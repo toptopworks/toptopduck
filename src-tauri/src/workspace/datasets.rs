@@ -89,6 +89,14 @@ pub enum StoreError {
     /// The rename's label is already shown by another entry (display-layer
     /// uniqueness).
     DisplayTaken(String),
+    /// The engine could not parse the source file (CSV delimiter sniffing
+    /// failed, malformed JSON, ...): the panel renders its own sentence and
+    /// appends this detail, instead of the Io echo that would bare the raw
+    /// engine string. One kind on purpose -- LoadError::Parse is shared by
+    /// every reader, so the wording stays format-neutral.
+    DataUnreadable {
+        detail: String,
+    },
     Io {
         detail: String,
     },
@@ -123,6 +131,9 @@ impl std::fmt::Display for StoreError {
             StoreError::DisplayTaken(label) => {
                 write!(f, "display name `{label}` is already taken")
             }
+            StoreError::DataUnreadable { detail } => {
+                write!(f, "the data file could not be parsed: {detail}")
+            }
             StoreError::Io { detail } => write!(f, "{detail}"),
         }
     }
@@ -134,6 +145,11 @@ impl From<LoadError> for StoreError {
             LoadError::UnsupportedFormat { requested } => {
                 StoreError::UnsupportedFormat { requested }
             }
+            // A file the engine could not parse (sniffer-blind delimiter,
+            // broken quote, malformed JSON) is the panel's everyday reject,
+            // not an infrastructure fault: it gets its own kind so the
+            // catalog owns the wording and the engine string rides as detail.
+            LoadError::Parse { detail } => StoreError::DataUnreadable { detail },
             other => StoreError::Io {
                 detail: other.to_string(),
             },
@@ -608,6 +624,15 @@ mod tests {
         p
     }
 
+    /// UTF-16 LE bytes with the BOM, the Excel "Unicode Text" save shape.
+    fn write_utf16_le(path: &Path, text: &str) {
+        let mut bytes: Vec<u8> = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(path, bytes).expect("write utf-16");
+    }
+
     const PEOPLE: &str = "name,score\nAda,9\nGrace,7\n";
 
     fn ws() -> tempfile::TempDir {
@@ -1025,5 +1050,59 @@ mod tests {
         );
         // Nothing landed: no manifest, no store dir.
         assert!(load_entries(workspace.path()).expect("load").is_empty());
+    }
+
+    /// A UTF-16 LE CSV with a BOM (the Excel "Unicode Text" save) imports
+    /// intact: the sniffer only tries utf-8, so the loader must retry with
+    /// the encoding pinned -- columns and rows must survive the round trip.
+    #[test]
+    fn utf16_bom_csv_imports_after_retry() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = sources.path().join("bulk.csv");
+        write_utf16_le(&src, "Dataset\tName\tValue\nA\tB\t1\nC\tD\t2\n");
+        let entry = add(workspace.path(), &src).expect("a BOM-carrying UTF-16 CSV imports");
+        assert_eq!(entry.columns.len(), 3, "tab-delimited columns survive");
+        assert_eq!(entry.columns[0].name, "Dataset");
+        assert_eq!(entry.row_count, 2);
+    }
+
+    /// Without the BOM the loader cannot tell encoding from bytes: the
+    /// sniffer fails outright and the refusal lands as the typed
+    /// DataUnreadable variant -- never as the Io echo that would surface the
+    /// raw engine string on the panel.
+    #[test]
+    fn bomless_utf16_csv_refuses_as_csv_unreadable() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = sources.path().join("bomless.csv");
+        write_utf16_le(&src, "name\tscore\nada\t9\n");
+        // Strip the BOM the helper just wrote (the first two bytes).
+        let bytes = fs::read(&src).expect("read back");
+        fs::write(&src, &bytes[2..]).expect("strip BOM");
+        let err = add(workspace.path(), &src).expect_err("a sniffer-blind CSV refuses");
+        match err {
+            StoreError::DataUnreadable { detail } => {
+                assert!(!detail.is_empty(), "the engine detail rides for triage");
+            }
+            other => panic!("expected DataUnreadable, got {other:?}"),
+        }
+        assert!(load_entries(workspace.path()).expect("load").is_empty());
+    }
+
+    /// The LoadError::Parse -> DataUnreadable mapping keeps the engine detail
+    /// (the panel appends it after the catalog sentence).
+    #[test]
+    fn parse_load_errors_map_to_csv_unreadable_with_detail() {
+        let e: StoreError = crate::model::LoadError::Parse {
+            detail: "sniff failed".into(),
+        }
+        .into();
+        assert_eq!(
+            e,
+            StoreError::DataUnreadable {
+                detail: "sniff failed".into()
+            }
+        );
     }
 }

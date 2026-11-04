@@ -218,4 +218,28 @@ describe("DatasetDetail", () => {
     expect(screen.getByText(/发送冻结的首 3 行样本值/)).toBeInTheDocument();
     expect(screen.getByText(/id、name/)).toBeInTheDocument();
   });
+
+  it("warns when the single column's name embeds separators -- the sniffer-fallback fingerprint", () => {
+    // The observed failure mode (issue #1483): the whole header line,
+    // commas included, landed as one VARCHAR column. A genuine single-column
+    // dataset cannot carry a separator inside its column name, so the
+    // separator is the fingerprint -- the warning must not gate usage.
+    const swallowedHeader = {
+      ...mockDataset,
+      columns: [
+        { name: "reporterCode,periods,reporters", canonical_type: "VARCHAR" },
+      ],
+    };
+    renderI18n(<DatasetDetail dataset={swallowedHeader} {...LOADED_PREVIEW} />);
+    expect(screen.getByText(/分隔符/)).toBeInTheDocument();
+  });
+
+  it("stays silent for a genuine single-column dataset with a clean column name", () => {
+    const genuineSingle = {
+      ...mockDataset,
+      columns: [{ name: "count", canonical_type: "BIGINT" }],
+    };
+    renderI18n(<DatasetDetail dataset={genuineSingle} {...LOADED_PREVIEW} />);
+    expect(screen.queryByText(/分隔符/)).not.toBeInTheDocument();
+  });
 });

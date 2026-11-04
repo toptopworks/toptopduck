@@ -378,4 +378,21 @@ describe("WorkspaceDatasetsDialog", () => {
     expect(screen.queryByText(/还没有数据集/)).not.toBeInTheDocument();
     expect(screen.queryByText(/^数据集 · /)).not.toBeInTheDocument();
   });
+
+  it("renders the CSV-unreadable refusal as its own sentence, engine detail riding after", async () => {
+    // Issue #1483: the sniff-failure reject must not bare the raw engine
+    // string as the whole banner (the Io echo it used to fall through to);
+    // the catalog sentence leads, the detail stays for triage.
+    seed([entry({})]);
+    vi.mocked(open).mockResolvedValue("/src/bad.csv");
+    vi.mocked(addWorkspaceDataset).mockRejectedValue({
+      kind: "DataUnreadable",
+      data: `Error when sniffing file "/src/bad.csv".`,
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("无法解析该数据文件");
+    expect(banner).toHaveTextContent("Error when sniffing file");
+  });
 });

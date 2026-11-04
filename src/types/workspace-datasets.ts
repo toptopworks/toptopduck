@@ -36,6 +36,7 @@ export type WorkspaceDatasetError =
   | { kind: "NotFound" }
   | { kind: "InvalidLabel" }
   | { kind: "DisplayTaken"; data: string }
+  | { kind: "DataUnreadable"; data: string }
   | { kind: "Io"; data: string };
 
 // L1 narrowing of an unknown IPC reject to a WorkspaceDatasetError (the
@@ -53,6 +54,7 @@ export function isWorkspaceDatasetError(e: unknown): e is WorkspaceDatasetError 
     case "UnsupportedFormat":
     case "ManifestCorrupt":
     case "DisplayTaken":
+    case "DataUnreadable":
     case "Io":
       return typeof (e as { data?: unknown }).data === "string";
     default:

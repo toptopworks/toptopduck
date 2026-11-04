@@ -114,6 +114,17 @@ function describeError(e: unknown, intl: ReturnType<typeof useIntl>): string {
           },
           { name: e.data },
         );
+      case "DataUnreadable":
+        // The catalog sentence leads; the engine string rides after it for
+        // triage (issue #1483) -- never as the whole banner.
+        return intl.formatMessage(
+          {
+            id: "workspace.datasets.error.dataUnreadable",
+            defaultMessage:
+              "The data file could not be parsed (the encoding may not be UTF-8, or the format is unrecognized); engine detail: {detail}",
+          },
+          { detail: e.data },
+        );
       case "Io":
         return e.data;
       default: {

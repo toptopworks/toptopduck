@@ -158,7 +158,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
         </TableBody>
       </Table>
 
-      <p className="disclosure-summary text-sm bg-info/10 border border-info/40 text-info rounded-md px-3 py-2 my-2">
+      <p className="disclosure-summary text-sm break-words bg-info/10 border border-info/40 text-info rounded-md px-3 py-2 my-2">
         <strong className="font-semibold">
           {intl.formatMessage({
             id: "privacy.summary.heading",

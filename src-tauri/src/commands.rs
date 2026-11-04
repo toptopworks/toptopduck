@@ -666,6 +666,9 @@ pub enum WorkspaceDatasetError {
     InvalidLabel,
     /// The rename's label is already shown by another entry.
     DisplayTaken(String),
+    /// The engine could not parse the source file (issue #1483): the panel
+    /// renders its own sentence, this detail rides after it.
+    DataUnreadable(String),
     Io(String),
 }
 
@@ -684,6 +687,7 @@ impl From<crate::workspace::datasets::StoreError> for WorkspaceDatasetError {
             StoreError::NotFound => WorkspaceDatasetError::NotFound,
             StoreError::InvalidLabel => WorkspaceDatasetError::InvalidLabel,
             StoreError::DisplayTaken(label) => WorkspaceDatasetError::DisplayTaken(label),
+            StoreError::DataUnreadable { detail } => WorkspaceDatasetError::DataUnreadable(detail),
             StoreError::Io { detail } => WorkspaceDatasetError::Io(detail),
         }
     }

@@ -5,6 +5,7 @@
 //! format-specific branches (ADR-0032 single source of truth).
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use duckdb::{params, Connection};
@@ -50,11 +51,28 @@ pub fn copy_in(
     // dir is torn down.
     let result = (|| -> Result<Snapshot, LoadError> {
         let conn = Connection::open(&file_path).map_err(io_err)?;
-        conn.execute(
-            &format!("CREATE TABLE data AS SELECT * FROM {reader_fn}(?)"),
-            params![path_str],
-        )
-        .map_err(parse_err)?;
+        // The encoding value is a static literal, never user input, so the
+        // interpolation stays safe (same contract as `reader_fn` above).
+        let build = |encoding: Option<&str>| -> Result<(), duckdb::Error> {
+            let sql = match encoding {
+                Some(enc) => {
+                    format!("CREATE TABLE data AS SELECT * FROM {reader_fn}(?, encoding='{enc}')")
+                }
+                None => format!("CREATE TABLE data AS SELECT * FROM {reader_fn}(?)"),
+            };
+            conn.execute(&sql, params![path_str]).map(|_| ())
+        };
+        // One pinned-encoding retry for the sniffer's UTF-16 blind spot;
+        // anything else fails straight through.
+        build(None)
+            .or_else(|e| {
+                if reader_fn == "read_csv_auto" && has_utf16_bom(&path_str) {
+                    build(Some("utf-16"))
+                } else {
+                    Err(e)
+                }
+            })
+            .map_err(parse_err)?;
         Snapshot::from_connection(&conn, file_path.clone(), temp_dir)
     })(); // conn dropped -> file closed before the session re-attaches it
 
@@ -76,4 +94,17 @@ fn parse_err(e: duckdb::Error) -> LoadError {
     LoadError::Parse {
         detail: e.to_string(),
     }
+}
+
+/// Whether the file carries a UTF-16 BOM (`FF FE` LE / `FE FF` BE). The
+/// CSV sniffer only tries utf-8, so a UTF-16 export (the Excel "Unicode
+/// Text" save) feeds NUL bytes into every candidate and fails the dialect
+/// search outright even though the table itself is fine -- the BOM is a
+/// cheap, unambiguous signal to retry with the encoding pinned.
+fn has_utf16_bom(path: &str) -> bool {
+    let mut head = [0u8; 2];
+    fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .map(|_| head == [0xFF, 0xFE] || head == [0xFE, 0xFF])
+        .unwrap_or(false)
 }
