@@ -58,7 +58,7 @@ interface WorkspaceDatasetsDialogProps {
 // boundary for any channel that slips one through).
 const PICKER_EXTENSIONS = ["csv", "parquet", "json", "jsonl", "ndjson"];
 
-// The upload status badge (issue #1485 + the completion-state follow-up):
+// The upload status badge (issues #1485 and #1488):
 // `running` names what the picker's batch is doing right now -- the file's
 // basename plus, for the add batch, its 1-based position and the batch size
 // (a replace is a single-file wait and carries no position); `startedAt` is
@@ -290,6 +290,10 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
     });
     const files = typeof selected === "string" ? [selected] : (selected ?? []);
     if (files.length === 0) return;
+    // Clear-on-fire, the row mutations' posture: a stale banner must not
+    // sit beside (or contradict) this batch's visible outcome. The cancel
+    // path above keeps an old banner -- no batch fired, nothing to clear.
+    setError(null);
     // Sequential awaits (issue #1485): the backend's manifest lock serializes
     // anyway, so the total time is unchanged -- but each file's onSuccess
     // (invalidate + the detail pick) lands per file, so rows appear one by
@@ -322,7 +326,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
         phase: "done",
         mode: "add",
         name: lastLanded,
-        seconds: Math.round((Date.now() - startedAt) / 1000),
+        seconds: Math.floor((Date.now() - startedAt) / 1000),
       });
     } else {
       // A whole-failed batch parks nothing: the running badge must not
@@ -403,7 +407,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
               // progress as a chip -- the same content model the rail's
               // ingest block carries, down to its elapsed-suffix clock.
               // No dismiss while running: closing a live badge is exactly
-              // the vanished-state bug this panel just fixed.
+              // the vanished-state bug (#1488).
               <Badge variant="secondary" className="min-w-0 shrink max-w-full" role="status">
                 <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
                 <span className="truncate">
@@ -447,8 +451,8 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                   )}
                 </span>
                 <ElapsedFace seconds={uploadStatus.seconds} />
-                {/* The dismiss rides the Button copy-in (the review round's
-                    two judgement calls): ghost's accent hover + the shared
+                {/* The dismiss rides the Button copy-in (the #1488 review
+                    round's two judgement calls): ghost's accent hover + the shared
                     focus-visible ring, at a 20px target (16px was the
                     panel's smallest pointer target). */}
                 <Button
@@ -546,7 +550,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                           phase: "done",
                           mode: "replace",
                           name,
-                          seconds: Math.round((Date.now() - startedAt) / 1000),
+                          seconds: Math.floor((Date.now() - startedAt) / 1000),
                         });
                       })
                       .catch(() => {
