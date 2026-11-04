@@ -748,6 +748,7 @@
   "workspace.artifact.saveFailed": "无法另存该文件的副本",
   "workspace.collapse": "收起右侧栏",
   "workspace.datasets.add": "添加数据集…",
+  "workspace.datasets.addDone": "已添加 {name}",
   "workspace.datasets.adding": "正在添加 {name}（第 {index}/{total} 个）…",
   "workspace.datasets.delete.confirm": "从此工作区移除 {name}？",
   "workspace.datasets.description": "此工作区的数据集对绑定的会话自动可用：在查询中首次引用时自动接入。",
@@ -765,6 +766,7 @@
   "workspace.datasets.fileFilter": "数据文件",
   "workspace.datasets.listHeading": "数据集 · {count}",
   "workspace.datasets.missingBadge": "缺文件",
+  "workspace.datasets.replaceDone": "已替换 {name}",
   "workspace.datasets.replacing": "正在替换 {name}…",
   "workspace.datasets.title": "数据集 — {workspace}",
   "workspace.expand": "展开右侧栏"
