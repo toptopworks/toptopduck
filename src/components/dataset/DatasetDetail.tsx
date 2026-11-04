@@ -29,6 +29,19 @@ interface DatasetDetailProps {
   onPrivacyChange?: (referenceName: string, privacy: DatasetPrivacy) => void;
 }
 
+// The sniffer-fallback fingerprint (issue #1483): when DuckDB's delimiter
+// search fails, the whole header line lands as ONE column whose name still
+// carries one of the candidate separators (comma, pipe, semicolon, tab). A
+// genuine single-column dataset (a count column, a join dimension) will not
+// carry a separator in its name -- a quoted header field is the one
+// false-positive shape, and the warning never gates, so a stray hint costs
+// nothing. Pure derivation, no wire field: it warns only, the rows still
+// read fine.
+function isProbableSnifferFallback(columns: ColumnSchema[]): boolean {
+  if (columns.length !== 1) return false;
+  return /[,;|\t]/.test(columns[0].name);
+}
+
 export function DatasetDetail({
   dataset,
   sample,
@@ -98,6 +111,17 @@ export function DatasetDetail({
           values={{ rows: dataset.row_count }}
         />
       </p>
+
+      {isProbableSnifferFallback(dataset.columns) && (
+        // The warning rides under the meta line, before the schema table: the
+        // user should read it BEFORE trusting the single column below.
+        <p className="text-warning text-sm mb-3">
+          <FormattedMessage
+            id="workspace.datasets.detail.sniffWarning"
+            defaultMessage="The delimiter may not have been recognized: the whole header landed as one column. Check the source file's delimiter and encoding, then re-add it."
+          />
+        </p>
+      )}
 
       <h3 className="text-base font-semibold">
         <FormattedMessage

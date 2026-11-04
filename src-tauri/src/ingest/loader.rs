@@ -5,6 +5,7 @@
 //! format-specific branches (ADR-0032 single source of truth).
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use duckdb::{params, Connection};
@@ -50,11 +51,22 @@ pub fn copy_in(
     // dir is torn down.
     let result = (|| -> Result<Snapshot, LoadError> {
         let conn = Connection::open(&file_path).map_err(io_err)?;
-        conn.execute(
+        let attempt = conn.execute(
             &format!("CREATE TABLE data AS SELECT * FROM {reader_fn}(?)"),
             params![path_str],
-        )
-        .map_err(parse_err)?;
+        );
+        // One pinned-encoding retry for the sniffer's UTF-16 blind spot;
+        // anything else fails straight through. The encoding value is a
+        // static literal, never user input, so the interpolation stays safe
+        // (same contract as `reader_fn` above).
+        let attempt = match attempt {
+            Err(_) if reader_fn == "read_csv_auto" && is_utf16_le(&path_str) => conn.execute(
+                &format!("CREATE TABLE data AS SELECT * FROM {reader_fn}(?, encoding='utf-16')"),
+                params![path_str],
+            ),
+            other => other,
+        };
+        attempt.map_err(parse_err)?;
         Snapshot::from_connection(&conn, file_path.clone(), temp_dir)
     })(); // conn dropped -> file closed before the session re-attaches it
 
@@ -76,4 +88,25 @@ fn parse_err(e: duckdb::Error) -> LoadError {
     LoadError::Parse {
         detail: e.to_string(),
     }
+}
+
+/// Whether the file is a plausible UTF-16 LE document: an `FF FE` BOM and
+/// an even total length (a valid UTF-16 file with a BOM is always 2+2n
+/// bytes). The CSV sniffer only tries utf-8, so a UTF-16 export (the Excel
+/// "Unicode Text" save) feeds NUL bytes into every candidate and fails the
+/// dialect search outright even though the table itself is fine. A `FE FF`
+/// (BE) BOM is deliberately not recognized: the engine's utf-16 decoding
+/// is little-endian only, so a BE file would transcode to mojibake and
+/// import as garbage instead of refusing. The even-length gate keeps
+/// odd-tailed garbage in the refuse posture for the same reason -- the
+/// decoder is permissive enough to land it as a mojibake table.
+fn is_utf16_le(path: &str) -> bool {
+    let mut head = [0u8; 2];
+    fs::File::open(path)
+        .and_then(|mut f| {
+            f.read_exact(&mut head)?;
+            f.metadata()
+        })
+        .map(|meta| head == [0xFF, 0xFE] && meta.len() % 2 == 0)
+        .unwrap_or(false)
 }
