@@ -54,7 +54,7 @@ use crate::ingest::schema::{attach_sql, quote_ident};
 use crate::ingest::{self, loader};
 use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
 use crate::session::materializer::{CachedDerivedRef, DispatchDeps};
-use crate::session::snapshot::Snapshot;
+use crate::session::snapshot::{snapshot_len, Snapshot};
 use crate::session::TOOL_OUTPUT_DIR_NAME;
 
 /// Subdirectory under `temp_path` for staging derived source files (ADR-0087
@@ -494,6 +494,9 @@ fn attach_and_register(
         ));
     }
 
+    // Stat before the file_path move (the writing connection is dropped by
+    // copy_in, so the on-disk size is final, issue #1485).
+    let size_bytes = snapshot_len(&snap.file_path);
     // Register in source_files (the snapshot path, same as uploaded
     // sources). The sandbox path in run_sandboxed_read attaches from here.
     deps.source_files
@@ -507,6 +510,7 @@ fn attach_and_register(
         row_count: snap.row_count,
         sample: snap.sample,
         fingerprint: snap.fingerprint,
+        size_bytes,
         rectify: RectifyProvenance::NotApplicable,
         privacy: DatasetPrivacy::default(),
         stale: None,

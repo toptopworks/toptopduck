@@ -648,6 +648,7 @@
   "thread.fold.addSources": "Loaded {count, plural, one {# dataset} other {# datasets}}",
   "thread.fold.deleteSources": "Deleted {count, plural, one {# dataset} other {# datasets}}",
   "thread.fold.replaceSources": "Replaced {count, plural, one {# dataset} other {# datasets}}",
+  "thread.ingest.progress": "Loading {name} (file {index} of {total})…",
   "thread.link.openFailed": "Could not open link",
   "thread.live.thinkingStep": "Thinking (step {step})…",
   "thread.occupancy.ariaLabel": "Context occupancy",
@@ -724,6 +725,7 @@
   "workingSet.detail.referenceName": "(reference name: {name})",
   "workingSet.detail.sampleHeading": "Data sample",
   "workingSet.detail.sampleLoading": "Loading rows…",
+  "workingSet.detail.size": "Size: {size}",
   "workingSet.detail.sourceFile": "Source file: {path}",
   "workingSet.empty": "Working set is empty — drop or pick a data file to start.",
   "workingSet.empty.add": "Add data file",
@@ -746,6 +748,7 @@
   "workspace.artifact.saveFailed": "Could not save a copy of the file",
   "workspace.collapse": "Collapse right sidebar",
   "workspace.datasets.add": "Add dataset…",
+  "workspace.datasets.adding": "Adding {name} (file {index} of {total})…",
   "workspace.datasets.delete.confirm": "Remove {name} from this workspace?",
   "workspace.datasets.description": "Datasets in this workspace are available to every session bound to it — a session picks them up automatically the first time a query mentions them.",
   "workspace.datasets.detail.sniffWarning": "The delimiter may not have been recognized: the whole header landed as one column. Check the source file's delimiter and encoding, then re-add it.",
@@ -762,6 +765,7 @@
   "workspace.datasets.fileFilter": "Data files",
   "workspace.datasets.listHeading": "Datasets · {count}",
   "workspace.datasets.missingBadge": "Missing",
+  "workspace.datasets.replacing": "Replacing {name}…",
   "workspace.datasets.title": "Datasets — {workspace}",
   "workspace.expand": "Expand right sidebar"
 }

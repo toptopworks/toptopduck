@@ -147,6 +147,13 @@ pub struct DatasetDescriptor {
     /// the *post-rectify* table, so different rectify choices yield different
     /// fingerprints when they change the materialized rows.
     pub fingerprint: String,
+    /// The snapshot file's byte size (issue #1485): the data body's on-disk
+    /// size, stat'ed off the store file at landing (the source file may have
+    /// moved; the store file IS the data). `#[serde(default)]` keeps older
+    /// manifests and recipes deserializing to 0 -- the detail pane renders no
+    /// size line for 0, never a fake value.
+    #[serde(default)]
+    pub size_bytes: u64,
     /// Rectify provenance (ADR-0042): how the dataset's header/skip state was
     /// determined -- format N/A, Excel auto-tidy (not recorded), or the user's
     /// explicit guided choices (carried so a future recipe can persist them).
@@ -361,6 +368,11 @@ impl std::error::Error for LoadError {}
 /// Outcome of an ingest attempt at the command boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
+// The size_bytes field (issue #1485) tips the Loaded variant over clippy's
+// variant-size heuristic; the enum crosses IPC whole, so boxing the descriptor
+// would tax every construction and match site for no allocation saved where
+// it matters.
+#[allow(clippy::large_enum_variant)]
 pub enum LoadOutcome {
     Loaded(DatasetDescriptor),
     /// Auto-tidy couldn't confidently rectify an Excel sheet (ADR-0015): the

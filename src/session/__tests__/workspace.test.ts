@@ -257,6 +257,7 @@ describe("resolveWorkingSetDetail (issue #792)", () => {
       source_path: `/x/${reference_name}.csv`,
       row_count: 1,
       fingerprint: "0".repeat(64),
+      size_bytes: 0,
       columns: [],
       sample: [],
       rectify: { kind: "NotApplicable" },

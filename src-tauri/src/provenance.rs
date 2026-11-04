@@ -429,6 +429,7 @@ mod tests {
                 fingerprint: String::new(),
                 rectify: crate::model::RectifyProvenance::NotApplicable,
                 privacy: crate::model::DatasetPrivacy::default(),
+                size_bytes: 0,
                 stale: None,
             });
         }

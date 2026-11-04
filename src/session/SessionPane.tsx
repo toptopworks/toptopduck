@@ -561,6 +561,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   // recorded thread while a turn runs.
                   liveTurn={s.liveTurn}
                   waitStartedAt={s.waitStartedAt}
+                  ingestProgress={s.ingestProgress}
                   onRespondApproval={handleRespondApproval}
                   onLoadApprovalAttachments={handleLoadApprovalAttachments}
                   onRetryTurn={handleAskAgain}

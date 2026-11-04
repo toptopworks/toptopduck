@@ -61,6 +61,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: None,
         });
     }
@@ -137,6 +138,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: Some(StaleAnchor {
                 reference_name: "people".into(),
                 display_name: "people".into(),

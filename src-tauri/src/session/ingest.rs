@@ -167,6 +167,10 @@ impl super::Session {
             });
         }
 
+        // Stat BEFORE the file_path move, while the path is still borrowable;
+        // the writing connection is long dropped (copy_in closed it), so the
+        // on-disk size is final (issue #1485).
+        let size_bytes = crate::session::snapshot::snapshot_len(&snap.file_path);
         // Record the attached snapshot's file so the sandbox can re-attach it
         // READ_ONLY (ADR-0005 read_* closure). file_path is moved here; the
         // descriptor below takes snap's remaining fields.
@@ -191,6 +195,7 @@ impl super::Session {
             row_count: snap.row_count,
             sample: snap.sample,
             fingerprint: snap.fingerprint,
+            size_bytes,
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
             stale: None,
@@ -492,6 +497,8 @@ impl super::Session {
             });
         }
         attached.push(reference_name.to_string());
+        // Same stat-before-move as the unguided path (issue #1485).
+        let size_bytes = crate::session::snapshot::snapshot_len(&snap.file_path);
         // Record the attached snapshot's file for the sandbox re-attach path
         // (ADR-0005 read_* closure). file_path is moved here; the descriptor
         // below takes the remaining fields.
@@ -506,6 +513,7 @@ impl super::Session {
             row_count: snap.row_count,
             sample: snap.sample,
             fingerprint: snap.fingerprint,
+            size_bytes,
             rectify,
             privacy: DatasetPrivacy::default(),
             stale: None,

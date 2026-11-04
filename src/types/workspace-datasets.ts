@@ -13,6 +13,9 @@ export interface WorkspaceDatasetEntry {
   // The SHA256 of the original source bytes -- the store key (NOT the
   // derived table fingerprint a working-set descriptor carries).
   fingerprint: string;
+  // The store file's byte size (issue #1485): the data body's on-disk size;
+  // 0 = unknown (an old manifest row), rendered nowhere.
+  size_bytes: number;
   columns: ColumnSchema[];
   row_count: number;
   sample: string[][];

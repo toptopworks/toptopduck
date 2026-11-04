@@ -648,6 +648,7 @@
   "thread.fold.addSources": "加载了 {count} 个数据源",
   "thread.fold.deleteSources": "删除了 {count} 个数据源",
   "thread.fold.replaceSources": "换源了 {count} 个数据源",
+  "thread.ingest.progress": "正在导入 {name}（第 {index}/{total} 个）…",
   "thread.link.openFailed": "无法打开链接",
   "thread.live.thinkingStep": "思考中（第 {step} 步）…",
   "thread.occupancy.ariaLabel": "上下文占用",
@@ -724,6 +725,7 @@
   "workingSet.detail.referenceName": "（引用名：{name}）",
   "workingSet.detail.sampleHeading": "数据样本",
   "workingSet.detail.sampleLoading": "正在加载行数据…",
+  "workingSet.detail.size": "大小：{size}",
   "workingSet.detail.sourceFile": "来源文件：{path}",
   "workingSet.empty": "工作集为空 — 拖入或选择一个数据文件开始。",
   "workingSet.empty.add": "添加数据文件",
@@ -746,6 +748,7 @@
   "workspace.artifact.saveFailed": "无法另存该文件的副本",
   "workspace.collapse": "收起右侧栏",
   "workspace.datasets.add": "添加数据集…",
+  "workspace.datasets.adding": "正在添加 {name}（第 {index}/{total} 个）…",
   "workspace.datasets.delete.confirm": "从此工作区移除 {name}？",
   "workspace.datasets.description": "此工作区的数据集对绑定的会话自动可用：在查询中首次引用时自动接入。",
   "workspace.datasets.detail.sniffWarning": "疑似未能正确识别分隔符：整行标题被当成了单个列。请检查源文件的分隔符与编码后重新添加。",
@@ -762,6 +765,7 @@
   "workspace.datasets.fileFilter": "数据文件",
   "workspace.datasets.listHeading": "数据集 · {count}",
   "workspace.datasets.missingBadge": "缺文件",
+  "workspace.datasets.replacing": "正在替换 {name}…",
   "workspace.datasets.title": "数据集 — {workspace}",
   "workspace.expand": "展开右侧栏"
 }

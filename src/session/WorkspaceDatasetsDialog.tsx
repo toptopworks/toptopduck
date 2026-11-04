@@ -17,6 +17,7 @@ import { open as openPicker } from "@tauri-apps/plugin-dialog";
 import { Upload } from "lucide-react";
 import { useCallback, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
+import { Loader2 } from "lucide-react";
 
 import {
   addWorkspaceDataset,
@@ -36,6 +37,7 @@ import {
   DialogTitle,
 } from "../components/ui/dialog";
 import { DatasetDetail, type DatasetSamplePage } from "../components/dataset/DatasetDetail";
+import { fileBasename } from "../lib/basename";
 import { WorkingSetList } from "../components/dataset/WorkingSetList";
 import type { DatasetDescriptor, DatasetPrivacy } from "../types/dataset";
 import {
@@ -54,6 +56,14 @@ interface WorkspaceDatasetsDialogProps {
 // the picker never offers it; the store-side refusal stays as the honest
 // boundary for any channel that slips one through).
 const PICKER_EXTENSIONS = ["csv", "parquet", "json", "jsonl", "ndjson"];
+
+// The in-flight upload's status line (issue #1485): what the picker's batch
+// is doing right now -- the file's basename plus, for the add batch, its
+// 1-based position and the batch size (a replace is a single-file wait and
+// carries no position). Cleared when the batch settles.
+type UploadStatus =
+  | { mode: "add"; name: string; index: number; total: number }
+  | { mode: "replace"; name: string };
 
 // The master/detail sections' card chrome -- the working-set tab's
 // PANEL_CARD_BASE form (bg-card + border + rounded + shadow + padding), so
@@ -149,6 +159,7 @@ function toDescriptor(d: ListedWorkspaceDataset): DatasetDescriptor {
     row_count: d.row_count,
     sample: d.sample,
     fingerprint: d.fingerprint,
+    size_bytes: d.size_bytes,
     rectify: { kind: "NotApplicable" },
     privacy: d.privacy,
   };
@@ -159,6 +170,9 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   const queryClient = useQueryClient();
   const open = workspace !== null;
   const [error, setError] = useState<string | null>(null);
+  // The in-flight upload's status line (issue #1485): non-null while the
+  // picker's add batch or a row's replace round-trips; cleared on settle.
+  const [uploadStatus, setUploadStatus] = useState<UploadStatus | null>(null);
   // The detail pick (which row's detail the right pane shows), resolved to
   // the first entry when unset or deleted -- the band rides the resolved
   // pick so it never names a row that is no longer in the list.
@@ -254,7 +268,16 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       return null;
     });
     const files = typeof selected === "string" ? [selected] : (selected ?? []);
-    for (const file of files) add.mutate(file);
+    // Sequential awaits (issue #1485): the backend's manifest lock serializes
+    // anyway, so the total time is unchanged -- but each file's onSuccess
+    // (invalidate + the detail pick) lands per file, so rows appear one by
+    // one instead of all at once at the end. A rejected mutate is already
+    // surfaced via onError; swallow the throw so the batch continues.
+    for (const [i, file] of files.entries()) {
+      setUploadStatus({ mode: "add", name: fileBasename(file), index: i + 1, total: files.length });
+      await add.mutateAsync(file).catch(() => {});
+    }
+    setUploadStatus(null);
   };
 
   const rows = listing.data ?? [];
@@ -312,14 +335,39 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex justify-end">
+        <div className="flex items-center gap-3">
+          {uploadStatus !== null && (
+            // The status line (issue #1485): the picker's per-file progress,
+            // the same content model the rail's ingest block carries.
+            <p className="m-0 min-w-0 flex-1 truncate text-xs text-muted-foreground" role="status">
+              {uploadStatus.mode === "add" ? (
+                <FormattedMessage
+                  id="workspace.datasets.adding"
+                  defaultMessage="Adding {name} (file {index} of {total})…"
+                  values={{ name: uploadStatus.name, index: uploadStatus.index, total: uploadStatus.total }}
+                />
+              ) : (
+                <FormattedMessage
+                  id="workspace.datasets.replacing"
+                  defaultMessage="Replacing {name}…"
+                  values={{ name: uploadStatus.name }}
+                />
+              )}
+            </p>
+          )}
           <Button
             variant="outline"
             size="sm"
+            className="ml-auto"
             disabled={add.isPending}
             onClick={() => void pickAndAdd()}
           >
-            <Upload className="h-4 w-4" aria-hidden />
+            {add.isPending ? (
+              // The in-flight spinner (the settings-panel posture, issue #1485).
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+            ) : (
+              <Upload className="h-4 w-4" aria-hidden />
+            )}
             <FormattedMessage id="workspace.datasets.add" defaultMessage="Add dataset…" />
           </Button>
         </div>
@@ -377,7 +425,14 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                   }}
                   onReplace={(name, file) => {
                     setError(null);
-                    replace.mutate({ name, file });
+                    // The same status line as the add batch (issue #1485): a
+                    // replace is one long IPC, the line names the row until
+                    // it settles. A reject is already surfaced via onError.
+                    setUploadStatus({ mode: "replace", name });
+                    void replace
+                      .mutateAsync({ name, file })
+                      .catch(() => {})
+                      .finally(() => setUploadStatus(null));
                   }}
                   onDelete={(name) => {
                     setError(null);

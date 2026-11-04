@@ -53,6 +53,10 @@ export interface DatasetDescriptor {
   row_count: number;
   sample: string[][];
   fingerprint: string;
+  // The store file's byte size (issue #1485): the data body's on-disk size;
+  // 0 = unknown (an old manifest row or a stat failure) -- the detail pane
+  // renders no size line for 0, never a fake figure.
+  size_bytes: number;
   // Rectify provenance (ADR-0042): how the header/skip state was determined --
   // format N/A, Excel auto-tidy (not recorded), or the user's explicit choices.
   rectify: RectifyProvenance;

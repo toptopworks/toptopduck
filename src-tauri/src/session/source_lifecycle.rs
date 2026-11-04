@@ -398,6 +398,9 @@ impl super::Session {
         // when the rename fallback fired) for the sandbox re-attach path.
         self.source_files
             .insert(reference_name.to_string(), PathBuf::from(&attach_path));
+        // The descriptor's size stat's the attached file (the data body, issue
+        // #1485); the writing connection is long dropped, so the figure is final.
+        let size_bytes = crate::session::snapshot::snapshot_len(Path::new(&attach_path));
         // A replace re-bases the source on extension dispatch (the new file
         // was read by ITS extension) -- drop any recorded reader so the
         // recipe does not carry the old registration's fn-named reader over
@@ -448,6 +451,7 @@ impl super::Session {
             row_count: new_snap.row_count,
             sample: new_snap.sample,
             fingerprint: new_snap.fingerprint,
+            size_bytes,
             rectify: RectifyProvenance::NotApplicable,
             privacy: existing.privacy,
             stale: None,

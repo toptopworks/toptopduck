@@ -440,6 +440,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: Default::default(),
             privacy: Default::default(),
+            size_bytes: 0,
             stale: None,
         });
         (working_set, engine, CancelToken::new())

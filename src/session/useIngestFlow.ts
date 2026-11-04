@@ -61,6 +61,19 @@ export interface UseIngestFlowDeps {
   viewed: Pick<UseViewedResult, "clearForNewSource">;
 }
 
+/** The transient in-flight ingest block's content model (issue #1485): the
+ *  file currently materializing, its 1-based position in the batch, the batch
+ *  size, and the batch's start stamp (ONE clock for the whole batch -- a
+ *  per-file clock would visibly reset on every file). Rendered by the rail's
+ *  live region; cleared on every batch exit (drain / park / halt) and at the
+ *  start of the next ingest. Client UI state only -- never enters any cache. */
+export interface IngestProgress {
+  currentPath: string;
+  index: number;
+  total: number;
+  startedAt: number;
+}
+
 export interface UseIngestFlow {
   /** The open guidance dialog state (NeedsGuidance route), or null. Renders the
    *  GuidedLoadDialog in the session pane; the { request, path } pair carries
@@ -80,6 +93,12 @@ export interface UseIngestFlow {
    *  error banner on the Error-halt screen). Cleared at the start of the
    *  next ingest. */
   haltedRemaining: number | null;
+  /** The in-flight ingest's progress block (issue #1485), or null. Set at the
+   *  batch entry and updated per file INSIDE runBatchSegment's loop; cleared
+   *  on every exit (drained / parked / halted / single-file finally). The
+   *  rail renders it above the live turn exchange; `setMutationLoading`
+   *  semantics are untouched -- this state is pure presentation. */
+  ingestProgress: IngestProgress | null;
   // Declared Promise<void> (not void) so the contract reflects the async
   // implementation: the cold-start drop effect fire-and-forgets it via `void`,
   // and the composer's file-section consumer (handleIngestFiles) accepts it
@@ -123,6 +142,11 @@ type IngestRoute = LoadOutcome["kind"];
 interface ParkedBatch {
   remaining: string[];
   resolve: (allLoaded: boolean) => void;
+  // The ORIGINAL batch's size and how many files already settled before the
+  // park (issue #1485): the resume segment must keep counting globally --
+  // "file 2 of 3" -- instead of restarting at "1 of 2" over the remainder.
+  total: number;
+  consumed: number;
 }
 
 export function useIngestFlow(
@@ -141,7 +165,15 @@ export function useIngestFlow(
   const [guidance, setGuidance] = useState<{ request: GuidanceRequest; path: string } | null>(null);
   const [guidanceError, setGuidanceError] = useState<AppError | null>(null);
   const [haltedRemaining, setHaltedRemaining] = useState<number | null>(null);
+  const [ingestProgress, setIngestProgress] = useState<IngestProgress | null>(null);
   const parkedBatchRef = useRef<ParkedBatch | null>(null);
+  // The batch clock's origin (issue #1485): ONE stamp per wait window, minted
+  // at the entry point and by the post-guidance resume (the guidance
+  // interaction sits between the two segments -- the parked figure is stale,
+  // not continued), read by runBatchSegment's per-file updates. Cleared with
+  // the block on every batch exit; the i/n count stays global across the
+  // resume via the parked batch's total/consumed.
+  const batchStartedAtRef = useRef<number | null>(null);
 
   // Route ONE file's LoadOutcome into its side effects (issue #351 split):
   // - Loaded -> no side effect here (the caller refreshes + clears viewed).
@@ -215,7 +247,16 @@ export function useIngestFlow(
   // refresh, while nothing else can race it -- and leaves the Promise
   // pending for the post-Loaded resume.
   const runBatchSegment = useCallback(
-    async (paths: string[], resolve: (allLoaded: boolean) => void): Promise<void> => {
+    async (
+      paths: string[],
+      resolve: (allLoaded: boolean) => void,
+      // The position of THIS segment inside the original batch (issue #1485):
+      // a fresh batch is the whole queue {total: paths.length, consumed: 0};
+      // the post-guidance resume passes the parked batch's figures so the
+      // block keeps counting globally. The clock itself is the entry stamp
+      // the segment launcher mints.
+      origin: { total: number; consumed: number } = { total: paths.length, consumed: 0 },
+    ): Promise<void> => {
       let loadedAny = false;
       // Paths not yet attempted. The loop head is consumed on EVERY route
       // (loaded, parked-on, or errored), so after a halt `unattempted` holds
@@ -226,6 +267,16 @@ export function useIngestFlow(
       try {
         while (unattempted.length > 0) {
           const [path, ...rest] = unattempted;
+          // The per-file block update (issue #1485): global position (the
+          // consumed prefix + this segment's own progress) and the segment
+          // entry stamp the launcher minted -- the per-file clock that would
+          // visibly restart on every file is the explicitly rejected shape.
+          setIngestProgress({
+            currentPath: path,
+            index: origin.consumed + (paths.length - unattempted.length) + 1,
+            total: origin.total,
+            startedAt: batchStartedAtRef.current ?? Date.now(),
+          });
           setMutationLoading(true);
           let route: IngestRoute;
           try {
@@ -245,7 +296,12 @@ export function useIngestFlow(
             // so a cancel or ESC in that window must find the handle here --
             // writing it only after the refresh orphaned the batch (gate hung
             // forever, remainder silently dropped).
-            parkedBatchRef.current = { remaining: rest, resolve };
+            parkedBatchRef.current = {
+              remaining: rest,
+              resolve,
+              total: paths.length,
+              consumed: paths.length - rest.length,
+            };
             outcome = "parked";
           } else {
             outcome = "halted";
@@ -261,6 +317,12 @@ export function useIngestFlow(
         haltReason = "reject";
         outcome = "halted";
       }
+      // The block is transient (issue #1485): every segment exit (drained /
+      // parked / halted / thrown) clears it and the batch clock with it. A
+      // park hands the wait to the guidance dialog; a resume mints a new
+      // block from the loop below.
+      setIngestProgress(null);
+      batchStartedAtRef.current = null;
       if (loadedAny) {
         try {
           await refreshServerState("load");
@@ -299,6 +361,9 @@ export function useIngestFlow(
       setHaltedRemaining(null);
       setMutationLoading(true);
       setError(null);
+      // The single-file block (issue #1485): same content model, 1 of 1.
+      batchStartedAtRef.current = Date.now();
+      setIngestProgress({ currentPath: path, index: 1, total: 1, startedAt: batchStartedAtRef.current });
       try {
         const route = routeIngestOutcome(await ingestFile(sessionId, path), path);
         if (route === "Loaded") {
@@ -310,6 +375,8 @@ export function useIngestFlow(
         setError(toAppError(e, intl, "load"));
       } finally {
         setMutationLoading(false);
+        setIngestProgress(null);
+        batchStartedAtRef.current = null;
         void pollPersistError();
       }
     },
@@ -338,6 +405,15 @@ export function useIngestFlow(
       }
       setHaltedRemaining(null);
       setError(null);
+      // Mint the batch clock + the first file's block (issue #1485); the
+      // segment loop updates per file and clears on every exit.
+      batchStartedAtRef.current = Date.now();
+      setIngestProgress({
+        currentPath: paths[0],
+        index: 1,
+        total: paths.length,
+        startedAt: batchStartedAtRef.current,
+      });
       return new Promise<boolean>((resolve) => {
         void runBatchSegment(paths, resolve);
       });
@@ -379,7 +455,16 @@ export function useIngestFlow(
             // remainder continues through the same LoadOutcome routing --
             // re-parking on the next NeedsGuidance, halting on Error.
             if (parked !== null) {
-              await runBatchSegment(parked.remaining, parked.resolve);
+              // The resume is a NEW wait window (issue #1485): the guidance
+              // interaction sat between the two segments, so the clock
+              // re-mints here (the parked figure is stale, not continued) --
+              // but the i/n count stays GLOBAL off the parked batch's
+              // original size and consumed prefix.
+              batchStartedAtRef.current = Date.now();
+              await runBatchSegment(parked.remaining, parked.resolve, {
+                total: parked.total,
+                consumed: parked.consumed,
+              });
             }
           } catch (e) {
             // Past the Loaded the dialog is closed -- a failure here belongs
@@ -458,6 +543,7 @@ export function useIngestFlow(
     guidance,
     guidanceError,
     haltedRemaining,
+    ingestProgress,
     handleIngest,
     handleIngestMany,
     handleGuidedSubmit,

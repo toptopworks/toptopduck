@@ -41,6 +41,7 @@ const mockDataset: DatasetDescriptor = {
   source_path: "/x/people.csv",
   row_count: 5,
   fingerprint: "abc123def4560000000000000000000000000000000000000000000000000999",
+  size_bytes: 0,
   columns: [
     { name: "id", canonical_type: "BIGINT" },
     { name: "name", canonical_type: "VARCHAR" },
@@ -2864,5 +2865,34 @@ describe("Thread", () => {
     expect(host).toHaveAttribute("aria-current", "true");
     fireEvent.click(host);
     expect(onSelectViz).toHaveBeenCalledWith(BODY);
+  });
+});
+
+// Issue #1485: the in-flight ingest's transient block renders ABOVE the live
+// exchange while a dataset import materializes; it never enters the timeline.
+describe("Thread ingest progress block (issue #1485)", () => {
+  it("renders the file name, the batch position and the batch clock while set", () => {
+    renderThread(
+      <Thread
+        entries={[]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        ingestProgress={{
+          currentPath: "/x/员工表.csv",
+          index: 1,
+          total: 2,
+          startedAt: Date.now(),
+        }}
+      />,
+    );
+    const block = screen.getByRole("status");
+    expect(block).toHaveTextContent("正在导入 员工表.csv（第 1/2 个）…");
+  });
+
+  it("renders nothing while no ingest is in flight", () => {
+    renderThread(
+      <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });

@@ -87,6 +87,7 @@ const previewDataset: DatasetDescriptor = {
   source_path: "/x/r.csv",
   row_count: 1,
   fingerprint: "abc123def4560000000000000000000000000000000000000000000000000999",
+  size_bytes: 0,
   columns: [
     { name: "平均HP", canonical_type: "DOUBLE" },
     { name: "平均攻击", canonical_type: "DOUBLE" },

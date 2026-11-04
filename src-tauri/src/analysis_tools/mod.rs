@@ -267,6 +267,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: None,
         });
         let mut sources = HashMap::new();
@@ -356,6 +357,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: None,
         });
         let mut sources = HashMap::new();

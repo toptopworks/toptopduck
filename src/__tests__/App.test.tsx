@@ -263,6 +263,7 @@ const guidedDataset: DatasetDescriptor = {
   source_path: "/x/m.xlsx",
   row_count: 1,
   fingerprint: "ff".repeat(32),
+  size_bytes: 0,
   columns: [
     { name: "id", canonical_type: "BIGINT" },
     { name: "name", canonical_type: "VARCHAR" },
@@ -1339,6 +1340,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     source_path: "/x/a.csv",
     row_count: 1,
     fingerprint: "ff".repeat(32),
+    size_bytes: 0,
     columns: [{ name: "id", canonical_type: "BIGINT" }],
     sample: [["1"]],
     rectify: { kind: "NotApplicable" },
