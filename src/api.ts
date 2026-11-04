@@ -96,9 +96,16 @@ export interface RecentWorkspace {
 // sidebar's workspace section can keep a missing-directory group with a
 // state hint (issue #1392). The selector filters on `exists` and slices its
 // top 10; older workspaces resurface through the folder browse. Tolerant --
-// an unreadable registry lists empty.
-export async function listWorkspaces(): Promise<RecentWorkspace[]> {
-  return invoke<RecentWorkspace[]>("list_workspaces");
+// an unreadable registry lists empty, and `degraded` (issue #1481) is the
+// only way to tell that fallback from a genuinely empty registry.
+// Mirrors `commands::WorkspaceListing`.
+export interface WorkspaceListing {
+  workspaces: RecentWorkspace[];
+  degraded: boolean;
+}
+
+export async function listWorkspaces(): Promise<WorkspaceListing> {
+  return invoke<WorkspaceListing>("list_workspaces");
 }
 
 // Rename a workspace record (issue #1392): the display title only -- the

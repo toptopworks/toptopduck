@@ -416,17 +416,40 @@ fn workspace_row(r: &crate::workspace::WorkspaceRecord) -> RecentWorkspace {
     }
 }
 
+/// The wire envelope of the registry listing (issue #1481): the rows plus
+/// the degraded flag -- `true` only when the tolerant read fell back to
+/// empty on an unreadable file, which a genuinely empty registry (a fresh
+/// install, a fully-removed set) never sets.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkspaceListing {
+    pub workspaces: Vec<RecentWorkspace>,
+    pub degraded: bool,
+}
+
 /// The workspace registry's LRU view (ADR-0138, issue #1384): EVERY record,
 /// most recently used first -- dangling directories included, so the
 /// sidebar's workspace section can keep a missing-directory group with a
 /// state hint (issue #1392). The selector filters on `exists` and slices
 /// its top 10; older workspaces resurface through the folder browse.
-/// Read-only and tolerant -- an unreadable registry lists empty.
+/// Read-only and tolerant -- an unreadable registry lists empty, and the
+/// envelope's `degraded` flag is the only way the wire can tell that
+/// fallback from a genuinely empty registry (issue #1481).
+/// The plain body of the `list_workspaces` command (issue #1481): the
+/// tuple-to-envelope projection, extracted so the flag's only wire hop
+/// pins without a running app.
+fn workspace_listing(registry: &crate::workspace::WorkspaceRegistry) -> WorkspaceListing {
+    let (records, degraded) = registry.all();
+    WorkspaceListing {
+        workspaces: records.iter().map(workspace_row).collect(),
+        degraded,
+    }
+}
+
 #[tauri::command]
 pub fn list_workspaces(
     registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
-) -> Vec<RecentWorkspace> {
-    registry.all().iter().map(workspace_row).collect()
+) -> WorkspaceListing {
+    workspace_listing(&registry)
 }
 
 /// Mint a NAMED workspace for the session-creation selector (issue #1393):
@@ -6258,11 +6281,45 @@ mod tests {
 
         let echo = dir.to_string_lossy().into_owned();
         rename_registry_record(&registry, &echo, "T").expect("rename lands");
-        assert_eq!(registry.all()[0].title.as_deref(), Some("T"));
+        assert_eq!(registry.all().0[0].title.as_deref(), Some("T"));
         remove_registry_record(&registry, &echo).expect("remove lands");
         assert!(
-            registry.all().is_empty(),
+            registry.all().0.is_empty(),
             "the record is gone despite the drift"
+        );
+    }
+
+    // Issue #1481: the flag's only wire hop. The envelope projection must
+    // carry the degraded flag through, or the sweep judges on a
+    // permanently-false flag -- pinned here at the command's plain body,
+    // one layer above the registry's three-face test.
+    #[test]
+    fn the_listing_command_carries_the_degraded_flag_onto_the_wire() {
+        let root = tempfile::tempdir().expect("registry dir");
+        let registry = crate::workspace::WorkspaceRegistry::new(
+            root.path().join(crate::workspace::WORKSPACES_FILE_NAME),
+        );
+        let dir = root.path().join("Alpha");
+        std::fs::create_dir(&dir).expect("mkdir");
+        registry
+            .record_at(&dir, Some("Seed"), true, 1_000)
+            .expect("record");
+        let listing = workspace_listing(&registry);
+        assert_eq!(listing.workspaces.len(), 1);
+        assert!(!listing.degraded, "a healthy read carries the flag false");
+        std::fs::write(
+            root.path().join(crate::workspace::WORKSPACES_FILE_NAME),
+            "{ not json",
+        )
+        .expect("corrupt");
+        let listing = workspace_listing(&registry);
+        assert!(
+            listing.workspaces.is_empty(),
+            "the tolerant read still empties the rows"
+        );
+        assert!(
+            listing.degraded,
+            "the corrupt read carries the flag true -- the tell"
         );
     }
 }

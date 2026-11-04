@@ -56,10 +56,10 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
   });
 
   it("the unbound face prompts and the popover offers recent + browse only", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
       { path: "/w/beta", label: "beta", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     renderPicker(null);
     expect(
       screen.getByRole("button", { name: "Select workspace" }),
@@ -90,7 +90,7 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
   });
 
   it("the bound face shows the label and the undo row clears the pending value", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([]);
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [], degraded: false });
     const onChange = vi.fn();
     renderPicker({ path: "/w/alpha", label: "alpha" }, onChange);
     expect(
@@ -102,10 +102,10 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
   });
 
   it("a recent row commits once and closes the popover", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
       { path: "/w/beta", label: "beta", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     const onChange = vi.fn();
     renderPicker(null, onChange);
     openPopover();
@@ -120,14 +120,15 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
   });
 
   it("the recent list shows the freshest 10 only", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue(
-      Array.from({ length: 12 }, (_, i) => ({
+    vi.mocked(listWorkspaces).mockResolvedValue({
+      workspaces: Array.from({ length: 12 }, (_, i) => ({
         path: `/w/ws-${i + 1}`,
         label: `ws-${i + 1}`,
         explicit: false,
         exists: true,
       })),
-    );
+      degraded: false,
+    });
     renderPicker(null);
     openPopover();
     await waitFor(() =>
@@ -142,7 +143,7 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
   });
 
   it("a browse pick binds with the derived tail; a cancel changes nothing", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([]);
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [], degraded: false });
     const onChange = vi.fn();
     renderPicker(null, onChange);
     openPopover();
@@ -169,9 +170,9 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
     // ADR-0051 default (Infinity) would pin the first fetch for the rest
     // of the run; the query opts out itself. Riding the same Infinity
     // default here pins the opt-out: reopen must fetch again.
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     renderPicker(null, vi.fn(), Infinity);
     openPopover();
     await waitFor(() => expect(listWorkspaces).toHaveBeenCalledTimes(1));
@@ -193,7 +194,7 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
   });
 
   it("typing widens to the full registry, matching label or path tail case-insensitively", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       ...Array.from({ length: 12 }, (_, i) => ({
         path: `/w/ws-${i + 1}`,
         label: `ws-${i + 1}`,
@@ -202,7 +203,7 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
       })),
       // A row whose label does not carry the term but whose path tail does.
       { path: "/w/somewhere/tail-hit", label: "Different Label", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     renderPicker(null);
     openPopover();
     await screen.findByRole("button", { name: "ws-1" });
@@ -223,9 +224,9 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
   });
 
   it("a zero-match term shows the empty state; clearing restores the cap", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     renderPicker(null);
     openPopover();
     const search = await screen.findByPlaceholderText("Search workspaces");
@@ -243,10 +244,10 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
   });
 
   it("dangling records never surface in the capped or the typed view (issue #1392)", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
       { path: "/w/gone", label: "gone", explicit: false, exists: false },
-    ]);
+    ], degraded: false });
     renderPicker(null);
     openPopover();
     expect(
@@ -270,10 +271,10 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
   });
 
   it("a layer close resets the search term for the next open", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
       { path: "/w/beta", label: "beta", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     renderPicker(null);
     openPopover();
     const search = await screen.findByPlaceholderText("Search workspaces");
@@ -300,7 +301,7 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
   });
 
   it("an empty registry hides the search box but keeps the new-workspace entry", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([]);
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [], degraded: false });
     renderPicker(null);
     openPopover();
     expect(
@@ -312,10 +313,10 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
   });
 
   it("the selected row rides the accent pair with the folder icon leading and the check trailing", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
       { path: "/w/beta", label: "beta", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     renderPicker({ path: "/w/alpha", label: "alpha" });
     openPopover();
     const alpha = await screen.findByRole("button", { name: "alpha" });
@@ -331,9 +332,9 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
   });
 
   it("the naming modal guards the name and cancels without invoking", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     renderPicker(null);
     openPopover();
     // The entry closes the layer and hands over to the naming modal.
@@ -374,9 +375,9 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
   });
 
   it("creating from the modal mints immediately and seats the reply as the pending selection", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     vi.mocked(createWorkspace).mockResolvedValue({
       path: "/w/my-analysis",
       label: "my-analysis",
@@ -411,9 +412,9 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
   });
 
   it("a backend refusal surfaces inline and keeps the modal open", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     vi.mocked(createWorkspace).mockRejectedValueOnce(
       new Error("workspace name contains a path-illegal character"),
     );

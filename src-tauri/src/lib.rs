@@ -504,7 +504,10 @@ pub fn run() {
             // aborts that workspace's sweep (honest refusal -- deleting
             // against an unreadable manifest could destroy the only copy).
             // Logged per workspace, never fatal to boot.
-            for record in workspace_registry.all() {
+            // A degraded read lands here as zero records too -- the sweep
+            // skips whole rather than judging unreadable state.
+            let (orphan_sweep_records, _) = workspace_registry.all();
+            for record in orphan_sweep_records {
                 if record.path.exists() {
                     if let Err(detail) = crate::workspace::datasets::sweep_orphans(&record.path) {
                         log::warn!(
