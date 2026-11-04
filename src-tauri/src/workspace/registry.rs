@@ -172,7 +172,8 @@ impl WorkspaceRegistry {
     /// selector's existing-directory branch (a same-name mint that found a
     /// never-recorded directory still needs a label).
     pub fn label_of(&self, canonical: &Path) -> String {
-        self.load()
+        let (records, _) = self.load();
+        records
             .into_iter()
             .find(|r| r.path == canonical)
             .map(|r| r.label())
@@ -186,7 +187,8 @@ impl WorkspaceRegistry {
     /// directory return `None`: their directory tail is a machine timestamp
     /// (or a path the user never bound), not a face worth showing.
     pub fn explicit_label_of(&self, canonical: &Path) -> Option<String> {
-        self.load()
+        let (records, _) = self.load();
+        records
             .into_iter()
             .find(|r| r.path == canonical && r.explicit)
             .map(|r| r.label())
@@ -243,7 +245,7 @@ impl WorkspaceRegistry {
     /// back (a bound session's next launch re-creates it on demand), so
     /// hiding beats deleting.
     pub fn recent(&self) -> Vec<WorkspaceRecord> {
-        let mut records = self.load();
+        let (mut records, _) = self.load();
         records.retain(|r| r.path.exists());
         sort_lru(&mut records);
         records
@@ -252,11 +254,14 @@ impl WorkspaceRegistry {
     /// The sidebar section's view (issue #1392): every record in the same
     /// LRU order as [`Self::recent`], dangling records INCLUDED -- the
     /// section keeps them with a missing-state hint instead of letting a
-    /// group vanish silently.
-    pub fn all(&self) -> Vec<WorkspaceRecord> {
-        let mut records = self.load();
+    /// group vanish silently. The paired flag marks a degraded read (issue
+    /// #1481): the records came back empty because the file was UNREADABLE,
+    /// not because the registry is empty -- the wire projection carries it
+    /// so state-destroying consumers can hold their judgment.
+    pub fn all(&self) -> (Vec<WorkspaceRecord>, bool) {
+        let (mut records, degraded) = self.load();
         sort_lru(&mut records);
-        records
+        (records, degraded)
     }
 
     /// [`Self::record`] with an injectable clock and title for tests. The
@@ -320,17 +325,19 @@ impl WorkspaceRegistry {
 
     /// The tolerant read (both faces): a missing file is the first-run
     /// state; ANY other failure degrades to empty with a warn so a broken
-    /// file stays diagnosable from the log dir.
-    fn load(&self) -> Vec<WorkspaceRecord> {
+    /// file stays diagnosable from the log dir. The paired flag marks the
+    /// degraded arm (issue #1481): the empty fallback must stay tellable
+    /// from a genuinely empty registry on the listing view.
+    fn load(&self) -> (Vec<WorkspaceRecord>, bool) {
         match self.load_for_write() {
-            Ok(records) => records,
+            Ok(records) => (records, false),
             Err(detail) => {
                 log::warn!(
                     target: "toptopduck::workspace_registry",
                     "workspace registry {} unreadable, reading empty: {detail}",
                     self.path.display()
                 );
-                Vec::new()
+                (Vec::new(), true)
             }
         }
     }
@@ -534,6 +541,38 @@ mod tests {
             std::fs::read_to_string(root.path().join(WORKSPACES_FILE_NAME)).expect("read"),
             "{ not json",
             "a refused write never rewrites the file"
+        );
+    }
+
+    #[test]
+    fn a_degraded_read_flags_the_listing_and_a_healthy_one_does_not() {
+        // Issue #1481: the tolerant-empty fallback must stay TELLABLE from a
+        // genuinely empty registry -- the listing view pairs its records with
+        // a degraded flag so state-destroying consumers (the staged-pick
+        // sweep) can hold their judgment through a read failure instead of
+        // reading the empty fallback as "every record was removed".
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let (records, degraded) = reg.all();
+        assert!(records.is_empty());
+        assert!(
+            !degraded,
+            "a missing file is the first-run empty, not a degradation"
+        );
+        let dir = dir_under(root.path(), "alpha");
+        reg.record_at(&dir, None, false, 1_000).expect("record");
+        let (records, degraded) = reg.all();
+        assert_eq!(records.len(), 1);
+        assert!(!degraded, "a healthy read never flags");
+        std::fs::write(root.path().join(WORKSPACES_FILE_NAME), "{ not json").expect("corrupt");
+        let (records, degraded) = reg.all();
+        assert!(
+            records.is_empty(),
+            "the corrupt file still degrades to empty"
+        );
+        assert!(
+            degraded,
+            "a corrupt read is degraded -- the flag is the tell"
         );
     }
 
@@ -786,12 +825,12 @@ mod tests {
         let dir = dir_under(root.path(), "alpha");
         let reg = registry(&root);
         reg.record_at(&dir, None, false, 1_000).expect("record");
-        assert!(!reg.all()[0].explicit, "the plain record stays implicit");
+        assert!(!reg.all().0[0].explicit, "the plain record stays implicit");
         let raw = std::fs::read_to_string(root.path().join(WORKSPACES_FILE_NAME)).expect("read");
         assert!(!raw.contains("explicit"), "false skips the key");
         reg.record_selected(&dir);
         assert!(
-            reg.all()[0].explicit,
+            reg.all().0[0].explicit,
             "the explicit bind upgrades the same record"
         );
         let raw = std::fs::read_to_string(root.path().join(WORKSPACES_FILE_NAME)).expect("read");
@@ -806,7 +845,7 @@ mod tests {
         reg.record_at(&dir, Some("Old"), true, 1_000)
             .expect("record");
         reg.rename(&dir, "New").expect("rename");
-        let record = &reg.all()[0];
+        let record = &reg.all().0[0];
         assert_eq!(record.title.as_deref(), Some("New"));
         assert_eq!(record.path, dir, "the path never rewrites");
         assert_eq!(record.created_at, 1_000);
@@ -820,6 +859,7 @@ mod tests {
         reg.rename(&twin, "New").expect("rename twin");
         assert_eq!(
             reg.all()
+                .0
                 .iter()
                 .filter(|r| r.title.as_deref() == Some("New"))
                 .count(),
@@ -845,7 +885,7 @@ mod tests {
             "the recorded path deletes its record"
         );
         assert!(dir.exists(), "the directory stays");
-        assert!(reg.all().is_empty());
+        assert!(reg.all().0.is_empty());
         // Removing an unknown path is an idempotent Ok -- a miss, not a write.
         assert!(!reg.remove_record(&dir).expect("remove again"));
     }
@@ -861,7 +901,7 @@ mod tests {
         reg.record_at(&old, None, true, 1_000).expect("old");
         reg.record_at(&gone, None, true, 5_000).expect("gone");
         std::fs::remove_dir(&gone).expect("the directory disappears");
-        let all = reg.all();
+        let all = reg.all().0;
         assert_eq!(
             all.iter().map(|r| r.path.as_path()).collect::<Vec<_>>(),
             vec![gone.as_path(), old.as_path()],

@@ -111,7 +111,10 @@ vi.mock("../api", async (importOriginal) => {
     createSession: vi.fn(async () => "sess-1"),
     // Issue #1384: the selector's popover fetch + the minted pane's first
     // ask both stay off the real IPC.
-    listWorkspaces: vi.fn(async () => []),
+    listWorkspaces: vi.fn(async () => ({
+      workspaces: [],
+      degraded: false,
+    })),
     askQuestion: vi.fn(async () => ({
       kind: "Textual" as const,
       data: { text_kind: "Clarify" as const, body: "ok", assumption: null },
@@ -310,9 +313,9 @@ describe("App cold-start workspace selector wiring (issue #1384)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listLiveSessions).mockResolvedValue([]);
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/demo", label: "demo", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     vi.mocked(createSession).mockResolvedValue({
       session_id: "sess-1",
       recipe_path: "/x/sess-1.recipe.json",
@@ -377,9 +380,9 @@ describe("App cold-start workspace-section shortcut wiring (issue #1392)", () =>
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listLiveSessions).mockResolvedValue([]);
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/demo", label: "demo", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     vi.mocked(createSession).mockResolvedValue({
       session_id: "sess-1",
       recipe_path: "/x/sess-1.recipe.json",

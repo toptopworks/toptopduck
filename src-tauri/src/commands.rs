@@ -416,17 +416,33 @@ fn workspace_row(r: &crate::workspace::WorkspaceRecord) -> RecentWorkspace {
     }
 }
 
+/// The wire envelope of the registry listing (issue #1481): the rows plus
+/// the degraded flag -- `true` only when the tolerant read fell back to
+/// empty on an unreadable file, which a genuinely empty registry (a fresh
+/// install, a fully-removed set) never sets.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkspaceListing {
+    pub workspaces: Vec<RecentWorkspace>,
+    pub degraded: bool,
+}
+
 /// The workspace registry's LRU view (ADR-0138, issue #1384): EVERY record,
 /// most recently used first -- dangling directories included, so the
 /// sidebar's workspace section can keep a missing-directory group with a
 /// state hint (issue #1392). The selector filters on `exists` and slices
 /// its top 10; older workspaces resurface through the folder browse.
-/// Read-only and tolerant -- an unreadable registry lists empty.
+/// Read-only and tolerant -- an unreadable registry lists empty, and the
+/// envelope's `degraded` flag is the only way the wire can tell that
+/// fallback from a genuinely empty registry (issue #1481).
 #[tauri::command]
 pub fn list_workspaces(
     registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
-) -> Vec<RecentWorkspace> {
-    registry.all().iter().map(workspace_row).collect()
+) -> WorkspaceListing {
+    let (records, degraded) = registry.all();
+    WorkspaceListing {
+        workspaces: records.iter().map(workspace_row).collect(),
+        degraded,
+    }
 }
 
 /// Mint a NAMED workspace for the session-creation selector (issue #1393):
@@ -6258,10 +6274,10 @@ mod tests {
 
         let echo = dir.to_string_lossy().into_owned();
         rename_registry_record(&registry, &echo, "T").expect("rename lands");
-        assert_eq!(registry.all()[0].title.as_deref(), Some("T"));
+        assert_eq!(registry.all().0[0].title.as_deref(), Some("T"));
         remove_registry_record(&registry, &echo).expect("remove lands");
         assert!(
-            registry.all().is_empty(),
+            registry.all().0.is_empty(),
             "the record is gone despite the drift"
         );
     }

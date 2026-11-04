@@ -28,7 +28,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 // are display-contract tests, so the listing is an empty registry and the
 // mutations resolve unless a test overrides them.
 vi.mock("../../api", () => ({
-  listWorkspaces: vi.fn().mockResolvedValue([]),
+  listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [], degraded: false }),
   renameWorkspace: vi.fn().mockResolvedValue(undefined),
   removeWorkspace: vi.fn().mockResolvedValue(undefined),
   createWorkspace: vi.fn().mockResolvedValue(undefined),
@@ -1636,10 +1636,10 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   }
 
   it("renders explicit groups under a counted section head; implicit records never surface", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
       { path: "/w/implicit", label: "implicit", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     const { container } = renderShell(
       <SessionSidebar {...wsProps()} />,
     );
@@ -1659,9 +1659,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("keeps a missing-directory group with the not-found hint", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/gone", label: "gone", explicit: true, exists: false },
-    ]);
+    ], degraded: false });
     const { container } = renderShell(
       <SessionSidebar {...wsProps()} />,
     );
@@ -1676,9 +1676,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("expands the subtree into the SAME session rows the recent body renders", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const { container } = renderShell(
       <SessionSidebar
         {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
@@ -1703,10 +1703,10 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("keeps a session bound to a non-explicit workspace in the recent body", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
       { path: "/w/implicit", label: "implicit", explicit: false, exists: true },
-    ]);
+    ], degraded: false });
     const { container } = renderShell(
       <SessionSidebar
         {...wsProps({
@@ -1736,9 +1736,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("an open bound session rides its group only; the refetch-window open stays recent", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const openRow = (sid: string, name: string, path: string) => ({
       sid,
       name,
@@ -1813,9 +1813,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("a session landing in a workspace opens its group", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const view = renderShell(<SessionSidebar {...wsProps()} />);
     const group = await waitFor(() => {
       const el = view.container.querySelector(
@@ -1851,9 +1851,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("a cold start's scan arrival keeps the groups collapsed", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     // Pre-scan: the persisted list is still empty and not yet loaded.
     const view = renderShell(
       <SessionSidebar {...wsProps({ sessionsLoaded: false })} />,
@@ -1893,11 +1893,11 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("a landing fans its landed groups; a manual fold holds", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/one", label: "one", explicit: true, exists: true },
       { path: "/w/two", label: "two", explicit: true, exists: true },
       { path: "/w/three", label: "three", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const view = renderShell(<SessionSidebar {...wsProps()} />);
     const head = (path: string) =>
       view.container.querySelector(
@@ -1935,9 +1935,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("a row archived away and returning does not re-fan its group", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/one", label: "one", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const view = renderShell(<SessionSidebar {...wsProps()} />);
     const head = () =>
       view.container.querySelector(
@@ -1965,9 +1965,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("heads the action buttons with tooltips and the diagonal expand glyphs", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const { container } = renderShell(<SessionSidebar {...wsProps()} />);
     await waitFor(() =>
       expect(
@@ -2012,9 +2012,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("caps the subtree preview at 5 and expands the rest via Show more (N)", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/big", label: "big", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const members = Array.from({ length: 7 }, (_, i) =>
       metaRow(`/m${i}.json`, `m${i}`, "/w/big"),
     );
@@ -2035,9 +2035,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("collapse resets the preview: re-expanding shows the cap again", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/big", label: "big", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const members = Array.from({ length: 7 }, (_, i) =>
       metaRow(`/m${i}.json`, `m${i}`, "/w/big"),
     );
@@ -2079,9 +2079,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("wires the menu three-piece and the same-workspace new-session shortcut", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const onNewInWorkspace = vi.fn();
     const { container } = renderShell(
       <SessionSidebar {...wsProps({ onNewInWorkspace })} />,
@@ -2128,9 +2128,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("remove stages the strong-confirm; cancel keeps the record", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     vi.mocked(removeWorkspace).mockClear();
     const { container } = renderShell(
       <SessionSidebar {...wsProps()} />,
@@ -2158,9 +2158,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("folds the section from its head; the zero-group face shows the empty hint", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const { container } = renderShell(
       <SessionSidebar {...wsProps()} />,
     );
@@ -2177,7 +2177,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("a zero-group section still renders the head with the empty hint", () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([]);
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [], degraded: false });
     renderShell(<SessionSidebar {...wsProps()} />);
     expect(
       screen.getByRole("button", { name: "Workspaces(0)" }),
@@ -2204,9 +2204,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("collapse-all resets every group's Show-more preview", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/big", label: "big", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const members = Array.from({ length: 7 }, (_, i) =>
       metaRow(`/m${i}.json`, `m${i}`, "/w/big"),
     );
@@ -2233,9 +2233,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("the rename modal surfaces a refusal, guards Save, and submits the trimmed title", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const { container } = renderShell(
       <SessionSidebar {...wsProps()} />,
     );
@@ -2274,9 +2274,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
   });
 
   it("the head's New workspace modal creates with the trimmed name and the group lands via the listing", async () => {
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     const { container } = renderShell(
       <SessionSidebar {...wsProps()} />,
     );
@@ -2292,10 +2292,10 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     fireEvent.change(input, { target: { value: "  fresh  " } });
     // The post-create refetch returns the grown registry -- the group must
     // arrive through the invalidation channel, not local state.
-    vi.mocked(listWorkspaces).mockResolvedValue([
+    vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [
       { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
       { path: "/w/fresh", label: "fresh", explicit: true, exists: true },
-    ]);
+    ], degraded: false });
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(createWorkspace).toHaveBeenCalledWith("fresh"));
     await waitFor(() =>
@@ -2461,7 +2461,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
       ) as HTMLElement;
 
     it("restores a persisted section fold on mount", async () => {
-      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [explicitGroup], degraded: false });
       seedStore({ collapsedSections: ["workspaces"] });
       const { container } = renderShell(
         <SessionSidebar {...wsProps()} />,
@@ -2478,14 +2478,14 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     });
 
     it("writes a section fold back to the persisted document", () => {
-      vi.mocked(listWorkspaces).mockResolvedValue([]);
+      vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [], degraded: false });
       renderShell(<SessionSidebar {...wsProps()} />);
       fireEvent.click(screen.getByRole("button", { name: "Workspaces(0)" }));
       expect(storedDocument().collapsedSections).toEqual(["workspaces"]);
     });
 
     it("falls back to the expanded default on a corrupt document", () => {
-      vi.mocked(listWorkspaces).mockResolvedValue([]);
+      vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [], degraded: false });
       localStorage.setItem(SIDEBAR_EXPANSION_KEY, "{corrupt");
       renderShell(<SessionSidebar {...wsProps()} />);
       expect(
@@ -2494,7 +2494,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     });
 
     it("restores a persisted subtree expansion", async () => {
-      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [explicitGroup], degraded: false });
       seedStore({ expandedWorkspaces: ["/w/explicit"] });
       const { container } = renderShell(
         <SessionSidebar
@@ -2509,7 +2509,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     });
 
     it("writes a subtree toggle back to the persisted document", async () => {
-      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [explicitGroup], degraded: false });
       const { container } = renderShell(
         <SessionSidebar
           {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
@@ -2527,7 +2527,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     });
 
     it("the persisted seen baseline keeps existing rows from fanning on a cold start", async () => {
-      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [explicitGroup], degraded: false });
       seedStore({ seenWorkspaces: ["/a.json"] });
       const view = renderShell(
         <SessionSidebar {...wsProps({ sessionsLoaded: false })} />,
@@ -2561,7 +2561,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     });
 
     it("a fresh store folds the first scan's bound rows into the seen baseline (upgrade face)", async () => {
-      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [explicitGroup], degraded: false });
       const view = renderShell(
         <SessionSidebar {...wsProps({ sessionsLoaded: false })} />,
       );
@@ -2586,7 +2586,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     });
 
     it("fans a newly landed session once and records it in the persisted baseline", async () => {
-      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [explicitGroup], degraded: false });
       seedStore({ seenWorkspaces: ["/old.json"] });
       const view = renderShell(
         <SessionSidebar {...wsProps({ sessionsLoaded: false })} />,
@@ -2631,7 +2631,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
         explicit: true,
         exists: true,
       };
-      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup, second]);
+      vi.mocked(listWorkspaces).mockResolvedValue({ workspaces: [explicitGroup, second], degraded: false });
       const { container } = renderShell(
         <SessionSidebar
           {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}

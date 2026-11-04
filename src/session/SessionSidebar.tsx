@@ -201,7 +201,7 @@ export function SessionSidebar({
     staleTime: 0,
   });
   const workspaceGroups = buildWorkspaceGroups(
-    workspaceList ?? [],
+    workspaceList?.workspaces ?? [],
     sessions,
     openSessions,
     activeSessionId,
