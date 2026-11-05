@@ -12,10 +12,15 @@
 // injection anchor). Code and i18n keys keep the workspace.datasets
 // namespace.
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type Mutation,
+} from "@tanstack/react-query";
 import { open as openPicker } from "@tauri-apps/plugin-dialog";
 import { Check, Loader2, Upload, X } from "lucide-react";
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useState, useSyncExternalStore, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import {
@@ -70,23 +75,24 @@ const PICKER_EXTENSIONS = ["csv", "parquet", "json", "jsonl", "ndjson"];
 // new upload begins, because a replace lands with no other visible trace
 // (same row, same label; only the content underneath changes). A failed
 // upload never reaches `done` -- the error banner owns that face.
-// Every variant carries the workspace whose panel minted the batch (#1491):
-// the badge renders (and locks) only on that workspace's panel, so a panel
-// reopened on another workspace neither narrates nor locks for a foreign
-// batch -- while the origin panel keeps a RUNNING face across close/reopen
-// (#1488).
+// The map is keyed by the workspace whose panel minted the batch (#1491,
+// hardened in the review round: two panels may fly at once now that a
+// foreign panel stays unlocked, and a single slot would let the second
+// fire's badge erase the first's RUNNING face): the badge renders (and
+// locks) only on that workspace's panel, so a panel reopened on another
+// workspace neither narrates nor locks for a foreign batch -- while the
+// origin panel keeps a RUNNING face across close/reopen (#1488).
 type UploadStatus =
   | {
     phase: "running";
     mode: "add";
-    workspace: string;
     name: string;
     index: number;
     total: number;
     startedAt: number;
   }
-  | { phase: "running"; mode: "replace"; workspace: string; name: string; startedAt: number }
-  | { phase: "done"; mode: "add" | "replace"; workspace: string; name: string; seconds: number };
+  | { phase: "running"; mode: "replace"; name: string; startedAt: number }
+  | { phase: "done"; mode: "add" | "replace"; name: string; seconds: number };
 
 // The master/detail sections' card chrome -- the working-set tab's
 // PANEL_CARD_BASE form (bg-card + border + rounded + shadow + padding), so
@@ -188,14 +194,29 @@ function toDescriptor(d: ListedWorkspaceDataset): DatasetDescriptor {
   };
 }
 
+// A pending mutation's minted variables as the row mutations' shape, for
+// the flight predicates inside the panel (#1492's review round): the
+// variables freeze at fire time, so unlike the hook's live `variables`
+// slot they keep the FIRST fire's identity through a same-observer
+// supersede. The cast is the boundary: only this panel's five mutations
+// carry a `workspace` field, so the cache-wide predicates below can narrow
+// any pending mutation's variables to it.
+function flightVariables(
+  m: Mutation<unknown, Error, unknown, unknown>,
+): { workspace?: string } | undefined {
+  return m.state.variables as { workspace?: string } | undefined;
+}
+
 export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDatasetsDialogProps) {
   const intl = useIntl();
   const queryClient = useQueryClient();
   const open = workspace !== null;
   const [error, setError] = useState<string | null>(null);
-  // The in-flight upload's status line (issue #1485): non-null while the
-  // picker's add batch or a row's replace round-trips; cleared on settle.
-  const [uploadStatus, setUploadStatus] = useState<UploadStatus | null>(null);
+  // The in-flight upload's status lines (issue #1485), keyed by the
+  // minting workspace: a panel's badge is non-null while its add batch or
+  // replace round-trips, cleared on settle -- and a second panel's flight
+  // never overwrites the first's face (the review round's keyed-map fix).
+  const [uploadStatuses, setUploadStatuses] = useState<Record<string, UploadStatus>>({});
   // The detail pick (which row's detail the right pane shows), resolved to
   // the first entry when unset or deleted -- the band rides the resolved
   // pick so it never names a row that is no longer in the list.
@@ -220,10 +241,15 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       // cleanup: a reopen is a fresh working session, not a continuation of
       // the last one. A RUNNING badge survives the edge: its IPC is still
       // in flight, and clearing it would resurrect the vanished-state bug
-      // (the upload keeps running with no face).
+      // (the upload keeps running with no face). The sweep is key-wide:
+      // every workspace's DONE face clears, every RUNNING face stays.
       setError(null);
       setSelectedName(null);
-      setUploadStatus((prev) => (prev?.phase === "running" ? prev : null));
+      setUploadStatuses((prev) =>
+        Object.fromEntries(
+          Object.entries(prev).filter(([, status]) => status.phase === "running"),
+        ),
+      );
     }
   }
   const path = panel?.path ?? "";
@@ -234,9 +260,14 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
     enabled: open,
   });
 
-  const invalidate = useCallback(() => {
+  // The listing invalidation for a NAMED workspace (#1492): the success
+  // callbacks are hot-swapped options -- TanStack runs whichever closure
+  // the latest render produced -- so the invalidate target must arrive
+  // through the mutation's variables, never the live panel. add's batch
+  // rides the same helper (the #1491 inline form, converged).
+  const invalidateFor = (path: string) => {
     void queryClient.invalidateQueries({ queryKey: datasetKey(path) });
-  }, [path, queryClient]);
+  };
 
   const add = useMutation({
     // The batch's target rides the variables, never the live `path`
@@ -254,12 +285,20 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       // The freshly added dataset becomes the detail pick: the user's last
       // upload is what they want to look at (a multi-file pick lands on the
       // last one). The IPC returns the landed entry with its de-conflicted
-      // reference name.
-      setSelectedName(entry.reference_name);
+      // reference name. The write lands only while the panel still shows
+      // the batch's workspace (#1492): a rebind would park the pick on
+      // another workspace's panel -- masked by the rows[0] fallback except
+      // for a cross-workspace name collision, so decorative, but the gate
+      // keeps the write on the panel the click fired from. The settle-time
+      // `workspace` read is the same hot-swap semantics the onError
+      // routing below leans on.
+      if (workspace !== null && workspace.path === v.workspace) {
+        setSelectedName(entry.reference_name);
+      }
       // Invalidate the batch's minted workspace, not the current panel: the
       // app default is staleTime Infinity, so a mid-batch rebind would leave
       // the origin's listing stale and its reopen would miss the new rows.
-      void queryClient.invalidateQueries({ queryKey: datasetKey(v.workspace) });
+      invalidateFor(v.workspace);
     },
     onError: (e: unknown, v) => {
       const message = describeError(e, intl);
@@ -292,27 +331,38 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       }
     },
   });
+  // The four row mutations carry the workspace in their variables (#1492):
+  // BOTH the IPC target and the success invalidation must bind to the
+  // workspace the click fired in. The variables are bound per call -- the
+  // handlers below mint from the render const `path`, same posture as the
+  // add batch -- while the onSuccess closures are hot-swapped options that
+  // drift with the live panel: a rebind mid-flight (replace is a
+  // minute-scale copy-in) would otherwise invalidate the foreign panel's
+  // listing and leave the origin stale under the app's staleTime Infinity.
+  // onError keeps the live banner write: routing a row failure across
+  // panels is #1490's add-batch face, not this panel's scope.
   const replace = useMutation({
-    mutationFn: (v: { name: string; file: string }) =>
-      replaceWorkspaceDataset(path, v.name, v.file),
-    onSuccess: invalidate,
+    mutationFn: (v: { workspace: string; name: string; file: string }) =>
+      replaceWorkspaceDataset(v.workspace, v.name, v.file),
+    onSuccess: (_, v) => invalidateFor(v.workspace),
     onError: (e: unknown) => setError(describeError(e, intl)),
   });
   const remove = useMutation({
-    mutationFn: (name: string) => removeWorkspaceDataset(path, name),
-    onSuccess: invalidate,
+    mutationFn: (v: { workspace: string; name: string }) =>
+      removeWorkspaceDataset(v.workspace, v.name),
+    onSuccess: (_, v) => invalidateFor(v.workspace),
     onError: (e: unknown) => setError(describeError(e, intl)),
   });
   const rename = useMutation({
-    mutationFn: (v: { name: string; newDisplay: string }) =>
-      renameWorkspaceDataset(path, v.name, v.newDisplay),
-    onSuccess: invalidate,
+    mutationFn: (v: { workspace: string; name: string; newDisplay: string }) =>
+      renameWorkspaceDataset(v.workspace, v.name, v.newDisplay),
+    onSuccess: (_, v) => invalidateFor(v.workspace),
     onError: (e: unknown) => setError(describeError(e, intl)),
   });
   const privacy = useMutation({
-    mutationFn: (v: { name: string; next: DatasetPrivacy }) =>
-      setWorkspaceDatasetPrivacy(path, v.name, v.next),
-    onSuccess: invalidate,
+    mutationFn: (v: { workspace: string; name: string; next: DatasetPrivacy }) =>
+      setWorkspaceDatasetPrivacy(v.workspace, v.name, v.next),
+    onSuccess: (_, v) => invalidateFor(v.workspace),
     onError: (e: unknown) => setError(describeError(e, intl)),
   });
 
@@ -355,15 +405,17 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
     const startedAt = Date.now();
     let lastLanded: string | null = null;
     for (const [i, file] of files.entries()) {
-      setUploadStatus({
-        phase: "running",
-        mode: "add",
-        workspace: path,
-        name: fileBasename(file),
-        index: i + 1,
-        total: files.length,
-        startedAt,
-      });
+      setUploadStatuses((prev) => ({
+        ...prev,
+        [path]: {
+          phase: "running",
+          mode: "add",
+          name: fileBasename(file),
+          index: i + 1,
+          total: files.length,
+          startedAt,
+        },
+      }));
       await add
         // The origin's label pins with the path (#1490): the pair mints from
         // the same render const as `path`, so the failure toast can name the
@@ -374,18 +426,26 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
         })
         .catch(() => {});
     }
-    if (lastLanded !== null) {
-      setUploadStatus({
-        phase: "done",
-        mode: "add",
-        workspace: path,
-        name: lastLanded,
-        seconds: Math.floor((Date.now() - startedAt) / 1000),
-      });
+    const landed = lastLanded;
+    if (landed !== null) {
+      // The clock reads at settle time, outside the updater: the batch's
+      // elapsed measures the batch, not React's commit of the badge.
+      const seconds = Math.floor((Date.now() - startedAt) / 1000);
+      setUploadStatuses((prev) => ({
+        ...prev,
+        [path]: {
+          phase: "done",
+          mode: "add",
+          name: landed,
+          seconds,
+        },
+      }));
     } else {
       // A whole-failed batch parks nothing: the running badge must not
       // outlive its batch, and the error banner owns the failure face.
-      setUploadStatus(null);
+      setUploadStatuses((prev) =>
+        Object.fromEntries(Object.entries(prev).filter(([key]) => key !== path)),
+      );
     }
   };
 
@@ -410,14 +470,59 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   // The badge belongs to the panel whose batch minted it (#1491): a panel
   // opened on another workspace neither narrates nor locks for a foreign
   // batch; the home panel keeps a RUNNING face across close/reopen (#1488).
-  const badge = uploadStatus?.workspace === path ? uploadStatus : null;
+  // The map's keying (not a workspace field in the variant) carries the
+  // identity, so two panels' concurrent flights each keep their own face.
+  const badge = uploadStatuses[path] ?? null;
   const uploadRunning = badge?.phase === "running";
-  const busy =
-    rename.isPending ||
-    replace.isPending ||
-    remove.isPending ||
-    privacy.isPending ||
-    uploadRunning;
+  // The row locks count the cache's pending FLIGHTS, not the hook's own
+  // state (#1492, hardened in the review round): a useMutation observer's
+  // `isPending`/`variables` report only the LATEST fire, so a second row
+  // mutation fired on a foreign panel mid-flight would supersede the slot
+  // and silently unlock this panel's rows while its own IPC still flies.
+  // The predicate reads the MINTED variables, which freeze at fire time --
+  // each flight keeps its identity through both the rebind and the
+  // supersede. The add batch rides the same predicate (its variables carry
+  // the workspace too), matching the badge lock above belt-and-braces; a
+  // foreign panel's flight matches nothing here, so it neither locks nor
+  // narrates -- the badge derivation's posture.
+  // useSyncExternalStore is the seam, not TanStack's own useMutationState:
+  // the library hook reads its filters from an effect-updated ref, so a
+  // rebind's new path does not re-filter until the NEXT cache event -- the
+  // rebind-home leg would render a stale count and drop the lock. A NUMBER
+  // snapshot closing over the live `path` recomputes on every render and
+  // every cache event, and numbers compare by value so unrelated renders
+  // stay stable.
+  const mutationCache = queryClient.getMutationCache();
+  const subscribeMutations = useCallback(
+    (onChange: () => void) => mutationCache.subscribe(onChange),
+    [mutationCache],
+  );
+  const countRowFlights = useCallback(
+    () =>
+      mutationCache.findAll({
+        status: "pending",
+        predicate: (m) => flightVariables(m)?.workspace === path,
+      }).length,
+    [mutationCache, path],
+  );
+  const rowFlights = useSyncExternalStore(subscribeMutations, countRowFlights);
+  // The detail pane's spinner is the row lock's one-off sibling: it must
+  // name the PRIVACY flight itself, not any row mutation -- the `next`
+  // field is the privacy leg's alone among the variables shapes this
+  // panel mints (#1492).
+  const countPrivacyFlights = useCallback(
+    () =>
+      mutationCache.findAll({
+        status: "pending",
+        predicate: (m) => {
+          const v = flightVariables(m);
+          return v !== undefined && v.workspace === path && "next" in v;
+        },
+      }).length,
+    [mutationCache, path],
+  );
+  const privacyFlights = useSyncExternalStore(subscribeMutations, countPrivacyFlights);
+  const busy = rowFlights > 0 || uploadRunning;
 
   // The list row's extra marker: a missing store file badges the row
   // (destructive -- the honest flag), the detail carries the long sentence.
@@ -519,7 +624,10 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                   size="icon"
                   className="ml-0.5 size-5 rounded-full"
                   aria-label={intl.formatMessage({ id: "common.close" })}
-                  onClick={() => setUploadStatus(null)}
+                  onClick={() =>
+                    setUploadStatuses((prev) =>
+                      Object.fromEntries(Object.entries(prev).filter(([key]) => key !== path)),
+                    )}
                 >
                   <X className="size-3" aria-hidden />
                 </Button>
@@ -590,7 +698,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                     // posture): a stale banner must not contradict a retry's
                     // visible success.
                     setError(null);
-                    rename.mutate({ name, newDisplay });
+                    rename.mutate({ workspace: path, name, newDisplay });
                   }}
                   onReplace={(name, file) => {
                     setError(null);
@@ -600,31 +708,40 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                     // (the frozen duration), a reject clears it -- the error
                     // banner owns the failure face.
                     const startedAt = Date.now();
-                    setUploadStatus({
-                      phase: "running",
-                      mode: "replace",
-                      workspace: path,
-                      name,
-                      startedAt,
-                    });
+                    setUploadStatuses((prev) => ({
+                      ...prev,
+                      [path]: {
+                        phase: "running",
+                        mode: "replace",
+                        name,
+                        startedAt,
+                      },
+                    }));
                     void replace
-                      .mutateAsync({ name, file })
+                      .mutateAsync({ workspace: path, name, file })
                       .then(() => {
-                        setUploadStatus({
-                          phase: "done",
-                          mode: "replace",
-                          workspace: path,
-                          name,
-                          seconds: Math.floor((Date.now() - startedAt) / 1000),
-                        });
+                        const seconds = Math.floor((Date.now() - startedAt) / 1000);
+                        setUploadStatuses((prev) => ({
+                          ...prev,
+                          [path]: {
+                            phase: "done",
+                            mode: "replace",
+                            name,
+                            seconds,
+                          },
+                        }));
                       })
                       .catch(() => {
-                        setUploadStatus(null);
+                        setUploadStatuses((prev) =>
+                          Object.fromEntries(
+                            Object.entries(prev).filter(([key]) => key !== path),
+                          ),
+                        );
                       });
                   }}
                   onDelete={(name) => {
                     setError(null);
-                    remove.mutate(name);
+                    remove.mutate({ workspace: path, name });
                   }}
                   onPickError={(e: unknown) => setError(describeError(e, intl))}
                   badgeFor={badgeFor}
@@ -665,10 +782,10 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                       }
                       sampleLoading={false}
                       sampleError={null}
-                      loading={privacy.isPending}
+                      loading={privacyFlights > 0}
                       onPrivacyChange={(name, next) => {
                         setError(null);
-                        privacy.mutate({ name, next });
+                        privacy.mutate({ workspace: path, name, next });
                       }}
                     />
                   </>
