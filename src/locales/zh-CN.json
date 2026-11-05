@@ -769,5 +769,6 @@
   "workspace.datasets.replaceDone": "已替换 {name}",
   "workspace.datasets.replacing": "正在替换 {name}…",
   "workspace.datasets.title": "数据集 — {workspace}",
+  "workspace.datasets.uploadFailedToast": "上传到 {workspace} 失败",
   "workspace.expand": "展开右侧栏"
 }

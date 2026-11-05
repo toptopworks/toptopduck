@@ -36,6 +36,7 @@ import {
   DialogTitle,
 } from "../components/ui/dialog";
 import { DatasetDetail, type DatasetSamplePage } from "../components/dataset/DatasetDetail";
+import { toast } from "../components/ui/use-toast";
 import { ElapsedFace } from "../components/thread/ElapsedFace";
 import { WaitElapsedSuffix } from "../components/thread/WaitElapsedSuffix";
 import { fileBasename } from "../lib/basename";
@@ -243,8 +244,11 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
     // call, so a panel rebind mid-batch would retarget the files that have
     // not fired yet. The variables are bound per call -- pickAndAdd's
     // closure pins the workspace: each iteration mints from the const path
-    // of the render the click fired in.
-    mutationFn: (v: { workspace: string; file: string }) =>
+    // of the render the click fired in. `label` rides along for the same
+    // reason (#1490): the failure toast interpolates the ORIGIN workspace's
+    // name, and the panel's prop cannot be trusted at settle time (it may
+    // be null or name another workspace by then).
+    mutationFn: (v: { workspace: string; label: string; file: string }) =>
       addWorkspaceDataset(v.workspace, v.file),
     onSuccess: (entry, v) => {
       // The freshly added dataset becomes the detail pick: the user's last
@@ -257,7 +261,34 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       // the origin's listing stale and its reopen would miss the new rows.
       void queryClient.invalidateQueries({ queryKey: datasetKey(v.workspace) });
     },
-    onError: (e: unknown) => setError(describeError(e, intl)),
+    onError: (e: unknown, v) => {
+      const message = describeError(e, intl);
+      // The failure routes by where the panel stands at SETTLE time
+      // (#1490): on the origin workspace the banner stays the face; off it
+      // (closed = null, or rebound to another workspace -- both variants
+      // hit the same comparison) the banner would never be seen, so the
+      // destructive toast carries the message, attributed to the origin.
+      // The panel's live `workspace` reads correctly here because TanStack
+      // runs the callbacks from the LATEST options -- the same hot-swap
+      // semantics #1492 guards against elsewhere is exactly the settle-time
+      // read this routing wants. One failure, one face: the toast branch
+      // never touches the error state.
+      if (workspace === null || workspace.path !== v.workspace) {
+        toast({
+          variant: "destructive",
+          title: intl.formatMessage(
+            {
+              id: "workspace.datasets.uploadFailedToast",
+              defaultMessage: "Upload to {workspace} failed",
+            },
+            { workspace: v.label },
+          ),
+          description: message,
+        });
+      } else {
+        setError(message);
+      }
+    },
   });
   const replace = useMutation({
     mutationFn: (v: { name: string; file: string }) =>
@@ -332,7 +363,10 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
         startedAt,
       });
       await add
-        .mutateAsync({ workspace: path, file })
+        // The origin's label pins with the path (#1490): the pair mints from
+        // the same render const as `path`, so the failure toast can name the
+        // workspace the click happened in even after the panel moved on.
+        .mutateAsync({ workspace: path, label: panel?.label ?? "", file })
         .then(() => {
           lastLanded = fileBasename(file);
         })
