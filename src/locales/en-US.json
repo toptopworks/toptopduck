@@ -769,5 +769,6 @@
   "workspace.datasets.replaceDone": "Replaced {name}",
   "workspace.datasets.replacing": "Replacing {name}…",
   "workspace.datasets.title": "Datasets — {workspace}",
+  "workspace.datasets.uploadFailedToast": "Upload to {workspace} failed",
   "workspace.expand": "Expand right sidebar"
 }

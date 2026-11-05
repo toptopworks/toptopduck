@@ -10,6 +10,16 @@ import type { ListedWorkspaceDataset } from "../../types/workspace-datasets";
 // tests can drive the picker without the native bridge.
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
+// The toast store is mocked, not rendered: this panel's contract is the
+// FIRING leg (#1490 -- which failures route to a toast, with which copy);
+// the rendering face is the #1494 infra's own covered ground. The
+// exported `toast` spy is one instance for the file (the panel consumes
+// only the named export), so consuming tests mockClear before asserting.
+vi.mock("../../components/ui/use-toast", () => ({
+  useToast: () => ({ toasts: [], toast: vi.fn(), dismiss: vi.fn() }),
+  toast: vi.fn(),
+}));
+
 // Partial api mock (the WorkingSetList.test pattern): every panel mutation is
 // stubbed, the rest of the module rides the real implementation.
 vi.mock("../../api", async (importOriginal) => {
@@ -35,6 +45,7 @@ import {
   replaceWorkspaceDataset,
   setWorkspaceDatasetPrivacy,
 } from "../../api";
+import { toast } from "../../components/ui/use-toast";
 import { open } from "@tauri-apps/plugin-dialog";
 
 // One manifest entry fixture (the wire shape, ADR-0141): stable identity +
@@ -567,6 +578,11 @@ describe("WorkspaceDatasetsDialog", () => {
       })
       .mockResolvedValue(entry({ reference_name: "good", display_name: "good", source_path: "/src/good.csv" }));
     renderPanel();
+    // The on-site face stays the banner alone (#1490): a failure landing on
+    // the panel that minted the batch never fires a toast -- the two faces
+    // must not double-narrate one failure. The spy clears up front so the
+    // assertion covers the whole test window (failure and the retry below).
+    vi.mocked(toast).mockClear();
     fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("无法解析该数据文件");
     // Neither face parks: the running badge cleared with its batch, and no
@@ -581,6 +597,7 @@ describe("WorkspaceDatasetsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加数据集…" }));
     expect(await screen.findByText(/已添加 good\.csv/)).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(toast).not.toHaveBeenCalled();
   });
 
   it("keeps a running badge across close/reopen; the done badge still clears on the open edge", async () => {
@@ -721,5 +738,98 @@ describe("WorkspaceDatasetsDialog", () => {
     view.rerender(bound(null));
     view.rerender(bound({ path: "/ws", label: "Demo" }));
     expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
+  });
+
+  it("an add failure landing while the panel is closed fires a destructive toast naming the origin workspace", async () => {
+    // #1490's closed-panel variant: the banner renders only while the panel
+    // does, so a batch failing after the sidebar nulled the workspace prop
+    // would vanish unread -- the reopen edge would destroy the error state
+    // before it ever rendered. Offsite, the failure changes faces: the
+    // toast carries it, attributed to the workspace that minted the batch.
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const bound = (ws: { path: string; label: string } | null) => (
+      <QueryClientProvider client={client}>
+        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
+      </QueryClientProvider>
+    );
+    seed([]);
+    vi.mocked(open).mockResolvedValue("/src/a.csv");
+    vi.mocked(addWorkspaceDataset).mockClear();
+    let rejectAdd!: (e: unknown) => void;
+    vi.mocked(addWorkspaceDataset).mockImplementation(
+      () => new Promise<ListedWorkspaceDataset>((_resolve, reject) => { rejectAdd = reject; }),
+    );
+    vi.mocked(toast).mockClear();
+    const view = render(bound({ path: "/ws", label: "Demo" }));
+    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
+    expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
+    // Close while the upload runs; the failure lands with no panel present.
+    view.rerender(bound(null));
+    await act(async () => {
+      rejectAdd({ kind: "DataUnreadable", data: `Error when sniffing file "/src/a.csv".` });
+    });
+    // Destructive, attributed to the origin workspace by name, the banner's
+    // detail sentence riding as the description.
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+    expect(toast).toHaveBeenCalledWith({
+      variant: "destructive",
+      title: "上传到 Demo 失败",
+      description: expect.stringContaining("无法解析该数据文件"),
+    });
+    // No double surface: the panel state never took the error, so the
+    // reopen edge has nothing to destroy -- no banner greets the reopen.
+    view.rerender(bound({ path: "/ws", label: "Demo" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "添加数据集…" })).toBeInTheDocument();
+  });
+
+  it("an add failure landing on a rebound panel fires the toast attributed to the origin workspace, the foreign panel stays clean", async () => {
+    // #1490's rebind variant shares the routing: the shared error state has
+    // no workspace attribution, so the banner would narrate a Demo failure
+    // on Other's panel and the reopen edge would then destroy it unread.
+    // The toast names the origin; the foreign panel takes nothing.
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const bound = (ws: { path: string; label: string } | null) => (
+      <QueryClientProvider client={client}>
+        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
+      </QueryClientProvider>
+    );
+    seed([]);
+    vi.mocked(open).mockResolvedValue("/src/a.csv");
+    vi.mocked(addWorkspaceDataset).mockClear();
+    let rejectAdd!: (e: unknown) => void;
+    vi.mocked(addWorkspaceDataset).mockImplementation(
+      () => new Promise<ListedWorkspaceDataset>((_resolve, reject) => { rejectAdd = reject; }),
+    );
+    vi.mocked(toast).mockClear();
+    const view = render(bound({ path: "/ws", label: "Demo" }));
+    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
+    expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
+    // Rebind mid-flight; the failure lands on the foreign panel's watch.
+    view.rerender(bound(null));
+    view.rerender(bound({ path: "/other", label: "Other" }));
+    await act(async () => {
+      rejectAdd({ kind: "Io", data: "disk full" });
+    });
+    // The Io echo rides verbatim as the description; the attribution names
+    // Demo, not the panel the user is looking at.
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+    expect(toast).toHaveBeenCalledWith({
+      variant: "destructive",
+      title: "上传到 Demo 失败",
+      description: "disk full",
+    });
+    // The foreign panel's error state is untouched, and the origin's
+    // reopen is equally clean (the failure was delivered, not stored).
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    view.rerender(bound(null));
+    view.rerender(bound({ path: "/ws", label: "Demo" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
