@@ -69,17 +69,23 @@ const PICKER_EXTENSIONS = ["csv", "parquet", "json", "jsonl", "ndjson"];
 // new upload begins, because a replace lands with no other visible trace
 // (same row, same label; only the content underneath changes). A failed
 // upload never reaches `done` -- the error banner owns that face.
+// Every variant carries the workspace whose panel minted the batch (#1491):
+// the badge renders (and locks) only on that workspace's panel, so a panel
+// reopened on another workspace neither narrates nor locks for a foreign
+// batch -- while the origin panel keeps a RUNNING face across close/reopen
+// (#1488).
 type UploadStatus =
   | {
     phase: "running";
     mode: "add";
+    workspace: string;
     name: string;
     index: number;
     total: number;
     startedAt: number;
   }
-  | { phase: "running"; mode: "replace"; name: string; startedAt: number }
-  | { phase: "done"; mode: "add" | "replace"; name: string; seconds: number };
+  | { phase: "running"; mode: "replace"; workspace: string; name: string; startedAt: number }
+  | { phase: "done"; mode: "add" | "replace"; workspace: string; name: string; seconds: number };
 
 // The master/detail sections' card chrome -- the working-set tab's
 // PANEL_CARD_BASE form (bg-card + border + rounded + shadow + padding), so
@@ -232,14 +238,24 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   }, [path, queryClient]);
 
   const add = useMutation({
-    mutationFn: (file: string) => addWorkspaceDataset(path, file),
-    onSuccess: (entry) => {
+    // The batch's target rides the variables, never the live `path`
+    // (#1491): TanStack resolves mutationFn from the LATEST options at each
+    // call, so a panel rebind mid-batch would retarget the files that have
+    // not fired yet. The variables are bound per call -- pickAndAdd's
+    // closure pins the workspace: each iteration mints from the const path
+    // of the render the click fired in.
+    mutationFn: (v: { workspace: string; file: string }) =>
+      addWorkspaceDataset(v.workspace, v.file),
+    onSuccess: (entry, v) => {
       // The freshly added dataset becomes the detail pick: the user's last
       // upload is what they want to look at (a multi-file pick lands on the
       // last one). The IPC returns the landed entry with its de-conflicted
       // reference name.
       setSelectedName(entry.reference_name);
-      invalidate();
+      // Invalidate the batch's minted workspace, not the current panel: the
+      // app default is staleTime Infinity, so a mid-batch rebind would leave
+      // the origin's listing stale and its reopen would miss the new rows.
+      void queryClient.invalidateQueries({ queryKey: datasetKey(v.workspace) });
     },
     onError: (e: unknown) => setError(describeError(e, intl)),
   });
@@ -309,13 +325,14 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       setUploadStatus({
         phase: "running",
         mode: "add",
+        workspace: path,
         name: fileBasename(file),
         index: i + 1,
         total: files.length,
         startedAt,
       });
       await add
-        .mutateAsync(file)
+        .mutateAsync({ workspace: path, file })
         .then(() => {
           lastLanded = fileBasename(file);
         })
@@ -325,6 +342,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       setUploadStatus({
         phase: "done",
         mode: "add",
+        workspace: path,
         name: lastLanded,
         seconds: Math.floor((Date.now() - startedAt) / 1000),
       });
@@ -353,7 +371,11 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   // vanish from the UI while its IPC keeps running), so the running window
   // -- not each mutation's isPending -- is the lock. The DONE badge does not
   // lock: the panel is settled, and the next submission overwrites the badge.
-  const uploadRunning = uploadStatus?.phase === "running";
+  // The badge belongs to the panel whose batch minted it (#1491): a panel
+  // opened on another workspace neither narrates nor locks for a foreign
+  // batch; the home panel keeps a RUNNING face across close/reopen (#1488).
+  const badge = uploadStatus?.workspace === path ? uploadStatus : null;
+  const uploadRunning = badge?.phase === "running";
   const busy =
     rename.isPending ||
     replace.isPending ||
@@ -401,8 +423,8 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
         </DialogHeader>
 
         <div className="flex h-8 items-center gap-3">
-          {uploadStatus !== null ? (
-            uploadStatus.phase === "running" ? (
+          {badge !== null ? (
+            badge.phase === "running" ? (
               // The running badge (issue #1485): the picker's per-file
               // progress as a chip -- the same content model the rail's
               // ingest block carries, down to its elapsed-suffix clock.
@@ -411,21 +433,21 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
               <Badge variant="secondary" className="min-w-0 shrink max-w-full" role="status">
                 <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
                 <span className="truncate">
-                  {uploadStatus.mode === "add" ? (
+                  {badge.mode === "add" ? (
                     <FormattedMessage
                       id="workspace.datasets.adding"
                       defaultMessage="Adding {name} (file {index} of {total})…"
-                      values={{ name: uploadStatus.name, index: uploadStatus.index, total: uploadStatus.total }}
+                      values={{ name: badge.name, index: badge.index, total: badge.total }}
                     />
                   ) : (
                     <FormattedMessage
                       id="workspace.datasets.replacing"
                       defaultMessage="Replacing {name}…"
-                      values={{ name: uploadStatus.name }}
+                      values={{ name: badge.name }}
                     />
                   )}
                 </span>
-                <WaitElapsedSuffix startedAt={uploadStatus.startedAt} />
+                <WaitElapsedSuffix startedAt={badge.startedAt} />
               </Badge>
             ) : (
               // The done badge: ✓ + the landed label + the FROZEN total
@@ -436,21 +458,21 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
               <Badge variant="secondary" className="min-w-0 shrink max-w-full gap-1.5 pr-1">
                 <Check aria-hidden />
                 <span className="truncate">
-                  {uploadStatus.mode === "add" ? (
+                  {badge.mode === "add" ? (
                     <FormattedMessage
                       id="workspace.datasets.addDone"
                       defaultMessage="Added {name}"
-                      values={{ name: uploadStatus.name }}
+                      values={{ name: badge.name }}
                     />
                   ) : (
                     <FormattedMessage
                       id="workspace.datasets.replaceDone"
                       defaultMessage="Replaced {name}"
-                      values={{ name: uploadStatus.name }}
+                      values={{ name: badge.name }}
                     />
                   )}
                 </span>
-                <ElapsedFace seconds={uploadStatus.seconds} />
+                <ElapsedFace seconds={badge.seconds} />
                 {/* The dismiss rides the Button copy-in (the #1488 review
                     round's two judgement calls): ghost's accent hover + the shared
                     focus-visible ring, at a 20px target (16px was the
@@ -542,13 +564,20 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                     // (the frozen duration), a reject clears it -- the error
                     // banner owns the failure face.
                     const startedAt = Date.now();
-                    setUploadStatus({ phase: "running", mode: "replace", name, startedAt });
+                    setUploadStatus({
+                      phase: "running",
+                      mode: "replace",
+                      workspace: path,
+                      name,
+                      startedAt,
+                    });
                     void replace
                       .mutateAsync({ name, file })
                       .then(() => {
                         setUploadStatus({
                           phase: "done",
                           mode: "replace",
+                          workspace: path,
                           name,
                           seconds: Math.floor((Date.now() - startedAt) / 1000),
                         });

@@ -620,4 +620,106 @@ describe("WorkspaceDatasetsDialog", () => {
     view.rerender(bound({ path: "/ws", label: "Demo" }));
     expect(screen.queryByText(/已添加 a\.csv/)).not.toBeInTheDocument();
   });
+
+  it("a mid-batch rebind never retargets the files that have not fired yet", async () => {
+    // #1491: the add loop resolves its target from the LIVE panel state at
+    // each call (TanStack builds the mutation from the latest options), so
+    // opening another workspace's panel mid-batch would land the remaining
+    // files in the wrong manifest. The batch's target must be pinned at
+    // mint -- every file rides the workspace the panel showed at the click.
+    // All defaults ride the constructor (setDefaultOptions replaces the
+    // whole object, so a later call would drop the retry pins); the
+    // staleTime Infinity mirror makes the invalidation the ONLY refetch
+    // trigger, so the reopen assertion below pins the invalidate target
+    // rather than key-switch noise.
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, staleTime: Infinity },
+        mutations: { retry: false },
+      },
+    });
+    const bound = (ws: { path: string; label: string } | null) => (
+      <QueryClientProvider client={client}>
+        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
+      </QueryClientProvider>
+    );
+    seed([]);
+    vi.mocked(open).mockResolvedValue(["/src/a.csv", "/src/b.csv"]);
+    let releaseFirst!: (e: ListedWorkspaceDataset) => void;
+    const firstInFlight = new Promise<ListedWorkspaceDataset>((resolve) => {
+      releaseFirst = resolve;
+    });
+    // The add mock carries the prior tests' call records (mockClear is the
+    // file's per-consumer convention); the batch's own two calls must be the
+    // only ones on the books.
+    vi.mocked(addWorkspaceDataset).mockClear();
+    vi.mocked(addWorkspaceDataset)
+      .mockImplementationOnce(() => firstInFlight)
+      .mockResolvedValueOnce(
+        entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" }),
+      );
+    const view = render(bound({ path: "/ws", label: "Demo" }));
+    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
+    expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
+    // File 1 still in flight: close the panel and open ANOTHER workspace's
+    // -- the #1491 repro. The remaining file must keep landing in /ws.
+    view.rerender(bound(null));
+    view.rerender(bound({ path: "/other", label: "Other" }));
+    await act(async () => {
+      releaseFirst(entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" }));
+    });
+    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(2));
+    expect(
+      vi.mocked(addWorkspaceDataset).mock.calls.map((call) => call[0]),
+    ).toEqual(["/ws", "/ws"]);
+    // The criterion's other half: the origin's listing is invalidated, so
+    // reopening the home panel refetches it (staleTime Infinity makes the
+    // invalidation the only refetch trigger -- a miss leaves the origin's
+    // reopen without the new rows).
+    const before = vi.mocked(listWorkspaceDatasets).mock.calls.length;
+    view.rerender(bound(null));
+    view.rerender(bound({ path: "/ws", label: "Demo" }));
+    await waitFor(() =>
+      expect(vi.mocked(listWorkspaceDatasets).mock.calls.length).toBeGreaterThan(
+        before,
+      ),
+    );
+    expect(vi.mocked(listWorkspaceDatasets).mock.calls.at(-1)).toEqual(["/ws"]);
+  });
+
+  it("a foreign running badge neither narrates nor locks a panel opened on another workspace", async () => {
+    // #1491's sibling face: the badge and the Add lock are component state,
+    // so a panel reopened on another workspace would narrate (and lock for)
+    // a batch it does not own. The badge must follow its batch's workspace:
+    // silent on the foreign panel, back on its home panel's reopen.
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const bound = (ws: { path: string; label: string } | null) => (
+      <QueryClientProvider client={client}>
+        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
+      </QueryClientProvider>
+    );
+    seed([]);
+    vi.mocked(open).mockResolvedValue(["/src/a.csv", "/src/b.csv"]);
+    // Never settled: the batch stays in flight for the test's whole life;
+    // the cleanup unmounts the panel and the pending promise is simply
+    // dropped (no rejection, nothing to flush).
+    const inFlight = new Promise<ListedWorkspaceDataset>(() => {});
+    vi.mocked(addWorkspaceDataset).mockImplementation(() => inFlight);
+    const view = render(bound({ path: "/ws", label: "Demo" }));
+    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
+    expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
+    // Rebind to another workspace mid-flight: no badge face, no Add lock.
+    view.rerender(bound(null));
+    view.rerender(bound({ path: "/other", label: "Other" }));
+    await waitFor(() =>
+      expect(screen.queryByText(/正在添加 a\.csv/)).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "添加数据集…" })).toBeEnabled();
+    // The home panel's reopen restores its batch's narration.
+    view.rerender(bound(null));
+    view.rerender(bound({ path: "/ws", label: "Demo" }));
+    expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
+  });
 });
