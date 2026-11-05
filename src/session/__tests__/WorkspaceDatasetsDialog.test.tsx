@@ -832,4 +832,102 @@ describe("WorkspaceDatasetsDialog", () => {
     view.rerender(bound({ path: "/ws", label: "Demo" }));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+
+  it("a replace settling on a rebound panel invalidates the origin's listing, never the foreign panel's", async () => {
+    // #1492: the row mutations' success invalidation must ride the
+    // mutation's variables -- TanStack hot-swaps an in-flight mutation's
+    // options to the latest render's closures, so a live-panel callback
+    // would refresh the workspace the user has REBOUND to while the origin
+    // goes stale (the app default is staleTime Infinity, so this mirrored
+    // client makes the invalidation the ONLY refetch trigger -- key-switch
+    // noise would fake the green, the #1491 test's lesson).
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, staleTime: Infinity },
+        mutations: { retry: false },
+      },
+    });
+    const bound = (ws: { path: string; label: string } | null) => (
+      <QueryClientProvider client={client}>
+        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
+      </QueryClientProvider>
+    );
+    const callsFor = (p: string) =>
+      vi.mocked(listWorkspaceDatasets).mock.calls.filter((call) => call[0] === p).length;
+    // The count assertions read ABSOLUTE per-path calls: clear the records
+    // the file's earlier tests left on the shared spy first (the mockClear
+    // per-consumer convention; seed() swaps the implementation, not the
+    // call log).
+    vi.mocked(listWorkspaceDatasets).mockClear();
+    seed([entry({})]);
+    vi.mocked(open).mockResolvedValue("/src/people_v2.csv");
+    vi.mocked(replaceWorkspaceDataset).mockClear();
+    let resolveReplace!: (e: ListedWorkspaceDataset) => void;
+    vi.mocked(replaceWorkspaceDataset).mockImplementation(
+      () => new Promise<ListedWorkspaceDataset>((resolve) => { resolveReplace = resolve; }),
+    );
+    const view = render(bound({ path: "/ws", label: "Demo" }));
+    fireEvent.click(await screen.findByRole("button", { name: /换源/ }));
+    await waitFor(() => expect(replaceWorkspaceDataset).toHaveBeenCalledTimes(1));
+    expect(callsFor("/ws")).toBe(1);
+    // The copy-in wait is the whole hazard window: close and open ANOTHER
+    // workspace's panel before the replace settles.
+    view.rerender(bound(null));
+    view.rerender(bound({ path: "/other", label: "Other" }));
+    await waitFor(() => expect(callsFor("/other")).toBe(1));
+    // Settle on the foreign panel. The replace refreshes its OWN
+    // workspace's listing (so the origin's reopen sees the new content) and
+    // leaves /other untouched -- the staleTime Infinity mirror makes both
+    // legs fail if the invalidate target drifts to the live panel.
+    await act(async () => {
+      resolveReplace(entry({}));
+    });
+    view.rerender(bound(null));
+    view.rerender(bound({ path: "/ws", label: "Demo" }));
+    await waitFor(() => expect(callsFor("/ws")).toBe(2));
+    expect(callsFor("/other")).toBe(1);
+    expect(vi.mocked(listWorkspaceDatasets).mock.calls.at(-1)).toEqual(["/ws"]);
+  });
+
+  it("a row mutation in flight locks only the panel whose workspace fired it", async () => {
+    // #1492's sibling face: busy's isPending legs carry no workspace
+    // identity, so a removal in flight would silently lock EVERY row on a
+    // panel reopened on another workspace -- with no narration, worse than
+    // the pre-#1491 state that at least told the user why. The legs gate on
+    // the firing workspace (the uploadRunning derivation's shape): the
+    // home panel keeps its lock across close/reopen while the IPC flies;
+    // the foreign panel neither locks nor narrates.
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const bound = (ws: { path: string; label: string } | null) => (
+      <QueryClientProvider client={client}>
+        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
+      </QueryClientProvider>
+    );
+    seed([entry({})]);
+    let resolveRemove!: () => void;
+    vi.mocked(removeWorkspaceDataset).mockImplementation(
+      () => new Promise<void>((resolve) => { resolveRemove = resolve; }),
+    );
+    const view = render(bound({ path: "/ws", label: "Demo" }));
+    fireEvent.click(await screen.findByRole("button", { name: /删除/ }));
+    fireEvent.click(
+      within(screen.getAllByRole("alertdialog").at(-1)!).getByRole("button", { name: "删除" }),
+    );
+    // The home panel locks while the removal flies...
+    expect(await screen.findByRole("button", { name: /重命名/ })).toBeDisabled();
+    // ...a panel opened on another workspace stays unlocked...
+    view.rerender(bound(null));
+    view.rerender(bound({ path: "/other", label: "Other" }));
+    expect(await screen.findByRole("button", { name: /重命名/ })).toBeEnabled();
+    // ...and the home panel's reopen restores the lock (still in flight).
+    view.rerender(bound(null));
+    view.rerender(bound({ path: "/ws", label: "Demo" }));
+    expect(await screen.findByRole("button", { name: /重命名/ })).toBeDisabled();
+    resolveRemove();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /重命名/ })).toBeEnabled(),
+    );
+  });
 });

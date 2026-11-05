@@ -15,7 +15,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open as openPicker } from "@tauri-apps/plugin-dialog";
 import { Check, Loader2, Upload, X } from "lucide-react";
-import { useCallback, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import {
@@ -234,9 +234,14 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
     enabled: open,
   });
 
-  const invalidate = useCallback(() => {
+  // The listing invalidation for a NAMED workspace (#1492): the success
+  // callbacks are hot-swapped options -- TanStack runs whichever closure
+  // the latest render produced -- so the invalidate target must arrive
+  // through the mutation's variables, never the live panel. add's batch
+  // rides the same helper (the #1491 inline form, converged).
+  const invalidateFor = (path: string) => {
     void queryClient.invalidateQueries({ queryKey: datasetKey(path) });
-  }, [path, queryClient]);
+  };
 
   const add = useMutation({
     // The batch's target rides the variables, never the live `path`
@@ -254,12 +259,20 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       // The freshly added dataset becomes the detail pick: the user's last
       // upload is what they want to look at (a multi-file pick lands on the
       // last one). The IPC returns the landed entry with its de-conflicted
-      // reference name.
-      setSelectedName(entry.reference_name);
+      // reference name. The write lands only while the panel still shows
+      // the batch's workspace (#1492): a rebind would park the pick on
+      // another workspace's panel -- masked by the rows[0] fallback except
+      // for a cross-workspace name collision, so decorative, but the gate
+      // keeps the write on the panel the click fired from. The settle-time
+      // `workspace` read is the same hot-swap semantics the onError
+      // routing below leans on.
+      if (workspace !== null && workspace.path === v.workspace) {
+        setSelectedName(entry.reference_name);
+      }
       // Invalidate the batch's minted workspace, not the current panel: the
       // app default is staleTime Infinity, so a mid-batch rebind would leave
       // the origin's listing stale and its reopen would miss the new rows.
-      void queryClient.invalidateQueries({ queryKey: datasetKey(v.workspace) });
+      invalidateFor(v.workspace);
     },
     onError: (e: unknown, v) => {
       const message = describeError(e, intl);
@@ -292,27 +305,38 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       }
     },
   });
+  // The four row mutations carry the workspace in their variables (#1492):
+  // BOTH the IPC target and the success invalidation must bind to the
+  // workspace the click fired in. The variables are bound per call -- the
+  // handlers below mint from the render const `path`, same posture as the
+  // add batch -- while the onSuccess closures are hot-swapped options that
+  // drift with the live panel: a rebind mid-flight (replace is a
+  // minute-scale copy-in) would otherwise invalidate the foreign panel's
+  // listing and leave the origin stale under the app's staleTime Infinity.
+  // onError keeps the live banner write: routing a row failure across
+  // panels is #1490's add-batch face, not this panel's scope.
   const replace = useMutation({
-    mutationFn: (v: { name: string; file: string }) =>
-      replaceWorkspaceDataset(path, v.name, v.file),
-    onSuccess: invalidate,
+    mutationFn: (v: { workspace: string; name: string; file: string }) =>
+      replaceWorkspaceDataset(v.workspace, v.name, v.file),
+    onSuccess: (_, v) => invalidateFor(v.workspace),
     onError: (e: unknown) => setError(describeError(e, intl)),
   });
   const remove = useMutation({
-    mutationFn: (name: string) => removeWorkspaceDataset(path, name),
-    onSuccess: invalidate,
+    mutationFn: (v: { workspace: string; name: string }) =>
+      removeWorkspaceDataset(v.workspace, v.name),
+    onSuccess: (_, v) => invalidateFor(v.workspace),
     onError: (e: unknown) => setError(describeError(e, intl)),
   });
   const rename = useMutation({
-    mutationFn: (v: { name: string; newDisplay: string }) =>
-      renameWorkspaceDataset(path, v.name, v.newDisplay),
-    onSuccess: invalidate,
+    mutationFn: (v: { workspace: string; name: string; newDisplay: string }) =>
+      renameWorkspaceDataset(v.workspace, v.name, v.newDisplay),
+    onSuccess: (_, v) => invalidateFor(v.workspace),
     onError: (e: unknown) => setError(describeError(e, intl)),
   });
   const privacy = useMutation({
-    mutationFn: (v: { name: string; next: DatasetPrivacy }) =>
-      setWorkspaceDatasetPrivacy(path, v.name, v.next),
-    onSuccess: invalidate,
+    mutationFn: (v: { workspace: string; name: string; next: DatasetPrivacy }) =>
+      setWorkspaceDatasetPrivacy(v.workspace, v.name, v.next),
+    onSuccess: (_, v) => invalidateFor(v.workspace),
     onError: (e: unknown) => setError(describeError(e, intl)),
   });
 
@@ -412,11 +436,16 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   // batch; the home panel keeps a RUNNING face across close/reopen (#1488).
   const badge = uploadStatus?.workspace === path ? uploadStatus : null;
   const uploadRunning = badge?.phase === "running";
+  // The row locks follow their mutation's firing workspace (#1492): a bare
+  // `isPending` has no identity (the panel rebinds without remounting), so
+  // each leg gates on the variables' workspace -- the badge match's shape
+  // above. The home panel keeps its lock across close/reopen while the IPC
+  // flies; a foreign panel neither locks nor narrates.
   const busy =
-    rename.isPending ||
-    replace.isPending ||
-    remove.isPending ||
-    privacy.isPending ||
+    (rename.isPending && rename.variables?.workspace === path) ||
+    (replace.isPending && replace.variables?.workspace === path) ||
+    (remove.isPending && remove.variables?.workspace === path) ||
+    (privacy.isPending && privacy.variables?.workspace === path) ||
     uploadRunning;
 
   // The list row's extra marker: a missing store file badges the row
@@ -590,7 +619,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                     // posture): a stale banner must not contradict a retry's
                     // visible success.
                     setError(null);
-                    rename.mutate({ name, newDisplay });
+                    rename.mutate({ workspace: path, name, newDisplay });
                   }}
                   onReplace={(name, file) => {
                     setError(null);
@@ -608,7 +637,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                       startedAt,
                     });
                     void replace
-                      .mutateAsync({ name, file })
+                      .mutateAsync({ workspace: path, name, file })
                       .then(() => {
                         setUploadStatus({
                           phase: "done",
@@ -624,7 +653,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                   }}
                   onDelete={(name) => {
                     setError(null);
-                    remove.mutate(name);
+                    remove.mutate({ workspace: path, name });
                   }}
                   onPickError={(e: unknown) => setError(describeError(e, intl))}
                   badgeFor={badgeFor}
@@ -665,10 +694,10 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                       }
                       sampleLoading={false}
                       sampleError={null}
-                      loading={privacy.isPending}
+                      loading={privacy.isPending && privacy.variables?.workspace === path}
                       onPrivacyChange={(name, next) => {
                         setError(null);
-                        privacy.mutate({ name, next });
+                        privacy.mutate({ workspace: path, name, next });
                       }}
                     />
                   </>
