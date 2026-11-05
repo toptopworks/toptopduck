@@ -1146,6 +1146,7 @@ export default function App() {
                         onSubmit={handleShellSubmit}
                         onCancel={handleShellCancel}
                         loading={composer.loading}
+                        queued={composer.queued}
                         phase={composer.phase}
                         turnStartedAt={composer.turnStartedAt}
                         turnPausedSince={composer.turnPausedSince}

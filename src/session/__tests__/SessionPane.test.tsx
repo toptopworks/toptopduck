@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -21,7 +21,7 @@ import { artifactTurn } from "./fixtures";
 import type { ComposerSessionFields } from "../useComposerState";
 import type { ApprovalEntry } from "../useApprovalEvents";
 import type { ThreadEntry } from "../../types/thread";
-import type { DatasetDescriptor } from "../../types/dataset";
+import type { DatasetDescriptor, LoadOutcome } from "../../types/dataset";
 
 // The pane-level approval wiring pins (issue #1009 review, PR #1010): both
 // approval callbacks live ONLY on the pane -- the respond callback binds the
@@ -137,6 +137,8 @@ function renderPane(opts?: {
   approvals?: ApprovalEntry[];
   thread?: ThreadEntry[];
   pendingIngestPaths?: string[];
+  onSeedDraft?: (sid: string, question: string) => void;
+  onSeedInvocations?: (sid: string, names: string[]) => void;
 }) {
   if (opts?.thread) {
     vi.mocked(conversation).mockResolvedValue(opts.thread);
@@ -173,8 +175,8 @@ function renderPane(opts?: {
             pendingQuestion={null}
             pendingSkillInvocations={[]}
             onQuestionConsumed={noop}
-            onSeedDraft={noop}
-            onSeedInvocations={noop}
+            onSeedDraft={opts?.onSeedDraft ?? noop}
+            onSeedInvocations={opts?.onSeedInvocations ?? noop}
             onComposerFields={(_sid, fields) => {
               composerFields = fields;
             }}
@@ -197,7 +199,7 @@ function renderPane(opts?: {
   const ask = () => {
     void composerFields!.handleAsk("q");
   };
-  return { ...render(ui()), ui, queryClient, respond, ask };
+  return { ...render(ui()), ui, queryClient, respond, ask, getComposerFields: () => composerFields };
 }
 
 // Open a delivered file through its rail artifact card (the real selection
@@ -455,5 +457,100 @@ describe("SessionPane rail hint vs an in-flight ingest", () => {
     });
     expect(await screen.findByText(RAIL_EMPTY)).toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+});
+
+// Issue #1500: the composer question's queue behind an in-flight ingest
+// batch, exercised through the real wiring -- the shell-reported fields
+// (handleIngestFiles = the tracked ingestMany, handleAsk = the queue-aware
+// fire) and the pane's own seed-back props.
+describe("SessionPane composer queue behind an in-flight ingest (#1500)", () => {
+  const heldQuestion = "queued while loading";
+  const loadedDataset: DatasetDescriptor = {
+    reference_name: "people",
+    display_name: "people",
+    source_path: "/x/big.csv",
+    row_count: 1,
+    fingerprint: "ff".repeat(32),
+    size_bytes: 0,
+    columns: [{ name: "id", canonical_type: "BIGINT" }],
+    sample: [["1"]],
+    rectify: { kind: "NotApplicable" },
+    privacy: { send_samples: true, type_only_columns: [] },
+  };
+
+  beforeEach(() => {
+    stubSessionApis();
+    // The shared api mocks keep call history across this file's describes
+    // (stubSessionApis re-stamps implementations, not the call log) -- drop
+    // the earlier describes' askQuestion calls before the not-called asserts.
+    vi.mocked(askQuestion).mockClear();
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: loadedDataset });
+  });
+
+  it("queues the submit while the batch runs and auto-sends the held question on full load", async () => {
+    // The executing window: a deferred ingestFile holds the batch in flight.
+    let resolveIngest!: (outcome: { kind: "Loaded"; data: DatasetDescriptor }) => void;
+    vi.mocked(ingestFile).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveIngest = resolve;
+        }),
+    );
+    const view = renderPane();
+
+    // Arm the batch through the shell-reported manual path, then submit
+    // through the bar's fire.
+    act(() => {
+      void view.getComposerFields()!.handleIngestFiles(["/x/big.csv"]);
+    });
+    await act(async () => {
+      void view.getComposerFields()!.handleAsk(heldQuestion);
+    });
+
+    // The queued posture rides the report; the ask has not fired.
+    expect(view.getComposerFields()!.queued).toBe(true);
+    expect(askQuestion).not.toHaveBeenCalled();
+
+    // The batch fully loads -> the held question auto-sends as a turn.
+    await act(async () => {
+      resolveIngest({ kind: "Loaded", data: loadedDataset });
+    });
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith(SID, heldQuestion, []));
+    expect(view.getComposerFields()!.queued).toBe(false);
+  });
+
+  it("seeds the held question and invocations back when the batch halts", async () => {
+    const onSeedDraft = vi.fn();
+    const onSeedInvocations = vi.fn();
+    // A deferred ingestFile holds the batch in flight across the submit --
+    // an immediately-resolving mock would settle the batch inside the arming
+    // act, before the submit could land in the slot.
+    let rejectIngest!: (outcome: LoadOutcome) => void;
+    vi.mocked(ingestFile).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          rejectIngest = resolve;
+        }),
+    );
+    const view = renderPane({ onSeedDraft, onSeedInvocations });
+
+    act(() => {
+      void view.getComposerFields()!.handleIngestFiles(["/x/bad.csv"]);
+    });
+    await act(async () => {
+      void view.getComposerFields()!.handleAsk(heldQuestion, ["skill-a"]);
+    });
+    expect(view.getComposerFields()!.queued).toBe(true);
+
+    // The file errors -> terminal halt -> the #991 atomic rollback channels:
+    // the question AND the staged names return; nothing auto-sends.
+    await act(async () => {
+      rejectIngest({ kind: "Error", data: { kind: "Parse", data: { detail: "bad csv" } } });
+    });
+    await waitFor(() => expect(onSeedDraft).toHaveBeenCalledWith(SID, heldQuestion));
+    expect(onSeedInvocations).toHaveBeenCalledWith(SID, ["skill-a"]);
+    expect(askQuestion).not.toHaveBeenCalled();
+    expect(view.getComposerFields()!.queued).toBe(false);
   });
 });

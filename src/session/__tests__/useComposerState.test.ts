@@ -10,6 +10,7 @@ import {
 // passthrough (loading=true distinguishes from the idle default loading=false).
 const SESSION_FIELDS: ComposerSessionFields = {
   loading: true,
+  queued: false,
   phase: null,
   turnStartedAt: null,
   turnPausedSince: null,

@@ -1,0 +1,163 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { log } from "../lib/log";
+
+// The composer question's queue behind an in-flight ingest batch (issue
+// #1500). #1486 un-froze the main thread, making a pre-existing gate gap
+// reachable: the bar's `loading` reflects the TURN domain only (ADR-0021 --
+// an ingest mutation's in-flight window must not flip Ask/Stop), so a
+// question submitted mid-batch went straight to `ask` and silently queued on
+// the backend session lock inside spawn_blocking. This hook gives that
+// submit the same treatment the cold-start chain already has (ADR-0092 /
+// pendingPayload.ts): the question enters a per-session pending slot and the
+// bar shows a visible queued posture; the batch's settle decides the exit.
+//
+// The exits ride handleIngestMany's `Promise<boolean>` verbatim (no batch
+// logic is duplicated here):
+// - resolve true (every file Loaded, incl. the post-guidance drain) -> the
+//   held question auto-sends with its invocations (a NeedsGuidance park keeps
+//   the Promise pending per the #500 gate, so the slot simply keeps waiting).
+// - resolve false (cancel / Error / superseded / IPC reject) -> the question
+//   and the staged invocations return through the same channels the
+//   #991 atomic rollback uses (onSeedDraft / onSeedInvocations) -- never an
+//   auto-send.
+//
+// The tracked ingestMany is the ONE arming point: SessionPane routes both
+// the manual "+" section (the shell-reported handleIngestFiles) and the
+// pendingPayload consumption through it, so a cold-start batch gates the bar
+// exactly like a manual one. The wrapper is pass-through: the verdict
+// Promise the caller consumes is the batch's own.
+//
+// Lifecycle is the keep-alive pane's, for free: the slot survives a session
+// switch (the pane stays mounted) and dies with the pane, whose unmount
+// flips the alive guard -- a settle after close neither leaks an auto-send
+// into a dropped session nor seeds a draft slot for a sid that no longer
+// exists.
+//
+// One ordering note for the narrow corner where a question was queued behind
+// a cold-start batch: the tracker's settle continuation registered first, so
+// the queued question's turn opens before pendingPayload's held question
+// fires. Both turns run; the backend serializes them.
+interface QueuedQuestion {
+  question: string;
+  invocations: string[];
+}
+
+export interface ComposerQueueDeps {
+  sessionId: string;
+  ingestMany: (paths: string[]) => Promise<boolean>;
+  ask: (question: string, invocations?: string[]) => Promise<void>;
+  onSeedDraft: (sessionId: string, question: string) => void;
+  onSeedInvocations: (sessionId: string, names: string[]) => void;
+}
+
+export interface ComposerQueue {
+  /** True while the held question waits behind the in-flight batch: the
+   *  bar disables the input and shows the queued copy. A NEW axis -- never
+   *  folds into the turn-domain `loading` (ADR-0021). */
+  queued: boolean;
+  /** The tracked handleIngestMany: pass-through verdict, arms the settle. */
+  ingestMany: (paths: string[]) => Promise<boolean>;
+  /** The queue-aware ask the bar routes through. Outside a batch it is the
+   *  direct fire; inside one it fills the slot and resolves immediately. */
+  handleAsk: (question: string, invocations?: string[]) => Promise<void>;
+  /** Occupy the slot with a question that predates the bar (the ADR-0092
+   *  chain's held question): the settle exits fire it exactly like a bar
+   *  submit -- auto-send on true, seed-back on false -- so the slot is the
+   *  ONE holder of pending questions and a bar submit during the chain
+   *  window is inert (single slot, first wins). */
+  hold: (question: string, invocations: string[]) => void;
+}
+
+export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
+  const { sessionId, ingestMany, ask, onSeedDraft, onSeedInvocations } = deps;
+  // The in-flight batch's verdict Promise, or null between batches. The
+  // synchronous-read ref (not state) is the queue's gate: the submit path
+  // consults it in the same tick the user hits Enter, and the settle
+  // continuation clears it without waiting for a render flush.
+  const batchRef = useRef<Promise<boolean> | null>(null);
+  const [queued, setQueued] = useState<QueuedQuestion | null>(null);
+  // The slot's synchronous mirror: the settle continuation reads it without
+  // waiting for the render flush (the same refs-first idiom as useTurnFlow's
+  // live mirrors -- the batch settles off the render cycle).
+  const queuedRef = useRef<QueuedQuestion | null>(null);
+  // The pane-liveness guard: a settle after close is a full stop -- no ask,
+  // no seed. The setup RE-ARMS the flag (not an init-once ref): StrictMode's
+  // dev simulate-unmount runs setup -> cleanup -> setup on mount, so an
+  // init-once ref would read false for the pane's whole life and every
+  // settle would early-return -- the held question strands in the slot (the
+  // #1500 live-app report) while later submits fire direct.
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  const settle = useCallback(
+    (allLoaded: boolean) => {
+      batchRef.current = null;
+      const held = queuedRef.current;
+      if (!aliveRef.current || held === null) return;
+      queuedRef.current = null;
+      setQueued(null);
+      if (allLoaded) {
+        // ask catches its own failures internally (session error state) and
+        // never intentionally rejects; the `.catch` is the same defensive
+        // log the pendingPayload / shell-ask paths carry.
+        void ask(held.question, held.invocations).catch((e: unknown) =>
+          log.error("useComposerQueue", "queued ask threw unexpectedly", e),
+        );
+      } else {
+        onSeedDraft(sessionId, held.question);
+        if (held.invocations.length > 0) {
+          onSeedInvocations(sessionId, held.invocations);
+        }
+      }
+    },
+    [ask, onSeedDraft, onSeedInvocations, sessionId],
+  );
+
+  const ingestManyTracked = useCallback(
+    (paths: string[]) => {
+      const batch = ingestMany(paths);
+      batchRef.current = batch;
+      // The contract is resolve-only (an IPC reject resolves false), so the
+      // rejection arm is purely defensive: an unexpected throw must not
+      // strand the question queued forever -- it takes the halt exit.
+      void batch.then(settle, (e: unknown) => {
+        log.error("useComposerQueue", "ingest batch rejected unexpectedly", e);
+        settle(false);
+      });
+      return batch;
+    },
+    [ingestMany, settle],
+  );
+
+  const queuedAsk = useCallback(
+    (question: string, invocations?: string[]) => {
+      if (batchRef.current !== null) {
+        // Single slot: the bar disables the input while queued, so a second
+        // submit here is the belt-and-suspenders path -- ignored client-side
+        // (the same contract as the ADR-0021 loading guard), first wins.
+        if (queuedRef.current === null) {
+          const held = { question, invocations: invocations ?? [] };
+          queuedRef.current = held;
+          setQueued(held);
+        }
+        return Promise.resolve();
+      }
+      return ask(question, invocations);
+    },
+    [ask],
+  );
+
+  const hold = useCallback((question: string, invocations: string[]) => {
+    if (queuedRef.current !== null) return;
+    const held = { question, invocations };
+    queuedRef.current = held;
+    setQueued(held);
+  }, []);
+
+  return { queued: queued !== null, ingestMany: ingestManyTracked, handleAsk: queuedAsk, hold };
+}

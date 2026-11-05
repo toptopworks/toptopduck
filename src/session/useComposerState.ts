@@ -23,6 +23,12 @@ export interface ComposerSessionFields {
    *  turnLoading, not the union loading. A dataset/ingest mutation's
    *  in-flight window must not flip the bar's Ask/Stop button. */
   loading: boolean;
+  /** The composer question's queued posture (issue #1500): true while the
+   *  session holds a question in the pending slot behind an in-flight ingest
+   *  batch -- the bar disables the input and shows the queued copy. A NEW
+   *  axis owned by useComposerQueue; it deliberately does NOT fold into
+   *  `loading` (the turn-domain ruling above). */
+  queued: boolean;
   phase: TurnPhase | null;
   /** The turn clock (issue #1264 turn-clock ruling): the bar's phase label
    *  derives its continuous elapsed-seconds figure from it, freezing while
@@ -82,6 +88,7 @@ const idleHandleIngestFiles = (): void => {};
  *  session has not reported its fields yet. */
 export const IDLE_SESSION_FIELDS: ComposerSessionFields = {
   loading: false,
+  queued: false,
   phase: null,
   turnStartedAt: null,
   turnPausedSince: null,

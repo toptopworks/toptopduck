@@ -11,6 +11,7 @@ function makeFields(
 ): ComposerSessionFields {
   return {
     loading: true,
+    queued: false,
     phase: null,
     turnStartedAt: null,
     turnPausedSince: null,

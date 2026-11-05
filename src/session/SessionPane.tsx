@@ -9,6 +9,7 @@ import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useRailFollow } from "./useRailFollow";
 import { useSessionState } from "./useSessionState";
+import { useComposerQueue } from "./useComposerQueue";
 import { consumePendingPayload } from "./pendingPayload";
 import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
@@ -189,6 +190,26 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     handleApprovalsSettled,
     onFirstTurnSettled,
   );
+  // Issue #1500: the composer question's queue behind an in-flight ingest
+  // batch. The tracked ingestMany is the ONE arming point -- both the
+  // shell-reported handleIngestFiles (the manual "+" section) and the
+  // pendingPayload consumption below route through it, so a cold-start
+  // batch gates the bar exactly like a manual one. The pendingPayload
+  // chain's held question occupies the SAME slot (hold below), so the
+  // session can never carry two pending questions and the bar honestly
+  // shows the queued posture during the chain window. The wrapped
+  // handleAsk is the BAR-facing fire only: the ask-again sink keeps the
+  // direct s.handleAsk (a settle has already cleared the batch by the time
+  // it fires; see #1503 for the follow-up). onSeedDraft /
+  // onSeedInvocations are useCallback-stable in the shell (the #991
+  // atomic-rollback channels).
+  const { queued, ingestMany, handleAsk: queuedHandleAsk, hold } = useComposerQueue({
+    sessionId,
+    ingestMany: s.handleIngestMany,
+    ask: s.handleAsk,
+    onSeedDraft,
+    onSeedInvocations,
+  });
   // Issue #829: the rail's stick-to-bottom posture. Signals only -- the
   // settled count grows on appends, liveTurn's identity changes per streaming
   // event and per approval-channel update (and its null -> live transition
@@ -221,23 +242,25 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   useEffect(() => {
     onComposerFields(sessionId, {
       loading: s.turnLoading,
+      queued,
       phase: s.phase,
       turnStartedAt: s.turnStartedAt,
       turnPausedSince: s.turnPausedSince,
-      handleAsk: s.handleAsk,
+      handleAsk: queuedHandleAsk,
       handleCancel: s.handleCancel,
-      handleIngestFiles: s.handleIngestMany,
+      handleIngestFiles: ingestMany,
       workspaceCollapsed: s.workspaceCollapsed,
     });
   }, [
     sessionId,
     s.turnLoading,
+    queued,
     s.phase,
     s.turnStartedAt,
     s.turnPausedSince,
-    s.handleAsk,
+    queuedHandleAsk,
     s.handleCancel,
-    s.handleIngestMany,
+    ingestMany,
     s.workspaceCollapsed,
     onComposerFields,
   ]);
@@ -261,19 +284,17 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   const consumedPendingRef = useRef<string | null>(null);
   useEffect(() => {
     void consumePendingPayload({
-      sessionId,
       paths: pendingIngestPaths,
       question: pendingQuestion,
       invocations: pendingSkillInvocations,
       consumedRef: consumedPendingRef,
       onIngestConsumed,
       onQuestionConsumed,
-      onSeedDraft,
-      onSeedInvocations,
-      ingestMany: s.handleIngestMany,
+      ingestMany,
+      hold,
       ask: s.handleAsk,
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: s.handleIngestMany / s.handleAsk are stable inside useSessionState, the consumed callbacks are useCallback-stable in useShellSessions
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: the tracked ingestMany / hold / s.handleAsk are stable inside useSessionState + useComposerQueue, the consumed callbacks are useCallback-stable in useShellSessions
   }, [pendingIngestPaths, pendingQuestion, pendingSkillInvocations, sessionId, onSeedDraft, onSeedInvocations]);
 
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
