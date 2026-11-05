@@ -52,6 +52,7 @@ import { DegradeCard, ErrorBoundary } from "./components/common/ErrorBoundary";
 import { SettingsView } from "./components/settings/SettingsView";
 import type { SettingsSection, WorkspaceExitIntent } from "./components/settings/sections";
 import { Alert } from "./components/ui/alert";
+import { Toaster } from "./components/ui/toaster";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
@@ -1287,6 +1288,14 @@ export default function App() {
                   onOpenPersisted={(path, name) =>
                     void openPersisted(path, name)}
                 />
+                {/* ADR-0142 (issue #1494): the app-level transient-event
+                    feedback face. The single Toaster mounts at the shell root
+                    so its viewport (main-area column top, measured -- never a
+                    child of the main area's transforming subtree) never rides
+                    a panel mount while in-panel banners keep the panel-present
+                    failure face. Consumers fire toast({...}) from anywhere;
+                    App renders the viewport and nothing else. */}
+                <Toaster />
               </div>
             </NavigationHistoryProvider>
           </ErrorBoundary>
