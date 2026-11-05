@@ -215,13 +215,42 @@ fn resolve_session(
 /// fine). Deliberately the sync-command shape only: issue #1412 keeps the
 /// `spawn_blocking` task bodies on their hand-written lock, and a blocking
 /// task that ever adopts this helper must clone the `Arc<SessionHandle>`
-/// and call it inside the task (the guard is `!Send`).
+/// and call it inside the task (the guard is `!Send`). An IPC command whose
+/// body merely WAITS on the gate uses the async twin
+/// [`with_session_lock_off_thread`] instead (issue #1486).
 fn with_session_lock<T>(
     handle: &SessionHandle,
     op: impl FnOnce(&mut Session) -> Result<T, SessionError>,
 ) -> Result<T, SessionError> {
     let mut s = handle.session_lock()?;
     op(&mut s)
+}
+
+/// Async twin of [`with_session_lock`] (issue #1486): take the per-session
+/// gate on a blocking-pool thread, never on the calling (IPC) thread. A
+/// sync command that waits on this mutex parks the OS message pump behind it
+/// -- the "not responding" window while an ingest or a whole turn holds the
+/// gate (ADR-0021) -- so every command whose body merely WAITS on the gate
+/// routes through here: clone the `Arc<SessionHandle>` into the task, lock
+/// inside, and await (the `ingest_file` pattern, converged into one helper;
+/// the #1412 hand-written `spawn_blocking` bodies keep their own locks). The
+/// closure must own its captures (`move`), and both it and the result must
+/// be `Send` (they cross a thread boundary); the `!Send` guard never leaves
+/// the task.
+async fn with_session_lock_off_thread<T>(
+    handle: &Arc<SessionHandle>,
+    op: impl FnOnce(&mut Session) -> Result<T, SessionError> + Send + 'static,
+) -> Result<T, SessionError>
+where
+    T: Send + 'static,
+{
+    let handle = Arc::clone(handle);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut s = handle.session_lock()?;
+        op(&mut s)
+    })
+    .await
+    .map_err(|e| SessionError::Engine(e.to_string()))?
 }
 
 /// The wire reply from `create_session` (ADR-0089): the runtime session id +
@@ -970,7 +999,7 @@ pub async fn ingest_file_guided(
 /// takes the session lock like any command, but holds it only for the
 /// retention read (not a SessionHandle lock-light read).
 #[tauri::command]
-pub fn guidance_window(
+pub async fn guidance_window(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     path: String,
@@ -979,64 +1008,67 @@ pub fn guidance_window(
     limit: usize,
 ) -> Result<Vec<Vec<String>>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, move |s| {
         s.guidance_window(&path, &sheet_name, offset, limit).ok_or_else(|| {
             SessionError::Engine(format!(
                 "no retained guidance for sheet \"{sheet_name}\" of {path} (already committed, discarded, or superseded)"
             ))
         })
     })
+    .await
 }
 
 /// Drop the session's retained guided-load parse (issue #750): the dialog's
 /// cancel path frees the retained sheets (commit already drops them
 /// server-side). Idempotent; the frontend fires it best-effort on cancel.
 #[tauri::command]
-pub fn discard_guided_retention(
+pub async fn discard_guided_retention(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<(), SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, |s| {
         s.discard_guidance_retention();
         Ok(())
     })
+    .await
 }
 
 #[tauri::command]
-pub fn list_working_set(
+pub async fn list_working_set(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<DatasetDescriptor>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.list()))
+    with_session_lock_off_thread(&handle, |s| Ok(s.list())).await
 }
 
 #[tauri::command]
-pub fn active_dataset(
+pub async fn active_dataset(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<DatasetDescriptor>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.active()))
+    with_session_lock_off_thread(&handle, |s| Ok(s.active())).await
 }
 
 #[tauri::command]
-pub fn get_dataset(
+pub async fn get_dataset(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
 ) -> Result<Option<DatasetDescriptor>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.get(&reference_name)))
+    with_session_lock_off_thread(&handle, move |s| Ok(s.get(&reference_name))).await
 }
 
 /// Rename a dataset's display label (ADR-0037, slice 4a issue #8): display-only
 /// -- the reference name is untouched, so SQL / recipe / active references stay
-/// valid. Synchronous: no copy-in, just an in-memory label swap. Rejects an
-/// unknown reference or a label already shown by another dataset.
+/// valid. No copy-in, just an in-memory label swap, but the gate wait still
+/// runs off the IPC thread like every lock-taking command (issue #1486).
+/// Rejects an unknown reference or a label already shown by another dataset.
 #[tauri::command]
-pub fn rename_dataset(
+pub async fn rename_dataset(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
@@ -1044,10 +1076,11 @@ pub fn rename_dataset(
 ) -> Result<DatasetDescriptor, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, move |s| {
         s.rename_display(&reference_name, &new_display)
             .map_err(SessionError::RenameDataset)
     })
+    .await
 }
 
 /// Re-upload a file onto an existing dataset's reference name (ADR-0042, issue
@@ -1097,7 +1130,7 @@ fn privacy_update_to_result(
 /// shared `error.dataset.notFound` locale message instead of a free-text
 /// Engine string.
 #[tauri::command]
-pub fn set_dataset_privacy(
+pub async fn set_dataset_privacy(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
@@ -1105,9 +1138,10 @@ pub fn set_dataset_privacy(
 ) -> Result<DatasetDescriptor, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, move |s| {
         privacy_update_to_result(s.set_privacy(&reference_name, privacy), &reference_name)
     })
+    .await
 }
 
 /// Remove a source Dataset from the working set (issue #38/#39, ADR-0040).
@@ -1117,23 +1151,25 @@ pub fn set_dataset_privacy(
 /// and refuses the ACTIVE source when OTHER sources remain (ADR-0035 -> issue
 /// #39: no silent focus jump -- the caller must use `remove_active_source` to
 /// name an explicit continuation). The LAST active source is allowed through
-/// here to an empty working set (AC4, issue #39). Synchronous: the session
-/// Mutex serializes this against an in-flight turn (correctness), and the
-/// frontend additionally disables source management via its shared `loading`
-/// flag during the ADR-0040 execution window (UX) -- the two layers are
-/// independent. The only I/O is a best-effort DETACH + remove_file.
+/// here to an empty working set (AC4, issue #39). The session Mutex still
+/// serializes this against an in-flight turn (correctness), but since issue
+/// #1486 the gate wait runs off the IPC thread; the frontend additionally
+/// disables source management via its shared `loading` flag during the
+/// ADR-0040 execution window (UX) -- the two layers are independent. The
+/// only I/O is a best-effort DETACH + remove_file.
 #[tauri::command]
-pub fn remove_source(
+pub async fn remove_source(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
 ) -> Result<(), SessionError> {
     let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, move |s| {
         s.remove_source(&reference_name)
             .map_err(SessionError::RemoveSource)
     })
+    .await
 }
 
 /// Remove the ACTIVE source and repoint focus at an explicit continuation
@@ -1147,7 +1183,7 @@ pub fn remove_source(
 /// typed `SessionError::RemoveSource(RemoveSourceError)` (issue #121), so the
 /// frontend narrows on `kind` and renders a locale message.
 #[tauri::command]
-pub fn remove_active_source(
+pub async fn remove_active_source(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
@@ -1155,10 +1191,11 @@ pub fn remove_active_source(
 ) -> Result<(), SessionError> {
     let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, move |s| {
         s.remove_active_source(&reference_name, &continue_with)
             .map_err(SessionError::RemoveSource)
     })
+    .await
 }
 
 /// Preview the delete impact of one source (issue #1063): the live results a
@@ -1169,13 +1206,16 @@ pub fn remove_active_source(
 /// itself (the removal path reports `NotFound`). Usable while resuming,
 /// like the other read-only working-set commands.
 #[tauri::command]
-pub fn preview_delete_impact(
+pub async fn preview_delete_impact(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
 ) -> Result<Vec<DeleteImpactEntry>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.delete_impact_preview(&reference_name)))
+    with_session_lock_off_thread(&handle, move |s| {
+        Ok(s.delete_impact_preview(&reference_name))
+    })
+    .await
 }
 
 /// Ask one question (PRD #1) against the named session: run one agent turn
@@ -1357,18 +1397,19 @@ pub fn cancel(store: State<'_, Arc<SessionStore>>, session_id: String) -> Result
 
 /// Read the named session's conversation thread (ADR-0028/0039/0040): the
 /// unified timeline of turns AND source lifecycle events, in order.
-/// Synchronous -- a snapshot read of the session history with no copy-in. The
+/// A snapshot read of the session history with no copy-in; the gate wait
+/// runs off the IPC thread like every lock-taking command (issue #1486). The
 /// frontend renders this as the always-visible thread (turns + source events);
 /// the window assembler reads only the turns (the session filters source events
 /// out before assembly), so source events never enter the LLM payload.
 #[tauri::command]
-pub fn conversation(
+pub async fn conversation(
     app: tauri::AppHandle,
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<ThreadEntry>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    let entries = with_session_lock(&handle, |s| Ok(s.conversation()))?;
+    let entries = with_session_lock_off_thread(&handle, |s| Ok(s.conversation())).await?;
     // ADR-0124 (issue #1087), tightened to a file-level allowlist by
     // ADR-0137 Decision 6 (#1383): every manifest-named file must be
     // iframe-servable before a card can render -- the whitelist is
@@ -2320,16 +2361,17 @@ pub async fn delete_session(
 /// bound path is untouched, so sidebar addressing stays stable. Rejects a blank
 /// name. Delegates to [`Session::rename`].
 #[tauri::command]
-pub fn rename_session(
+pub async fn rename_session(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     new_name: String,
 ) -> Result<String, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, move |s| {
         s.rename(&new_name).map_err(SessionError::RenameSession)
     })
+    .await
 }
 
 /// Read the OPEN session's current display name (ADR-0089 Decision 4). The
@@ -2339,14 +2381,15 @@ pub fn rename_session(
 /// `recipe.json` file from disk. Returns the name carried by the in-memory
 /// persister (the same value the next atomic write will persist).
 #[tauri::command]
-pub fn get_session_name(
+pub async fn get_session_name(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<String, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, |s| {
         Ok(s.session_name().unwrap_or_default().to_string())
     })
+    .await
 }
 
 /// The cold-rename file operation, extracted so the blank-name short-circuit
@@ -2803,12 +2846,12 @@ pub async fn open_recipe(
 /// failure. The outer [`SessionError`] is the addressing failure (invalid id /
 /// unknown session / lock poison) -- distinct from the persist error itself.
 #[tauri::command]
-pub fn take_persist_error(
+pub async fn take_persist_error(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<SaveError>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.take_persist_error()))
+    with_session_lock_off_thread(&handle, |s| Ok(s.take_persist_error())).await
 }
 
 /// Read + clear the named session's resume-hit source status notices
@@ -2820,12 +2863,12 @@ pub fn take_persist_error(
 /// every replay-path resume (the replay path's blocking semantics are
 /// unchanged, ADR-0035).
 #[tauri::command]
-pub fn take_source_notices(
+pub async fn take_source_notices(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<crate::SourceNotice>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.take_source_notices()))
+    with_session_lock_off_thread(&handle, |s| Ok(s.take_source_notices())).await
 }
 
 /// Read + clear the named session's pending external-change conflict, if any
@@ -2838,12 +2881,12 @@ pub fn take_source_notices(
 /// file. Returns `None` when no conflict is pending or after a prior read
 /// cleared it.
 #[tauri::command]
-pub fn take_pending_conflict(
+pub async fn take_pending_conflict(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<crate::PendingConflict>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.take_pending_conflict()))
+    with_session_lock_off_thread(&handle, |s| Ok(s.take_pending_conflict())).await
 }
 
 // --- Tiered tool approval (ADR-0080, issue #294) -------------------------
@@ -4001,14 +4044,22 @@ pub fn get_session_model_config(
 /// ADR-0035 suspension read in-process right after the persist, so the
 /// picker can warn without a second IPC racing the banner poll.
 #[tauri::command]
-pub fn set_session_posture(
+pub async fn set_session_posture(
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
     session_id: String,
     posture: PosturePair,
 ) -> Result<SetPosturePersistOutcome, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    apply_posture_set(&handle, live.inner(), posture)
+    // issue #1486: the pair write + persist-now batch inside takes the
+    // session gate, so the whole body runs on the blocking pool. The config
+    // handle is cloned out of `State` first -- the `spawn_blocking` closure
+    // must be `'static`, and a `State` borrow lives only as long as the
+    // command invocation.
+    let live = live.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || apply_posture_set(&handle, &live, posture))
+        .await
+        .map_err(|e| SessionError::Engine(e.to_string()))?
 }
 
 /// The set command's body (issue #600, single full-pair command since
@@ -5863,6 +5914,79 @@ mod tests {
             Err(e) => assert_eq!(e, SessionError::InvalidId),
             Ok(_) => panic!("malformed id must reject"),
         }
+    }
+
+    /// Issue #1486 regression pin: the async twin parks its lock WAIT on the
+    /// blocking pool, never on the calling (IPC) thread. While another
+    /// thread holds the session gate, one poll of the helper's future must
+    /// come back `Pending` promptly -- a caller-thread lock wait would park
+    /// the poller on the gate (the frozen-window failure mode) and the
+    /// watchdog fires instead -- and once the gate releases, the helper
+    /// completes with the closure's value.
+    #[test]
+    fn with_session_lock_off_thread_waits_on_the_blocking_pool_not_the_caller() {
+        use std::future::Future;
+        use std::sync::mpsc;
+        use std::task::{Context, Waker};
+        use std::time::Duration;
+
+        const POLL_WATCHDOG: Duration = Duration::from_secs(5);
+        const DONE_WATCHDOG: Duration = Duration::from_secs(10);
+
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+                Default::default(),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("handle for the minted id");
+
+        // Gate holder: lock, confirm held, hold until the release signal,
+        // then drop the guard.
+        let (held_tx, held_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let holder_handle = Arc::clone(&handle);
+        let holder = std::thread::spawn(move || {
+            let guard = holder_handle.session_lock().expect("holder takes the gate");
+            held_tx.send(()).expect("held signal");
+            release_rx.recv().expect("release signal");
+            drop(guard);
+        });
+        held_rx.recv().expect("gate is held before the poll");
+
+        // Poller: one poll under a held gate (the caller-side-park probe),
+        // then drive the future to completion once this thread releases.
+        let (pending_tx, pending_rx) = mpsc::channel::<bool>();
+        let (done_tx, done_rx) = mpsc::channel::<Result<Vec<DatasetDescriptor>, SessionError>>();
+        let poll_handle = Arc::clone(&handle);
+        let poller = std::thread::spawn(move || {
+            let mut fut = Box::pin(with_session_lock_off_thread(&poll_handle, |s| Ok(s.list())));
+            let mut cx = Context::from_waker(Waker::noop());
+            let is_pending = fut.as_mut().poll(&mut cx).is_pending();
+            pending_tx.send(is_pending).expect("poll verdict");
+            let outcome = tauri::async_runtime::block_on(fut);
+            done_tx.send(outcome).expect("done verdict");
+        });
+        let is_pending = pending_rx
+            .recv_timeout(POLL_WATCHDOG)
+            .expect("one poll returns while the gate is held");
+        assert!(
+            is_pending,
+            "a held gate parks the pool task, not the caller"
+        );
+        release_tx.send(()).expect("release the gate");
+        let datasets = done_rx
+            .recv_timeout(DONE_WATCHDOG)
+            .expect("helper completes after the gate releases")
+            .expect("closure value crosses whole");
+        assert!(
+            datasets.is_empty(),
+            "a fresh session lists an empty working set"
+        );
+        holder.join().expect("holder exits cleanly");
+        poller.join().expect("poller exits cleanly");
     }
 
     /// set_dataset_privacy rejects an unknown reference name as the typed
