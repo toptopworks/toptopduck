@@ -748,6 +748,7 @@
   "workspace.artifact.saveFailed": "Could not save a copy of the file",
   "workspace.collapse": "Collapse right sidebar",
   "workspace.datasets.add": "Add dataset…",
+  "workspace.datasets.addDone": "Added {name}",
   "workspace.datasets.adding": "Adding {name} (file {index} of {total})…",
   "workspace.datasets.delete.confirm": "Remove {name} from this workspace?",
   "workspace.datasets.description": "Datasets in this workspace are available to every session bound to it — a session picks them up automatically the first time a query mentions them.",
@@ -765,6 +766,7 @@
   "workspace.datasets.fileFilter": "Data files",
   "workspace.datasets.listHeading": "Datasets · {count}",
   "workspace.datasets.missingBadge": "Missing",
+  "workspace.datasets.replaceDone": "Replaced {name}",
   "workspace.datasets.replacing": "Replacing {name}…",
   "workspace.datasets.title": "Datasets — {workspace}",
   "workspace.expand": "Expand right sidebar"

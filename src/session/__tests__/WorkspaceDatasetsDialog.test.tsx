@@ -61,6 +61,11 @@ function entry(overrides: Partial<ListedWorkspaceDataset>): ListedWorkspaceDatas
   };
 }
 
+// The badge's trailing elapsed face ("· 12秒"-shaped suffix): one named
+// pattern for the badge assertions -- a face rewording would otherwise need
+// an edit per site.
+const ELAPSED_SUFFIX = /· \d+秒/;
+
 // The dialog's queries run inside React Query; withIntl already carries the
 // Intl + Tooltip context the list rows need. The panel mounts bound to the
 // demo workspace in every test, so the element is fixed.
@@ -398,9 +403,9 @@ describe("WorkspaceDatasetsDialog", () => {
   });
   // Issue #1485: the picker's add batch runs the mutations SEQUENTIALLY (the
   // backend manifest lock serializes anyway), so each landed file invalidates
-  // the listing and the status line names the file in flight until the batch
+  // the listing and the badge names the file in flight until the batch
   // settles.
-  it("runs the add batch sequentially, naming the file in flight in the status line", async () => {
+  it("runs the add batch sequentially, naming the file in flight in the badge", async () => {
     vi.mocked(listWorkspaceDatasets)
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" })])
@@ -408,62 +413,118 @@ describe("WorkspaceDatasetsDialog", () => {
         entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" }),
         entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" }),
       ]);
-    vi.mocked(open).mockResolvedValue(["/src/a.csv", "/src/b.csv"]);
+    vi.mocked(open)
+      .mockResolvedValueOnce(["/src/a.csv", "/src/b.csv"])
+      .mockResolvedValue(["/src/c.csv"]);
     vi.mocked(addWorkspaceDataset).mockClear();
     const gates: Array<(e: ListedWorkspaceDataset) => void> = [];
     vi.mocked(addWorkspaceDataset).mockImplementation(
       () => new Promise<ListedWorkspaceDataset>((resolve) => { gates.push(resolve); }),
     );
+    // ONE batch clock (#1488): every Date.now call steps +2500, so the
+    // suffix mounted for file 1 already reads 2s past the batch stamp and
+    // file 2's window holds the same 2s-or-more -- the stamp never moves
+    // (the step decouples the pin from render-noise call ordering). A
+    // per-file re-stamp would move the origin past the mounted clock and
+    // the suffix would fall back to the face's 1s floor -- the 2s-or-more
+    // assertions are the discriminator. The spy must outlive the act
+    // flushes (the file-global restoreAllMocks runs after the test).
+    let step = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => (step += 2500));
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
-    // File 1 in flight: the line names it; the second IPC has not fired.
+    // File 1 in flight: the badge names it; the second IPC has not fired.
+    // The badge carries the batch clock's elapsed suffix (ONE stamp per
+    // batch -- the suffix survives the per-file badge swaps); the RUNNING
+    // window locks the Add button (a second submission here would overwrite
+    // the live badge), the button keeps its idle face (no spinner inside
+    // it), the running face carries no dismiss (closing a live badge is the
+    // vanished-state hole), and the empty card stays mounted -- hiding it
+    // would bounce the layout between the card, the gap, and the list.
     expect(await screen.findByText(/正在添加 a\.csv（第 1\/2 个）/)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(/· (?:[2-9]|\d{2,})秒/);
+    expect(await screen.findByText(/还没有数据集/)).toBeInTheDocument();
+    const addBtn = screen.getByRole("button", { name: "添加数据集…" });
+    expect(addBtn.querySelector(".animate-spin")).toBeNull();
+    expect(screen.queryByRole("button", { name: "关闭" })).not.toBeInTheDocument();
+    expect(addBtn).toBeDisabled();
     expect(addWorkspaceDataset).toHaveBeenCalledTimes(1);
     await act(async () => {
       gates[0](entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" }));
     });
     expect(await screen.findByText(/正在添加 b\.csv（第 2\/2 个）/)).toBeInTheDocument();
+    // File 2's window still reads off the batch stamp: the suffix holds 2s
+    // or more (a per-file clock would read the 1s floor here).
+    expect(screen.getByRole("status")).toHaveTextContent(/· (?:[2-9]|\d{2,})秒/);
     expect(addWorkspaceDataset).toHaveBeenCalledTimes(2);
+    // The RUNNING window locks the row actions too (the symmetric hole): a
+    // replace fired here would overwrite the live add badge. File 2's IPC is
+    // the distinguishing window -- replace.isPending is false there, so the
+    // upload-window lock (not the mutation pendings) is what holds the row.
+    expect(await screen.findByRole("button", { name: /^a/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /换源/ })).toBeDisabled();
     await act(async () => {
       gates[1](entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" }));
     });
-    await waitFor(() => expect(screen.queryByText(/正在添加/)).toBeNull());
+    // The done badge parks: the last LANDED file + the FROZEN total
+    // duration. Done does not lock -- the Add button is live again.
+    expect(await screen.findByText(/已添加 b\.csv/)).toBeInTheDocument();
+    const badge = screen.getByText(/已添加 b\.csv/).closest("[data-slot='badge']")!;
+    expect(badge).toHaveTextContent(ELAPSED_SUFFIX);
+    expect(screen.getByRole("button", { name: "添加数据集…" })).toBeEnabled();
+    // The done badge's third clear path (besides dismiss and the reopen
+    // edge): the NEXT upload overwrites it -- the new running face replaces
+    // the parked one the moment the picker lands a file.
+    fireEvent.click(screen.getByRole("button", { name: "添加数据集…" }));
+    expect(await screen.findByText(/正在添加 c\.csv（第 1\/1 个）/)).toBeInTheDocument();
+    expect(screen.queryByText(/已添加 b\.csv/)).not.toBeInTheDocument();
+    await act(async () => {
+      gates[2](entry({ reference_name: "c", display_name: "c", source_path: "/src/c.csv" }));
+    });
+    expect(await screen.findByText(/已添加 c\.csv/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    expect(screen.queryByText(/已添加 c\.csv/)).not.toBeInTheDocument();
   });
 
-  it("keeps the add batch running past a failed file -- the banner names it, the rest still land", async () => {
+  it("keeps the add batch running past a failed file -- the banner names it, the done face never does", async () => {
     // The `.catch(() => {})` over each `mutateAsync` is the documented
-    // design: one bad file must not drop the remainder. A rejected first
-    // file surfaces its error banner AND the batch advances to the second
-    // file's status line instead of parking at 1-of-2.
+    // design: one bad file must not drop the remainder. The failure rides
+    // TRAILING here (the good file lands first): "the last file that
+    // landed" and "the last file attempted" only diverge in this order, and
+    // the done face must name the landed one -- a failed file never reads
+    // as added.
     vi.mocked(listWorkspaceDatasets)
       .mockResolvedValueOnce([])
       .mockResolvedValue([entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" })]);
-    vi.mocked(open).mockResolvedValue(["/src/bad.csv", "/src/b.csv"]);
+    vi.mocked(open).mockResolvedValue(["/src/b.csv", "/src/bad.csv"]);
     vi.mocked(addWorkspaceDataset).mockClear();
     let resolveGood!: (e: ListedWorkspaceDataset) => void;
     vi.mocked(addWorkspaceDataset)
+      .mockImplementationOnce(
+        () => new Promise<ListedWorkspaceDataset>((resolve) => { resolveGood = resolve; }),
+      )
       .mockRejectedValueOnce({
         kind: "DataUnreadable",
         data: `Error when sniffing file "/src/bad.csv".`,
-      })
-      .mockImplementationOnce(
-        () => new Promise<ListedWorkspaceDataset>((resolve) => { resolveGood = resolve; }),
-      );
+      });
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
-    // The first file's rejection lands on the banner...
-    const banner = await screen.findByRole("alert");
-    expect(banner).toHaveTextContent("无法解析该数据文件");
-    // ...and the batch still runs the second file to its own status line.
-    expect(await screen.findByText(/正在添加 b\.csv（第 2\/2 个）/)).toBeInTheDocument();
-    expect(addWorkspaceDataset).toHaveBeenCalledTimes(2);
+    // The good file runs first; its gate holds the batch mid-flight.
+    expect(await screen.findByText(/正在添加 b\.csv（第 1\/2 个）/)).toBeInTheDocument();
+    expect(addWorkspaceDataset).toHaveBeenCalledTimes(1);
     await act(async () => {
       resolveGood(entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" }));
     });
-    await waitFor(() => expect(screen.queryByText(/正在添加/)).toBeNull());
+    // The trailing file's rejection lands on the banner...
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("无法解析该数据文件");
+    // ...and the done badge names the LANDED file, never the failed one
+    // (the banner above owns that face).
+    expect(await screen.findByText(/已添加 b\.csv/)).toBeInTheDocument();
+    expect(screen.queryByText(/已添加 bad\.csv/)).not.toBeInTheDocument();
   });
 
-  it("names the row in the status line while a replace round-trips and clears it on settle", async () => {
+  it("parks a done badge after a replace settles -- the running window locks Add, done unlocks and dismisses", async () => {
     seed([entry({})]);
     vi.mocked(open).mockResolvedValue("/src/people_v2.csv");
     vi.mocked(replaceWorkspaceDataset).mockClear();
@@ -475,9 +536,88 @@ describe("WorkspaceDatasetsDialog", () => {
     fireEvent.click(await screen.findByRole("button", { name: /换源/ }));
     await waitFor(() => expect(replaceWorkspaceDataset).toHaveBeenCalled());
     expect(await screen.findByText(/正在替换 people/)).toBeInTheDocument();
+    // A replace mints its own clock at the round-trip's entry; the suffix
+    // rides the badge while it runs. The RUNNING window locks the Add
+    // button -- a second submission here would overwrite the live badge.
+    expect(screen.getByRole("status")).toHaveTextContent(ELAPSED_SUFFIX);
+    expect(screen.getByRole("button", { name: "添加数据集…" })).toBeDisabled();
     await act(async () => {
       gates[0](entry({}));
     });
-    await waitFor(() => expect(screen.queryByText(/正在替换/)).toBeNull());
+    // The done badge: the label + the frozen duration; the panel unlocks
+    // (done does not lock) and the dismiss clears the badge.
+    expect(await screen.findByText(/已替换 people/)).toBeInTheDocument();
+    const badge = screen.getByText(/已替换 people/).closest("[data-slot='badge']")!;
+    expect(badge).toHaveTextContent(ELAPSED_SUFFIX);
+    expect(screen.getByRole("button", { name: "添加数据集…" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    expect(screen.queryByText(/已替换 people/)).not.toBeInTheDocument();
+  });
+
+  it("parks no done badge when the whole batch fails -- the banner owns the failure face", async () => {
+    vi.mocked(listWorkspaceDatasets).mockResolvedValue([]);
+    vi.mocked(open)
+      .mockResolvedValueOnce(["/src/bad.csv"])
+      .mockResolvedValue(["/src/good.csv"]);
+    vi.mocked(addWorkspaceDataset).mockClear();
+    vi.mocked(addWorkspaceDataset)
+      .mockRejectedValueOnce({
+        kind: "DataUnreadable",
+        data: `Error when sniffing file "/src/bad.csv".`,
+      })
+      .mockResolvedValue(entry({ reference_name: "good", display_name: "good", source_path: "/src/good.csv" }));
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法解析该数据文件");
+    // Neither face parks: the running badge cleared with its batch, and no
+    // done badge ever minted -- "added" must stay a true statement.
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByText(/已添加/)).not.toBeInTheDocument();
+    // The unlock follows: the failed window is over, the Add button is live.
+    expect(screen.getByRole("button", { name: "添加数据集…" })).toBeEnabled();
+    // A retry that succeeds clears the stale banner on fire (the same
+    // clear-on-fire posture the row mutations carry): the fresh done face
+    // must not sit beside the old failure.
+    fireEvent.click(screen.getByRole("button", { name: "添加数据集…" }));
+    expect(await screen.findByText(/已添加 good\.csv/)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps a running badge across close/reopen; the done badge still clears on the open edge", async () => {
+    // The panel stays mounted across close/reopen (the sidebar only nulls
+    // the workspace prop), so the upload loop keeps running with the panel
+    // closed. The open edge must therefore NOT clear a RUNNING badge -- its
+    // IPC is still in flight and the badge is its only face -- while a DONE
+    // badge is the previous session's residue and joins the cleanup.
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const bound = (ws: { path: string; label: string } | null) => (
+      <QueryClientProvider client={client}>
+        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
+      </QueryClientProvider>
+    );
+    seed([]);
+    vi.mocked(open).mockResolvedValue("/src/a.csv");
+    vi.mocked(addWorkspaceDataset).mockClear();
+    let resolveAdd!: (e: ListedWorkspaceDataset) => void;
+    vi.mocked(addWorkspaceDataset).mockImplementation(
+      () => new Promise<ListedWorkspaceDataset>((resolve) => { resolveAdd = resolve; }),
+    );
+    const view = render(bound({ path: "/ws", label: "Demo" }));
+    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
+    expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
+    // Close and reopen while the upload runs: the badge survives the edge.
+    view.rerender(bound(null));
+    view.rerender(bound({ path: "/ws", label: "Demo" }));
+    expect(screen.getByText(/正在添加 a\.csv/)).toBeInTheDocument();
+    // Settle: the done badge parks -- and a second reopen clears it.
+    await act(async () => {
+      resolveAdd(entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" }));
+    });
+    expect(await screen.findByText(/已添加 a\.csv/)).toBeInTheDocument();
+    view.rerender(bound(null));
+    view.rerender(bound({ path: "/ws", label: "Demo" }));
+    expect(screen.queryByText(/已添加 a\.csv/)).not.toBeInTheDocument();
   });
 });

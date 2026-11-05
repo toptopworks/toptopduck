@@ -14,7 +14,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open as openPicker } from "@tauri-apps/plugin-dialog";
-import { Loader2, Upload } from "lucide-react";
+import { Check, Loader2, Upload, X } from "lucide-react";
 import { useCallback, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
@@ -36,6 +36,8 @@ import {
   DialogTitle,
 } from "../components/ui/dialog";
 import { DatasetDetail, type DatasetSamplePage } from "../components/dataset/DatasetDetail";
+import { ElapsedFace } from "../components/thread/ElapsedFace";
+import { WaitElapsedSuffix } from "../components/thread/WaitElapsedSuffix";
 import { fileBasename } from "../lib/basename";
 import { WorkingSetList } from "../components/dataset/WorkingSetList";
 import type { DatasetDescriptor, DatasetPrivacy } from "../types/dataset";
@@ -56,13 +58,28 @@ interface WorkspaceDatasetsDialogProps {
 // boundary for any channel that slips one through).
 const PICKER_EXTENSIONS = ["csv", "parquet", "json", "jsonl", "ndjson"];
 
-// The in-flight upload's status line (issue #1485): what the picker's batch
-// is doing right now -- the file's basename plus, for the add batch, its
-// 1-based position and the batch size (a replace is a single-file wait and
-// carries no position). Cleared when the batch settles.
+// The upload status badge (issues #1485 and #1488):
+// `running` names what the picker's batch is doing right now -- the file's
+// basename plus, for the add batch, its 1-based position and the batch size
+// (a replace is a single-file wait and carries no position); `startedAt` is
+// the batch clock (ONE stamp per add batch -- a per-file clock would visibly
+// reset on each file; a replace mints its own). `done` is the settled face:
+// the operation's label, the last landed file's basename, and the FROZEN
+// total duration -- the badge parks there until the user dismisses it or a
+// new upload begins, because a replace lands with no other visible trace
+// (same row, same label; only the content underneath changes). A failed
+// upload never reaches `done` -- the error banner owns that face.
 type UploadStatus =
-  | { mode: "add"; name: string; index: number; total: number }
-  | { mode: "replace"; name: string };
+  | {
+    phase: "running";
+    mode: "add";
+    name: string;
+    index: number;
+    total: number;
+    startedAt: number;
+  }
+  | { phase: "running"; mode: "replace"; name: string; startedAt: number }
+  | { phase: "done"; mode: "add" | "replace"; name: string; seconds: number };
 
 // The master/detail sections' card chrome -- the working-set tab's
 // PANEL_CARD_BASE form (bg-card + border + rounded + shadow + padding), so
@@ -192,9 +209,14 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       // The open edge clears the transient state (the error banner and the
       // detail pick never survive into a fresh panel); the close edge
       // deliberately keeps everything, so the animation plays over the
-      // exact face the user is leaving.
+      // exact face the user is leaving. The DONE badge joins the open-edge
+      // cleanup: a reopen is a fresh working session, not a continuation of
+      // the last one. A RUNNING badge survives the edge: its IPC is still
+      // in flight, and clearing it would resurrect the vanished-state bug
+      // (the upload keeps running with no face).
       setError(null);
       setSelectedName(null);
+      setUploadStatus((prev) => (prev?.phase === "running" ? prev : null));
     }
   }
   const path = panel?.path ?? "";
@@ -267,16 +289,50 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       return null;
     });
     const files = typeof selected === "string" ? [selected] : (selected ?? []);
+    if (files.length === 0) return;
+    // Clear-on-fire, the row mutations' posture: a stale banner must not
+    // sit beside (or contradict) this batch's visible outcome. The cancel
+    // path above keeps an old banner -- no batch fired, nothing to clear.
+    setError(null);
     // Sequential awaits (issue #1485): the backend's manifest lock serializes
     // anyway, so the total time is unchanged -- but each file's onSuccess
     // (invalidate + the detail pick) lands per file, so rows appear one by
     // one instead of all at once at the end. A rejected mutate is already
     // surfaced via onError; swallow the throw so the batch continues.
+    // ONE batch clock minted here: every per-file badge reuses it, so the
+    // elapsed suffix counts the whole batch instead of resetting per file.
+    // The done badge names the LAST file that actually landed -- a failed
+    // file must never read as added (the banner owns the failure face).
+    const startedAt = Date.now();
+    let lastLanded: string | null = null;
     for (const [i, file] of files.entries()) {
-      setUploadStatus({ mode: "add", name: fileBasename(file), index: i + 1, total: files.length });
-      await add.mutateAsync(file).catch(() => {});
+      setUploadStatus({
+        phase: "running",
+        mode: "add",
+        name: fileBasename(file),
+        index: i + 1,
+        total: files.length,
+        startedAt,
+      });
+      await add
+        .mutateAsync(file)
+        .then(() => {
+          lastLanded = fileBasename(file);
+        })
+        .catch(() => {});
     }
-    setUploadStatus(null);
+    if (lastLanded !== null) {
+      setUploadStatus({
+        phase: "done",
+        mode: "add",
+        name: lastLanded,
+        seconds: Math.floor((Date.now() - startedAt) / 1000),
+      });
+    } else {
+      // A whole-failed batch parks nothing: the running badge must not
+      // outlive its batch, and the error banner owns the failure face.
+      setUploadStatus(null);
+    }
   };
 
   const rows = listing.data ?? [];
@@ -291,9 +347,19 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       ? selectedName
       : (rows[0]?.reference_name ?? null);
   const shown = rows.find((d) => d.reference_name === resolvedName) ?? null;
-  // The list's action buttons lock while any row-level mutation round-trips.
+  // The list's action buttons lock while any row-level mutation round-trips
+  // -- AND while an upload is RUNNING: a second submission firing inside the
+  // window would overwrite the running badge (the in-flight operation would
+  // vanish from the UI while its IPC keeps running), so the running window
+  // -- not each mutation's isPending -- is the lock. The DONE badge does not
+  // lock: the panel is settled, and the next submission overwrites the badge.
+  const uploadRunning = uploadStatus?.phase === "running";
   const busy =
-    rename.isPending || replace.isPending || remove.isPending || privacy.isPending;
+    rename.isPending ||
+    replace.isPending ||
+    remove.isPending ||
+    privacy.isPending ||
+    uploadRunning;
 
   // The list row's extra marker: a missing store file badges the row
   // (destructive -- the honest flag), the detail carries the long sentence.
@@ -334,39 +400,85 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex items-center gap-3">
-          {uploadStatus !== null && (
-            // The status line (issue #1485): the picker's per-file progress,
-            // the same content model the rail's ingest block carries.
-            <p className="m-0 min-w-0 flex-1 truncate text-xs text-muted-foreground" role="status">
-              {uploadStatus.mode === "add" ? (
-                <FormattedMessage
-                  id="workspace.datasets.adding"
-                  defaultMessage="Adding {name} (file {index} of {total})…"
-                  values={{ name: uploadStatus.name, index: uploadStatus.index, total: uploadStatus.total }}
-                />
-              ) : (
-                <FormattedMessage
-                  id="workspace.datasets.replacing"
-                  defaultMessage="Replacing {name}…"
-                  values={{ name: uploadStatus.name }}
-                />
-              )}
-            </p>
-          )}
+        <div className="flex h-8 items-center gap-3">
+          {uploadStatus !== null ? (
+            uploadStatus.phase === "running" ? (
+              // The running badge (issue #1485): the picker's per-file
+              // progress as a chip -- the same content model the rail's
+              // ingest block carries, down to its elapsed-suffix clock.
+              // No dismiss while running: closing a live badge is exactly
+              // the vanished-state bug (#1488).
+              <Badge variant="secondary" className="min-w-0 shrink max-w-full" role="status">
+                <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
+                <span className="truncate">
+                  {uploadStatus.mode === "add" ? (
+                    <FormattedMessage
+                      id="workspace.datasets.adding"
+                      defaultMessage="Adding {name} (file {index} of {total})…"
+                      values={{ name: uploadStatus.name, index: uploadStatus.index, total: uploadStatus.total }}
+                    />
+                  ) : (
+                    <FormattedMessage
+                      id="workspace.datasets.replacing"
+                      defaultMessage="Replacing {name}…"
+                      values={{ name: uploadStatus.name }}
+                    />
+                  )}
+                </span>
+                <WaitElapsedSuffix startedAt={uploadStatus.startedAt} />
+              </Badge>
+            ) : (
+              // The done badge: ✓ + the landed label + the FROZEN total
+              // duration. It parks until dismissed (or the next upload /
+              // a reopen overwrites it) -- a replace lands with no other
+              // visible trace (same row, same label), so this is the
+              // operation's only success face.
+              <Badge variant="secondary" className="min-w-0 shrink max-w-full gap-1.5 pr-1">
+                <Check aria-hidden />
+                <span className="truncate">
+                  {uploadStatus.mode === "add" ? (
+                    <FormattedMessage
+                      id="workspace.datasets.addDone"
+                      defaultMessage="Added {name}"
+                      values={{ name: uploadStatus.name }}
+                    />
+                  ) : (
+                    <FormattedMessage
+                      id="workspace.datasets.replaceDone"
+                      defaultMessage="Replaced {name}"
+                      values={{ name: uploadStatus.name }}
+                    />
+                  )}
+                </span>
+                <ElapsedFace seconds={uploadStatus.seconds} />
+                {/* The dismiss rides the Button copy-in (the #1488 review
+                    round's two judgement calls): ghost's accent hover + the shared
+                    focus-visible ring, at a 20px target (16px was the
+                    panel's smallest pointer target). */}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="ml-0.5 size-5 rounded-full"
+                  aria-label={intl.formatMessage({ id: "common.close" })}
+                  onClick={() => setUploadStatus(null)}
+                >
+                  <X className="size-3" aria-hidden />
+                </Button>
+              </Badge>
+            )
+          ) : null}
           <Button
             variant="outline"
             size="sm"
             className="ml-auto"
-            disabled={add.isPending}
+            disabled={uploadRunning}
             onClick={() => void pickAndAdd()}
           >
-            {add.isPending ? (
-              // The in-flight spinner (the settings-panel posture, issue #1485).
-              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-            ) : (
-              <Upload className="h-4 w-4" aria-hidden />
-            )}
+            {/* The idle face only -- the running badge to the left owns the
+                in-flight signal; the button just disables (the same
+                replace-window posture). */}
+            <Upload className="h-4 w-4" aria-hidden />
             <FormattedMessage id="workspace.datasets.add" defaultMessage="Add dataset…" />
           </Button>
         </div>
@@ -424,14 +536,26 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                   }}
                   onReplace={(name, file) => {
                     setError(null);
-                    // The same status line as the add batch (issue #1485): a
-                    // replace is one long IPC, the line names the row until
-                    // it settles. A reject is already surfaced via onError.
-                    setUploadStatus({ mode: "replace", name });
+                    // The same badge as the add batch (issue #1485): a
+                    // replace is one long IPC, the running badge names the
+                    // row until it settles; success flips to the done badge
+                    // (the frozen duration), a reject clears it -- the error
+                    // banner owns the failure face.
+                    const startedAt = Date.now();
+                    setUploadStatus({ phase: "running", mode: "replace", name, startedAt });
                     void replace
                       .mutateAsync({ name, file })
-                      .catch(() => {})
-                      .finally(() => setUploadStatus(null));
+                      .then(() => {
+                        setUploadStatus({
+                          phase: "done",
+                          mode: "replace",
+                          name,
+                          seconds: Math.floor((Date.now() - startedAt) / 1000),
+                        });
+                      })
+                      .catch(() => {
+                        setUploadStatus(null);
+                      });
                   }}
                   onDelete={(name) => {
                     setError(null);

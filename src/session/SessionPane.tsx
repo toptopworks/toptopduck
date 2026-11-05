@@ -568,13 +568,16 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   busy={s.loading}
                 />
               </ErrorBoundary>
-              {s.thread.length === 0 && s.liveTurn === null && (
+              {s.thread.length === 0 && s.liveTurn === null && s.ingestProgress === null && (
               // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
               // padding) + the .muted color rule retired onto utility; the class
               // hooks had no selector / test dependents and are dropped. Gated on
               // liveTurn too (issue #297): a brand-new session's FIRST in-flight
               // turn already renders the live card -- the "no conversations yet"
-              // hint would contradict it.
+              // hint would contradict it. Gated on the ingest block too (#1485's
+              // pane-level follow-up): an in-flight import renders its progress
+              // card in the same rail -- "load data to begin" under a running
+              // load is the same contradiction.
                 <p className="text-[0.85rem] p-2 text-muted-foreground">
                   <FormattedMessage
                     id="session.rail.empty"
