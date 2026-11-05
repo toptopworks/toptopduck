@@ -627,8 +627,16 @@ describe("WorkspaceDatasetsDialog", () => {
     // opening another workspace's panel mid-batch would land the remaining
     // files in the wrong manifest. The batch's target must be pinned at
     // mint -- every file rides the workspace the panel showed at the click.
+    // All defaults ride the constructor (setDefaultOptions replaces the
+    // whole object, so a later call would drop the retry pins); the
+    // staleTime Infinity mirror makes the invalidation the ONLY refetch
+    // trigger, so the reopen assertion below pins the invalidate target
+    // rather than key-switch noise.
     const client = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+      defaultOptions: {
+        queries: { retry: false, staleTime: Infinity },
+        mutations: { retry: false },
+      },
     });
     const bound = (ws: { path: string; label: string } | null) => (
       <QueryClientProvider client={client}>
@@ -645,10 +653,6 @@ describe("WorkspaceDatasetsDialog", () => {
     // file's per-consumer convention); the batch's own two calls must be the
     // only ones on the books.
     vi.mocked(addWorkspaceDataset).mockClear();
-    // Mirror the app default (staleTime Infinity) on this client: with it
-    // the invalidation is the ONLY refetch trigger, so the reopen assertion
-    // below pins the invalidate target rather than key-switch noise.
-    client.setDefaultOptions({ queries: { staleTime: Infinity } });
     vi.mocked(addWorkspaceDataset)
       .mockImplementationOnce(() => firstInFlight)
       .mockResolvedValueOnce(

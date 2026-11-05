@@ -72,7 +72,8 @@ const PICKER_EXTENSIONS = ["csv", "parquet", "json", "jsonl", "ndjson"];
 // Every variant carries the workspace whose panel minted the batch (#1491):
 // the badge renders (and locks) only on that workspace's panel, so a panel
 // reopened on another workspace neither narrates nor locks for a foreign
-// batch -- while the origin panel keeps its face across close/reopen (#1488).
+// batch -- while the origin panel keeps a RUNNING face across close/reopen
+// (#1488).
 type UploadStatus =
   | {
     phase: "running";
@@ -240,8 +241,9 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
     // The batch's target rides the variables, never the live `path`
     // (#1491): TanStack resolves mutationFn from the LATEST options at each
     // call, so a panel rebind mid-batch would retarget the files that have
-    // not fired yet. The variables are bound per call -- the loop's closure
-    // pins the workspace the panel showed at the click.
+    // not fired yet. The variables are bound per call -- pickAndAdd's
+    // closure pins the workspace: each iteration mints from the const path
+    // of the render the click fired in.
     mutationFn: (v: { workspace: string; file: string }) =>
       addWorkspaceDataset(v.workspace, v.file),
     onSuccess: (entry, v) => {
@@ -371,7 +373,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   // lock: the panel is settled, and the next submission overwrites the badge.
   // The badge belongs to the panel whose batch minted it (#1491): a panel
   // opened on another workspace neither narrates nor locks for a foreign
-  // batch; the home panel keeps its face across close/reopen (#1488).
+  // batch; the home panel keeps a RUNNING face across close/reopen (#1488).
   const badge = uploadStatus?.workspace === path ? uploadStatus : null;
   const uploadRunning = badge?.phase === "running";
   const busy =
