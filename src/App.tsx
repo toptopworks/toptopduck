@@ -1288,15 +1288,18 @@ export default function App() {
                   onOpenPersisted={(path, name) =>
                     void openPersisted(path, name)}
                 />
-                {/* ADR-0142 (issue #1494): the app-level transient-event
-                    feedback face. The single Toaster mounts at the shell root
-                    so its viewport (main-area column top, measured -- never a
-                    child of the main area's transforming subtree) never rides
-                    a panel mount while in-panel banners keep the panel-present
-                    failure face. Consumers fire toast({...}) from anywhere;
-                    App renders the viewport and nothing else. */}
-                <Toaster />
               </div>
+              {/* ADR-0142 (issue #1494): the app-level transient-event
+                  feedback face. Sits OUTSIDE the shell div -- the
+                  settings-mode display swap (styles.css) hides every
+                  non-exempt direct shell child, viewport included, and a
+                  failure toast landing during settings must still show --
+                  but INSIDE the root boundary so a throwing consumer node
+                  degrades the app instead of white-screening it. The
+                  viewport (main-area column top, measured) never rides a
+                  panel mount; in-panel banners keep the panel-present
+                  failure face. */}
+              <Toaster />
             </NavigationHistoryProvider>
           </ErrorBoundary>
         </IntlProvider>

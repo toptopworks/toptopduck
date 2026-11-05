@@ -10,8 +10,11 @@ import { useToast, toast } from "../use-toast";
 // multiple toasts stack (the recipe's TOAST_LIMIT cap is deliberately
 // dropped, ADR-0142 Decision 4), the 5s auto-dismiss runs on the clock,
 // hover pauses the countdown, swipe-up removes (swipeDirection matches
-// the column-top placement), and the viewport anchors to the main-area
-// column top. jsdom runs no CSS animations, so radix's close falls back
+// the column-top placement), the viewport anchors to the main-area
+// column top and re-centers through a firing ResizeObserver (the
+// rail-fold re-measure, Decision 3), the close button carries its
+// sr-only name and dismisses, and a closed toast releases the
+// viewport's pointer-events. jsdom runs no CSS animations, so radix's close falls back
 // to immediate unmount -- which is also the reduced-motion posture on
 // the JS side (no behavior waits on animation completion); the CSS side
 // is gated by app.css's global prefers-reduced-motion block, which
@@ -151,5 +154,84 @@ describe("ui toast face (issue #1494)", () => {
       "-translate-x-1/2",
       "z-[100]",
     );
+  });
+
+  it("re-centers the viewport through the fold (ResizeObserver re-fire)", () => {
+    // test-setup's global RO never fires; a spy stub records observed
+    // targets so the test fires the callback of the instance that
+    // actually OBSERVED the main area (the Shell.test precedent) -- a
+    // wiring deletion leaves no observing instance and reddens here.
+    const instances: {
+      cb: ResizeObserverCallback;
+      targets: Element[];
+    }[] = [];
+    class FireableRO {
+      cb: ResizeObserverCallback;
+
+      targets: Element[] = [];
+
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb;
+        instances.push(this);
+      }
+
+      observe(target: Element) {
+        this.targets.push(target);
+      }
+
+      unobserve() {}
+
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", FireableRO);
+    const main = document.createElement("main");
+    main.className = "main-area";
+    document.body.appendChild(main);
+    const rect = vi.spyOn(main, "getBoundingClientRect");
+    rect.mockReturnValue({ left: 200, top: 64, width: 400 } as DOMRect);
+    const { container } = render(<Toaster />);
+    const vp = container.querySelector(
+      "[data-slot=\"toast-viewport\"]",
+    ) as HTMLElement;
+    expect(vp.style.left).toBe("400px");
+    const observer = instances.find((i) => i.targets.includes(main));
+    expect(observer).toBeTruthy();
+    // Rail fold: the column narrows and shifts; RO re-fires on the same
+    // element and the callback must re-measure or the anchor goes stale.
+    rect.mockReturnValue({ left: 100, top: 64, width: 200 } as DOMRect);
+    act(() => {
+      observer!.cb(
+        [{ target: main } as unknown as ResizeObserverEntry],
+        observer as unknown as ResizeObserver,
+      );
+    });
+    expect(vp.style.left).toBe("200px");
+    main.remove();
+  });
+
+  it("names and dismisses through the close button", () => {
+    fireToast({ title: "Closable note" });
+    // The sr-only Close span (dialog.tsx precedent) is the button's
+    // accessible name -- getByRole name-matching proves the label exists.
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByText("Closable note")).toBeNull();
+  });
+
+  it("releases the viewport pointer-events once the toast closes", () => {
+    fireToast({ title: "Releasing note" });
+    // The region wrapper (the ol's parent div, where radix sets the
+    // pointerEvents style) is live while the toast is open -- that IS the
+    // hover-pause affordance.
+    const wrapper = viewportEl().parentElement as HTMLElement;
+    expect(wrapper.style.pointerEvents).toBe("");
+    act(() => {
+      vi.advanceTimersByTime(5001);
+    });
+    // Closed: radix Presence unmounts the closed toast (jsdom skips the
+    // exit animation), the toast count returns to zero, and the wrapper
+    // switches itself off -- a dismissed toast leaves no invisible
+    // click-intercepting strip over the column top.
+    expect(screen.queryByText("Releasing note")).toBeNull();
+    expect(wrapper.style.pointerEvents).toBe("none");
   });
 });

@@ -13,8 +13,9 @@ import { toastVariants } from "./toast-variants";
 
 // shadcn radix-toast copy-in (ADR-0142, issue #1494): the radix-family
 // toast primitives on the repo's token system. The viewport mounts once
-// at the shell root via toaster.tsx (never inside the main area, whose
-// collapse-slide transforms would trap a fixed child) and follows the
+// at the shell root via toaster.tsx (never inside the main area's
+// transforming subtree -- the collapse-slide transforms on its bar-slot
+// descendants would trap a fixed child) and follows the
 // main-area column -- the conversation pane host, ADR-0092's stable
 // `.main-area` class -- at its horizontal center and top edge. Measured
 // in JS because a fixed element cannot read sibling geometry from CSS;
@@ -23,10 +24,12 @@ import { toastVariants } from "./toast-variants";
 // sits above the z-50 overlay family so a failure landing under an open
 // dialog still shows. Wording-free (ADR-0142 Decision 5): this face
 // carries no copy and no i18n keys; title/description come from the
-// consumer. The sr-only "Close" label rides the dialog.tsx precedent.
+// consumer. The close button's sr-only label and focus-ring width ride
+// the dialog.tsx close-button precedent -- control chrome, not message
+// copy (the ADR's consequences note carves it out).
 
-function useMainAreaAnchor(): { left: number; top: number } | null {
-  const [anchor, setAnchor] = useState<{ left: number; top: number } | null>(
+function useMainAreaAnchor(): { centerX: number; top: number } | null {
+  const [anchor, setAnchor] = useState<{ centerX: number; top: number } | null>(
     null,
   );
 
@@ -35,7 +38,7 @@ function useMainAreaAnchor(): { left: number; top: number } | null {
     if (!mainArea) return;
     const measure = () => {
       const rect = mainArea.getBoundingClientRect();
-      setAnchor({ left: rect.left + rect.width / 2, top: rect.top });
+      setAnchor({ centerX: rect.left + rect.width / 2, top: rect.top });
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;
@@ -62,7 +65,7 @@ function ToastViewport({
       data-slot="toast-viewport"
       style={{
         ...style,
-        ...(anchor ? { left: anchor.left, top: anchor.top } : {}),
+        ...(anchor ? { left: anchor.centerX, top: anchor.top } : {}),
       }}
       className={cn(
         "fixed top-16 left-1/2 z-[100] flex max-h-screen w-full -translate-x-1/2 flex-col gap-2 p-4 md:max-w-[420px]",
@@ -128,13 +131,15 @@ function ToastClose({
     <ToastPrimitives.Close
       data-slot="toast-close"
       className={cn(
-        "text-foreground/50 hover:text-foreground focus:ring-ring absolute top-1 right-1 rounded-md p-1 opacity-0 transition-opacity focus:opacity-100 focus:outline-none group-hover:opacity-100 group-[.destructive]:text-destructive-foreground/70 group-[.destructive]:hover:text-destructive-foreground group-[.destructive]:focus:ring-destructive-foreground/60",
+        "ring-offset-background text-foreground/50 hover:text-foreground focus:ring-ring absolute top-1 right-1 rounded-md p-1 opacity-0 transition-opacity focus:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-none group-hover:opacity-100 group-[.destructive]:text-destructive-foreground/70 group-[.destructive]:hover:text-destructive-foreground group-[.destructive]:focus:ring-destructive-foreground/60",
         className,
       )}
       toast-close=""
       {...props}
     >
       <X data-slot="toast-close-icon" className="size-4" />
+      <span className="sr-only">Close</span>
+
     </ToastPrimitives.Close>
   );
 }
