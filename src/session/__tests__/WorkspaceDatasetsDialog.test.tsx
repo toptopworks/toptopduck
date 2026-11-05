@@ -12,9 +12,9 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
 // The toast store is mocked, not rendered: this panel's contract is the
 // FIRING leg (#1490 -- which failures route to a toast, with which copy);
-// the rendering face is the #1494 infra's own covered ground. The module
-// keeps every vi.fn in one instance for the file, so consuming tests
-// mockClear before asserting.
+// the rendering face is the #1494 infra's own covered ground. The
+// exported `toast` spy is one instance for the file (the panel consumes
+// only the named export), so consuming tests mockClear before asserting.
 vi.mock("../../components/ui/use-toast", () => ({
   useToast: () => ({ toasts: [], toast: vi.fn(), dismiss: vi.fn() }),
   toast: vi.fn(),
@@ -788,7 +788,7 @@ describe("WorkspaceDatasetsDialog", () => {
   });
 
   it("an add failure landing on a rebound panel fires the toast attributed to the origin workspace, the foreign panel stays clean", async () => {
-    // #1493's rebind variant shares the routing: the shared error state has
+    // #1490's rebind variant shares the routing: the shared error state has
     // no workspace attribution, so the banner would narrate a Demo failure
     // on Other's panel and the reopen edge would then destroy it unread.
     // The toast names the origin; the foreign panel takes nothing.

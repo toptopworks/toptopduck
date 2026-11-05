@@ -266,13 +266,15 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
       // The failure routes by where the panel stands at SETTLE time
       // (#1490): on the origin workspace the banner stays the face; off it
       // (closed = null, or rebound to another workspace -- both variants
-      // hit the same comparison) the banner would never be seen, so the
-      // destructive toast carries the message, attributed to the origin.
-      // The panel's live `workspace` reads correctly here because TanStack
-      // runs the callbacks from the LATEST options -- the same hot-swap
-      // semantics #1492 guards against elsewhere is exactly the settle-time
-      // read this routing wants. One failure, one face: the toast branch
-      // never touches the error state.
+      // hit the same comparison) the banner cannot carry the failure:
+      // closed, it renders nowhere and the reopen edge destroys it unread;
+      // rebound, it would narrate the origin's failure on another
+      // workspace's panel. So the destructive toast carries the message,
+      // attributed to the origin. The panel's live `workspace` reads
+      // correctly here because TanStack runs the callbacks from the LATEST
+      // options -- the same hot-swap semantics #1492 flags as a hazard
+      // elsewhere is exactly the settle-time read this routing wants. One
+      // failure, one face: the toast branch never touches the error state.
       if (workspace === null || workspace.path !== v.workspace) {
         toast({
           variant: "destructive",
