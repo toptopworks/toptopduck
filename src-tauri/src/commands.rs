@@ -1065,7 +1065,7 @@ pub async fn get_dataset(
 /// Rename a dataset's display label (ADR-0037, slice 4a issue #8): display-only
 /// -- the reference name is untouched, so SQL / recipe / active references stay
 /// valid. No copy-in, just an in-memory label swap, but the gate wait still
-/// runs off the IPC thread like every lock-taking command (issue #1486).
+/// runs off the IPC thread like every gate-waiting command (issue #1486).
 /// Rejects an unknown reference or a label already shown by another dataset.
 #[tauri::command]
 pub async fn rename_dataset(
@@ -1398,7 +1398,7 @@ pub fn cancel(store: State<'_, Arc<SessionStore>>, session_id: String) -> Result
 /// Read the named session's conversation thread (ADR-0028/0039/0040): the
 /// unified timeline of turns AND source lifecycle events, in order.
 /// A snapshot read of the session history with no copy-in; the gate wait
-/// runs off the IPC thread like every lock-taking command (issue #1486). The
+/// runs off the IPC thread like every gate-waiting command (issue #1486). The
 /// frontend renders this as the always-visible thread (turns + source events);
 /// the window assembler reads only the turns (the session filters source events
 /// out before assembly), so source events never enter the LLM payload.
