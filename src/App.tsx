@@ -52,6 +52,7 @@ import { DegradeCard, ErrorBoundary } from "./components/common/ErrorBoundary";
 import { SettingsView } from "./components/settings/SettingsView";
 import type { SettingsSection, WorkspaceExitIntent } from "./components/settings/sections";
 import { Alert } from "./components/ui/alert";
+import { Toaster } from "./components/ui/toaster";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
@@ -1288,6 +1289,17 @@ export default function App() {
                     void openPersisted(path, name)}
                 />
               </div>
+              {/* ADR-0142 (issue #1494): the app-level transient-event
+                  feedback face. Sits OUTSIDE the shell div -- the
+                  settings-mode display swap (styles.css) hides every
+                  non-exempt direct shell child, viewport included, and a
+                  failure toast landing during settings must still show --
+                  but INSIDE the root boundary so a throwing consumer node
+                  degrades the app instead of white-screening it. The
+                  viewport (main-area column top, measured) never rides a
+                  panel mount; in-panel banners keep the panel-present
+                  failure face. */}
+              <Toaster />
             </NavigationHistoryProvider>
           </ErrorBoundary>
         </IntlProvider>
