@@ -103,7 +103,7 @@ pub async fn check_for_updates(app: AppHandle) -> Result<Option<UpdateInfo>, Str
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
     // Never reuse the discovery check's result (dsh discipline): the manifest
-    // may have moved between the rail icon landing and the click.
+    // may have moved between the topbar indicator landing and the click.
     let updater = updater(&app)?;
     let update = updater
         .check()
@@ -127,18 +127,15 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
     app.restart()
 }
 
-/// Emit a throttled download-progress event: on each whole-percent change when
-/// the content length is known (plus the first chunk so 0% is observable),
-/// every 512 KiB otherwise. A torn-down webview fails the emit; that is the
-/// expected case during exit, so the error is ignored.
-fn emit_progress(
-    app: &AppHandle,
-    downloaded: usize,
+/// The throttle decision (extracted so its test pins the SHIPPED logic, not a
+/// copy): fire on the first chunk and each whole-percent change when the
+/// content length is known, every 512 KiB otherwise.
+fn should_emit_progress(
+    downloaded: u64,
     total: Option<u64>,
     last_percent: &mut Option<u64>,
-) {
-    let downloaded = downloaded as u64;
-    let should_emit = match total {
+) -> bool {
+    match total {
         Some(total) if total > 0 => {
             let percent = (downloaded.saturating_mul(100) / total).min(100);
             let changed = last_percent.is_none() || *last_percent.as_ref().unwrap() != percent;
@@ -148,8 +145,20 @@ fn emit_progress(
             changed
         }
         _ => downloaded % (512 * 1024) == 0,
-    };
-    if should_emit {
+    }
+}
+
+/// Emit a throttled download-progress event via [`should_emit_progress`]. A
+/// torn-down webview fails the emit; that is the expected case during exit,
+/// so the error is ignored.
+fn emit_progress(
+    app: &AppHandle,
+    downloaded: usize,
+    total: Option<u64>,
+    last_percent: &mut Option<u64>,
+) {
+    let downloaded = downloaded as u64;
+    if should_emit_progress(downloaded, total, last_percent) {
         let _ = app.emit(
             DOWNLOAD_PROGRESS_EVENT,
             DownloadProgress {
@@ -242,13 +251,14 @@ mod tests {
 
     /// The percent-step throttle: with a known total, an event fires on the
     /// first chunk and on each whole-percent boundary crossing -- and nowhere
-    /// between (same-percent chunks stay silent).
+    /// between (same-percent chunks stay silent). Pins the production
+    /// [`should_emit_progress`] directly -- the decision the emit path rides.
     #[test]
     fn progress_emits_on_percent_change_only() {
         let mut last = None;
         let mut fired = 0;
         for downloaded in [0u64, 5, 9, 10, 14, 19, 20] {
-            if emit_should_fire(downloaded, Some(1000), &mut last) {
+            if should_emit_progress(downloaded, Some(1000), &mut last) {
                 fired += 1;
             }
         }
@@ -256,25 +266,5 @@ mod tests {
             fired, 3,
             "fires at 0 (first chunk), 10 (1%), 20 (2%); same-percent chunks stay silent"
         );
-    }
-
-    /// Test seam: the emit decision extracted from the closure so the
-    /// throttle is pin-able without an AppHandle.
-    fn emit_should_fire(
-        downloaded: u64,
-        total: Option<u64>,
-        last_percent: &mut Option<u64>,
-    ) -> bool {
-        match total {
-            Some(total) if total > 0 => {
-                let percent = (downloaded.saturating_mul(100) / total).min(100);
-                let changed = last_percent.is_none() || *last_percent.as_ref().unwrap() != percent;
-                if changed {
-                    *last_percent = Some(percent);
-                }
-                changed
-            }
-            _ => downloaded % (512 * 1024) == 0,
-        }
     }
 }

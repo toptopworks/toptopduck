@@ -142,7 +142,7 @@ export const workspaceKeys = {
 } as const;
 
 /** The update-check slice (ADR-0143, issue #1509): one process-wide cached
- *  check -- the startup auto-check populates it; the rail icon and the
+ *  check -- the startup auto-check populates it; the topbar indicator and the
  *  settings block subscribe (enabled:false reads, no mount refetch) and the
  *  settings button re-fetches through fetchQuery. Session-agnostic like the
  *  adapter table / workspace registry above. */

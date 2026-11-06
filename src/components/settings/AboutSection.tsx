@@ -80,7 +80,7 @@ export function AboutSection() {
     setUpToDate(false);
     try {
       const result = await checkForUpdates();
-      // Mirror the fresh result into the shared slice so the rail icon and
+      // Mirror the fresh result into the shared slice so the topbar indicator and
       // this block stay one truth.
       queryClient.setQueryData(updateKeys.check(), result);
       if (result === null) setUpToDate(true);

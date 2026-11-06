@@ -826,6 +826,10 @@ impl SessionStore {
     /// proceeds regardless (the user confirmed the interruption at the update
     /// dialog, so a straggler must not block the exit).
     pub fn shutdown_all(&self, timeout: std::time::Duration) -> usize {
+        /// The poll cadence while waiting for drop signals (each turn's
+        /// cancel-then-discard lands in well under a second; the poll only
+        /// bridges to the signal).
+        const RELEASE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
         let ids: Vec<SessionId> = {
             let map = self
                 .sessions
@@ -859,7 +863,7 @@ impl SessionStore {
                 )
             });
             if !remaining.is_empty() {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(RELEASE_POLL_INTERVAL);
             }
         }
         remaining.len()
