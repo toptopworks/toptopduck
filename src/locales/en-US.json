@@ -580,6 +580,7 @@
   "settings.title": "App Settings",
   "settings.update.available": "Version {version} is available.",
   "settings.update.check": "Check for updates",
+  "settings.update.checkFailed": "Couldn't check for updates",
   "settings.update.checking": "Checking…",
   "settings.update.confirmBody": "In-progress tasks will be interrupted. The app restarts when the update finishes.",
   "settings.update.confirmOk": "Update and restart",

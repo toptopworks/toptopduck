@@ -10,6 +10,7 @@ import { useUpdateAvailable } from "../../shell/useUpdateCheck";
 import { useUpdateInstall } from "../../shell/useUpdateInstall";
 import { UpdateConfirmDialog } from "../../shell/UpdateConfirmDialog";
 import { fmtError } from "../../lib/error-presentation";
+import { TechnicalDetailsFold } from "../common/TechnicalDetailsFold";
 import { Button } from "../ui/button";
 import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
 
@@ -24,13 +25,25 @@ import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
 
 type Phase = "idle" | "checking";
 
+// The inline failure face: a friendly catalog line + the raw reject riding the
+// technical-details fold (issue #119's fold, the shared detail seam).
+type UpdateError = { message: string; detail: string | null };
+
 export function AboutSection() {
   const intl = useIntl();
   const queryClient = useQueryClient();
   const update = useUpdateAvailable();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<UpdateError | null>(null);
   const { installing, percent, confirmOpen, setConfirmOpen, requestInstall, startInstall } =
-    useUpdateInstall(setError);
+    useUpdateInstall((detail) => {
+      setError({
+        message: intl.formatMessage({
+          id: "settings.update.installFailedToast",
+          defaultMessage: "Update failed",
+        }),
+        detail,
+      });
+    });
 
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [checkPhase, setCheckPhase] = useState<Phase>("idle");
@@ -62,7 +75,13 @@ export function AboutSection() {
       queryClient.setQueryData(updateKeys.check(), result);
       if (result === null) setUpToDate(true);
     } catch (e) {
-      setError(fmtError(e, intl));
+      setError({
+        message: intl.formatMessage({
+          id: "settings.update.checkFailed",
+          defaultMessage: "Couldn't check for updates",
+        }),
+        detail: fmtError(e, intl),
+      });
     } finally {
       setCheckPhase("idle");
     }
@@ -175,15 +194,24 @@ export function AboutSection() {
             </p>
           )}
         </SettingsRow>
-
-        {error && <p className="settings-error text-destructive mt-3 text-sm">{error}</p>}
-
-        <UpdateConfirmDialog
-          open={confirmOpen}
-          onOpenChange={setConfirmOpen}
-          onConfirm={() => void startInstall()}
-        />
       </SettingsCard>
+
+      {/* The settings-family error face: a sibling line BELOW the card (the
+          Engine/General/Agents posture) -- inside the card it would pick up
+          the divide-y hairlines and lose the row padding. The raw reject
+          rides the technical-details fold. */}
+      {error && (
+        <>
+          <p className="settings-error text-destructive mt-3 text-sm">{error.message}</p>
+          <TechnicalDetailsFold detail={error.detail} />
+        </>
+      )}
+
+      <UpdateConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        onConfirm={() => void startInstall()}
+      />
     </div>
   );
 }

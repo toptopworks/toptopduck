@@ -580,6 +580,7 @@
   "settings.title": "应用设置",
   "settings.update.available": "新版本 {version} 可用。",
   "settings.update.check": "检查更新",
+  "settings.update.checkFailed": "无法检查更新",
   "settings.update.checking": "检查中…",
   "settings.update.confirmBody": "进行中的任务会中断，更新完成后应用会自动重启。",
   "settings.update.confirmOk": "更新并重启",

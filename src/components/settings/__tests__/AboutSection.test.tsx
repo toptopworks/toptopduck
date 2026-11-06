@@ -70,15 +70,31 @@ describe("AboutSection update block", () => {
     expect(queryClient.getQueryData(updateKeys.check())).toBeNull();
   });
 
-  it("surfaces a failed manual check as an inline error", async () => {
+  it("surfaces a failed manual check as an inline error with the raw detail folded", async () => {
     mockedCheck.mockRejectedValue(new Error("endpoint unreachable"));
     renderPane();
 
     fireEvent.click(screen.getByRole("button", { name: /check for updates/i }));
 
-    await waitFor(() =>
-      expect(screen.getByText(/endpoint unreachable/i)).toBeInTheDocument(),
-    );
+    // The friendly catalog line is primary; the raw reject rides the
+    // technical-details fold.
+    expect(await screen.findByText(/couldn't check for updates/i)).toBeInTheDocument();
+    expect(screen.getByText(/endpoint unreachable/i)).toBeInTheDocument();
+  });
+
+  it("lands an install failure as an inline error with the raw detail folded", async () => {
+    mockedInstall.mockRejectedValue(new Error("signature invalid"));
+    const { queryClient } = renderPane();
+    queryClient.setQueryData(updateKeys.check(), {
+      version: "0.5.0",
+      notes: null,
+      currentVersion: "0.4.0",
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: /update to 0\.5\.0/i }));
+
+    expect(await screen.findByText(/^update failed$/i)).toBeInTheDocument();
+    expect(screen.getByText(/signature invalid/i)).toBeInTheDocument();
   });
 
   it("shows the install button and notes once an update is known", async () => {
