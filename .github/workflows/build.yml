@@ -95,8 +95,9 @@ jobs:
           path: |
             target/release/bundle/msi/*.msi
             target/release/bundle/nsis/*.exe
-            target/release/bundle/dmg/*.dmg
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
             target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
             target/release/bundle/appimage/*.AppImage
             target/universal-apple-darwin/release/bundle/macos/*.app
           if-no-files-found: error

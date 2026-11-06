@@ -47,6 +47,7 @@ function renderIndicator() {
       </IntlProvider>
     </QueryClientProvider>,
   );
+  return queryClient;
 }
 
 const UPDATE = {
@@ -106,6 +107,24 @@ describe("UpdateIndicator", () => {
       await screen.findByRole("button", { name: "Update and restart" }),
     );
     await waitFor(() => expect(mockedInstall).toHaveBeenCalledTimes(1));
+  });
+
+  it("cannot start a second install while one is already in flight", async () => {
+    // The shared in-flight gate (the slice is process-wide): a confirm leg
+    // opened on this face must go dark when another face (the About pane)
+    // already started the chain -- exactly one Rust install may run.
+    mockedLive.mockResolvedValue([{ sid: "s", in_flight: true } as never]);
+    const queryClient = renderIndicator();
+    fireEvent.click(
+      screen.getByRole("button", { name: "New version 0.5.0 available" }),
+    );
+    const confirm = await screen.findByRole("button", {
+      name: "Update and restart",
+    });
+    // The other face's startInstall already wrote the slice.
+    queryClient.setQueryData(updateKeys.install(), { percent: null });
+    fireEvent.click(confirm);
+    expect(mockedInstall).not.toHaveBeenCalled();
   });
 
   it("toasts a destructive failure and returns to the idle posture", async () => {

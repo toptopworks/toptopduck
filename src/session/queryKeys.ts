@@ -142,10 +142,10 @@ export const workspaceKeys = {
 } as const;
 
 /** The update-check slice (ADR-0143, issue #1509): one process-wide cached
- *  check -- the startup auto-check populates it; the topbar indicator and the
- *  settings block subscribe (enabled:false reads, no mount refetch) and the
- *  settings button re-fetches through fetchQuery. Session-agnostic like the
- *  adapter table / workspace registry above. */
+ *  check -- the startup auto-check populates it; the sidebar indicator and
+ *  the settings block subscribe (enabled:false reads, no mount refetch) and
+ *  the settings button re-fetches through fetchQuery. Session-agnostic like
+ *  the adapter table / workspace registry above. */
 export const updateKeys = {
   check: () => ["update-check"] as const,
   /** The install-in-flight slice: `{ percent: number | null } | null`. An

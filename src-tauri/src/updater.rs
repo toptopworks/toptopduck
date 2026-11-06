@@ -46,9 +46,20 @@ const SHUTDOWN_RELEASE_WAIT: Duration = Duration::from_secs(10);
 /// Decision 2): `msiexec /passive /promptrestart` may restart the machine
 /// without asking when files are in use -- `REBOOT=ReallySuppress` as an
 /// installer property is the only defense. Rides both Windows updater branches
-/// (harmlessly ignored by the NSIS template).
-#[cfg(windows)]
+/// (harmlessly ignored by the NSIS template). Unconditional so its pin test
+/// runs on every CI OS (the test legs are Linux-only); only the use site is
+/// cfg(windows).
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const WINDOWS_INSTALLER_ARGS: &[&str] = &["REBOOT=ReallySuppress"];
+
+/// The total request timeout for the check and download requests. The plugin
+/// defaults to NO timeout ("the requests do not time out"), and the install
+/// overlay is dismiss-free -- a stalled mirror would wedge the whole UI with
+/// the install gate locked until the process is killed. reqwest's timeout is
+/// total (connect through the last body byte), so the bound must also cover a
+/// slow-network large payload: 300s spans a ~150MB updater package at
+/// ~0.5MB/s, while still bounding a zero-byte stall.
+const UPDATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The IPC-visible face of a discovered update: the target version, its
 /// release notes, and the running version for display.
@@ -76,6 +87,7 @@ fn updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     let cleanup_app = app.clone();
     let builder = app
         .updater_builder()
+        .timeout(UPDATE_REQUEST_TIMEOUT)
         .on_before_exit(move || cleanup_before_update_exit(&cleanup_app));
     #[cfg(windows)]
     let builder = builder.installer_args(WINDOWS_INSTALLER_ARGS);
@@ -103,7 +115,7 @@ pub async fn check_for_updates(app: AppHandle) -> Result<Option<UpdateInfo>, Str
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
     // Never reuse the discovery check's result (dsh discipline): the manifest
-    // may have moved between the topbar indicator landing and the click.
+    // may have moved between the sidebar indicator landing and the click.
     let updater = updater(&app)?;
     let update = updater
         .check()
@@ -112,12 +124,24 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
         .ok_or_else(|| "no update available".to_string())?;
     let progress_app = app.clone();
     let mut last_percent: Option<u64> = None;
+    // The plugin's on_before_exit hook is Windows-only in 2.14.1 (its single
+    // call site sits inside the Windows install_inner), so macOS and Linux
+    // run the session-release half of the cleanup from the download-finished
+    // callback instead: after the payload has verified, before the installer
+    // replaces files -- a failed download leaves every session intact. Core
+    // cleanup is left to restart()'s normal exit path.
+    #[cfg(not(windows))]
+    let finish_app = app.clone();
+    #[cfg(not(windows))]
+    let on_download_finish = move || shutdown_sessions_and_save_state(&finish_app);
+    #[cfg(windows)]
+    let on_download_finish = || {};
     update
         .download_and_install(
             move |downloaded, total| {
                 emit_progress(&progress_app, downloaded, total, &mut last_percent);
             },
-            || {},
+            on_download_finish,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -169,14 +193,13 @@ fn emit_progress(
     }
 }
 
-/// The pre-exit cleanup chain (ADR-0143 Decision 5), riding `on_before_exit`
-/// because Windows `install()` bypasses every exit hook. Order matters:
-/// sessions first (their release reaps the external CLI children and their
-/// bridge sidecars, and drops each in-memory DuckDB), then the explicit
-/// window-state save, then the Tauri core cleanup (tray icon, resource
-/// tables). Every step is best-effort-logged: the update exit proceeds even
-/// when a step degrades -- the user confirmed the interruption at the dialog.
-fn cleanup_before_update_exit(app: &AppHandle) {
+/// The session-release half of the update cleanup: cancel + detach every live
+/// session (their release reaps the external CLI children and bridge sidecars
+/// and drops each in-memory DuckDB), then the explicit window-state save.
+/// Shared by the Windows `on_before_exit` chain and the non-Windows
+/// download-finished seam. Best-effort-logged: the update proceeds even when
+/// a step degrades -- the user confirmed the interruption at the dialog.
+fn shutdown_sessions_and_save_state(app: &AppHandle) {
     if let Some(store) = app.try_state::<std::sync::Arc<SessionStore>>() {
         let stragglers = store.shutdown_all(SHUTDOWN_RELEASE_WAIT);
         if stragglers > 0 {
@@ -194,6 +217,14 @@ fn cleanup_before_update_exit(app: &AppHandle) {
     } {
         log::warn!("update-exit cleanup: window-state save failed: {e}");
     }
+}
+
+/// The pre-exit cleanup chain (ADR-0143 Decision 5), riding `on_before_exit`
+/// because Windows `install()` bypasses every exit hook: session release +
+/// window state (above), then the Tauri core cleanup (tray icon, resource
+/// tables).
+fn cleanup_before_update_exit(app: &AppHandle) {
+    shutdown_sessions_and_save_state(app);
     app.cleanup_before_exit();
 }
 
@@ -227,8 +258,8 @@ mod tests {
 
     /// The reboot-suppression property is the only defense against a silent
     /// machine restart on the MSI path; freeze the literal so a refactor
-    /// cannot drop or rename it unnoticed.
-    #[cfg(windows)]
+    /// cannot drop or rename it unnoticed. Runs on every OS (the const is
+    /// unconditional; only the use site is cfg(windows)).
     #[test]
     fn windows_installer_args_pin_reboot_suppression() {
         assert_eq!(WINDOWS_INSTALLER_ARGS, &["REBOOT=ReallySuppress"]);
@@ -247,6 +278,20 @@ mod tests {
         assert_eq!(json["version"], "0.5.0");
         assert_eq!(json["notes"], "notes");
         assert_eq!(json["currentVersion"], "0.4.0");
+    }
+
+    /// The progress payload's camelCase is equally load-bearing (the frontend
+    /// reads `contentLength`; a dropped rename yields a forever-null percent
+    /// with zero errors), so it gets the same pin.
+    #[test]
+    fn download_progress_serializes_camel_case() {
+        let payload = DownloadProgress {
+            downloaded: 512,
+            content_length: Some(1024),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["downloaded"], 512);
+        assert_eq!(json["contentLength"], 1024);
     }
 
     /// The percent-step throttle: with a known total, an event fires on the

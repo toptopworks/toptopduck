@@ -5,7 +5,7 @@ import { updateKeys } from "../session/queryKeys";
 
 /** The startup auto-check delay (ADR-0143 Decision 4): 1s after mount, single
  *  shot, no polling -- past the first-paint window so the check never
- *  contends with boot, soon enough that the topbar indicator lands with the first
+ *  contends with boot, soon enough that the sidebar indicator lands with the first
  *  meaningful glance. */
 const STARTUP_DELAY_MS = 1000;
 
@@ -37,9 +37,9 @@ export function useStartupUpdateCheck(): void {
 /** Pure subscription to the shared update-check slice: what the startup
  *  auto-check (or a manual settings-page check) last landed, `null` while no
  *  update is known. Never fetches on its own -- the `enabled: false` query is
- *  a cache listener, so the topbar indicator and the settings block both mirror the
- *  one process-wide truth without triggering mount-time fetches (the 1s
- *  startup delay must own the first network touch). */
+ *  a cache listener, so the sidebar indicator and the settings block both
+ *  mirror the one process-wide truth without triggering mount-time fetches
+ *  (the 1s startup delay must own the first network touch). */
 export function useUpdateAvailable(): UpdateInfo | null {
   const { data } = useQuery({
     queryKey: updateKeys.check(),

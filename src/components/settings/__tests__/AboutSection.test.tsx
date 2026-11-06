@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 
 import { AboutSection } from "../AboutSection";
 import {
   checkForUpdates,
   installUpdate,
   listLiveSessions,
+  onUpdateDownloadProgress,
 } from "../../../api";
 import { updateKeys } from "../../../session/queryKeys";
 import { renderSettings } from "./helpers";
@@ -38,6 +39,7 @@ vi.mock("@tauri-apps/api/app", async (importOriginal) => {
 const mockedCheck = vi.mocked(checkForUpdates);
 const mockedInstall = vi.mocked(installUpdate);
 const mockedLive = vi.mocked(listLiveSessions);
+const mockedProgress = vi.mocked(onUpdateDownloadProgress);
 
 function renderPane() {
   return renderSettings(<AboutSection />);
@@ -153,5 +155,44 @@ describe("AboutSection update block", () => {
     fireEvent.click(screen.getByRole("button", { name: /update and restart/i }));
 
     await waitFor(() => expect(mockedInstall).toHaveBeenCalledTimes(1));
+  });
+
+  it("drives the install percent from the download progress events", async () => {
+    // The producer face: the Rust download events flow through the
+    // subscription into the shared install slice and onto the button's
+    // percent wording -- the floor, the clamp, and the null-total guard all
+    // live on this path (the suites previously mocked the subscription as a
+    // no-op, leaving the whole producer unexecuted).
+    let progress:
+      | ((p: { downloaded: number; contentLength: number | null }) => void)
+      | null = null;
+    mockedProgress.mockImplementationOnce(async (cb) => {
+      progress = cb;
+      return () => {};
+    });
+    mockedInstall.mockReturnValue(new Promise(() => {}));
+    const { queryClient } = renderPane();
+    queryClient.setQueryData(updateKeys.check(), {
+      version: "0.5.0",
+      notes: null,
+      currentVersion: "0.4.0",
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /update to 0\.5\.0/i }),
+    );
+    await waitFor(() => expect(progress).not.toBeNull());
+    expect(screen.getByRole("button", { name: "Updating…" })).toBeInTheDocument();
+
+    act(() => progress?.({ downloaded: 150, contentLength: 200 }));
+    expect(
+      await screen.findByRole("button", { name: "Updating… 75%" }),
+    ).toBeInTheDocument();
+
+    // Unknown total collapses back to the unquantified posture (no NaN).
+    act(() => progress?.({ downloaded: 10, contentLength: null }));
+    expect(
+      await screen.findByRole("button", { name: "Updating…" }),
+    ).toBeInTheDocument();
   });
 });
