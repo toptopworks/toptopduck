@@ -27,6 +27,29 @@ pub fn copy_in(
     alias: &str,
     reader_fn: &str,
 ) -> Result<Snapshot, LoadError> {
+    copy_in_impl(src, temp_dir, alias, reader_fn, true)
+}
+
+/// The shape-only face of [`copy_in`] for the shared store (issue #1506):
+/// identical build and shape derivation EXCEPT no content fingerprint pass
+/// -- the store's identity is its content key, so the returned snapshot's
+/// `fingerprint` is empty and the store layer backfills the key.
+pub fn copy_in_shape(
+    src: &Path,
+    temp_dir: &Path,
+    alias: &str,
+    reader_fn: &str,
+) -> Result<Snapshot, LoadError> {
+    copy_in_impl(src, temp_dir, alias, reader_fn, false)
+}
+
+fn copy_in_impl(
+    src: &Path,
+    temp_dir: &Path,
+    alias: &str,
+    reader_fn: &str,
+    derive_fingerprint: bool,
+) -> Result<Snapshot, LoadError> {
     // The caller may hand us the tree snapshot directory that does not exist
     // yet (first ingest into a fresh session tree, ADR-0136 D1) -- create it
     // so Connection::open below can land the file. Idempotent for the temp
@@ -67,7 +90,11 @@ pub fn copy_in(
             other => other,
         };
         attempt.map_err(parse_err)?;
-        Snapshot::from_connection(&conn, file_path.clone(), temp_dir)
+        if derive_fingerprint {
+            Snapshot::from_connection(&conn, file_path.clone(), temp_dir)
+        } else {
+            Snapshot::from_connection_shape(&conn, file_path.clone())
+        }
     })(); // conn dropped -> file closed before the session re-attaches it
 
     match result {

@@ -279,41 +279,51 @@ fn write_entries(workspace: &Path, entries: &[DatasetEntry]) -> Result<(), Store
 }
 
 /// Re-open a landed store file READ_ONLY and re-derive its shape (the
-/// zero-conversion hit path, ADR-0141 D2).
-fn reopen_read_only(workspace: &Path, dest: PathBuf) -> Result<Snapshot, StoreError> {
+/// zero-conversion hit path, ADR-0141 D2). Shape only -- the identity is
+/// the content key recovered from the file name, not a table-content
+/// fingerprint (issue #1506).
+fn reopen_read_only(dest: PathBuf) -> Result<Snapshot, StoreError> {
     let config = Config::default()
         .access_mode(AccessMode::ReadOnly)
         .map_err(StoreError::io)?;
     let conn = Connection::open_with_flags(&dest, config).map_err(StoreError::io)?;
-    Snapshot::from_connection(&conn, dest, &store_dir(workspace)).map_err(StoreError::from)
+    let snap = Snapshot::from_connection_shape(&conn, dest).map_err(StoreError::from)?;
+    Ok(Snapshot {
+        fingerprint: store_fingerprint(&snap.file_path),
+        ..snap
+    })
 }
 
 /// Materialize `src` into the store under its content key: a hit opens the
 /// existing snapshot READ_ONLY and re-derives its shape (zero conversion); a
 /// miss copies in through the shared loader under a temp name and atomically
 /// renames (single physical file, no parallel writers -- ADR-0141 D2).
+/// Both paths derive shape only -- no table-content fingerprint pass; the
+/// identity is the store key itself (issue #1506).
 pub fn materialize(workspace: &Path, src: &Path, reader: &str) -> Result<Snapshot, StoreError> {
     let key = sha256_file(src)?;
     let dest = store_file(workspace, &key);
     if dest.exists() {
-        return reopen_read_only(workspace, dest);
+        return reopen_read_only(dest);
     }
 
     fs::create_dir_all(store_dir(workspace)).map_err(StoreError::io)?;
     let temp_stem = format!("{TEMP_PREFIX}{}-{}", key, std::process::id());
     // copy_in owns its own failure cleanup (partial files are removed); on
-    // success the built file is renamed into its content-keyed name.
-    let snap = loader::copy_in(src, &store_dir(workspace), &temp_stem, reader)?;
+    // success the built file is renamed into its content-keyed name. The
+    // shape-only face skips the fingerprint pass -- the key IS the identity.
+    let snap = loader::copy_in_shape(src, &store_dir(workspace), &temp_stem, reader)?;
     match fs::rename(&snap.file_path, &dest) {
         Ok(()) => Ok(Snapshot {
             file_path: dest,
+            fingerprint: key,
             ..snap
         }),
         Err(_) if dest.exists() => {
             // Another writer landed the same key first (cross-process); the
             // store's file wins and the redundant temp is dropped.
             let _ = fs::remove_file(&snap.file_path);
-            reopen_read_only(workspace, dest)
+            reopen_read_only(dest)
         }
         Err(e) => {
             let _ = fs::remove_file(&snap.file_path);
@@ -705,6 +715,32 @@ mod tests {
             .expect("store dir")
             .count();
         assert_eq!(files, 1, "one physical file for one content key");
+    }
+
+    /// The snapshot's identity on the shared face is the store key (the
+    /// source bytes' SHA256) -- NOT a table-content fingerprint: both the
+    /// miss and hit paths skip the full-table CSV dump + hash pass
+    /// (issue #1506), so a GB-scale import pays neither the export cost nor
+    /// its transient disk spike, and a content hit is hash + metadata only.
+    /// The price fixture guarantees the two hashes differ as text: the
+    /// source keeps `1.50` while a table dump would render the DOUBLE as
+    /// `1.5`.
+    #[test]
+    fn shared_snapshot_identity_is_the_store_key_on_both_paths() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = csv(sources.path(), "prices.csv", "item,price\nwidget,1.50\n");
+        let key = format!("{:x}", Sha256::digest(fs::read(&src).expect("src bytes")));
+        let miss = materialize(workspace.path(), &src, "read_csv_auto").expect("miss");
+        assert_eq!(
+            miss.fingerprint, key,
+            "the miss path does not derive a table-content hash"
+        );
+        let hit = materialize(workspace.path(), &src, "read_csv_auto").expect("hit");
+        assert_eq!(
+            hit.fingerprint, key,
+            "the hit path does not derive a table-content hash"
+        );
     }
 
     /// Different content under the same stem materializes to a different

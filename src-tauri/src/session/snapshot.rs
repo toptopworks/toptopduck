@@ -4,6 +4,9 @@
 //! Shared by source copy-in (the data table on an attached read-only snapshot)
 //! and turn-result materialization (a result_N physical table, ADR-0024) -- the
 //! derivation is table-shape-agnostic, so DRY holds across both paths.
+//! The shape-only face (`derive_shape` / `Snapshot::from_connection_shape`)
+//! skips the fingerprint for surfaces whose identity is already known by
+//! other means (the shared store's content key, issue #1506).
 
 use std::fs;
 use std::io::Read;
@@ -44,10 +47,23 @@ pub struct TableShape {
     pub columns: Vec<ColumnSchema>,
     pub row_count: u64,
     pub sample: Vec<Vec<String>>,
+    /// Empty on the shape-only face (`derive_shape`): identity is external
+    /// there and the caller backfills it (issue #1506) -- never persist or
+    /// compare an empty fingerprint.
     pub fingerprint: String,
 }
 
 impl Snapshot {
+    fn from_shape(file_path: PathBuf, shape: TableShape) -> Self {
+        Self {
+            file_path,
+            columns: shape.columns,
+            row_count: shape.row_count,
+            sample: shape.sample,
+            fingerprint: shape.fingerprint,
+        }
+    }
+
     /// Derive a source snapshot's descriptor from its data table on conn.
     /// work_dir holds the transient fingerprint dump (removed after hashing).
     pub fn from_connection(
@@ -60,13 +76,18 @@ impl Snapshot {
             .and_then(|s| s.to_str())
             .unwrap_or("snap");
         let shape = derive_table(conn, "data", work_dir, stem)?;
-        Ok(Self {
-            file_path,
-            columns: shape.columns,
-            row_count: shape.row_count,
-            sample: shape.sample,
-            fingerprint: shape.fingerprint,
-        })
+        Ok(Self::from_shape(file_path, shape))
+    }
+
+    /// The shape-only face of [`Self::from_connection`]: derive the
+    /// descriptor's shape facts without the content fingerprint pass -- no
+    /// CSV dump, no full-table scan, no work dir. For surfaces whose
+    /// identity is external (the shared store's content key IS its file
+    /// name); `fingerprint` stays empty and the caller backfills the real
+    /// identity (issue #1506).
+    pub fn from_connection_shape(conn: &Connection, file_path: PathBuf) -> Result<Self, LoadError> {
+        let shape = derive_shape(conn, "data")?;
+        Ok(Self::from_shape(file_path, shape))
     }
 }
 
@@ -81,15 +102,31 @@ pub fn derive_table(
     work_dir: &Path,
     dump_stem: &str,
 ) -> Result<TableShape, LoadError> {
+    let shape = derive_shape(conn, table)?;
+    let fingerprint = fingerprint_table(conn, work_dir, dump_stem, table)?;
+    // The field contract, executable: only the shape-only face may leave
+    // the fingerprint empty for the caller to backfill.
+    debug_assert!(!fingerprint.is_empty());
+    Ok(TableShape {
+        fingerprint,
+        ..shape
+    })
+}
+
+/// The shape-only core of [`derive_table`]: canonical schema, row count,
+/// frozen first-3-row sample, and NO content fingerprint (no CSV dump, no
+/// full-table scan). For surfaces whose identity is already known by other
+/// means -- the shared store, whose key IS its file name (issue #1506);
+/// `fingerprint` stays empty for the caller to backfill.
+fn derive_shape(conn: &Connection, table: &str) -> Result<TableShape, LoadError> {
     let columns = describe_table(conn, table)?;
     let row_count = count_rows(conn, table)?;
     let sample = read_table_sample(conn, &columns, table)?;
-    let fingerprint = fingerprint_table(conn, work_dir, dump_stem, table)?;
     Ok(TableShape {
         columns,
         row_count,
         sample,
-        fingerprint,
+        fingerprint: String::new(),
     })
 }
 
