@@ -132,9 +132,8 @@ export interface UseSessionState {
   // QuestionBar consumer accepts it via void-return covariance.
   handleAsk: (question: string, invocations?: string[]) => Promise<void>;
   handleCancel: () => Promise<void>;
-  /** The synchronous live-turn probe (mirrors UseTurnFlow, issue #1503):
-   *  ref-truth accurate off the render cycle -- the composer queue's settle
-   *  continuation probes this, never the lagging liveTurn state. */
+  /** The synchronous live-turn probe (mirrors UseTurnFlow.hasLiveTurn,
+   *  issue #1503). */
   hasLiveTurn: () => boolean;
   handleIngest: (path: string) => void;
   /** Multi-file ingest from the composer "+" file section (ADR-0083, issue

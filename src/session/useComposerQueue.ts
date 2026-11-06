@@ -51,9 +51,8 @@ export interface ComposerQueueDeps {
   ask: (question: string, invocations?: string[]) => Promise<void>;
   onSeedDraft: (sessionId: string, question: string) => void;
   onSeedInvocations: (sessionId: string, names: string[]) => void;
-  /** The synchronous live-turn probe (useTurnFlow's liveRef, issue #1503):
-   *  the settle continuation runs off the render cycle, so it must probe
-   *  the ref-truth, not the lagging liveTurn state. */
+  /** The synchronous live-turn probe (issue #1503); the ref-truth contract
+   *  lives on UseTurnFlow.hasLiveTurn. */
   hasLiveTurn: () => boolean;
 }
 
