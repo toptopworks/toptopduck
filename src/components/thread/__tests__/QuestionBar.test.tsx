@@ -140,6 +140,51 @@ describe("QuestionBar keyboard submit (Enter / Shift+Enter / IME)", () => {
   });
 });
 
+describe("QuestionBar queued posture (#1500)", () => {
+  it("disables the input and shows the queued copy while a question waits behind a batch", () => {
+    const onSubmit = vi.fn();
+    renderQuestionBar(
+      <QuestionBar onSubmit={onSubmit} onCancel={() => {}} loading={false} queued={true} />,
+    );
+    // The queued posture is a NEW axis -- the turn-domain loading stays
+    // false, so the submit button still renders (not the stop button), but
+    // the input is disabled and the status slot carries the queued copy.
+    expect(screen.getByLabelText("提问")).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("已排队，导入完成后自动发送…");
+    expect(screen.queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "提问" })).toBeDisabled();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("does not submit a prefilled draft while queued (belt-and-suspenders)", () => {
+    // The input is disabled while queued, so a typed path cannot reach the
+    // guard; the form-submit event is the bypass the guard exists for -- a
+    // controlled draft must not submit out from under the queued posture.
+    const onSubmit = vi.fn();
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={onSubmit}
+        onCancel={() => {}}
+        loading={false}
+        queued={true}
+        draft="排队期间预填"
+        setDraft={() => {}}
+      />,
+    );
+    fireEvent.submit(screen.getByRole("textbox", { name: "提问" }));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("keeps the plain posture when queued is absent or false", () => {
+    const onSubmit = vi.fn();
+    renderQuestionBar(
+      <QuestionBar onSubmit={onSubmit} onCancel={() => {}} loading={false} queued={false} />,
+    );
+    expect(screen.getByLabelText("提问")).toBeEnabled();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+});
+
 describe("QuestionBar controlled draft mode (ADR-0092)", () => {
   it("renders the controlled draft and routes edits to setDraft", () => {
     const setDraft = vi.fn();

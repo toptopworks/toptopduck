@@ -11,9 +11,9 @@ import { log } from "../lib/log";
 // Per-session drafts (ADR-0092 Decision 6): the hook owns a
 // Record<sessionId, string> for open sessions + a separate cold-start draft.
 // The draft switches per activeSessionId — each keep-alive session retains its
-// own input text across switches. The turn-flow outputs (loading / phase /
-// handleAsk / handleCancel / handleIngestFiles) are passed through the
-// `session` parameter and merged with the owned drafts.
+// own input text across switches. The session-reported fields (loading /
+// queued / phase / handleAsk / handleCancel / handleIngestFiles) are passed
+// through the `session` parameter and merged with the owned drafts.
 
 // Session-derived bar fields the hook can't own yet (sourced from
 // useSessionState -> useTurnFlow). Passed in by the caller and merged with the
@@ -23,6 +23,12 @@ export interface ComposerSessionFields {
    *  turnLoading, not the union loading. A dataset/ingest mutation's
    *  in-flight window must not flip the bar's Ask/Stop button. */
   loading: boolean;
+  /** The composer question's queued posture (issue #1500): true while the
+   *  session holds a question in the pending slot behind an in-flight ingest
+   *  batch -- the bar disables the input and shows the queued copy. A NEW
+   *  axis owned by useComposerQueue; it deliberately does NOT fold into
+   *  `loading` (the turn-domain ruling above). */
+  queued: boolean;
   phase: TurnPhase | null;
   /** The turn clock (issue #1264 turn-clock ruling): the bar's phase label
    *  derives its continuous elapsed-seconds figure from it, freezing while
@@ -31,8 +37,9 @@ export interface ComposerSessionFields {
   turnPausedSince: number | null;
   handleAsk: (question: string, invocations?: string[]) => Promise<void>;
   handleCancel: () => Promise<void>;
-  /** Multi-file ingest from the composer "+" file section (ADR-0083). Routed
-   *  through useIngestFlow's handleIngestMany inside SessionPane. */
+  /** Multi-file ingest from the composer "+" file section (ADR-0083).
+   *  Routed through useComposerQueue's tracked ingestMany (wrapping
+   *  useIngestFlow's handleIngestMany) inside SessionPane. */
   handleIngestFiles: (paths: string[]) => void;
   /** The session pane's workspace fold (ADR-0083). Bar-shaping, not
    *  turn-flow: the shell-level bar slot mirrors the pane's conversation-column
@@ -82,6 +89,7 @@ const idleHandleIngestFiles = (): void => {};
  *  session has not reported its fields yet. */
 export const IDLE_SESSION_FIELDS: ComposerSessionFields = {
   loading: false,
+  queued: false,
   phase: null,
   turnStartedAt: null,
   turnPausedSince: null,

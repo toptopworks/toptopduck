@@ -19,11 +19,20 @@ import { log } from "../lib/log";
 // the same halt: the staged invocations seed back into the staging too, so a
 // resubmit carries both (the question to the draft, the names to the
 // staging), never the question alone.
+//
+// Since #1500 the held question's EXIT is owned by the composer queue slot
+// (useComposerQueue): files+question payloads hold the question into the
+// slot at arming time (the slot's settle fires it on a full load and seeds
+// it back through onSeedDraft / onSeedInvocations on a halt), so the chain
+// itself neither awaits the verdict nor asks, and a bar submit during the
+// chain window lands in the SAME single slot -- inert while occupied, so
+// the session can never carry two pending questions at once. A files-only
+// payload just arms the batch (the empty slot's settle is a no-op exit). A
+// bare question (no files) has no batch to hold behind, so it asks directly.
 // ask catches its own failures internally (sets the session error state)
 // and never intentionally rejects; the `.catch` below is a defensive log so
 // an unexpected throw surfaces instead of becoming an unhandled rejection.
 export type PendingPayloadDeps = {
-  sessionId: string;
   paths: string[];
   question: string | null;
   invocations: string[];
@@ -31,17 +40,21 @@ export type PendingPayloadDeps = {
   consumedRef: RefObject<string | null>;
   onIngestConsumed: () => void;
   onQuestionConsumed: () => void;
-  onSeedDraft: (sessionId: string, question: string) => void;
-  onSeedInvocations: (sessionId: string, names: string[]) => void;
+  /** The tracked ingestMany (#1500): arming routes through the composer
+   *  queue, whose settle owns the held question's exit. */
   ingestMany: (paths: string[]) => Promise<boolean>;
+  /** Occupy the queue slot with the held question (#1500): the settle exits
+   *  fire it exactly like a bar submit, so the chain neither awaits the
+   *  verdict nor asks itself. */
+  hold: (question: string, invocations: string[]) => void;
   ask: (question: string, invocations: string[]) => Promise<void>;
 };
 
 export async function consumePendingPayload(deps: PendingPayloadDeps): Promise<void> {
   const {
-    sessionId, paths, question, invocations, consumedRef,
-    onIngestConsumed, onQuestionConsumed, onSeedDraft, onSeedInvocations,
-    ingestMany, ask,
+    paths, question, invocations, consumedRef,
+    onIngestConsumed, onQuestionConsumed,
+    ingestMany, hold, ask,
   } = deps;
   if (paths.length === 0 && question === null) return;
   // JSON.stringify makes the (paths, question, invocations) triple
@@ -52,12 +65,15 @@ export async function consumePendingPayload(deps: PendingPayloadDeps): Promise<v
   if (paths.length > 0) onIngestConsumed();
   if (question !== null) onQuestionConsumed();
   if (paths.length > 0) {
-    const allLoaded = await ingestMany(paths);
-    if (!allLoaded) {
-      if (question !== null) onSeedDraft(sessionId, question);
-      if (invocations.length > 0) onSeedInvocations(sessionId, invocations);
-      return;
-    }
+    // Arm the tracked batch: the slot owns the held question's exit (settle
+    // true auto-sends with the invocations, settle false seeds both back
+    // through the #991 channels). Holding is synchronous, within the same
+    // task as the arming, so the slot is occupied before any settle
+    // continuation can run -- the session cannot carry two pending
+    // questions at once.
+    ingestMany(paths);
+    if (question !== null) hold(question, invocations);
+    return;
   }
   if (question !== null) {
     // ADR-0119: the staged names are the first ask's user invocations --

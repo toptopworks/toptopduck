@@ -9,6 +9,7 @@ import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useRailFollow } from "./useRailFollow";
 import { useSessionState } from "./useSessionState";
+import { useComposerQueue } from "./useComposerQueue";
 import { consumePendingPayload } from "./pendingPayload";
 import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
@@ -39,8 +40,9 @@ import { useSkillsRegistry } from "../skills/registry";
 //
 // ADR-0092: QuestionBar moved to the shell level. SessionPane no longer owns
 // the bar or its composer controls. It reports its bar-relevant fields
-// (loading / phase / handleAsk / handleCancel / handleIngestFiles) upward via
-// onComposerFields so the shell-level bar can read them for the active session.
+// (loading / queued / phase / handleAsk / handleCancel / handleIngestFiles)
+// upward via onComposerFields so the shell-level bar can read them for the
+// active session.
 // Pending payloads from a cold-start submit (#500) are consumed on mount by
 // consumePendingPayload (pendingPayload.ts) -- the ordering contract and its
 // history live in that module header.
@@ -65,16 +67,18 @@ interface SessionPaneProps {
   onIngestConsumed: () => void;
   /** ADR-0092: a pending question from the shell-level cold-start bar. Set
    *  when the user submits from the centered bar with no active session; the
-   *  shell creates a session carrying the question, and SessionPane fires it
-   *  via handleAsk once the pending ingest settles. null once consumed or for
-   *  sessions opened by any other action. */
+   *  shell creates a session carrying the question, and the pane holds it
+   *  into the composer queue slot (#1500), whose settle auto-sends it once
+   *  the pending ingest fully loads (seeding it back on a halt). null once
+   *  consumed or for sessions opened by any other action. */
   pendingQuestion: string | null;
   /** The skill names staged on the cold-start bar beside the pending
    *  question (ADR-0119: the first ask's user invocations). Consumed in the
    *  same one-shot effect; cleared by onQuestionConsumed. */
   pendingSkillInvocations: string[];
-  /** ADR-0092: shell callback after the pending question is fired, so the
-   *  OpenSession entry is cleared and a remount cannot re-fire. */
+  /** ADR-0092: shell callback after the pane takes the pending question
+   *  into the queue slot, so the OpenSession entry is cleared and a remount
+   *  cannot re-fire. */
   onQuestionConsumed: () => void;
   /** #500: hand a held-back pending question back into the bar draft. Fires
    *  when the pending ingest batch halts (NeedsGuidance / Error): the
@@ -86,9 +90,9 @@ interface SessionPaneProps {
    *  re-seed -- the staged names go back into the session's composer
    *  staging, so a resubmit carries the pick + question pair whole. */
   onSeedInvocations: (sessionId: string, names: string[]) => void;
-  /** ADR-0092: lifts this session's bar-relevant fields (loading / phase /
-   *  handleAsk / handleCancel / handleIngestFiles) to the shell-level bar.
-   *  Called via useEffect whenever the fields change. */
+  /** ADR-0092: lifts this session's bar-relevant fields (loading / queued /
+   *  phase / handleAsk / handleCancel / handleIngestFiles) to the
+   *  shell-level bar. Called via useEffect whenever the fields change. */
   onComposerFields: (sessionId: string, fields: ComposerSessionFields) => void;
   /** ADR-0092: drop this session's bar-fields entry on unmount (close / delete
    *  / error-boundary replacement). A dedicated callback replaces the prior
@@ -189,6 +193,26 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     handleApprovalsSettled,
     onFirstTurnSettled,
   );
+  // Issue #1500: the composer question's queue behind an in-flight ingest
+  // batch. The tracked ingestMany is the ONE arming point -- both the
+  // shell-reported handleIngestFiles (the manual "+" section) and the
+  // pendingPayload consumption below route through it, so a cold-start
+  // batch gates the bar exactly like a manual one. The pendingPayload
+  // chain's held question occupies the SAME slot (hold below), so the
+  // session can never carry two pending questions and the bar honestly
+  // shows the queued posture during the chain window. The wrapped
+  // handleAsk is the BAR-facing fire only: the ask-again sink keeps the
+  // direct s.handleAsk (a settle has already cleared the batch by the time
+  // it fires; see #1503 for the follow-up). onSeedDraft /
+  // onSeedInvocations are useCallback-stable in the shell (the #991
+  // atomic-rollback channels).
+  const { queued, ingestMany, handleAsk: queuedHandleAsk, hold } = useComposerQueue({
+    sessionId,
+    ingestMany: s.handleIngestMany,
+    ask: s.handleAsk,
+    onSeedDraft,
+    onSeedInvocations,
+  });
   // Issue #829: the rail's stick-to-bottom posture. Signals only -- the
   // settled count grows on appends, liveTurn's identity changes per streaming
   // event and per approval-channel update (and its null -> live transition
@@ -221,23 +245,25 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   useEffect(() => {
     onComposerFields(sessionId, {
       loading: s.turnLoading,
+      queued,
       phase: s.phase,
       turnStartedAt: s.turnStartedAt,
       turnPausedSince: s.turnPausedSince,
-      handleAsk: s.handleAsk,
+      handleAsk: queuedHandleAsk,
       handleCancel: s.handleCancel,
-      handleIngestFiles: s.handleIngestMany,
+      handleIngestFiles: ingestMany,
       workspaceCollapsed: s.workspaceCollapsed,
     });
   }, [
     sessionId,
     s.turnLoading,
+    queued,
     s.phase,
     s.turnStartedAt,
     s.turnPausedSince,
-    s.handleAsk,
+    queuedHandleAsk,
     s.handleCancel,
-    s.handleIngestMany,
+    ingestMany,
     s.workspaceCollapsed,
     onComposerFields,
   ]);
@@ -261,19 +287,17 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   const consumedPendingRef = useRef<string | null>(null);
   useEffect(() => {
     void consumePendingPayload({
-      sessionId,
       paths: pendingIngestPaths,
       question: pendingQuestion,
       invocations: pendingSkillInvocations,
       consumedRef: consumedPendingRef,
       onIngestConsumed,
       onQuestionConsumed,
-      onSeedDraft,
-      onSeedInvocations,
-      ingestMany: s.handleIngestMany,
+      ingestMany,
+      hold,
       ask: s.handleAsk,
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: s.handleIngestMany / s.handleAsk are stable inside useSessionState, the consumed callbacks are useCallback-stable in useShellSessions
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: the tracked ingestMany / hold / s.handleAsk are stable inside useSessionState + useComposerQueue, the consumed callbacks are useCallback-stable in useShellSessions
   }, [pendingIngestPaths, pendingQuestion, pendingSkillInvocations, sessionId, onSeedDraft, onSeedInvocations]);
 
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
@@ -780,7 +804,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               <WorkspaceWorkingSet
                 sessionId={sessionId}
                 busy={s.loading}
-                onAddFiles={s.handleIngestMany}
+                onAddFiles={ingestMany}
                 surfaces={s.mutationSurfaces}
               />
             </div>

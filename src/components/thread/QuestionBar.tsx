@@ -31,6 +31,17 @@ type QuestionBarProps = {
    *  that don't exercise a running turn omit it (no figure). */
   turnStartedAt?: number | null;
   turnPausedSince?: number | null;
+  /** The composer question's queued posture (issue #1500): a submit that
+   *  landed while an ingest batch is in flight sits in the session's pending
+   *  slot -- the input is disabled and the status slot carries the queued
+   *  copy until the batch settles (auto-send on full load, seed-back to the
+   *  draft on halt). A NEW axis, deliberately separate from `loading` (the
+   *  turn domain, ADR-0021): the bar's own paths never raise both, but the
+   *  ask-again direct fire can open a turn while a question sits queued, so
+   *  the render cedes the feedback slot to loading (never folded into one
+   *  flag). Optional so embedders / tests that don't exercise the queue
+   *  omit it. */
+  queued?: boolean;
   /** Left-side toolbar controls rendered inside the unified container (the
    *  composer "+" / auth-mode slots threaded from the shell, ADR-0092). */
   children?: ReactNode;
@@ -98,7 +109,7 @@ const SKILL_PICKER_PANEL_ID = "question-bar-skill-picker";
 /** The textarea's DOM id -- the shell's one anchor for seating focus on the
  *  composer (the create exit's focus hand-off, issue #1040). */
 export const COMPOSER_INPUT_ID = "question-bar-input";
-export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnStartedAt = null, turnPausedSince = null, draft, setDraft, children, trailing, skillPicker }: QuestionBarProps) {
+export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnStartedAt = null, turnPausedSince = null, queued = false, draft, setDraft, children, trailing, skillPicker }: QuestionBarProps) {
   const intl = useIntl();
   const [localDraft, setLocalDraft] = useState("");
   const value = draft ?? localDraft;
@@ -121,8 +132,10 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
     picker.close();
     // ADR-0021 single in-flight: a second submit while a turn runs is
     // ignored client-side (the input is also disabled, this is the
-    // belt-and-suspenders guard).
-    if (!q || loading) return;
+    // belt-and-suspenders guard). The queued posture joins the same guard
+    // (#1500): a form-submit bypass while a question waits behind an ingest
+    // batch must not fire out from under the pending slot.
+    if (!q || loading || queued) return;
     onSubmit(q);
   }
 
@@ -175,7 +188,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
               ? skillPickerOptionId(SKILL_PICKER_PANEL_ID, panel.highlightIndex)
               : undefined
           }
-          disabled={loading}
+          disabled={loading || queued}
           rows={3}
           className="min-w-40 flex-1 resize-none border-0 bg-transparent p-0 text-sm outline-none placeholder:text-muted-foreground focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:opacity-50"
           onKeyDown={(e) => {
@@ -285,6 +298,25 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
               {phase !== null && <span className="truncate">{phaseLabel(phase, intl)}</span>}
               <span className="shrink-0">
                 <WaitElapsedSuffix startedAt={turnStartedAt} pausedSince={turnPausedSince} />
+              </span>
+            </span>
+          )}
+          {queued && !loading && (
+            // The queued posture's feedback slot (issue #1500), seated where
+            // the wait-feedback slot sits: the held question waits behind an
+            // in-flight ingest batch, and the copy names the exit (auto-send
+            // on full load) so the disabled bar reads as intent, not a
+            // freeze. role="status" + aria-live like the phase slot.
+            <span
+              className="flex min-w-0 items-baseline text-[0.82rem] text-muted-foreground @max-[340px]:hidden"
+              role="status"
+              aria-live="polite"
+            >
+              <span className="truncate">
+                {intl.formatMessage({
+                  id: "questionBar.queued",
+                  defaultMessage: "Queued until the import finishes…",
+                })}
               </span>
             </span>
           )}
