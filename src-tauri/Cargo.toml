@@ -355,6 +355,15 @@ required-features = ["test-fixtures"]
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
+# In-app updater (ADR-0143, issue #1509). Minor-pinned ">=2.14" on purpose:
+# 2.10.0 introduced installer-variant manifest keys ({os}-{arch}-{nsis/msi}),
+# 2.11.0 upstreamed the Windows installer-launch validation, and 2.14.0 made
+# the stock plugin equivalent to the community-vendored baselines -- no fork
+# needed. The plugin is registered under #[cfg(desktop)] in lib.rs like the
+# two neighbors above; the frontend never touches the plugin's IPC surface
+# (all check / download / install orchestration lives in the Rust updater
+# module), so no `updater:default` capability entry is required.
+tauri-plugin-updater = "2.14"
 
 # CLI tool executor platform support (issue #671, ADR-0108 Decision 5):
 # Windows terminates a tool's process tree via a kill-on-close job object;

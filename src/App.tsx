@@ -10,6 +10,7 @@ import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions } from "./shell/useShellSessions";
 import { useTrayEvents } from "./shell/useTrayEvents";
+import { useStartupUpdateCheck } from "./shell/useUpdateCheck";
 import { useAppConfigState } from "./shell/useAppConfigState";
 import {
   ColdStartGuideBanner,
@@ -42,6 +43,7 @@ import type { AuthMode } from "./types/approval";
 import { AUTH_MODE_DEFAULT } from "./types/approval";
 import { usePlatform } from "./shell/use-platform";
 import { SidebarToggle } from "./shell/SidebarToggle";
+import { UpdateIndicator } from "./shell/UpdateIndicator";
 import { NavButtons } from "./shell/NavButtons";
 import { NavigationHistoryProvider } from "./shell/NavigationHistoryContext";
 import type { NavEntry } from "./shell/navigationHistory";
@@ -299,6 +301,11 @@ export default function App() {
     openPersisted,
     goToEmptyState,
   });
+
+  // The startup delayed auto-update-check (ADR-0143, issue #1509): one
+  // silent check 1s after mount, populating the shared cache slice the rail
+  // icon and the settings update block subscribe to.
+  useStartupUpdateCheck();
 
   // Cold start (ADR-0092): no active session -- the centered bar + greeting
   // shell posture, and the composer's pending channels below are live.
@@ -997,6 +1004,15 @@ export default function App() {
                     head/tail via useNavigationHistory. */}
                   <NavButtons />
                   <div className="flex-1" data-tauri-drag-region />
+                  {/* The standalone update indicator (ADR-0143, issue #1509):
+                      renders ONLY while an update is known; the click opens
+                      the About pane's update block. Sits in the topbar's
+                      trailing cluster beside the soft-cap alert -- shell
+                      chrome that persists across workspace / settings views,
+                      which a per-session surface (the rail) cannot promise on
+                      cold start. Not a badge on the settings gear: a fully
+                      independent, self-dismissing status affordance. */}
+                  <UpdateIndicator onOpenSettings={() => openSettings({ section: "about" })} />
                   {!settingsView.open && (
                     <>
                       {atSoftCap && (

@@ -1293,3 +1293,45 @@ export async function setUserAdapterEnabled(
 ): Promise<void> {
   return invoke<void>("set_user_adapter_enabled", { adapterId, enabled });
 }
+
+// --- App updater (ADR-0143, issue #1509) -------------------------------------
+
+/** A discovered update (camelCase from the Rust `UpdateInfo`): the target
+ *  version, its release notes, and the running version. `null` from a check
+ *  means up to date. */
+export interface UpdateInfo {
+  version: string;
+  notes: string | null;
+  currentVersion: string;
+}
+
+/** The `update-download-progress` event payload: bytes downloaded and, when
+ *  the server advertises it, the total content length. Percent-step
+ *  throttled on the Rust side. */
+export interface UpdateDownloadProgress {
+  downloaded: number;
+  contentLength: number | null;
+}
+
+/** Manual / startup update check. Always fresh on the Rust side (the plugin
+ *  check never reuses a prior result). */
+export function checkForUpdates(): Promise<UpdateInfo | null> {
+  return invoke<UpdateInfo | null>("check_for_updates");
+}
+
+/** The one-shot atomic install: fresh check -> download (progress events
+ *  below) -> cleanup -> install -> relaunch. Never resolves in the success
+ *  path -- the process is replaced by the installer (Windows) or the
+ *  relaunch (macOS/Linux); only the error path resolves. */
+export function installUpdate(): Promise<void> {
+  return invoke<void>("install_update");
+}
+
+/** Subscribe to download progress during `installUpdate`. */
+export async function onUpdateDownloadProgress(
+  cb: (p: UpdateDownloadProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<UpdateDownloadProgress>("update-download-progress", (e) =>
+    cb(e.payload),
+  );
+}
