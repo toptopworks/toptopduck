@@ -8,7 +8,7 @@
 
 3. **产物面与清单键**：产物维持 `targets: "all"` 顺带全家（Windows nsis + msi、macOS dmg + `.app.tar.gz`、Linux AppImage + deb + rpm），全部进清单——Windows 双变体键 + 裸键（见上），Linux `linux-x86_64`（AppImage）+ `-deb` + `-rpm` 变体键（deb 位 `dpkg`、rpm 位 `rpm -U` 提权安装，AppImage 位原地重写，均在线），macOS universal 产物双写 darwin 两键。清单由发版脚本从 `.sig` 产物拼装（缺任一平台键即失败），不引入 tauri-action。插件版本钉 `>=2.14.0`：变体键匹配 2.10.0 起；Windows 安装器启动校验与失败不退出 2.11.0 起在上游；2.14.0 起上游与社区 vendor 基线等价，无需自维护 fork。
 
-4. **检查 UX**：启动 1 秒延迟单次自动检查，无轮询；自动检查失败静默，手动检查失败显式。发现更新时 rail 出现独立更新图标，自显自隐，tooltip 标新版本号，点击直达设置页更新块；设置页按钮走状态机（检查更新 → 更新到 vX → 更新中）并展示版本 notes。更新可用是持续状态而非瞬时事件，不进 toast 分类学（ADR-0142：toast 只收瞬时事件）。
+4. **检查 UX**：启动 1 秒延迟单次自动检查，无轮询；自动检查失败静默，手动检查失败显式。发现更新时 sidebar footer（设置齿轮右侧）出现独立更新图标，自显自隐，tooltip 标新版本号，点击**直接安装**——有 in-flight 任务先经确认弹窗，下载进度由居中无关闭钮的安装浮层接管，安装失败落 destructive toast；设置页更新块入独立「关于」节（预留官网等），按钮走状态机（检查更新 → 更新到 vX → 更新中含百分比）并展示版本 notes。更新可用是持续状态而非瞬时事件，不进 toast 分类学（ADR-0142：toast 只收瞬时事件）。
 
 5. **一键原子流**：Rust 侧单命令编排完整链——check（不复用启动检查的旧结果）→ download（进度事件发前端）→ 清理链 → install → relaunch。清理链经插件的 `on_before_exit` 钩子执行（Windows `install()` 内部 `exit(0)` 绕过退出钩子，钩子是唯一前置机会）：收 ACP bridge sidecar → 关 DuckDB 连接 → 显式保存窗口状态（window-state 插件 API）→ 调 Tauri core `cleanup_before_exit()`（清托盘图标/资源表/隐藏窗口，属 core 非 window-state）。有活跃 ACP turn 时先弹确认框「进行中的任务会中断」，不硬封锁。无 ready 中间态——目标版本与本地包两件事实不落状态机。
 
@@ -39,7 +39,7 @@
 - **nsis 单发砍 msi**：须改产物面，收益仅少挂一个资产；丢 per-machine 安装偏好用户与存量 msi 位的原地升级路径。**否决**——双发顺带零维护。
 - **per-user WiX msi 单发**：自养 wxs 模板把 msi 改为 per-user 后 msi 即可更新载体（nsis 与 msi 双形态等价）；与 nsis 载体收益相同，代价是长期维护一套自有 WiX 模板。**否决**——nsis 原生 per-user 零模板。
 - **toast 呈现更新可用**：更新可用是持续状态，toast 是瞬时事件反馈（ADR-0142 分类学），自动消失语义不承载持续状态。**否决**——独立更新图标自显自隐。
-- **设置图标角标点**：图标、角标、tooltip、跳转四件套叠加。**否决**——rail 独立图标直达已足。
+- **设置图标角标点**：图标、角标、tooltip、跳转四件套叠加。**否决**——footer 独立图标直装已足。
 - **按版本 dismiss**：版本忽略名单基建。**否决**——图标自显自隐已消解重复打扰。
 - **ready 中间态（下载完待装）**：两件事实进状态机，双频复查伺候 superseded。**否决**——一键原子流。
 - **tauri-action 自动产出清单**：引入 action 依赖换 latest.json 跨平台自动合并；与现有裸 `tauri build` 发版链不同构。**否决**——发版脚本拼装 + 完整性门更贴现状。
