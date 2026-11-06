@@ -730,12 +730,7 @@ mod tests {
         let workspace = ws();
         let sources = src_dir();
         let src = csv(sources.path(), "prices.csv", "item,price\nwidget,1.50\n");
-        let key = {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(fs::read(&src).expect("src bytes"));
-            format!("{:x}", hasher.finalize())
-        };
+        let key = format!("{:x}", Sha256::digest(fs::read(&src).expect("src bytes")));
         let miss = materialize(workspace.path(), &src, "read_csv_auto").expect("miss");
         assert_eq!(
             miss.fingerprint, key,

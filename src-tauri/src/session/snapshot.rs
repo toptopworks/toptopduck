@@ -104,6 +104,9 @@ pub fn derive_table(
 ) -> Result<TableShape, LoadError> {
     let shape = derive_shape(conn, table)?;
     let fingerprint = fingerprint_table(conn, work_dir, dump_stem, table)?;
+    // The field contract, executable: only the shape-only face may leave
+    // the fingerprint empty for the caller to backfill.
+    debug_assert!(!fingerprint.is_empty());
     Ok(TableShape {
         fingerprint,
         ..shape
