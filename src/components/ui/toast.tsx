@@ -116,8 +116,13 @@ function ToastDescription({
       data-slot="toast-description"
       // The muted token, not the recipe's opacity-90 dimming: DESIGN.md
       // routes subdued text through --muted-foreground (the
-      // AlertDescription precedent).
-      className={cn("text-muted-foreground text-sm", className)}
+      // AlertDescription precedent) -- correct on the neutral surface;
+      // the destructive surface re-tints through the group marker, the
+      // same mechanism ToastClose/ToastAction ride.
+      className={cn(
+        "text-muted-foreground text-sm group-[.destructive]:text-destructive-foreground/90",
+        className,
+      )}
       {...props}
     />
   );

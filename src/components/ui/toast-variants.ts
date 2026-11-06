@@ -9,8 +9,8 @@ import { cva } from "class-variance-authority";
 // destructive-foreground text) rather than the tinted /40 shape the
 // in-panel alert uses -- a toast has no surrounding panel context, so the
 // solid read is the honest one. The bare `destructive` class is the marker
-// ToastClose/ToastAction key their group-[.destructive] overrides off (the
-// recipe's mechanism). Shadow rides the DESIGN.md floating-popover tier
+// ToastClose/ToastAction/ToastDescription key their group-[.destructive]
+// overrides off (the recipe's mechanism). Shadow rides the DESIGN.md floating-popover tier
 // (shadow-md), radius the compact --radius token (rounded-md = 6px). The
 // enter/exit animations key off the column-top placement (ADR-0142
 // Decision 3): enter from the top edge, exit fades up out of it

@@ -67,6 +67,21 @@ describe("ui toast face (issue #1494)", () => {
     );
   });
 
+  it("re-tints the description on the destructive surface", () => {
+    // The muted token is correct on the neutral surface but lands as
+    // low-contrast gray-on-red without the group override (the copy-in
+    // gap found on the updater-failure toast, issue #1509). The override
+    // class rides the string unconditionally -- the variant distinction
+    // is the root's marker class (pinned above), not the class list.
+    fireToast({ title: "Failed", description: "raw detail" });
+    fireToast({ title: "Failed red", description: "raw detail red", variant: "destructive" });
+    expect(screen.getByText("raw detail")).toHaveClass("text-muted-foreground");
+    expect(screen.getByText("raw detail red")).toHaveClass(
+      "text-muted-foreground",
+      "group-[.destructive]:text-destructive-foreground/90",
+    );
+  });
+
   it("stacks multiple toasts concurrently", () => {
     fireToast({ title: "First batch" });
     fireToast({ title: "Second batch" });
