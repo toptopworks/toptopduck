@@ -40,8 +40,9 @@ import { useSkillsRegistry } from "../skills/registry";
 //
 // ADR-0092: QuestionBar moved to the shell level. SessionPane no longer owns
 // the bar or its composer controls. It reports its bar-relevant fields
-// (loading / phase / handleAsk / handleCancel / handleIngestFiles) upward via
-// onComposerFields so the shell-level bar can read them for the active session.
+// (loading / queued / phase / handleAsk / handleCancel / handleIngestFiles)
+// upward via onComposerFields so the shell-level bar can read them for the
+// active session.
 // Pending payloads from a cold-start submit (#500) are consumed on mount by
 // consumePendingPayload (pendingPayload.ts) -- the ordering contract and its
 // history live in that module header.
@@ -66,16 +67,18 @@ interface SessionPaneProps {
   onIngestConsumed: () => void;
   /** ADR-0092: a pending question from the shell-level cold-start bar. Set
    *  when the user submits from the centered bar with no active session; the
-   *  shell creates a session carrying the question, and SessionPane fires it
-   *  via handleAsk once the pending ingest settles. null once consumed or for
-   *  sessions opened by any other action. */
+   *  shell creates a session carrying the question, and the pane holds it
+   *  into the composer queue slot (#1500), whose settle auto-sends it once
+   *  the pending ingest fully loads (seeding it back on a halt). null once
+   *  consumed or for sessions opened by any other action. */
   pendingQuestion: string | null;
   /** The skill names staged on the cold-start bar beside the pending
    *  question (ADR-0119: the first ask's user invocations). Consumed in the
    *  same one-shot effect; cleared by onQuestionConsumed. */
   pendingSkillInvocations: string[];
-  /** ADR-0092: shell callback after the pending question is fired, so the
-   *  OpenSession entry is cleared and a remount cannot re-fire. */
+  /** ADR-0092: shell callback after the pane takes the pending question
+   *  into the queue slot, so the OpenSession entry is cleared and a remount
+   *  cannot re-fire. */
   onQuestionConsumed: () => void;
   /** #500: hand a held-back pending question back into the bar draft. Fires
    *  when the pending ingest batch halts (NeedsGuidance / Error): the
@@ -87,9 +90,9 @@ interface SessionPaneProps {
    *  re-seed -- the staged names go back into the session's composer
    *  staging, so a resubmit carries the pick + question pair whole. */
   onSeedInvocations: (sessionId: string, names: string[]) => void;
-  /** ADR-0092: lifts this session's bar-relevant fields (loading / phase /
-   *  handleAsk / handleCancel / handleIngestFiles) to the shell-level bar.
-   *  Called via useEffect whenever the fields change. */
+  /** ADR-0092: lifts this session's bar-relevant fields (loading / queued /
+   *  phase / handleAsk / handleCancel / handleIngestFiles) to the
+   *  shell-level bar. Called via useEffect whenever the fields change. */
   onComposerFields: (sessionId: string, fields: ComposerSessionFields) => void;
   /** ADR-0092: drop this session's bar-fields entry on unmount (close / delete
    *  / error-boundary replacement). A dedicated callback replaces the prior
@@ -801,7 +804,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               <WorkspaceWorkingSet
                 sessionId={sessionId}
                 busy={s.loading}
-                onAddFiles={s.handleIngestMany}
+                onAddFiles={ingestMany}
                 surfaces={s.mutationSurfaces}
               />
             </div>

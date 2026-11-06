@@ -21,11 +21,12 @@ import { log } from "../lib/log";
 //   #991 atomic rollback uses (onSeedDraft / onSeedInvocations) -- never an
 //   auto-send.
 //
-// The tracked ingestMany is the ONE arming point: SessionPane routes both
-// the manual "+" section (the shell-reported handleIngestFiles) and the
-// pendingPayload consumption through it, so a cold-start batch gates the bar
-// exactly like a manual one. The wrapper is pass-through: the verdict
-// Promise the caller consumes is the batch's own.
+// The tracked ingestMany is the ONE arming point: SessionPane routes the
+// manual "+" section (the shell-reported handleIngestFiles), the working-set
+// tab's add entry (issue #792), and the pendingPayload consumption through
+// it, so a cold-start batch gates the bar exactly like a manual one. The
+// wrapper is pass-through: the verdict Promise the caller consumes is the
+// batch's own.
 //
 // Lifecycle is the keep-alive pane's, for free: the slot survives a session
 // switch (the pane stays mounted) and dies with the pane, whose unmount
@@ -33,10 +34,12 @@ import { log } from "../lib/log";
 // into a dropped session nor seeds a draft slot for a sid that no longer
 // exists.
 //
-// One ordering note for the narrow corner where a question was queued behind
-// a cold-start batch: the tracker's settle continuation registered first, so
-// the queued question's turn opens before pendingPayload's held question
-// fires. Both turns run; the backend serializes them.
+// Single-slot semantics: the slot holds at most ONE question, whichever
+// entry filled it. The chain (pendingPayload) holds its question at the
+// pane's mount, before any bar interaction, so a question-carrying chain
+// window admits no second question (a bar submit is inert) -- and a
+// files-only chain window carries no held question at all, leaving the
+// slot to whichever bar submit lands first.
 interface QueuedQuestion {
   question: string;
   invocations: string[];
@@ -125,10 +128,21 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
       // The contract is resolve-only (an IPC reject resolves false), so the
       // rejection arm is purely defensive: an unexpected throw must not
       // strand the question queued forever -- it takes the halt exit.
-      void batch.then(settle, (e: unknown) => {
-        log.error("useComposerQueue", "ingest batch rejected unexpectedly", e);
-        settle(false);
-      });
+      // Identity gate: only the CURRENTLY armed batch's settle owns the
+      // exit. Batches can overlap (a mid-batch "+" pick, an OS-level window
+      // drop, or the #748 drop-under-dialog supersede resolving the parked
+      // batch synchronously under the newer arming), and a stale settle must
+      // neither clear the newer batch's gate nor exit the slot on its own
+      // verdict -- the question keeps waiting behind the newest batch.
+      void batch.then(
+        (allLoaded) => {
+          if (batchRef.current === batch) settle(allLoaded);
+        },
+        (e: unknown) => {
+          log.error("useComposerQueue", "ingest batch rejected unexpectedly", e);
+          if (batchRef.current === batch) settle(false);
+        },
+      );
       return batch;
     },
     [ingestMany, settle],
@@ -153,6 +167,16 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
   );
 
   const hold = useCallback((question: string, invocations: string[]) => {
+    // The temporal contract: hold requires an armed batch (the sole caller
+    // arms in the same synchronous task). A no-batch hold would strand the
+    // slot forever -- the bar locks with no settle to free it -- so the
+    // misuse logs and drops (the idle-handleAsk observability precedent).
+    if (batchRef.current === null) {
+      log.warn("useComposerQueue", "hold with no armed batch; question dropped", {
+        question,
+      });
+      return;
+    }
     if (queuedRef.current !== null) return;
     const held = { question, invocations };
     queuedRef.current = held;

@@ -367,4 +367,126 @@ describe("useComposerQueue (#1500 queued ask behind an in-flight ingest batch)",
     expect(deps.onSeedDraft).toHaveBeenCalledOnce();
     expect(deps.ask).not.toHaveBeenCalled();
   });
+
+  it("keeps the slot waiting when an older batch settles under a newer one (identity gate)", async () => {
+    // Arrange: two overlapping tracked batches -- reachable via a mid-batch
+    // "+" pick, an OS-level window drop, or the #748 drop-under-dialog
+    // supersede resolving the parked batch synchronously under the newer
+    // arming. The older batch's settle must neither exit the slot nor clear
+    // the newer batch's gate.
+    const deps = makeDeps();
+    const batch1 = deferredBoolean();
+    const batch2 = deferredBoolean();
+    deps.ingestMany
+      .mockReturnValueOnce(batch1.promise)
+      .mockReturnValueOnce(batch2.promise);
+    const { result } = renderHook(() => useComposerQueue(deps));
+    act(() => {
+      result.current.ingestMany(["/x/a.csv"]);
+    });
+    act(() => {
+      void result.current.handleAsk("几行");
+    });
+    act(() => {
+      result.current.ingestMany(["/x/b.csv"]);
+    });
+
+    // Act: the older batch settles first -- under the newer one.
+    await act(async () => {
+      batch1.resolve(false);
+      await batch1.promise;
+    });
+
+    // Assert: the question keeps waiting behind the newest batch.
+    expect(result.current.queued).toBe(true);
+    expect(deps.onSeedDraft).not.toHaveBeenCalled();
+    expect(deps.ask).not.toHaveBeenCalled();
+
+    // Act: the newer batch's settle owns the exit.
+    await act(async () => {
+      batch2.resolve(true);
+      await batch2.promise;
+    });
+
+    // Assert
+    expect(deps.ask).toHaveBeenCalledOnce();
+    expect(deps.ask).toHaveBeenCalledWith("几行", []);
+    expect(result.current.queued).toBe(false);
+  });
+
+  it("returns to direct fire after a settle (the gate resets for the next cycle)", async () => {
+    // Arrange
+    const deps = makeDeps();
+    const batch = deferredBoolean();
+    deps.ingestMany.mockReturnValueOnce(batch.promise);
+    const { result } = renderHook(() => useComposerQueue(deps));
+    act(() => {
+      result.current.ingestMany(["/x/a.csv"]);
+    });
+    act(() => {
+      void result.current.handleAsk("第一问");
+    });
+    await act(async () => {
+      batch.resolve(true);
+      await batch.promise;
+    });
+    expect(deps.ask).toHaveBeenCalledOnce();
+
+    // Act: with no batch in flight, the next submit must fire direct -- a
+    // settle that fails to reset the gate strands every later submit in a
+    // slot no batch will free.
+    await act(async () => {
+      await result.current.handleAsk("第二问");
+    });
+
+    // Assert
+    expect(deps.ask).toHaveBeenCalledTimes(2);
+    expect(deps.ask).toHaveBeenLastCalledWith("第二问", undefined);
+    expect(result.current.queued).toBe(false);
+  });
+
+  it("keeps the first holder when hold arrives at an occupied slot", async () => {
+    // Arrange: the bar question already queued behind the batch -- a late
+    // hold must be inert (single slot, first wins).
+    const deps = makeDeps();
+    const batch = deferredBoolean();
+    deps.ingestMany.mockReturnValueOnce(batch.promise);
+    const { result } = renderHook(() => useComposerQueue(deps));
+    act(() => {
+      result.current.ingestMany(["/x/a.csv"]);
+    });
+    act(() => {
+      void result.current.handleAsk("bar 第一问");
+    });
+
+    // Act
+    act(() => {
+      result.current.hold("链上问题", ["charting"]);
+    });
+    await act(async () => {
+      batch.resolve(true);
+      await batch.promise;
+    });
+
+    // Assert: the bar's question auto-sends; the late hold was dropped.
+    expect(deps.ask).toHaveBeenCalledOnce();
+    expect(deps.ask).toHaveBeenCalledWith("bar 第一问", []);
+    expect(deps.onSeedDraft).not.toHaveBeenCalled();
+  });
+
+  it("drops a hold that arrives with no armed batch instead of stranding the slot", () => {
+    // Arrange: hold's temporal contract requires an armed batch (the sole
+    // production caller arms in the same synchronous task); this pins the
+    // misuse guard -- the question must not occupy a slot nothing frees.
+    const deps = makeDeps();
+    const { result } = renderHook(() => useComposerQueue(deps));
+
+    // Act
+    act(() => {
+      result.current.hold("孤儿问题", []);
+    });
+
+    // Assert
+    expect(result.current.queued).toBe(false);
+  });
 });

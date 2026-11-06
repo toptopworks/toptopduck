@@ -46,10 +46,11 @@ export function WorkspaceWorkingSet({
    *  domains alike. */
   busy: boolean;
   // The empty-state card's inline add entry (issue #792): picked paths route
-  // into the SAME handleIngestMany pipeline as the composer's + entry
-  // (guided-load dock, error banner, batch queue all live inside it) -- the
-  // pane hands the ingest entry down; the seam never owns it (ADR-0123
-  // Decision 3).
+  // into the SAME pipeline as the composer's + entry -- the pane's tracked
+  // ingestMany (useComposerQueue) wrapping handleIngestMany, so the
+  // guided-load dock, error banner, batch queue, and the composer's queued
+  // posture all apply -- the pane hands the ingest entry down; the seam
+  // never owns it (ADR-0123 Decision 3).
   onAddFiles: (paths: string[]) => void;
   /** The session-level mutation surfaces the seam reports into (ADR-0123):
    *  the pane passes useSessionState's sinks through, the same ones the

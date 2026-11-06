@@ -36,9 +36,11 @@ type QuestionBarProps = {
    *  slot -- the input is disabled and the status slot carries the queued
    *  copy until the batch settles (auto-send on full load, seed-back to the
    *  draft on halt). A NEW axis, deliberately separate from `loading` (the
-   *  turn domain, ADR-0021): both flags are mutually exclusive by
-   *  construction, never folded. Optional so embedders / tests that don't
-   *  exercise the queue omit it. */
+   *  turn domain, ADR-0021): the bar's own paths never raise both, but the
+   *  ask-again direct fire can open a turn while a question sits queued, so
+   *  the render cedes the feedback slot to loading (never folded into one
+   *  flag). Optional so embedders / tests that don't exercise the queue
+   *  omit it. */
   queued?: boolean;
   /** Left-side toolbar controls rendered inside the unified container (the
    *  composer "+" / auth-mode slots threaded from the shell, ADR-0092). */

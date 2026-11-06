@@ -11,9 +11,9 @@ import { log } from "../lib/log";
 // Per-session drafts (ADR-0092 Decision 6): the hook owns a
 // Record<sessionId, string> for open sessions + a separate cold-start draft.
 // The draft switches per activeSessionId — each keep-alive session retains its
-// own input text across switches. The turn-flow outputs (loading / phase /
-// handleAsk / handleCancel / handleIngestFiles) are passed through the
-// `session` parameter and merged with the owned drafts.
+// own input text across switches. The session-reported fields (loading /
+// queued / phase / handleAsk / handleCancel / handleIngestFiles) are passed
+// through the `session` parameter and merged with the owned drafts.
 
 // Session-derived bar fields the hook can't own yet (sourced from
 // useSessionState -> useTurnFlow). Passed in by the caller and merged with the
@@ -37,8 +37,9 @@ export interface ComposerSessionFields {
   turnPausedSince: number | null;
   handleAsk: (question: string, invocations?: string[]) => Promise<void>;
   handleCancel: () => Promise<void>;
-  /** Multi-file ingest from the composer "+" file section (ADR-0083). Routed
-   *  through useIngestFlow's handleIngestMany inside SessionPane. */
+  /** Multi-file ingest from the composer "+" file section (ADR-0083).
+   *  Routed through useComposerQueue's tracked ingestMany (wrapping
+   *  useIngestFlow's handleIngestMany) inside SessionPane. */
   handleIngestFiles: (paths: string[]) => void;
   /** The session pane's workspace fold (ADR-0083). Bar-shaping, not
    *  turn-flow: the shell-level bar slot mirrors the pane's conversation-column

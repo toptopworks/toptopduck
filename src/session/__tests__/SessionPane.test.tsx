@@ -17,6 +17,7 @@ import {
   takeSourceNotices,
 } from "../../api";
 import { TooltipProvider } from "../../components/ui/tooltip";
+import { pickDataFiles } from "../../components/dataset/pickDataFiles";
 import { artifactTurn } from "./fixtures";
 import type { ComposerSessionFields } from "../useComposerState";
 import type { ApprovalEntry } from "../useApprovalEvents";
@@ -63,6 +64,12 @@ vi.mock("../../api", async (importOriginal) => {
     onTurnProgress: vi.fn(async () => () => {}),
   };
 });
+
+// The OS file dialog never opens in jsdom: the picker is module-mocked so
+// the working-set card's add path can arm a batch with chosen paths.
+vi.mock("../../components/dataset/pickDataFiles", () => ({
+  pickDataFiles: vi.fn(),
+}));
 
 // Hoisted so the ArtifactView mock factory below can read it at import time.
 // The probe's recovered flag lets a test flip the crash off, so the
@@ -551,6 +558,42 @@ describe("SessionPane composer queue behind an in-flight ingest (#1500)", () => 
     await waitFor(() => expect(onSeedDraft).toHaveBeenCalledWith(SID, heldQuestion));
     expect(onSeedInvocations).toHaveBeenCalledWith(SID, ["skill-a"]);
     expect(askQuestion).not.toHaveBeenCalled();
+    expect(view.getComposerFields()!.queued).toBe(false);
+  });
+
+  it("queues a submit behind a batch armed from the working-set tab's add entry", async () => {
+    // Review Important 1 (#1500): the empty working-set card's add entry
+    // must arm the TRACKED batch -- a submit during that window queues
+    // visibly, never the pre-fix silent backend-lock queue.
+    let resolveIngest!: (outcome: { kind: "Loaded"; data: DatasetDescriptor }) => void;
+    vi.mocked(ingestFile).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveIngest = resolve;
+        }),
+    );
+    vi.mocked(pickDataFiles).mockResolvedValue(["/x/big.csv"]);
+    const view = renderPane();
+
+    // Arm through the real card path: switch to the working-set tab (its
+    // panel is hidden at mount) and pick through the empty card's button.
+    fireEvent.click(screen.getByRole("tab", { name: "Working set" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Add data file" }));
+    });
+
+    // The submit lands in the slot; the ask has not fired.
+    await act(async () => {
+      void view.getComposerFields()!.handleAsk(heldQuestion);
+    });
+    expect(view.getComposerFields()!.queued).toBe(true);
+    expect(askQuestion).not.toHaveBeenCalled();
+
+    // The batch fully loads -> the held question auto-sends as a turn.
+    await act(async () => {
+      resolveIngest({ kind: "Loaded", data: loadedDataset });
+    });
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith(SID, heldQuestion, []));
     expect(view.getComposerFields()!.queued).toBe(false);
   });
 });
