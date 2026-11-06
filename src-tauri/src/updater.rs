@@ -289,7 +289,9 @@ mod tests {
             downloaded: 512,
             content_length: Some(1024),
         };
-        let json = serde_json::to_value(&payload).unwrap();
+        // By value (Copy): the newer CI clippy flags the borrowed form as a
+        // needless borrow for generic args.
+        let json = serde_json::to_value(payload).unwrap();
         assert_eq!(json["downloaded"], 512);
         assert_eq!(json["contentLength"], 1024);
     }
