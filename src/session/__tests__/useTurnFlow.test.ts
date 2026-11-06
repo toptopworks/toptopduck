@@ -183,11 +183,14 @@ describe("useTurnFlow", () => {
       let ask!: Promise<void>;
       act(() => {
         ask = result.current.handleAsk("q");
+        // Asserted BEFORE act's flush: the live arm lands in handleAsk's
+        // synchronous head (commitLive before the first await), so the ref
+        // reads true here while the lagging state mirror still holds the
+        // pre-turn render -- a post-flush assertion cannot tell the two
+        // apart, and this pre-flush truth is the off-render accuracy the
+        // composer queue's settle rides.
+        expect(result.current.hasLiveTurn()).toBe(true);
       });
-      // The live arm lands in handleAsk's synchronous head (commitLive before
-      // the first await), so the probe reads true without any flush -- this
-      // is the off-render accuracy the composer queue's settle rides.
-      expect(result.current.hasLiveTurn()).toBe(true);
 
       await act(async () => {
         resolveAsk(textualOutcome("done"));
