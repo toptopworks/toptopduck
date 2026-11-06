@@ -35,9 +35,19 @@
       }
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ1QUYzNjc5RDAxMDkzRTMKUldUamt4RFFlVGF2MWFPV3IzamI3WVdvUVVZcW5lTHM5MmFiYTJsRjd1QmU4ZkIvMlM5OUxTWmQK",
+      "endpoints": [
+        "https://dl.toptopduck.dev/latest.json",
+        "https://github.com/toptopworks/toptopduck/releases/latest/download/latest.json"
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "externalBin": ["binaries/toptopduck-acp-bridge"],
     "icon": [
       "icons/32x32.png",

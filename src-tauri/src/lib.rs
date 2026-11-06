@@ -22,6 +22,10 @@
 
 // Shells -- the Tauri app surface.
 pub mod commands;
+// In-app updater (ADR-0143, issue #1509): desktop-only with its plugin
+// dependency's Cargo target gate.
+#[cfg(desktop)]
+pub mod updater;
 // cfg(desktop) mirrors the tauri `tray-icon` feature's own desktop gate --
 // mobile builds neither compile the tray surface nor register it.
 #[cfg(desktop)]
@@ -205,13 +209,21 @@ pub fn run() {
     {
         app_builder = app_builder.plugin(
             tauri_plugin_window_state::Builder::new()
-                .with_state_flags(
-                    tauri_plugin_window_state::StateFlags::SIZE
-                        | tauri_plugin_window_state::StateFlags::POSITION
-                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
-                )
+                .with_state_flags(updater::window_state_flags())
                 .build(),
         );
+    }
+
+    // In-app updater (ADR-0143, issue #1509): registration only. Every check
+    // / download / install orchestration lives in the `updater` module, which
+    // builds a per-use Updater from `updater_builder()` -- that per-use
+    // construction is what carries the AppHandle into the on_before_exit
+    // cleanup chain and the Windows installer args, neither of which a
+    // registration-time plugin Builder can express. cfg(desktop) mirrors the
+    // Cargo target gate on tauri-plugin-updater.
+    #[cfg(desktop)]
+    {
+        app_builder = app_builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
 
     let app = app_builder
@@ -682,6 +694,11 @@ pub fn run() {
             // Desktop-only with the tray surface (issue #1142 handshake).
             #[cfg(desktop)]
             commands::tray_ready,
+            // Desktop-only with the updater plugin (ADR-0143, issue #1509).
+            #[cfg(desktop)]
+            updater::check_for_updates,
+            #[cfg(desktop)]
+            updater::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

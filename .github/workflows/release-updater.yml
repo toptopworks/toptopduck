@@ -1,0 +1,201 @@
+name: Release Updater
+
+# The updater release leg (ADR-0143, issue #1509): assemble the updater
+# manifest from the Build workflow's artifacts, gate its integrity, attach
+# the updater faces to the GitHub release (the fallback endpoint), and mirror
+# everything to Cloudflare R2 (the primary endpoint, dl.toptopduck.dev).
+#
+# One-time ops this workflow assumes (see ADR-0143 Decision 6):
+#   - minisign keypair generated; private key in the TAURI_SIGNING_PRIVATE_KEY
+#     secret (passwordless) + one offline backup; the matching pubkey is
+#     baked into tauri.conf.json (plugins.updater.pubkey)
+#   - R2 bucket (default name toptopduck-releases) with the custom domain
+#     dl.toptopduck.dev bound, plus the secrets R2_ACCOUNT_ID,
+#     R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
+#
+# Run manually after the release merge lands on main (the Build run for that
+# commit produces the artifacts): dispatch with the tag name.
+#
+# R2 discipline (dbx-proven): versioned payloads upload FIRST and are
+# immutable — republishing a tag with a byte-different manifest fails; the
+# root latest.json swaps LAST with no-cache so clients never see a manifest
+# whose payloads are not yet served.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.5.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-updater-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Assemble, attach, mirror
+    runs-on: ubuntu-latest
+    env:
+      MIRROR_ORIGIN: https://dl.toptopduck.dev
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      R2_BUCKET: s3://${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      # The Build workflow runs on the main push of the release merge; the
+      # tag points at that same commit, so resolve the tag -> sha and pick
+      # its successful Build run (the matrix legs share one run id).
+      - name: Resolve the Build run for the tag
+        run: |
+          set -euo pipefail
+          SHA="$(gh api "repos/${GH_REPO}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha')"
+          # A release merge may be tagged on the merge commit or on a tag
+          # object; peel annotated tags to the commit.
+          SHA="$(gh api "repos/${GH_REPO}/commits/${SHA}" --jq '.sha')"
+          RUN_ID="$(gh run list --workflow Build.yml --commit "$SHA" --status success --json databaseId --jq 'first.databaseId // empty')"
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::No successful Build run for ${RELEASE_TAG} (commit ${SHA}). Push the release merge to main and wait for Build." >&2
+            exit 1
+          fi
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+          echo "COMMIT_SHA=$SHA" >> "$GITHUB_ENV"
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+
+      # Both artifact families land in one flat assets dir: the installers
+      # (deb/rpm/AppImage carry their .sig in the updater family) and the
+      # signed updater faces (nsis exe + msi + their .sigs, the universal
+      # .app.tar.gz + .sig).
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p assets raw/windows raw/macos raw/linux
+          for pair in \
+            "toptopduck-windows-latest raw/windows" \
+            "toptopduck-updater-windows-latest raw/windows" \
+            "toptopduck-macos-latest raw/macos" \
+            "toptopduck-updater-macos-latest raw/macos" \
+            "toptopduck-ubuntu-latest raw/linux" \
+            "toptopduck-updater-ubuntu-latest raw/linux"; do
+            set -- $pair
+            if gh run download "$RUN_ID" --name "$1" --dir "$2" 2>/dev/null; then
+              echo "collected $1"
+            else
+              echo "::warning::$1 missing on run $RUN_ID (pre-updater build?)"
+            fi
+          done
+          find raw -type f -exec mv {} assets/ \;
+          ls -la assets
+
+      - name: Assemble the updater manifest
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          # Notes: the release body when the release already exists, else none.
+          NOTES="-"
+          if gh release view "$RELEASE_TAG" --json body --jq .body > release-body.txt 2>/dev/null; then
+            if [ -s release-body.txt ]; then NOTES=release-body.txt; fi
+          fi
+          PUB_DATE="$(gh api "repos/${GH_REPO}/commits/${COMMIT_SHA}" --jq '.commit.committer.date')"
+          node scripts/build-updater-manifest.mjs \
+            assets "$RELEASE_TAG" "$VERSION" \
+            "https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}" \
+            "$NOTES" "$PUB_DATE" latest.json --out-assets updater-assets
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+
+      # The jq integrity gate (issue #1509 acceptance): every platform key
+      # present with a non-empty url + signature, or the run fails. Belt over
+      # the assembler's own gate — this is the step the AC names.
+      - name: Verify the manifest (jq integrity gate)
+        run: |
+          set -euo pipefail
+          jq -e '
+            .version and .pub_date and
+            (["darwin-aarch64","darwin-x86_64","linux-x86_64","linux-x86_64-deb",
+              "linux-x86_64-rpm","windows-x86_64","windows-x86_64-nsis","windows-x86_64-msi"]
+              - (.platforms | keys)) == [] and
+            ([.platforms[] | select((.url | length) == 0 or (.signature | length) == 0)] | length) == 0
+          ' latest.json > /dev/null || {
+            echo "::error::latest.json failed the integrity gate" >&2
+            jq . latest.json >&2
+            exit 1
+          }
+          echo "manifest integrity OK"
+
+      # The fallback endpoint leg: attach the updater faces + the manifest to
+      # the GitHub release so the config's second endpoint serves them. The
+      # release is created (undrafted) if the manual step has not run yet.
+      - name: Attach updater assets to the GitHub release
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            echo "::notice::Release $RELEASE_TAG not found; creating it (notes can be edited after)."
+            gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --target "$COMMIT_SHA"
+          fi
+          cp latest.json updater-assets/
+          gh release upload "$RELEASE_TAG" updater-assets/* --clobber
+
+      # The mirror manifest: same bytes except every payload URL points at
+      # the R2 origin. minisign signs content, not URLs — the rewrite keeps
+      # the signatures valid (ADR-0143 Decision 1).
+      - name: Build the mirror manifest
+        run: |
+          set -euo pipefail
+          jq --arg origin "$MIRROR_ORIGIN" --arg tag "$RELEASE_TAG" \
+            '(.platforms | to_entries | map(.value.url = ($origin + "/" + $tag + "/" + (.value.url | split("/") | last))) | from_entries)' \
+            latest.json > latest.mirror.json
+          diff <(jq -S 'del(.platforms)' latest.json) <(jq -S 'del(.platforms)' latest.mirror.json) > /dev/null
+          echo "mirror manifest OK"
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+
+      - name: Upload versioned payloads to R2 (immutable-first)
+        run: |
+          set -euo pipefail
+          TAG_KEY="$RELEASE_TAG"
+          # Immutability guard (dbx-proven): a re-run must be byte-identical.
+          if aws s3 cp "$R2_BUCKET/$TAG_KEY/latest.json" existing.json --endpoint-url "$R2_ENDPOINT" 2>/dev/null; then
+            if ! cmp -s existing.json latest.mirror.json; then
+              echo "::error::$RELEASE_TAG was already published with a DIFFERENT manifest; refusing to rewrite history" >&2
+              exit 1
+            fi
+            echo "republish of an identical manifest (no-op allowed)"
+          fi
+          aws s3 cp updater-assets "$R2_BUCKET/$TAG_KEY" --recursive \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "latest.json"
+          # Verify what landed: every manifest payload must be served.
+          for url in $(jq -r '.platforms[].url' latest.mirror.json); do
+            key="$TAG_KEY/$(basename "$url")"
+            aws s3api head-object --bucket "${R2_BUCKET#s3://}" --key "$key" --endpoint-url "$R2_ENDPOINT" > /dev/null
+          done
+          aws s3 cp latest.mirror.json "$R2_BUCKET/$TAG_KEY/latest.json" \
+            --endpoint-url "$R2_ENDPOINT" --cache-control "no-cache"
+          echo "versioned payloads uploaded"
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+
+      # LAST swap: the root manifest clients poll. no-cache so a release is
+      # visible immediately; the payloads it names are already in place.
+      - name: Swap the root latest.json on R2
+        run: |
+          set -euo pipefail
+          aws s3 cp latest.mirror.json "$R2_BUCKET/latest.json" \
+            --endpoint-url "$R2_ENDPOINT" --cache-control "no-cache"
+          echo "root latest.json swapped"

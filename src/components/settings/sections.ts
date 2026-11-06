@@ -7,8 +7,8 @@
 // carries the section id set + order.
 
 /** The settings panes (ADR-0065 + #362 skills + #387 MCP + ADR-0091 rename +
- *  reorder + #932 agents): General / Runtime / Skills / Agents / MCP / CLI
- *  Tools / Database Engine / Privacy. */
+ *  reorder + #932 agents + #1509 about): General / Runtime / Skills / Agents /
+ *  MCP / CLI Tools / Database Engine / Privacy / About. */
 export type SettingsSection =
   | "general"
   | "runtime"
@@ -17,7 +17,8 @@ export type SettingsSection =
   | "mcp"
   | "cli-tools"
   | "database-engine"
-  | "privacy";
+  | "privacy"
+  | "about";
 
 /** The ordered set of settings sections rendered into the left rail. Drives
  *  ORDER + state only; the visible label for each id is rendered by SectionLabel
@@ -33,6 +34,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
   "cli-tools",
   "database-engine",
   "privacy",
+  "about",
 ];
 
 /** The pane IPC channels whose in-flight state blocks the settings close

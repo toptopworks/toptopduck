@@ -42,6 +42,7 @@ import type { AuthMode } from "./types/approval";
 import { AUTH_MODE_DEFAULT } from "./types/approval";
 import { usePlatform } from "./shell/use-platform";
 import { SidebarToggle } from "./shell/SidebarToggle";
+import { UpdateInstallOverlay } from "./shell/UpdateInstallOverlay";
 import { NavButtons } from "./shell/NavButtons";
 import { NavigationHistoryProvider } from "./shell/NavigationHistoryContext";
 import type { NavEntry } from "./shell/navigationHistory";
@@ -865,6 +866,13 @@ export default function App() {
           defaultLocale="en-US"
           onError={handleIntlError}
         >
+          {/* The install-in-flight overlay (issue #1509): centered progress
+              card while the one-shot install chain runs -- reads the shared
+              install slice, so it mirrors an install started from any update
+              face. Inside the IntlProvider (its copy is translated) and
+              above every view chrome so the backdrop covers the whole
+              shell. */}
+          <UpdateInstallOverlay />
           {/* ADR-0058 L3 top-level fallback: the last line of defense against a
             shell-level render throw. Every session is already isolated by its
             own L2 session-body boundary (in SessionPane), so this boundary

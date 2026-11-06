@@ -26,13 +26,18 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 // The sidebar's workspace section queries the registry listing (issue
 // #1392) and its menu fires the rename/remove/create IPCs; the shell tests
 // are display-contract tests, so the listing is an empty registry and the
-// mutations resolve unless a test overrides them.
+// mutations resolve unless a test overrides them. The footer's UpdateIndicator
+// drags the update-chain imports (check + install) through this mock too.
 vi.mock("../../api", () => ({
   listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [], degraded: false }),
   renameWorkspace: vi.fn().mockResolvedValue(undefined),
   removeWorkspace: vi.fn().mockResolvedValue(undefined),
   createWorkspace: vi.fn().mockResolvedValue(undefined),
   registerWorkspaceDirectory: vi.fn().mockResolvedValue(undefined),
+  checkForUpdates: vi.fn(),
+  installUpdate: vi.fn(),
+  listLiveSessions: vi.fn().mockResolvedValue([]),
+  onUpdateDownloadProgress: vi.fn(async () => vi.fn()),
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn().mockResolvedValue(null),
@@ -50,6 +55,7 @@ import {
   renameWorkspace,
 } from "../../api";
 import { SIDEBAR_EXPANSION_KEY } from "../sidebarExpansion";
+import { updateKeys } from "../queryKeys";
 
 // Radix DropdownMenu's pointer-event handling recurses under jsdom (the
 // SessionHeaderMenu suite's known limitation), so the dropdown-menu module is
@@ -620,6 +626,55 @@ describe("SessionSidebar settings footer (issue #282)", () => {
     const { container } = renderWithFooter({ provider: null });
     expect(container.querySelector(".sidebar-footer")).toBeNull();
     expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
+  });
+
+  it("mounts the update indicator in the footer once an update is known (#1509)", () => {
+    // The mount-point pin: the indicator (and with it the startup auto-check
+    // it exclusively owns) lives in the sidebar footer beside the gear --
+    // removing the mount reddens here, not silently in production.
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(updateKeys.check(), {
+      version: "0.6.0",
+      notes: null,
+      currentVersion: "0.4.0",
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          <IntlProvider locale="en" messages={{}} onError={() => {}}>
+            <SessionSidebar
+              collapsed={false}
+              sessions={[]}
+              sessionsLoaded={true}
+              openSessions={[]}
+              activeSessionId={null}
+              disabled={false}
+              loadError={null}
+              onNew={() => {}}
+              onNewInWorkspace={() => {}}
+              onActivate={() => {}}
+              onOpenPersisted={() => {}}
+              archivedSessions={[]}
+              showArchived={false}
+              onToggleArchived={() => {}}
+              onSetPinned={() => {}}
+              onArchive={() => {}}
+              onDelete={() => {}}
+              onRename={() => {}}
+              onClose={() => {}}
+              onOpenSearch={() => {}}
+              provider={footerProvider}
+              onOpenSettings={() => {}}
+            />
+          </IntlProvider>
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+    expect(
+      screen.getByRole("button", { name: "New version 0.6.0 available" }),
+    ).toBeInTheDocument();
   });
 });
 
