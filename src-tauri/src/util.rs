@@ -3,6 +3,8 @@
 //! Started as the home for [`sha256_hex`] so the skills module and the session
 //! module share a single content-hash implementation (issue #364, ADR-0086).
 
+use std::io::Read;
+use std::path::Path;
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
@@ -38,6 +40,29 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// Streaming SHA-256 of a file's bytes as a lowercase hex string -- the
+/// memory-bounded face of [`sha256_hex`] for files too large to read whole.
+///
+/// Shared by the shared store's content key (ADR-0141 D2) and the private
+/// copy-in source fingerprint (issue #1507).
+pub fn sha256_file(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// Truncate a string to `max` chars, appending an ellipsis when cut. The ONE

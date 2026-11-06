@@ -2,8 +2,9 @@
 //!
 //! A session bound to a `recipe.json` path rewrites the whole recipe atomically on
 //! every terminal turn / source lifecycle event (ADR-0034 per-turn atomic
-//! write). Resume reads the recipe back, verifies each source's post-rectify
-//! fingerprint (ADR-0035/0042), and eagerly re-executes the productive SQL
+//! write). Resume reads the recipe back, verifies each source's fingerprint
+//! (ADR-0035/0042; the v2 source hash, with a pre-v2 bare hash allowed as an
+//! algorithm upgrade), and eagerly re-executes the productive SQL
 //! chain (ADR-0034) -- LLM-free, the SQL and disambiguation choices already
 //! live in the recipe.
 //!

@@ -1171,10 +1171,36 @@ impl super::Session {
                     src.reader.as_deref(),
                 ) {
                     Ok(descriptor) => {
-                        if descriptor.fingerprint == src.fingerprint {
+                        // Fingerprint algorithm upgrade (issue #1507): a
+                        // recipe recorded before the source-hash fingerprint
+                        // carries a bare post-load hash, so the v2 read
+                        // mismatches without any data change. An algorithm
+                        // upgrade is not drift -- allow the source through,
+                        // log it, and pin the working set to the recorded
+                        // value so the post-resume persist keeps the recipe
+                        // verbatim (rewriting to v2 would change
+                        // chain_digest and force a watermark miss / full
+                        // replay on the next resume). Natural convergence: a
+                        // genuinely replaced or re-uploaded source writes v2.
+                        let upgraded =
+                            Self::is_fingerprint_upgrade(&src.fingerprint, &descriptor.fingerprint);
+                        if descriptor.fingerprint == src.fingerprint || upgraded {
                             // Match -- restore the recipe's display label over
                             // the path-derived one (ADR-0037 rename survives).
-                            if descriptor.display_name != src.display_name {
+                            let rename_needed = descriptor.display_name != src.display_name;
+                            if upgraded {
+                                log::info!(
+                                    target: "toptopduck::session",
+                                    "source {} carries a pre-v2 fingerprint; allowing the \
+                                     algorithm upgrade without rewriting the recipe",
+                                    src.reference_name,
+                                );
+                                self.working_set.replace(DatasetDescriptor {
+                                    fingerprint: src.fingerprint.clone(),
+                                    ..descriptor
+                                });
+                            }
+                            if rename_needed {
                                 // Backend log only: a failure to restore the
                                 // recipe's label is logged (not silently
                                 // swallowed), but no IPC event or banner is
@@ -1262,6 +1288,16 @@ impl super::Session {
             }
         }
         Ok(rebuilt)
+    }
+
+    /// Whether a fingerprint mismatch is the v2 algorithm upgrade (issue
+    /// #1507): the recipe recorded a bare post-load hash (no `v2:` prefix)
+    /// while the fresh read produced a source-hash fingerprint. Algorithm
+    /// upgrade != data drift -- the caller allows the source through and
+    /// pins the recorded value.
+    fn is_fingerprint_upgrade(recorded: &str, found: &str) -> bool {
+        let prefix = crate::ingest::loader::FINGERPRINT_V2_PREFIX;
+        !recorded.starts_with(prefix) && found.starts_with(prefix)
     }
 
     /// Ingest a source for resume under an explicit reference name + display

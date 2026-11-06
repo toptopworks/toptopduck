@@ -2852,60 +2852,51 @@ mod tests {
         );
     }
 
-    // M1 regression: a turn whose shape derivation fails must roll back the
-    // already-created result_N. Here the derivation's fingerprint dump cannot be
-    // written -- temp_path points at a file, so its "child" dump path has a file
-    // as parent and the COPY ... TO fails, but only AFTER CREATE TABLE result_1
-    // has succeeded. Without the DROP rollback the orphan table lingers
-    // unregistered; the next materialize attempt's next_result_number reuses N
-    // and clashes on CREATE, wedging every later turn (ADR-0022 never-reused).
-    // Under the agent contract (ADR-0077) the derive failure routes back to the
-    // model as a tool error; this scripted model never self-corrects (the
-    // single call clamps, re-issued every round-trip). The loop runtime's
-    // loop detection (ADR-0107 Decision 4, inherited by ADR-0116) stops the
-    // non-converging trajectory -- steer at 3 identical calls, abort on the
-    // repeat after the nudge -- long before the 24-step cap, failing
-    // honestly with the loop's own reason; EVERY failed attempt must still
-    // roll back result_1.
+    // Issue #1507: the fingerprint is the copy-in source hash, so the
+    // ingest + materialize paths no longer export any table to a
+    // `.fingerprint.csv` dump (the retired derivation's dominant cost and a
+    // transient disk footprint equal to the table). Walk the whole temp tree
+    // after one source ingest AND one materialized turn -- neither face may
+    // leave a dump behind. (The derive step's rollback guard stays for
+    // genuine DB-level failures; the dump-failure injection seam it used to
+    // be tested through is retired with the export itself.)
     #[test]
-    fn ask_drops_the_result_table_when_shape_derivation_fails() {
-        let provider =
-            FakeProvider::new().scripted_tool_turn("建表", materialize_call("SELECT 1 AS n"));
+    fn ingest_and_turn_leave_no_fingerprint_dump() {
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "建表",
+            vec![
+                Ok(materialize_call("SELECT 1 AS n")),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
         let mut session = Session::with_provider(Box::new(provider)).expect("session");
-        // Derivation work dir whose parent is a file -> the fingerprint
-        // COPY ... TO '<path>/result_1.fingerprint.csv' fails after CREATE.
-        let file = NamedTempFile::new().expect("temp file");
-        session.temp_path = file.path().to_path_buf();
+        let csv_path = session.temp_path.join("people.csv");
+        std::fs::write(&csv_path, "name,score\nAda,9\n").expect("write source");
+        match session.ingest(&csv_path) {
+            crate::model::LoadOutcome::Loaded(_) => {}
+            other => panic!("expected load, got {other:?}"),
+        }
+        match session.ask("建表") {
+            TurnOutcome::Materialized { .. } => {}
+            other => panic!("expected materialized turn, got {other:?}"),
+        }
 
-        // The non-self-correcting trajectory is stopped by loop detection and
-        // surfaces as a typed Execute failure carrying the honest repetition
-        // reason (the per-attempt engine errors rode back to the model as tool
-        // results, ADR-0077 -- they are not the turn-level detail).
-        let detail = match session.ask("建表") {
-            TurnOutcome::Failed(TurnFailure::Execute { detail }) => detail,
-            other => panic!("expected Execute failure after derive failure, got {other:?}"),
-        };
-        assert!(
-            detail.contains("identical arguments"),
-            "loop-detection stop carries the honest repetition detail: {detail:?}"
-        );
-
-        // result_1 was rolled back on every attempt: it is no longer a table in
-        // the session DB. (A broken rollback would leave it lingering -> the
-        // retry's next CREATE clashes and the probe below is non-zero.)
-        let remaining: i64 = session
-            .admin_engine
-            .conn()
-            .query_row(
-                "SELECT count(*) FROM information_schema.tables WHERE table_name = 'result_1'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("information_schema probe");
-        assert_eq!(
-            remaining, 0,
-            "result_1 must be dropped after the derive failure (M1)"
-        );
+        let mut stack = vec![session.temp_path.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read temp dir") {
+                let entry = entry.expect("dir entry");
+                if entry.file_type().expect("file type").is_dir() {
+                    stack.push(entry.path());
+                } else {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    assert!(
+                        !name.contains(".fingerprint.csv"),
+                        "no fingerprint dump may remain, found {name:?} under {}",
+                        entry.path().display()
+                    );
+                }
+            }
+        }
     }
 
     // The bridged fault vocabulary (issue #669): a bridged provider's error

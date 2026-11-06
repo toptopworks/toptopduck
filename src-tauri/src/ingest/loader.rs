@@ -13,10 +13,35 @@ use duckdb::{params, Connection};
 use crate::model::LoadError;
 use crate::session::snapshot::Snapshot;
 
+/// Version prefix of the source-hash fingerprint (issue #1507). Recipes
+/// recorded before the migration carry a bare post-load hash; the prefix is
+/// what resume's algorithm-upgrade branch keys on (and a future fingerprint
+/// algorithm bumps it to `v3:`).
+pub(crate) const FINGERPRINT_V2_PREFIX: &str = "v2:";
+
+/// The v2 source fingerprint: `v2:` + the streaming SHA256 of the file
+/// copy-in actually reads + the reader fn spelling.
+///
+/// Content-equivalent to the post-load table hash it replaced (issue #1507):
+/// the `read_*` builders are deterministic, so the source bytes uniquely
+/// determine the built table -- and the fn-name spelling alone pins the
+/// parse, because the pinned UTF-16 retry leg is a pure function of the
+/// source bytes (a file either triggers the retry on every read or on none).
+/// Excel sheets hash their own materialized temp CSVs (what their copy-in
+/// reads), so per-sheet identity and rectify sensitivity come for free.
+fn source_fingerprint(src: &Path, reader_fn: &str) -> Result<String, LoadError> {
+    let digest = crate::util::sha256_file(src).map_err(|e| LoadError::Io {
+        detail: e.to_string(),
+    })?;
+    Ok(format!("{FINGERPRINT_V2_PREFIX}{digest}:{reader_fn}"))
+}
+
 /// Copy-in `src` into a per-session temp DuckDB file `<alias>.duckdb` using the
 /// given DuckDB reader function (`read_csv_auto` / `read_parquet` /
-/// `read_json_auto`) and derive the snapshot descriptor. The file is later
-/// attached READ_ONLY by the session.
+/// `read_json_auto`) and derive the snapshot descriptor. The descriptor's
+/// fingerprint is the v2 source hash (issue #1507; see
+/// [`source_fingerprint`]). The file is later attached READ_ONLY by the
+/// session.
 ///
 /// `reader_fn` is a static literal chosen by [`super::reader_for`], never user
 /// input, so interpolating it into the SQL is safe; the user-supplied source
@@ -90,11 +115,15 @@ fn copy_in_impl(
             other => other,
         };
         attempt.map_err(parse_err)?;
+        let mut snapshot = Snapshot::from_connection(&conn, file_path.clone())?;
         if derive_fingerprint {
-            Snapshot::from_connection(&conn, file_path.clone(), temp_dir)
-        } else {
-            Snapshot::from_connection_shape(&conn, file_path.clone())
+            // The private face's identity (issue #1507): the v2 source hash
+            // backfills the shape-only derivation. The shared face
+            // (`copy_in_shape`) leaves it empty for the store-key backfill
+            // (issue #1506).
+            snapshot.fingerprint = source_fingerprint(src, reader_fn)?;
         }
+        Ok(snapshot)
     })(); // conn dropped -> file closed before the session re-attaches it
 
     match result {
