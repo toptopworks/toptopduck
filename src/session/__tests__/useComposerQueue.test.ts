@@ -24,6 +24,7 @@ function makeDeps() {
     ask: vi.fn(() => Promise.resolve()),
     onSeedDraft: vi.fn(),
     onSeedInvocations: vi.fn(),
+    hasLiveTurn: vi.fn(() => false),
   };
 }
 
@@ -488,5 +489,62 @@ describe("useComposerQueue (#1500 queued ask behind an in-flight ingest batch)",
 
     // Assert
     expect(result.current.queued).toBe(false);
+  });
+
+  it("seeds back instead of auto-sending when the batch settles under a live turn (#1503 Advisory A)", async () => {
+    // Arrange: the auto-send would die on useTurnFlow's single-turn guard as
+    // a SILENT drop (the question vanishes, worse than a halt which at least
+    // returns the draft) -- the settle must probe the live mirror and take
+    // the halt channel instead.
+    const deps = makeDeps();
+    deps.hasLiveTurn.mockReturnValue(true);
+    const batch = deferredBoolean();
+    deps.ingestMany.mockReturnValue(batch.promise);
+    const { result } = renderHook(() => useComposerQueue(deps));
+    act(() => {
+      result.current.ingestMany(["/x/a.csv"]);
+    });
+    act(() => {
+      void result.current.handleAsk("几行", ["skill-a"]);
+    });
+    expect(result.current.queued).toBe(true);
+
+    // Act: the batch FULLY loads, but a live turn owns the session.
+    await act(async () => {
+      batch.resolve(true);
+      await batch.promise;
+    });
+
+    // Assert: the #991 seed-back channel, not a fire into the void.
+    expect(result.current.queued).toBe(false);
+    expect(deps.onSeedDraft).toHaveBeenCalledOnce();
+    expect(deps.onSeedDraft).toHaveBeenCalledWith("sess-1", "几行");
+    expect(deps.onSeedInvocations).toHaveBeenCalledOnce();
+    expect(deps.onSeedInvocations).toHaveBeenCalledWith("sess-1", ["skill-a"]);
+    expect(deps.ask).not.toHaveBeenCalled();
+  });
+
+  it("does not consult the live-turn probe on a halt exit", async () => {
+    // The probe is the full-load leg's own guard: a halt seeds back
+    // unconditionally, so the probe must not even fire there (one condition,
+    // one owner).
+    const deps = makeDeps();
+    const batch = deferredBoolean();
+    deps.ingestMany.mockReturnValue(batch.promise);
+    const { result } = renderHook(() => useComposerQueue(deps));
+    act(() => {
+      result.current.ingestMany(["/x/a.csv"]);
+    });
+    act(() => {
+      void result.current.handleAsk("几行");
+    });
+
+    await act(async () => {
+      batch.resolve(false);
+      await batch.promise;
+    });
+
+    expect(deps.onSeedDraft).toHaveBeenCalledOnce();
+    expect(deps.hasLiveTurn).not.toHaveBeenCalled();
   });
 });

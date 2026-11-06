@@ -18,7 +18,7 @@ import {
 } from "../../api";
 import { TooltipProvider } from "../../components/ui/tooltip";
 import { pickDataFiles } from "../../components/dataset/pickDataFiles";
-import { artifactTurn } from "./fixtures";
+import { artifactTurn, failed } from "./fixtures";
 import type { ComposerSessionFields } from "../useComposerState";
 import type { ApprovalEntry } from "../useApprovalEvents";
 import type { ThreadEntry } from "../../types/thread";
@@ -594,6 +594,30 @@ describe("SessionPane composer queue behind an in-flight ingest (#1500)", () => 
       resolveIngest({ kind: "Loaded", data: loadedDataset });
     });
     await waitFor(() => expect(askQuestion).toHaveBeenCalledWith(SID, heldQuestion, []));
+    expect(view.getComposerFields()!.queued).toBe(false);
+  });
+});
+
+// Issue #1503: the ask-again sink (the rail's Failed/Cancelled retry, the
+// stale banner's rerun) routes through the queue-aware fire. Outside a batch
+// that IS the direct fire -- bit-identical to the pre-#1503 behavior
+// (handleAsk normalizes the invocations to [] on both paths, so the
+// askQuestion layer cannot tell them apart). Mid-batch the UI's busy gate
+// holds the buttons, so the in-slot semantics live in the useComposerQueue
+// suite; this pin keeps the pane's wiring on the queue-aware sink.
+describe("SessionPane ask-again fire path (#1503)", () => {
+  beforeEach(() => {
+    stubSessionApis();
+    vi.mocked(askQuestion).mockClear();
+  });
+
+  it("fires the rail retry as the direct fire when no batch is in flight", async () => {
+    const view = renderPane({ thread: [failed("坏查询")] });
+
+    // The thread query is async -- wait for the Failed card's retry action,
+    // then fire: the ask carries the verbatim question, no slot engaged.
+    fireEvent.click(await screen.findByRole("button", { name: "Retry this question" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith(SID, "坏查询", []));
     expect(view.getComposerFields()!.queued).toBe(false);
   });
 });
