@@ -170,6 +170,32 @@ describe("useTurnFlow", () => {
       expect(result.current.phase).toBeNull();
     });
 
+    it("hasLiveTurn probes the live truth: false before, true mid-turn, false after the settle (#1503)", async () => {
+      const { deps } = setup();
+      let resolveAsk!: (o: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>((res) => { resolveAsk = res; }),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+
+      expect(result.current.hasLiveTurn()).toBe(false);
+      let ask!: Promise<void>;
+      act(() => {
+        ask = result.current.handleAsk("q");
+      });
+      // The live arm lands in handleAsk's synchronous head (commitLive before
+      // the first await), so the probe reads true without any flush -- this
+      // is the off-render accuracy the composer queue's settle rides.
+      expect(result.current.hasLiveTurn()).toBe(true);
+
+      await act(async () => {
+        resolveAsk(textualOutcome("done"));
+        await ask;
+      });
+      expect(result.current.hasLiveTurn()).toBe(false);
+    });
+
     it("clears phase to null even when askQuestion rejects (IPC failure)", async () => {
       const { deps, setError, queryClient } = setup();
       vi.mocked(askQuestion).mockRejectedValue(new Error("ipc down"));

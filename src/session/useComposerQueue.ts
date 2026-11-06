@@ -51,6 +51,10 @@ export interface ComposerQueueDeps {
   ask: (question: string, invocations?: string[]) => Promise<void>;
   onSeedDraft: (sessionId: string, question: string) => void;
   onSeedInvocations: (sessionId: string, names: string[]) => void;
+  /** The synchronous live-turn probe (useTurnFlow's liveRef, issue #1503):
+   *  the settle continuation runs off the render cycle, so it must probe
+   *  the ref-truth, not the lagging liveTurn state. */
+  hasLiveTurn: () => boolean;
 }
 
 export interface ComposerQueue {
@@ -72,7 +76,7 @@ export interface ComposerQueue {
 }
 
 export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
-  const { sessionId, ingestMany, ask, onSeedDraft, onSeedInvocations } = deps;
+  const { sessionId, ingestMany, ask, onSeedDraft, onSeedInvocations, hasLiveTurn } = deps;
   // The in-flight batch's verdict Promise, or null between batches. The
   // synchronous-read ref (not state) is the queue's gate: the submit path
   // consults it in the same tick the user hits Enter, and the settle
@@ -104,7 +108,7 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
       if (!aliveRef.current || held === null) return;
       queuedRef.current = null;
       setQueued(null);
-      if (allLoaded) {
+      if (allLoaded && !hasLiveTurn()) {
         // ask catches its own failures internally (session error state) and
         // never intentionally rejects; the `.catch` is the same defensive
         // log the pendingPayload / shell-ask paths carry.
@@ -112,13 +116,22 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
           log.error("useComposerQueue", "queued ask threw unexpectedly", e),
         );
       } else {
+        // Two seed-back exits, one channel (the #991 atomic rollback):
+        // - !allLoaded: the batch halted (cancel / Error / superseded /
+        //   IPC reject) -- never an auto-send.
+        // - a live turn (#1503, the #1504 review's Advisory A): the
+        //   auto-send would die on useTurnFlow's single-turn guard as a
+        //   SILENT drop -- the question vanishes with no feedback, worse
+        //   than a halt (which at least returns the draft). Seed back
+        //   through the halt channel instead; the user re-submits when
+        //   the turn lands.
         onSeedDraft(sessionId, held.question);
         if (held.invocations.length > 0) {
           onSeedInvocations(sessionId, held.invocations);
         }
       }
     },
-    [ask, onSeedDraft, onSeedInvocations, sessionId],
+    [ask, hasLiveTurn, onSeedDraft, onSeedInvocations, sessionId],
   );
 
   const ingestManyTracked = useCallback(

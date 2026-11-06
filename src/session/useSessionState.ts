@@ -132,6 +132,10 @@ export interface UseSessionState {
   // QuestionBar consumer accepts it via void-return covariance.
   handleAsk: (question: string, invocations?: string[]) => Promise<void>;
   handleCancel: () => Promise<void>;
+  /** The synchronous live-turn probe (mirrors UseTurnFlow, issue #1503):
+   *  ref-truth accurate off the render cycle -- the composer queue's settle
+   *  continuation probes this, never the lagging liveTurn state. */
+  hasLiveTurn: () => boolean;
   handleIngest: (path: string) => void;
   /** Multi-file ingest from the composer "+" file section (ADR-0083, issue
    *  #351; #748 auto-resume). Sequential with park-on-guidance: a
@@ -370,17 +374,25 @@ export function useSessionState(
     },
     [markProduced, notePromotion],
   );
-  const { phase, liveTurn, waitStartedAt, turnStartedAt, turnPausedSince, handleAsk, handleCancel } =
-    useTurnFlow(sessionId, {
-      queryClient,
-      intl,
-      setTurnLoading,
-      setError,
-      pollPersistError,
-      viewed: { markProduced: markProducedWithExpand, suppressInit },
-      approvals,
-      onApprovalsSettled,
-    });
+  const {
+    phase,
+    liveTurn,
+    waitStartedAt,
+    turnStartedAt,
+    turnPausedSince,
+    handleAsk,
+    handleCancel,
+    hasLiveTurn,
+  } = useTurnFlow(sessionId, {
+    queryClient,
+    intl,
+    setTurnLoading,
+    setError,
+    pollPersistError,
+    viewed: { markProduced: markProducedWithExpand, suppressInit },
+    approvals,
+    onApprovalsSettled,
+  });
 
   // ADR-0089 Decision 4: wrap handleAsk so the first terminal turn triggers a
   // sidebar + header name sync. Reading the query cache directly (not the
@@ -520,6 +532,7 @@ export function useSessionState(
     ingestProgress,
     handleAsk: handleAskWithAutoName,
     handleCancel,
+    hasLiveTurn,
     handleIngest,
     handleIngestMany,
     handleGuidedSubmit,

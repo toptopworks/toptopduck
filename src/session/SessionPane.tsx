@@ -201,9 +201,9 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // chain's held question occupies the SAME slot (hold below), so the
   // session can never carry two pending questions and the bar honestly
   // shows the queued posture during the chain window. The wrapped
-  // handleAsk is the BAR-facing fire only: the ask-again sink keeps the
-  // direct s.handleAsk (a settle has already cleared the batch by the time
-  // it fires; see #1503 for the follow-up). onSeedDraft /
+  // handleAsk is the fire for BOTH the bar and the ask-again sink (issue
+  // #1503: a rail retry / banner rerun mid-batch enters the same slot
+  // instead of silently parking on the backend session lock). onSeedDraft /
   // onSeedInvocations are useCallback-stable in the shell (the #991
   // atomic-rollback channels).
   const { queued, ingestMany, handleAsk: queuedHandleAsk, hold } = useComposerQueue({
@@ -212,6 +212,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     ask: s.handleAsk,
     onSeedDraft,
     onSeedInvocations,
+    hasLiveTurn: s.hasLiveTurn,
   });
   // Issue #829: the rail's stick-to-bottom posture. Signals only -- the
   // settled count grows on appends, liveTurn's identity changes per streaming
@@ -387,25 +388,28 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
 
   // Issue #758: the ask-again sink -- the stale banner's rerun and the rail's
   // Failed/Cancelled retry buttons all funnel here, firing the held question
-  // as a fresh turn. Direct fire, never through the composer draft; handleAsk
-  // catches its own failures internally (session error state), the `.catch`
-  // is the same defensive log the pendingQuestion path uses. handleAsk is
-  // destructured out first: it is useCallback-stable inside useSessionState
-  // while the `s` return object is rebuilt every render, so depending on the
-  // method (not the object) keeps handleAskAgain identity-stable (the same
-  // pattern the approval callbacks above use).
-  const { handleAsk } = s;
+  // as a fresh turn. Never through the composer draft; the queue-aware
+  // handleAsk (issue #1503) fires direct outside a batch and enters the
+  // pending slot inside one -- the bar's queued axis carries the feedback
+  // (the pre-#1503 direct fire silently parked on the backend session lock).
+  // It catches its own failures internally (session error state), the
+  // `.catch` is the same defensive log the pendingQuestion path uses.
+  // queuedHandleAsk is useCallback-stable inside useComposerQueue (its ask
+  // dep is useCallback-stable inside useSessionState, while the `s` return
+  // object is rebuilt every render), so depending on the method keeps
+  // handleAskAgain identity-stable (the same pattern the approval callbacks
+  // above use).
   const handleAskAgain = useCallback(
     (question: string) => {
       // The composer's empty-input twin: ask-again consumes a raw persisted
       // string (the only ask generator that does), so a blank question -- a
       // legacy or hand-edited session file -- must not fire a hollow turn.
       if (!question.trim()) return;
-      void handleAsk(question).catch((e) =>
+      void queuedHandleAsk(question).catch((e) =>
         log.error("SessionPane", "ask-again handleAsk threw unexpectedly", e),
       );
     },
-    [handleAsk],
+    [queuedHandleAsk],
   );
 
   // ADR-0124 Decision 3: the single stage's two faces -- the dataset name
