@@ -1,35 +1,55 @@
 import { useIntl } from "react-intl";
 import { ArrowUpCircle } from "lucide-react";
 
-import { useUpdateAvailable } from "./useUpdateCheck";
+import { useStartupUpdateCheck, useUpdateAvailable } from "./useUpdateCheck";
+import { useUpdateInstall } from "./useUpdateInstall";
+import { UpdateConfirmDialog } from "./UpdateConfirmDialog";
+import { Button } from "../components/ui/button";
+import { toast } from "../components/ui/use-toast";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "../components/ui/tooltip";
 
-// The topbar ghost family posture (NavButtons' NAV_BUTTON_CLASS shape):
-// 28px hit area + 14px glyph, muted foreground lifting on hover, ring focus.
-// The single source for THIS button so it cannot drift from the family.
-const INDICATOR_BUTTON_CLASS =
-  "inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
-
-/** The standalone topbar update indicator (ADR-0143, issue #1509): an
- *  independent topbar icon that renders ONLY while the shared update-check
- *  cache carries an update -- self-showing on discovery, self-hiding the
- *  moment the cache reads null, no dismiss state, no badge on any other
- *  control. Update availability is a PERSISTENT state, so the indicator
- *  lives on shell chrome that exists in every view (workspace, cold start,
- *  settings overlay) -- never inside a per-session surface, which cold start
- *  does not render. The tooltip names the target version; the click opens
- *  Settings on the About pane, where the update block (state machine +
- *  notes) lives. Chrome follows the topbar ghost family (the NavButtons
- *  posture: 28px hit area, text-foreground/70, accent hover, ring focus);
- *  the glyph alone carries the status accent (text-primary). */
-export function UpdateIndicator({ onOpenSettings }: { onOpenSettings: () => void }) {
+/** The sidebar-footer update indicator (ADR-0143, issue #1509): an
+ *  independent icon that renders ONLY while the shared update-check cache
+ *  carries an update -- self-showing on discovery, self-hiding the moment the
+ *  cache reads null, no dismiss state, no badge on any other control. Update
+ *  availability is a PERSISTENT state, so the indicator lives on shell chrome
+ *  that exists in every view -- the sidebar footer beside the settings gear,
+ *  which renders across workspace, cold start, and the settings overlay.
+ *  The click installs DIRECTLY (the active-turn confirm gates it when tasks
+ *  are in flight); the in-flight feedback is the install overlay's job
+ *  (UpdateInstallOverlay), an install failure lands as a destructive toast,
+ *  and the shared install slice disables this button while one runs. Chrome
+ *  follows the footer family (the gear's ghost icon Button posture); the
+ *  glyph alone carries the status accent (text-primary).
+ *
+ *  This component also OWNS the startup auto-check mount (ADR-0143 Decision
+ *  4): App's body sits above the QueryClientProvider, so the check hook must
+ *  live in a component inside the provider -- and this is the one update-face
+ *  component that mounts exactly once, unconditionally, near the shell root
+ *  (the footer renders on every view, so the single 1s delayed check fires
+ *  exactly once per process). */
+export function UpdateIndicator() {
   const intl = useIntl();
+  useStartupUpdateCheck();
   const update = useUpdateAvailable();
+  const { installing, confirmOpen, setConfirmOpen, requestInstall, startInstall } =
+    useUpdateInstall((message) => {
+      toast({
+        variant: "destructive",
+        title: intl.formatMessage({
+          id: "settings.update.installFailedToast",
+          defaultMessage: "Update failed",
+        }),
+        description: message,
+      });
+    });
+
   if (update === null) return null;
+
   const label = intl.formatMessage(
     {
       id: "header.updateAvailable.ariaLabel",
@@ -37,19 +57,29 @@ export function UpdateIndicator({ onOpenSettings }: { onOpenSettings: () => void
     },
     { version: update.version },
   );
+
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          className={INDICATOR_BUTTON_CLASS}
-          aria-label={label}
-          onClick={onOpenSettings}
-        >
-          <ArrowUpCircle className="text-primary size-3.5" aria-hidden />
-        </button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom">{label}</TooltipContent>
-    </Tooltip>
+    <>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={label}
+            disabled={installing}
+            onClick={() => void requestInstall()}
+          >
+            <ArrowUpCircle className="text-primary size-4" aria-hidden />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">{label}</TooltipContent>
+      </Tooltip>
+      <UpdateConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        onConfirm={() => void startInstall()}
+      />
+    </>
   );
 }

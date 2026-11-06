@@ -148,4 +148,10 @@ export const workspaceKeys = {
  *  adapter table / workspace registry above. */
 export const updateKeys = {
   check: () => ["update-check"] as const,
+  /** The install-in-flight slice: `{ percent: number | null } | null`. An
+   *  install is process-wide (the Rust chain replaces the process), so the
+   *  downloading state lives in the shared cache -- every update face (the
+   *  sidebar indicator, the About button, the install overlay) reads one
+   *  truth, and no face can start a second install while one runs. */
+  install: () => ["update-install"] as const,
 } as const;

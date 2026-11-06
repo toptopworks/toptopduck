@@ -1,54 +1,40 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
 import { getVersion } from "@tauri-apps/api/app";
 import { Download, Loader2, RefreshCw } from "lucide-react";
 
-import {
-  checkForUpdates,
-  installUpdate,
-  listLiveSessions,
-  onUpdateDownloadProgress,
-} from "../../api";
+import { checkForUpdates } from "../../api";
 import { updateKeys } from "../../session/queryKeys";
 import { useUpdateAvailable } from "../../shell/useUpdateCheck";
+import { useUpdateInstall } from "../../shell/useUpdateInstall";
+import { UpdateConfirmDialog } from "../../shell/UpdateConfirmDialog";
 import { fmtError } from "../../lib/error-presentation";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "../ui/alert-dialog";
 import { Button } from "../ui/button";
 import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
 
 /** The About pane (ADR-0143, issue #1509): the app-identity surface --
  *  today the version + in-app update block, later the official-links home
- *  (site, repo, license) the pane exists to hold. The update button walks the
- *  state machine check -> update-to-X -> updating; the install leg is the
- *  Rust side's one-shot atomic chain (fresh check -> download -> cleanup ->
- *  install -> relaunch) and never resolves on success -- the process is
- *  replaced. A manual check that finds nothing writes the shared cache slice
- *  too, so the topbar indicator and this block always mirror one truth. */
+ *  (site, repo, license) the pane exists to hold. The manual check is local;
+ *  the install leg (gate -> download -> restart) is the shared
+ *  `useUpdateInstall` chain -- the same one the sidebar indicator runs, so
+ *  both faces drive one state machine. A manual check that finds nothing
+ *  writes the shared cache slice too, so the indicator and this block always
+ *  mirror one truth. */
 
-type Phase = "idle" | "checking" | "downloading";
+type Phase = "idle" | "checking";
 
 export function AboutSection() {
   const intl = useIntl();
   const queryClient = useQueryClient();
   const update = useUpdateAvailable();
+  const [error, setError] = useState<string | null>(null);
+  const { installing, percent, confirmOpen, setConfirmOpen, requestInstall, startInstall } =
+    useUpdateInstall(setError);
 
   const [appVersion, setAppVersion] = useState<string | null>(null);
-  const [phase, setPhase] = useState<Phase>("idle");
+  const [checkPhase, setCheckPhase] = useState<Phase>("idle");
   const [upToDate, setUpToDate] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [percent, setPercent] = useState<number | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const unlistenRef = useRef<(() => void) | null>(null);
 
   // The running version (display only). getVersion never rejects on desktop;
   // a non-resolving import (tests) leaves the version line hidden.
@@ -64,79 +50,26 @@ export function AboutSection() {
     };
   }, []);
 
-  // Drop the progress listener if the block unmounts mid-download (the
-  // download itself keeps running in Rust; only this UI face goes away).
-  useEffect(() => {
-    return () => {
-      unlistenRef.current?.();
-      unlistenRef.current = null;
-    };
-  }, []);
-
   async function handleCheck() {
-    if (phase !== "idle") return;
-    setPhase("checking");
+    if (checkPhase !== "idle") return;
+    setCheckPhase("checking");
     setError(null);
     setUpToDate(false);
     try {
       const result = await checkForUpdates();
-      // Mirror the fresh result into the shared slice so the topbar indicator and
-      // this block stay one truth.
+      // Mirror the fresh result into the shared slice so the sidebar indicator
+      // and this block stay one truth.
       queryClient.setQueryData(updateKeys.check(), result);
       if (result === null) setUpToDate(true);
     } catch (e) {
       setError(fmtError(e, intl));
     } finally {
-      setPhase("idle");
-    }
-  }
-
-  async function handleInstallClick() {
-    if (phase !== "idle" || update === null) return;
-    setError(null);
-    // Active-turn gate (ADR-0143 Decision 5): confirm before interrupting,
-    // never hard-block. The backend's live table is the truth (the frontend's
-    // per-session busy state only covers the active pane).
-    let inFlight = false;
-    try {
-      inFlight = (await listLiveSessions()).some((row) => row.in_flight);
-    } catch {
-      // The gate is best-effort: an unreadable table must not bury the
-      // update; proceed without the dialog.
-    }
-    if (inFlight) {
-      setConfirmOpen(true);
-      return;
-    }
-    void startInstall();
-  }
-
-  async function startInstall() {
-    setPhase("downloading");
-    setPercent(null);
-    void onUpdateDownloadProgress((p) => {
-      if (p.contentLength && p.contentLength > 0) {
-        setPercent(Math.min(100, Math.floor((p.downloaded / p.contentLength) * 100)));
-      } else {
-        setPercent(null);
-      }
-    }).then((unlisten) => {
-      unlistenRef.current = unlisten;
-    });
-    try {
-      // Success never resolves (the process is replaced by the installer /
-      // relaunch); only the error path lands here.
-      await installUpdate();
-    } catch (e) {
-      setError(fmtError(e, intl));
-      setPhase("idle");
-      unlistenRef.current?.();
-      unlistenRef.current = null;
+      setCheckPhase("idle");
     }
   }
 
   const button = (() => {
-    if (phase === "checking") {
+    if (checkPhase === "checking") {
       return (
         <Button type="button" size="sm" disabled>
           <RefreshCw className="size-3.5 animate-spin" aria-hidden />
@@ -144,7 +77,7 @@ export function AboutSection() {
         </Button>
       );
     }
-    if (phase === "downloading") {
+    if (installing) {
       return (
         <Button type="button" size="sm" disabled>
           <Loader2 className="size-3.5 animate-spin" aria-hidden />
@@ -162,7 +95,7 @@ export function AboutSection() {
     }
     if (update !== null) {
       return (
-        <Button type="button" size="sm" onClick={() => void handleInstallClick()}>
+        <Button type="button" size="sm" onClick={() => void requestInstall()}>
           <Download className="size-3.5" aria-hidden />
           <FormattedMessage
             id="settings.update.install"
@@ -245,35 +178,11 @@ export function AboutSection() {
 
         {error && <p className="settings-error text-destructive mt-3 text-sm">{error}</p>}
 
-        <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>
-                <FormattedMessage
-                  id="settings.update.confirmTitle"
-                  defaultMessage="Update now?"
-                />
-              </AlertDialogTitle>
-              <AlertDialogDescription>
-                <FormattedMessage
-                  id="settings.update.confirmBody"
-                  defaultMessage="In-progress tasks will be interrupted. The app restarts when the update finishes."
-                />
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>
-                <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
-              </AlertDialogCancel>
-              <AlertDialogAction onClick={() => void startInstall()}>
-                <FormattedMessage
-                  id="settings.update.confirmOk"
-                  defaultMessage="Update and restart"
-                />
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+        <UpdateConfirmDialog
+          open={confirmOpen}
+          onOpenChange={setConfirmOpen}
+          onConfirm={() => void startInstall()}
+        />
       </SettingsCard>
     </div>
   );

@@ -26,13 +26,18 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 // The sidebar's workspace section queries the registry listing (issue
 // #1392) and its menu fires the rename/remove/create IPCs; the shell tests
 // are display-contract tests, so the listing is an empty registry and the
-// mutations resolve unless a test overrides them.
+// mutations resolve unless a test overrides them. The footer's UpdateIndicator
+// drags the update-chain imports (check + install) through this mock too.
 vi.mock("../../api", () => ({
   listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [], degraded: false }),
   renameWorkspace: vi.fn().mockResolvedValue(undefined),
   removeWorkspace: vi.fn().mockResolvedValue(undefined),
   createWorkspace: vi.fn().mockResolvedValue(undefined),
   registerWorkspaceDirectory: vi.fn().mockResolvedValue(undefined),
+  checkForUpdates: vi.fn(),
+  installUpdate: vi.fn(),
+  listLiveSessions: vi.fn().mockResolvedValue([]),
+  onUpdateDownloadProgress: vi.fn(async () => vi.fn()),
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn().mockResolvedValue(null),

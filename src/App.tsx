@@ -10,7 +10,6 @@ import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions } from "./shell/useShellSessions";
 import { useTrayEvents } from "./shell/useTrayEvents";
-import { useStartupUpdateCheck } from "./shell/useUpdateCheck";
 import { useAppConfigState } from "./shell/useAppConfigState";
 import {
   ColdStartGuideBanner,
@@ -43,7 +42,7 @@ import type { AuthMode } from "./types/approval";
 import { AUTH_MODE_DEFAULT } from "./types/approval";
 import { usePlatform } from "./shell/use-platform";
 import { SidebarToggle } from "./shell/SidebarToggle";
-import { UpdateIndicator } from "./shell/UpdateIndicator";
+import { UpdateInstallOverlay } from "./shell/UpdateInstallOverlay";
 import { NavButtons } from "./shell/NavButtons";
 import { NavigationHistoryProvider } from "./shell/NavigationHistoryContext";
 import type { NavEntry } from "./shell/navigationHistory";
@@ -301,11 +300,6 @@ export default function App() {
     openPersisted,
     goToEmptyState,
   });
-
-  // The startup delayed auto-update-check (ADR-0143, issue #1509): one
-  // silent check 1s after mount, populating the shared cache slice the rail
-  // icon and the settings update block subscribe to.
-  useStartupUpdateCheck();
 
   // Cold start (ADR-0092): no active session -- the centered bar + greeting
   // shell posture, and the composer's pending channels below are live.
@@ -872,6 +866,13 @@ export default function App() {
           defaultLocale="en-US"
           onError={handleIntlError}
         >
+          {/* The install-in-flight overlay (issue #1509): centered progress
+              card while the one-shot install chain runs -- reads the shared
+              install slice, so it mirrors an install started from any update
+              face. Inside the IntlProvider (its copy is translated) and
+              above every view chrome so the backdrop covers the whole
+              shell. */}
+          <UpdateInstallOverlay />
           {/* ADR-0058 L3 top-level fallback: the last line of defense against a
             shell-level render throw. Every session is already isolated by its
             own L2 session-body boundary (in SessionPane), so this boundary
@@ -1004,15 +1005,6 @@ export default function App() {
                     head/tail via useNavigationHistory. */}
                   <NavButtons />
                   <div className="flex-1" data-tauri-drag-region />
-                  {/* The standalone update indicator (ADR-0143, issue #1509):
-                      renders ONLY while an update is known; the click opens
-                      the About pane's update block. Sits in the topbar's
-                      trailing cluster beside the soft-cap alert -- shell
-                      chrome that persists across workspace / settings views,
-                      which a per-session surface (the rail) cannot promise on
-                      cold start. Not a badge on the settings gear: a fully
-                      independent, self-dismissing status affordance. */}
-                  <UpdateIndicator onOpenSettings={() => openSettings({ section: "about" })} />
                   {!settingsView.open && (
                     <>
                       {atSoftCap && (
