@@ -161,7 +161,8 @@ fn run_explore(
 
     // Tail: derive the shape FROM THE SANDBOX (explore never persists). No
     // fingerprint, so this is the describe + sample primitives inline rather
-    // than snapshot::derive_table (which additionally dumps + hashes).
+    // than snapshot::derive_shape (which adds the row count; explore already
+    // has it from the sandbox run).
     let columns = describe_scratch(&table.conn, &table.name)?;
     let sample = read_sample(&table.conn, &columns, sample_rows, &table.name)?;
     Ok(ExploreShape {

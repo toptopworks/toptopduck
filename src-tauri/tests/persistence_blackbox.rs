@@ -2750,6 +2750,169 @@ fn resume_falls_back_to_extension_dispatch_for_an_unrecognized_reader() {
     assert_eq!(page.rows.len(), 1, "the CSV rows came through");
 }
 
+/// Issue #1507: a recipe recorded before the source-hash fingerprint carries
+/// a bare post-load hash. The v2 read produces a `v2:`-prefixed fingerprint,
+/// and the mismatch is an ALGORITHM UPGRADE, not data drift -- resume allows
+/// the source through without a Drift issue (any Drift aborts here) and pins
+/// the working set to the recorded value so every later recipe projection
+/// keeps it verbatim (rewriting to v2 would change chain_digest and force a
+/// watermark miss on the next resume). Convergence is in-app only (a
+/// re-upload / replace writes v2); an on-disk replacement or a resume
+/// re-link never converges.
+#[test]
+fn resume_allows_a_pre_v2_fingerprint_as_an_algorithm_upgrade() {
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef};
+    use toptopduck_lib::RectifyProvenance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    let csv = dir.path().join("people.csv");
+    fs::copy(fixture("people.csv"), &csv).expect("copy source");
+
+    // The live read must be v2 (the allow keys on the prefix). The recorded
+    // value is any bare hex that does NOT match the source digest: a real
+    // pre-v2 recipe's bare hash is a post-load table hash, never the source
+    // SHA256 -- a value that happens to match here would keep a future
+    // content-equality guard green while every genuine legacy recipe
+    // falsely drifts.
+    let v2_fp = {
+        let mut probe = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+        load_source(&mut probe, &csv);
+        probe.get("people").expect("people").fingerprint.clone()
+    };
+    assert!(
+        v2_fp.starts_with("v2:"),
+        "precondition: live fingerprint is v2"
+    );
+    let bare_fp = "0".repeat(64);
+
+    let recipe = Recipe::build(
+        "legacy".into(),
+        vec![SourceRef {
+            reference_name: "people".into(),
+            display_name: "people".into(),
+            source_path: csv.to_string_lossy().to_string(),
+            relative_path: None,
+            rectify: RectifyProvenance::NotApplicable,
+            fingerprint: bare_fp.clone(),
+            reader: None,
+        }],
+        vec![],
+        None,
+    )
+    .expect("build recipe");
+    save_atomic(&duck, &recipe).expect("save");
+
+    let mut resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    let people = resumed.get("people").expect("people restored");
+    assert_eq!(
+        people.fingerprint, bare_fp,
+        "the working set is pinned to the recipe's recorded value"
+    );
+
+    // A later persist (a fresh source add appends an event and atomically
+    // rewrites the recipe) must keep the recorded fingerprint verbatim.
+    load_source(&mut resumed, &fixture("orders.csv"));
+    drop(resumed);
+    let persisted = toptopduck_lib::persistence::read_recipe(&duck).expect("read back");
+    let people_ref = persisted
+        .sources
+        .iter()
+        .find(|s| s.reference_name == "people")
+        .expect("people persisted");
+    assert_eq!(
+        people_ref.fingerprint, bare_fp,
+        "the recipe keeps the recorded value across a post-resume persist"
+    );
+}
+
+/// Issue #1507 review: an empty recorded fingerprint is corruption (the
+/// shared manifest rejects an empty store key as corrupt), not a pre-v2
+/// posture -- it must NOT ride the algorithm-upgrade allow. It surfaces as
+/// Drift so the user decides, keeping the two empty-value postures aligned.
+#[test]
+fn resume_surfaces_drift_for_an_empty_fingerprint_recipe() {
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef};
+    use toptopduck_lib::RectifyProvenance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    let csv = dir.path().join("people.csv");
+    fs::copy(fixture("people.csv"), &csv).expect("copy source");
+
+    let recipe = Recipe::build(
+        "corrupt".into(),
+        vec![SourceRef {
+            reference_name: "people".into(),
+            display_name: "people".into(),
+            source_path: csv.to_string_lossy().to_string(),
+            relative_path: None,
+            rectify: RectifyProvenance::NotApplicable,
+            fingerprint: String::new(),
+            reader: None,
+        }],
+        vec![],
+        None,
+    )
+    .expect("build recipe");
+    save_atomic(&duck, &recipe).expect("save");
+
+    let drift_seen = Rc::new(RefCell::new(false));
+    let drift_for_cb = Rc::clone(&drift_seen);
+    let resumed = Session::open_recipe(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        Default::default(),
+        |_| {},
+        move |issue| match issue {
+            SourceIssue::Drift { reference_name, .. } => {
+                assert_eq!(reference_name, "people");
+                *drift_for_cb.borrow_mut() = true;
+                SourceResolution::Rebuild
+            }
+            other => panic!("expected Drift for an empty fingerprint, got {other:?}"),
+        },
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume");
+
+    assert!(
+        *drift_seen.borrow(),
+        "an empty fingerprint is Drift, not an upgrade allow"
+    );
+    assert!(
+        resumed.get("people").is_none(),
+        "the empty-fingerprint source was not restored"
+    );
+}
+
+/// Issue #1507: result_N descriptors are shape-only -- the materialize path
+/// no longer derives a table-content fingerprint (zero comparison and zero
+/// display consumers pinned elsewhere), so the descriptor ships an empty
+/// fingerprint and its identity is the reference name alone.
+#[test]
+fn materialized_results_carry_an_empty_fingerprint() {
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
+        "多少人",
+        productive("SELECT COUNT(*) AS n FROM \"people\".data"),
+    );
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    let _ = session.ask("多少人");
+    let result = session.get("result_1").expect("result_1 registered");
+    assert_eq!(
+        result.fingerprint, "",
+        "result descriptors carry no fingerprint identity"
+    );
+    let source = session.get("people").expect("people");
+    assert!(
+        source.fingerprint.starts_with("v2:"),
+        "source descriptors still carry their v2 identity: {}",
+        source.fingerprint
+    );
+}
+
 /// AC4: a boundary-case source (relative + absolute both stored) whose file
 /// is gone entirely surfaces as Missing and goes through re-link (ADR-0035
 /// honest degrade). The boundary case must not silently pick one

@@ -143,9 +143,12 @@ pub struct DatasetDescriptor {
     pub row_count: u64,
     /// First 3 rows frozen at copy-in (ADR-0026), each a vector of rendered cells.
     pub sample: Vec<Vec<String>>,
-    /// SHA256 (hex) of the post-copy-in snapshot (ADR-0042); the content hash of
-    /// the *post-rectify* table, so different rectify choices yield different
-    /// fingerprints when they change the materialized rows.
+    /// Content identity (ADR-0042): on the private face the v2 source hash --
+    /// `v2:` + the streaming SHA256 of the file copy-in reads + the reader fn
+    /// spelling; on the shared face the store's content key (a bare SHA256
+    /// hex). Rectify choices still partition it (they change what copy-in
+    /// reads). Resume compares it against the recipe's record; a materialized
+    /// result_N ships it empty (identity = the reference name).
     pub fingerprint: String,
     /// The snapshot file's byte size (issue #1485): the data body's on-disk
     /// size, stat'ed off the store file at landing (the source file may have

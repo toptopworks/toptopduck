@@ -9,12 +9,10 @@
 //! manifest entry references are orphans and are swept at startup.
 
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use duckdb::{AccessMode, Config, Connection};
-use sha2::{Digest, Sha256};
 
 use crate::ingest::{self, loader};
 use crate::model::{ColumnSchema, DatasetPrivacy, LoadError};
@@ -199,21 +197,6 @@ fn manifest_path(workspace: &Path) -> PathBuf {
     state_dir(workspace).join(MANIFEST_FILE_NAME)
 }
 
-/// Stream-hash a file's bytes (the store key, ADR-0141 D2).
-fn sha256_file(path: &Path) -> Result<String, StoreError> {
-    let mut file = fs::File::open(path).map_err(StoreError::io)?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buf).map_err(StoreError::io)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
 /// Read the manifest (ADR-0141 D8): missing = empty (fresh workspace); a
 /// parse failure copies the file aside as `datasets.json.corrupt` and refuses
 /// -- mutations load first, so a corrupt manifest can never be overwritten.
@@ -287,21 +270,22 @@ fn reopen_read_only(dest: PathBuf) -> Result<Snapshot, StoreError> {
         .access_mode(AccessMode::ReadOnly)
         .map_err(StoreError::io)?;
     let conn = Connection::open_with_flags(&dest, config).map_err(StoreError::io)?;
-    let snap = Snapshot::from_connection_shape(&conn, dest).map_err(StoreError::from)?;
+    let snap = Snapshot::from_connection(&conn, dest).map_err(StoreError::from)?;
     Ok(Snapshot {
         fingerprint: store_fingerprint(&snap.file_path),
         ..snap
     })
 }
 
-/// Materialize `src` into the store under its content key: a hit opens the
-/// existing snapshot READ_ONLY and re-derives its shape (zero conversion); a
-/// miss copies in through the shared loader under a temp name and atomically
-/// renames (single physical file, no parallel writers -- ADR-0141 D2).
-/// Both paths derive shape only -- no table-content fingerprint pass; the
-/// identity is the store key itself (issue #1506).
+/// Materialize `src` into the store under its content key (the streaming
+/// SHA-256 of the file's bytes, ADR-0141 D2): a hit opens the existing
+/// snapshot READ_ONLY and re-derives its shape (zero conversion); a miss
+/// copies in through the shared loader under a temp name and atomically
+/// renames (single physical file, no parallel writers). Both paths derive
+/// shape only -- no table-content fingerprint pass; the identity is the
+/// store key itself (issue #1506).
 pub fn materialize(workspace: &Path, src: &Path, reader: &str) -> Result<Snapshot, StoreError> {
-    let key = sha256_file(src)?;
+    let key = crate::util::sha256_file(src).map_err(StoreError::io)?;
     let dest = store_file(workspace, &key);
     if dest.exists() {
         return reopen_read_only(dest);
@@ -638,6 +622,7 @@ fn dispatch_reader(src: &Path) -> Result<&'static str, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     fn csv(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let p = dir.join(name);

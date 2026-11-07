@@ -157,8 +157,10 @@ pub const LEGACY_RECIPE_FILE_NAME: &str = "session.duck";
 ///
 /// The rectify choices are the user's explicit decisions (CSV/JSON/Parquet =
 /// N/A; Excel carries the user header/skip decisions, never the auto-tidy
-/// algorithm), and the fingerprint is the content hash of the post-rectify
-/// snapshot (resumed read-only, fixed by re-upload). The display label rides
+/// algorithm), and the fingerprint is the v2 source hash -- the hash of the
+/// file copy-in reads plus the reader fn spelling (issue #1507; resumed
+/// read-only, fixed by re-upload; a pre-v2 bare hash resumes through the
+/// algorithm-upgrade allow). The display label rides
 /// along so a user rename survives resume (ADR-0037 display-layer only -- the
 /// reference name is the stable identity SQL / the chain / the active pointer
 /// use).
@@ -696,9 +698,10 @@ pub struct Recipe {
     format_version: u32,
     pub session_name: String,
     /// The currently-loaded source Datasets (ADR-0034 current source set):
-    /// each is re-read on resume and its post-rectify fingerprint verified
-    /// (ADR-0035/0042). A removed source is absent; a replaced one keeps the
-    /// name with the new fingerprint.
+    /// each is re-read on resume and its fingerprint verified (ADR-0035/0042;
+    /// a pre-v2 bare hash resumes through the algorithm-upgrade allow). A
+    /// removed source is absent; a replaced one keeps the name with the new
+    /// fingerprint.
     pub sources: Vec<SourceRef>,
     /// The full conversation timeline (ADR-0028/0039/0040): every turn +
     /// every source lifecycle event, always visible, pure-append. The

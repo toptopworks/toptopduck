@@ -33,7 +33,7 @@ use crate::sandbox_sql::{
 };
 use crate::session::engine::AdminEngine;
 use crate::session::shared_datasets::SharedRefError;
-use crate::session::{derived_source, sandbox, snapshot::derive_table};
+use crate::session::{derived_source, sandbox, snapshot::derive_shape};
 use crate::workingset::WorkingSet;
 
 /// Cached derived-source registration (issue #440). Stores the catalog ref
@@ -384,9 +384,11 @@ impl Materializer for RealMaterializer {
         }
 
         // Derive the result's shape from admin's installed table -- the same
-        // derivation a source snapshot uses (DRY). A derive failure also rolls
-        // back result_N (orphan table would wedge later turns, ADR-0022).
-        let shape = match derive_table(admin, &result_name, deps.temp_path, &result_name) {
+        // shape-only derivation a source snapshot uses (DRY); the result
+        // carries no fingerprint (identity = the reference name, issue #1507).
+        // A derive failure still rolls back result_N (an orphan table would
+        // wedge later turns, ADR-0022).
+        let shape = match derive_shape(admin, &result_name) {
             Ok(shape) => shape,
             Err(e) => {
                 let detail = rollback_result(admin, &result_name, e.to_string());
@@ -400,7 +402,7 @@ impl Materializer for RealMaterializer {
             columns: shape.columns,
             row_count: shape.row_count,
             sample: shape.sample,
-            fingerprint: shape.fingerprint,
+            fingerprint: String::new(), // no identity: a result IS its name
             // A result lives in the session DB, no snapshot file (ADR-0024).
             size_bytes: 0,
             rectify: RectifyProvenance::NotApplicable,

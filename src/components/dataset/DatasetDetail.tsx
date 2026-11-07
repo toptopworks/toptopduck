@@ -249,8 +249,9 @@ export function DatasetDetail({
           empty (no file provenance to show -- the fingerprint is a file-change
           proof, so it has nothing to attach to either), and the full
           fingerprint sits directly under the path so a troubleshooting check
-          needs no hover. Both lines break-all: a long path / the 64-char
-          fingerprint wrap instead of stretching the panel. */}
+          needs no hover. Both lines break-all: a long path / the long
+          fingerprint (up to ~81 chars on the private face) wrap instead of
+          stretching the panel. */}
       {dataset.source_path !== "" && (
         <>
           <p className="source text-muted-foreground text-[0.85rem] break-all">
@@ -266,7 +267,8 @@ export function DatasetDetail({
               defaultMessage="Fingerprint: {fingerprint}"
               values={{
                 // The hex value rides the {typography.code} mono token (the
-                // schema-type <code> form): a 64-char data identifier reads
+                // schema-type <code> form): a long data identifier (bare hex
+                // on the shared face, v2-prefixed on the private face) reads
                 // best monospaced, the prose prefix stays in the body font.
                 fingerprint: (
                   <code className="font-mono text-[13px]">{dataset.fingerprint}</code>
