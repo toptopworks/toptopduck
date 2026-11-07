@@ -70,7 +70,7 @@ jobs:
           if [ "$(jq -r '.type' <<<"$TAG_OBJ")" = "tag" ]; then
             SHA="$(gh api "repos/${GH_REPO}/git/tags/${SHA}" --jq '.object.sha')"
           fi
-          RUN_ID="$(gh run list --workflow Build.yml --commit "$SHA" --status success --json databaseId --jq 'first.databaseId // empty')"
+          RUN_ID="$(gh run list --workflow build.yml --commit "$SHA" --status success --json databaseId --jq 'first.databaseId // empty')"
           if [ -z "$RUN_ID" ]; then
             echo "::error::No successful Build run for ${RELEASE_TAG} (commit ${SHA}). Push the release merge to main and wait for Build." >&2
             exit 1
