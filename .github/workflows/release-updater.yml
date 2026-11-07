@@ -62,10 +62,14 @@ jobs:
       - name: Resolve the Build run for the tag
         run: |
           set -euo pipefail
-          SHA="$(gh api "repos/${GH_REPO}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha')"
-          # A release merge may be tagged on the merge commit or on a tag
-          # object; peel annotated tags to the commit.
-          SHA="$(gh api "repos/${GH_REPO}/commits/${SHA}" --jq '.sha')"
+          # A release merge may be tagged on the merge commit (lightweight)
+          # or on an annotated tag object; the commits endpoint rejects tag
+          # object shas (422), so peel via the git/tags endpoint.
+          TAG_OBJ="$(gh api "repos/${GH_REPO}/git/ref/tags/${RELEASE_TAG}" --jq '.object')"
+          SHA="$(jq -r '.sha' <<<"$TAG_OBJ")"
+          if [ "$(jq -r '.type' <<<"$TAG_OBJ")" = "tag" ]; then
+            SHA="$(gh api "repos/${GH_REPO}/git/tags/${SHA}" --jq '.object.sha')"
+          fi
           RUN_ID="$(gh run list --workflow Build.yml --commit "$SHA" --status success --json databaseId --jq 'first.databaseId // empty')"
           if [ -z "$RUN_ID" ]; then
             echo "::error::No successful Build run for ${RELEASE_TAG} (commit ${SHA}). Push the release merge to main and wait for Build." >&2
@@ -73,6 +77,24 @@ jobs:
           fi
           echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
           echo "COMMIT_SHA=$SHA" >> "$GITHUB_ENV"
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+
+      # Phantom-update guard (issue #1511, Advisory B from PR #1510): a tag
+      # on a commit that was never version-bumped would ship a manifest whose
+      # version differs from the artifacts' embedded version, and clients
+      # would rediscover and reinstall the same build on every startup. The
+      # tag and the tauri.conf.json at the tagged commit must agree. Runs
+      # before any downloads so a bad dispatch fails fast.
+      - name: Gate the tag against tauri.conf.json
+        run: |
+          set -euo pipefail
+          CONF_VERSION="$(gh api "repos/${GH_REPO}/contents/src-tauri/tauri.conf.json?ref=${COMMIT_SHA}" --jq '.content' | tr -d '\n' | base64 -d | jq -r '.version')"
+          if [ "$CONF_VERSION" != "${RELEASE_TAG#v}" ]; then
+            echo "::error::Tag ${RELEASE_TAG} does not match tauri.conf.json version ${CONF_VERSION} at ${COMMIT_SHA}; bump the version before tagging." >&2
+            exit 1
+          fi
+          echo "tag/version match: ${RELEASE_TAG} == v${CONF_VERSION}"
         env:
           RELEASE_TAG: ${{ inputs.tag }}
 

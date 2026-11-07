@@ -124,6 +124,11 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
         .ok_or_else(|| "no update available".to_string())?;
     let progress_app = app.clone();
     let mut last_percent: Option<u64> = None;
+    // The plugin's progress callback delivers CHUNK LENGTHS (delta bytes), not
+    // cumulative totals (tauri-plugin-updater 2.14.1 calls
+    // `on_chunk(chunk.len(), content_length)`) -- accumulate here so the
+    // percent math (and the unknown-total 512 KiB cadence) see real progress.
+    let mut downloaded: u64 = 0;
     // The plugin's on_before_exit hook is Windows-only in 2.14.1 (its single
     // call site sits inside the Windows install_inner), so macOS and Linux
     // run the session-release half of the cleanup from the download-finished
@@ -138,7 +143,8 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
     let on_download_finish = || {};
     update
         .download_and_install(
-            move |downloaded, total| {
+            move |chunk_len, total| {
+                downloaded += chunk_len as u64;
                 emit_progress(&progress_app, downloaded, total, &mut last_percent);
             },
             on_download_finish,
@@ -177,11 +183,10 @@ fn should_emit_progress(
 /// so the error is ignored.
 fn emit_progress(
     app: &AppHandle,
-    downloaded: usize,
+    downloaded: u64,
     total: Option<u64>,
     last_percent: &mut Option<u64>,
 ) {
-    let downloaded = downloaded as u64;
     if should_emit_progress(downloaded, total, last_percent) {
         let _ = app.emit(
             DOWNLOAD_PROGRESS_EVENT,
