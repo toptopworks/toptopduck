@@ -21,6 +21,7 @@ import { toAppError } from "../lib/error-presentation";
 import { loadErrorDisplay } from "../lib/loadErrorDisplay";
 import { sessionKeys } from "./queryKeys";
 import { resolveWorkingSetDetail } from "./workspace";
+import type { BatchProgress } from "./useWorkspaceDatasets";
 import type { AppError, SessionFlowKind } from "../types/error";
 import type {
   DatasetDescriptor,
@@ -199,10 +200,12 @@ export interface ReplaceFlightInfo {
  *  swap target plus its start stamp (ONE clock, minted at the single report
  *  site -- SessionPane's trackReplace). Rendered by the rail's live region
  *  beside the ingest block; cleared on every settle. Client UI state only --
- *  never enters any cache. */
-export interface ReplaceProgress extends ReplaceFlightInfo {
-  startedAt: number;
-}
+ *  never enters any cache.
+ *
+ *  A projection of the shared-face seam's unified batch progress union
+ *  (#1519): this face's member is recognized by its `referenceName` field,
+ *  and the trackReplace construction site is unchanged. */
+export type ReplaceProgress = Extract<BatchProgress, { referenceName: string }>;
 
 export interface UseWorkingSet {
   // Data plane.

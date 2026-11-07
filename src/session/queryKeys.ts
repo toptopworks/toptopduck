@@ -141,6 +141,16 @@ export const workspaceKeys = {
   all: () => ["workspaces"] as const,
 } as const;
 
+/** The shared-dataset panel's listing (ADR-0141): keyed by the workspace's
+ *  canonical path -- a filesystem fact, not a session slice, so the panel's
+ *  listing and every mutation invalidation target the same family. The
+ *  app-wide staleTime Infinity makes the mutations' invalidation the ONLY
+ *  refetch trigger (#1491/#1492), which is why the key factory lives in the
+ *  one place every writer reads. */
+export const workspaceDatasetKeys = {
+  listing: (workspace: string) => ["workspace-datasets", workspace] as const,
+} as const;
+
 /** The update-check slice (ADR-0143, issue #1509): one process-wide cached
  *  check -- the startup auto-check populates it; the sidebar indicator and
  *  the settings block subscribe (enabled:false reads, no mount refetch) and

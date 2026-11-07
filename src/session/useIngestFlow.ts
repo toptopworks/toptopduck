@@ -4,6 +4,7 @@ import { discardGuidedRetention, guidanceWindow, ingestFile, ingestFileGuided } 
 import { toAppError } from "../lib/error-presentation";
 import { loadErrorDisplay } from "../lib/loadErrorDisplay";
 import { log } from "../lib/log";
+import type { BatchProgress } from "./useWorkspaceDatasets";
 import type { UseViewedResult } from "./useViewedResult";
 import type { AppError, SessionFlowKind } from "../types/error";
 import type { GuidanceRequest, LoadOutcome, SheetGuidance } from "../types/dataset";
@@ -67,13 +68,12 @@ export interface UseIngestFlowDeps {
  *  per-file clock would visibly reset on every file). Rendered by the rail's
  *  live region; cleared on every batch exit (drain / park / halt) -- the
  *  next ingest's entry block is minted by the segment loop's head. Client
- *  UI state only -- never enters any cache. */
-export interface IngestProgress {
-  currentPath: string;
-  index: number;
-  total: number;
-  startedAt: number;
-}
+ *  UI state only -- never enters any cache.
+ *
+ *  A projection of the shared-face seam's unified batch progress union
+ *  (#1519): this face's member is recognized by its `currentPath` field,
+ *  and the segment loop below constructs it unchanged. */
+export type IngestProgress = Extract<BatchProgress, { currentPath: string }>;
 
 export interface UseIngestFlow {
   /** The open guidance dialog state (NeedsGuidance route), or null. Renders the
