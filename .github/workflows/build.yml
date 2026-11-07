@@ -91,6 +91,13 @@ jobs:
           BUNDLE_ROOT="${{ matrix.os == 'macos-latest' && 'target/universal-apple-darwin/release/bundle' || 'target/release/bundle' }}"
           find "$BUNDLE_ROOT" -maxdepth 2 -type f -name '* *' \
             -exec bash -c 'mv "$1" "${1// /-}"' _ {} \;
+          # The universal target leaks a `_universal` arch segment into the dmg
+          # name (TAURI default `{name}_{version}_{target}`); drop the segment
+          # (TOPTOP-Duck_<version>.dmg). The updater package (.app.tar.gz)
+          # keeps its bare productName name: it is referenced by the R2
+          # manifest, which is immutable per tag.
+          find "$BUNDLE_ROOT/dmg" -maxdepth 1 -type f -name '*_universal.dmg' \
+            -exec bash -c 'mv "$1" "${1//_universal.dmg/.dmg}"' _ {} \; 2>/dev/null || true
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v7
