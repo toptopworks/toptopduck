@@ -181,7 +181,7 @@ jobs:
         run: |
           set -euo pipefail
           jq --arg origin "$MIRROR_ORIGIN" --arg tag "$RELEASE_TAG" \
-            '(.platforms | to_entries | map(.value.url = ($origin + "/" + $tag + "/" + (.value.url | split("/") | last))) | from_entries)' \
+            '.platforms = (.platforms | to_entries | map(.value.url = ($origin + "/" + $tag + "/" + (.value.url | split("/") | last))) | from_entries)' \
             latest.json > latest.mirror.json
           diff <(jq -S 'del(.platforms)' latest.json) <(jq -S 'del(.platforms)' latest.mirror.json) > /dev/null
           echo "mirror manifest OK"
