@@ -5,6 +5,7 @@ import {
   Box,
   Cable, Terminal,
   Database,
+  Info,
   Puzzle,
   Settings,
   ShieldCheck,
@@ -30,6 +31,7 @@ import {
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { AboutSection } from "./AboutSection";
 import { EngineSection } from "./EngineSection";
 import { GeneralSection } from "./GeneralSection";
 import { CliSection } from "./CliSection";
@@ -94,6 +96,8 @@ function SectionIcon({ section }: { section: SettingsSection }) {
       return <Cable className="size-4 shrink-0" aria-hidden />;
     case "cli-tools":
       return <Terminal className="size-4 shrink-0" aria-hidden />;
+    case "about":
+      return <Info className="size-4 shrink-0" aria-hidden />;
     default: {
       const _exhaustive: never = section;
       throw new Error(`Unknown settings section: ${String(_exhaustive)}`);
@@ -124,6 +128,8 @@ function SectionLabel({ section }: { section: SettingsSection }) {
       return (
         <FormattedMessage id="settings.nav.cliTools" defaultMessage="CLI Tools" />
       );
+    case "about":
+      return <FormattedMessage id="settings.nav.about" defaultMessage="About" />;
     default: {
       const _exhaustive: never = section;
       throw new Error(`Unknown settings section: ${String(_exhaustive)}`);
@@ -201,6 +207,8 @@ function SectionContent({
       return (
         <CliSection appConfig={appConfig} onCliToolsChanged={onCliToolsChanged} />
       );
+    case "about":
+      return <AboutSection />;
     default: {
       const _exhaustive: never = section;
       throw new Error(`Unknown settings section: ${String(_exhaustive)}`);

@@ -62,8 +62,20 @@ jobs:
       # Quality gates are NOT repeated here: the CI workflow's frontend/rust
       # jobs own them, and tauri's beforeBuildCommand (tsc --noEmit + vite
       # build) already covers type-check + bundle for the packaged app.
+      #
+      # macOS builds UNIVERSAL (ADR-0143): the one .app.tar.gz updater
+      # artifact serves both darwin manifest keys, so every installed arch
+      # stays on the update chain. The universal target relocates the bundle
+      # tree to target/universal-apple-darwin/release/bundle.
+      # TAURI_SIGNING_PRIVATE_KEY (minisign, passwordless) turns
+      # createUpdaterArtifacts into signed updater artifacts + .sig files;
+      # without the secret the bundler skips them and the updater-artifact
+      # upload below stays empty (warn) — the release workflow's manifest
+      # gate fails loudly instead.
       - name: Build (tauri build)
-        run: npm run tauri -- build
+        run: npm run tauri -- build ${{ matrix.os == 'macos-latest' && '--target universal-apple-darwin' || '' }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
       # productName is "TOPTOP Duck" (space) for the surfaces users read —
       # shortcut label, uninstall list. Bundle files drop the space so release
@@ -72,7 +84,8 @@ jobs:
       - name: Normalize bundle artifact names
         shell: bash
         run: |
-          find target/release/bundle -maxdepth 2 -type f -name '* *' \
+          BUNDLE_ROOT="${{ matrix.os == 'macos-latest' && 'target/universal-apple-darwin/release/bundle' || 'target/release/bundle' }}"
+          find "$BUNDLE_ROOT" -maxdepth 2 -type f -name '* *' \
             -exec bash -c 'mv "$1" "${1// /-}"' _ {} \;
 
       - name: Upload bundle artifacts
@@ -82,8 +95,24 @@ jobs:
           path: |
             target/release/bundle/msi/*.msi
             target/release/bundle/nsis/*.exe
-            target/release/bundle/dmg/*.dmg
-            target/release/bundle/macos/*.app
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
             target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
             target/release/bundle/appimage/*.AppImage
+            target/universal-apple-darwin/release/bundle/macos/*.app
           if-no-files-found: error
+
+      # The updater faces (ADR-0143): every signed artifact + its .sig, plus
+      # the macOS .app.tar.gz updater package. warn when absent — before the
+      # signing secret exists the main-push build must stay green; the
+      # release workflow's manifest gate is the hard failure point.
+      - name: Upload updater artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: toptopduck-updater-${{ matrix.os }}
+          path: |
+            target/release/bundle/**/*.sig
+            target/universal-apple-darwin/release/bundle/**/*.sig
+            target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+          if-no-files-found: warn
+          retention-days: 14

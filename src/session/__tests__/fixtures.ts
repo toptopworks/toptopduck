@@ -15,6 +15,7 @@ export function src(name: string): DatasetDescriptor {
     row_count: 1,
     sample: [["1"]],
     fingerprint: "ff".repeat(32),
+    size_bytes: 0,
     rectify: { kind: "NotApplicable" },
     privacy: { send_samples: true, type_only_columns: [] },
   };

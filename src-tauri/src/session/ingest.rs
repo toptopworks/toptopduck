@@ -130,7 +130,13 @@ impl super::Session {
 
     fn ingest_structured(&mut self, path: &Path, reader: &str) -> LoadOutcome {
         let reference_name = match ingest::derive_reference_name(path) {
-            Some(n) => self.working_set.deconflict(&n),
+            // ADR-0141 D6: the private face yields to the shared vocabulary.
+            Some(n) => super::shared_datasets::deconflict_with_shared(
+                &n,
+                &self.working_set,
+                self.runtime_facts.workspace.as_deref(),
+                Some(&self.shared_attaches),
+            ),
             None => {
                 return LoadOutcome::Error(LoadError::Io {
                     detail: "无法从路径推导数据集名".into(),
@@ -161,6 +167,10 @@ impl super::Session {
             });
         }
 
+        // Stat BEFORE the file_path move, while the path is still borrowable;
+        // the writing connection is long dropped (copy_in closed it), so the
+        // on-disk size is final (issue #1485).
+        let size_bytes = crate::session::snapshot::snapshot_len(&snap.file_path);
         // Record the attached snapshot's file so the sandbox can re-attach it
         // READ_ONLY (ADR-0005 read_* closure). file_path is moved here; the
         // descriptor below takes snap's remaining fields.
@@ -185,6 +195,7 @@ impl super::Session {
             row_count: snap.row_count,
             sample: snap.sample,
             fingerprint: snap.fingerprint,
+            size_bytes,
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
             stale: None,
@@ -486,6 +497,8 @@ impl super::Session {
             });
         }
         attached.push(reference_name.to_string());
+        // Same stat-before-move as the unguided path (issue #1485).
+        let size_bytes = crate::session::snapshot::snapshot_len(&snap.file_path);
         // Record the attached snapshot's file for the sandbox re-attach path
         // (ADR-0005 read_* closure). file_path is moved here; the descriptor
         // below takes the remaining fields.
@@ -500,6 +513,7 @@ impl super::Session {
             row_count: snap.row_count,
             sample: snap.sample,
             fingerprint: snap.fingerprint,
+            size_bytes,
             rectify,
             privacy: DatasetPrivacy::default(),
             stale: None,
@@ -612,5 +626,32 @@ impl super::Session {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Loaded descriptor's size_bytes must equal the store file's final
+    /// on-disk length (issue #1485): the stat runs after the writing
+    /// connection drops, and DuckDB flushes the main file on close -- a
+    /// mid-open stat reads a partial figure, so this equality pins the
+    /// ordering, not just that a stat happened.
+    #[test]
+    fn loaded_size_bytes_equals_the_store_file_length() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("people.csv");
+        fs::write(&src, "id,name\n1,a\n2,b\n").expect("csv");
+        let mut session = crate::session::Session::new().expect("session");
+        let d = match session.ingest(&src) {
+            LoadOutcome::Loaded(d) => d,
+            other => panic!("expected Loaded, got {other:?}"),
+        };
+        let store = session
+            .snapshot_dir()
+            .join(format!("{}.duckdb", d.reference_name));
+        let len = fs::metadata(&store).expect("store file").len();
+        assert_eq!(d.size_bytes, len);
     }
 }

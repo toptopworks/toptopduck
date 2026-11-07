@@ -170,10 +170,22 @@ impl RecipePersister {
         // inside the recipe.json file's directory subtree (primary resolver,
         // survives "move the folder").
         let duck_dir = self.recipe_path.as_deref().and_then(Path::parent);
+        // ADR-0141 D9: shared attaches ride the history events, never the
+        // sources -- resume restores them from the workspace store (zero
+        // conversion), and a re-read of the original file would both
+        // duplicate the conversion and break the fingerprint identity.
+        let shared_names: std::collections::HashSet<&str> = timeline
+            .iter()
+            .filter_map(|entry| match entry {
+                TimelineEntry::SharedAttach(ev) => Some(ev.reference_name.as_str()),
+                _ => None,
+            })
+            .collect();
         let sources: Vec<SourceRef> = working_set
             .list()
             .iter()
             .filter(|d| !working_set.is_result(&d.reference_name))
+            .filter(|d| !shared_names.contains(&d.reference_name.as_str()))
             .map(|d| {
                 let relative_path = duck_dir
                     .and_then(|dir| Path::new(&d.source_path).strip_prefix(dir).ok())
@@ -309,6 +321,7 @@ impl RecipePersister {
                 }
                 TimelineEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
                 TimelineEntry::Skill(ev) => Some(RecipeEntry::Skill(ev.clone())),
+                TimelineEntry::SharedAttach(ev) => Some(RecipeEntry::SharedAttach(ev.clone())),
             })
             .collect();
 
@@ -633,6 +646,7 @@ mod tests {
             fingerprint: "fp".into(),
             rectify: crate::model::RectifyProvenance::NotApplicable,
             privacy: Default::default(),
+            size_bytes: 0,
             stale: None,
         }
     }

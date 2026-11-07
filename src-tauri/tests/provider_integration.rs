@@ -757,9 +757,9 @@ fn a_protocol_switch_between_turns_reroutes_the_next_turn() {
 
 // --- cross-host redirect credential pins (issue #696) -----------------------
 //
-// The probe path has its own redirect pin (`egress_agent_does_not_follow_
-// cross_host_redirect` in provider::http, the shared ureq agent with
-// redirects disabled). The production turn path is in the same posture
+// The probe path has its own redirect pin (`egress_client_does_not_follow_
+// cross_host_redirect` in provider::preflight, the shared reqwest blocking
+// client with redirects disabled). The production turn path is in the same posture
 // since the loop-runtime swap (ADR-0116 Decision 6, issue #918): the live
 // factory injects an app-constructed reqwest client with redirects pinned
 // off (`Policy::none`), so a cross-host 3xx is never followed -- whatever

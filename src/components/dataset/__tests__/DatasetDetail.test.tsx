@@ -218,4 +218,60 @@ describe("DatasetDetail", () => {
     expect(screen.getByText(/发送冻结的首 3 行样本值/)).toBeInTheDocument();
     expect(screen.getByText(/id、name/)).toBeInTheDocument();
   });
+
+  it("warns when the single column's name embeds separators -- the sniffer-fallback fingerprint", () => {
+    // The observed failure mode (issue #1483): the whole header line,
+    // commas included, landed as one VARCHAR column. A genuine single-column
+    // dataset will not carry a separator inside its name (a quoted header
+    // field is the lone false positive), so the separator is the
+    // fingerprint -- the warning must not gate usage.
+    const swallowedHeader = {
+      ...mockDataset,
+      columns: [
+        { name: "reporterCode,periods,reporters", canonical_type: "VARCHAR" },
+      ],
+    };
+    renderI18n(<DatasetDetail dataset={swallowedHeader} {...LOADED_PREVIEW} />);
+    expect(screen.getByText(/分隔符/)).toBeInTheDocument();
+  });
+
+  it("warns on the pipe fingerprint -- DuckDB's fourth delimiter candidate", () => {
+    // A pipe-delimited file that falls into the swallowed-header mode lands
+    // as one column named like "id|name|qty": pipe is in DuckDB's candidate
+    // set alongside comma, semicolon, and tab, so the fingerprint must
+    // cover it.
+    const pipeSwallowed = {
+      ...mockDataset,
+      columns: [{ name: "id|name|qty", canonical_type: "VARCHAR" }],
+    };
+    renderI18n(<DatasetDetail dataset={pipeSwallowed} {...LOADED_PREVIEW} />);
+    expect(screen.getByText(/分隔符/)).toBeInTheDocument();
+  });
+
+  it("stays silent for a genuine single-column dataset with a clean column name", () => {
+    const genuineSingle = {
+      ...mockDataset,
+      columns: [{ name: "count", canonical_type: "BIGINT" }],
+    };
+    renderI18n(<DatasetDetail dataset={genuineSingle} {...LOADED_PREVIEW} />);
+    expect(screen.queryByText(/分隔符/)).not.toBeInTheDocument();
+  });
+});
+
+describe("DatasetDetail size line (issue #1485)", () => {
+  it("appends the human-readable store size to the meta line when known", () => {
+    renderI18n(
+      <DatasetDetail
+        dataset={{ ...mockDataset, size_bytes: 1073741824 }}
+        {...LOADED_PREVIEW}
+      />,
+    );
+    expect(screen.getByText(/行数：5/)).toBeInTheDocument();
+    expect(screen.getByText(/大小：1\s*GB/)).toBeInTheDocument();
+  });
+
+  it("renders no size line for 0 (an old manifest row -- never a fake figure)", () => {
+    renderI18n(<DatasetDetail dataset={mockDataset} {...LOADED_PREVIEW} />);
+    expect(screen.queryByText(/大小/)).toBeNull();
+  });
 });

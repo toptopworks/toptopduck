@@ -43,6 +43,16 @@ fn loads_csv_into_working_set_as_active() {
 }
 
 #[test]
+fn descriptor_size_bytes_is_a_real_stat() {
+    // issue #1485: the private face's Loaded descriptor carries the store
+    // file's stat'ed size -- nonzero for a real file (the 0 sentinel means
+    // unknown and would hide the detail pane's size line).
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &fixture("people.csv"));
+    assert!(d.size_bytes > 0, "size must be stat'ed off the store file");
+}
+
+#[test]
 fn exposes_canonical_duckdb_types() {
     // AC2: per-column DuckDB inferred types under a single canonical name.
     // (read_csv_auto infers integers as 64-bit BIGINT by default.)
@@ -713,8 +723,9 @@ fn guided_load_records_rectify_params() {
 
 #[test]
 fn different_rectify_yields_different_fingerprint() {
-    // AC4: same sheet, different rectify -> different materialized snapshot ->
-    // different fingerprint (rectify participates via post-rectify content hash).
+    // AC4: same sheet, different rectify -> different materialized temp CSV
+    // -> different fingerprint (the v2 source hash is taken over what
+    // copy-in reads, so the rectify choice participates through the CSV).
     let mut wb = Workbook::new();
     let ws = wb.add_worksheet();
     ws.set_name("people").expect("name");
@@ -759,6 +770,133 @@ fn different_rectify_yields_different_fingerprint() {
         }
     };
     assert_ne!(fp_a, fp_b);
+}
+
+// --- v2 source fingerprint (issue #1507) -----------------------------------
+//
+// The private face's fingerprint = `v2:` + the streaming SHA256 of the file
+// copy-in actually reads + the reader fn spelling. Source bytes uniquely
+// determine the built table (read_* is deterministic and the pinned UTF-16
+// retry leg is a pure function of the source bytes), so this is
+// content-equivalent to the post-load table hash it replaced -- without the
+// full-table export pass (the upload path's largest single cost).
+
+#[test]
+fn fingerprint_is_the_v2_source_hash_with_reader_spelling() {
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &fixture("people.csv"));
+    let expected = format!(
+        "v2:{}:read_csv_auto",
+        toptopduck_lib::util::sha256_hex(&fs::read(fixture("people.csv")).expect("read fixture")),
+    );
+    assert_eq!(d.fingerprint, expected);
+}
+
+#[test]
+fn same_source_bytes_yield_the_same_v2_fingerprint() {
+    // Content-addressed: identical bytes at two paths -> identical
+    // fingerprints (the path plays no role); changed bytes -> a different
+    // fingerprint. Fresh sessions per read so the stems need no de-conflict.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("people.csv");
+    let b = dir.path().join("people-copy.csv");
+    fs::copy(fixture("people.csv"), &a).expect("copy a");
+    fs::copy(fixture("people.csv"), &b).expect("copy b");
+
+    let fp_a = {
+        let mut s = Session::new().expect("session");
+        load_ok(&mut s, &a).fingerprint
+    };
+    let fp_b = {
+        let mut s = Session::new().expect("session");
+        load_ok(&mut s, &b).fingerprint
+    };
+    assert_eq!(fp_a, fp_b, "identical source bytes hash identically");
+
+    fs::write(&a, "name,score\nAda,9\n").expect("rewrite a");
+    let fp_changed = {
+        let mut s = Session::new().expect("session");
+        load_ok(&mut s, &a).fingerprint
+    };
+    assert_ne!(
+        fp_changed, fp_a,
+        "changed source bytes change the fingerprint"
+    );
+}
+
+#[test]
+fn v2_fingerprint_is_stable_across_the_utf16_retry_leg() {
+    // The pinned UTF-16 retry is decided by the source bytes alone, so the
+    // fn-name-only spelling still pins the parse: re-importing the same
+    // UTF-16 file produces the identical fingerprint.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let utf16 = dir.path().join("unicode.csv");
+    let mut bytes: Vec<u8> = vec![0xff, 0xfe]; // UTF-16 LE BOM
+    bytes.extend(
+        "name,score\nAda,9\n"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes()),
+    );
+    fs::write(&utf16, &bytes).expect("write utf16");
+
+    let fp_a = {
+        let mut s = Session::new().expect("session");
+        load_ok(&mut s, &utf16).fingerprint
+    };
+    let fp_b = {
+        let mut s = Session::new().expect("session");
+        load_ok(&mut s, &utf16).fingerprint
+    };
+    assert_eq!(fp_a, fp_b);
+    assert!(
+        fp_a.starts_with("v2:") && fp_a.ends_with(":read_csv_auto"),
+        "fn-name spelling rides the fingerprint: {fp_a:?}"
+    );
+}
+
+#[test]
+fn xlsx_sheets_carry_distinct_v2_fingerprints() {
+    // Each sheet's copy-in source is its OWN materialized temp CSV, so
+    // per-sheet fingerprints differ by content and survive a re-ingest
+    // (issue #1507: hash what copy-in reads -- no Excel special case).
+    let mut wb = Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.set_name("people").expect("name");
+    ws.write_string(0, 0, "id").unwrap();
+    ws.write_number(1, 0, 1.0).unwrap();
+    let ws2 = wb.add_worksheet();
+    ws2.set_name("orders").expect("name");
+    ws2.write_string(0, 0, "sku").unwrap();
+    ws2.write_string(1, 0, "abc").unwrap();
+    ws2.write_number(1, 1, 2.0).unwrap();
+    let (xlsx, _dir) = save_xlsx(wb, "two_sheets.xlsx");
+
+    let fps = {
+        let mut s = Session::new().expect("session");
+        load_ok(&mut s, &xlsx);
+        (
+            s.get("people").expect("people").fingerprint,
+            s.get("orders").expect("orders").fingerprint,
+        )
+    };
+    assert_ne!(
+        fps.0, fps.1,
+        "per-sheet materialized CSVs hash independently"
+    );
+    assert!(
+        fps.0.starts_with("v2:") && fps.0.ends_with(":read_csv_auto"),
+        "sheet fingerprints carry the reader spelling: {fps:?}"
+    );
+
+    let fps_again = {
+        let mut s = Session::new().expect("session");
+        load_ok(&mut s, &xlsx);
+        (
+            s.get("people").expect("people").fingerprint,
+            s.get("orders").expect("orders").fingerprint,
+        )
+    };
+    assert_eq!(fps, fps_again, "the materialized CSVs are deterministic");
 }
 
 #[test]

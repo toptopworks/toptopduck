@@ -51,6 +51,10 @@ jobs:
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hang-shaped failure (e.g. a DNS-hijacking network degrades the
+    # egress proxy pin's DNS-fast red to an unbounded block) would
+    # otherwise burn the job-level 6h default before CI reports it.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -100,11 +104,11 @@ jobs:
         run: cargo fmt --all --check
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets --features toptopduck/test-fixtures -- -D warnings
+        run: cargo clippy --workspace --all-targets --features toptopduck/test-fixtures,bounded-line/async -- -D warnings
 
       - name: test
         if: runner.os == 'Linux'
-        run: cargo test --workspace --features toptopduck/test-fixtures
+        run: cargo test --workspace --features toptopduck/test-fixtures,bounded-line/async
 
   # Release face (ADR-0131): the bundle legs live in build.yml with a
   # push-main-only trigger — this workflow carries the quality gates only

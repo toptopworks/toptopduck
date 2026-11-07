@@ -559,8 +559,9 @@ export function useShellSessions({
   // ADR-0092 cold-start submit (#500): the centered bar's submit with no
   // active session mints a session carrying the question as pendingQuestion +
   // the pending file list as pendingIngestPaths. The SessionPane consumes
-  // them on mount — files ingest first (handleIngestMany), then the question
-  // fires via handleAsk — and clears each through onIngestConsumed /
+  // them on mount — files arm the tracked ingest batch first, and the
+  // question holds into the composer queue slot (#1500), whose settle
+  // auto-sends it on a full load — each cleared through onIngestConsumed /
   // onQuestionConsumed. ADR-0089 auto-persist applies (createSession binds
   // the recipe.json immediately).
   const createSessionWithQuestion = useCallback(

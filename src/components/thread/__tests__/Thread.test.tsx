@@ -41,6 +41,7 @@ const mockDataset: DatasetDescriptor = {
   source_path: "/x/people.csv",
   row_count: 5,
   fingerprint: "abc123def4560000000000000000000000000000000000000000000000000999",
+  size_bytes: 0,
   columns: [
     { name: "id", canonical_type: "BIGINT" },
     { name: "name", canonical_type: "VARCHAR" },
@@ -2864,5 +2865,101 @@ describe("Thread", () => {
     expect(host).toHaveAttribute("aria-current", "true");
     fireEvent.click(host);
     expect(onSelectViz).toHaveBeenCalledWith(BODY);
+  });
+});
+
+// Issue #1485: the in-flight ingest's transient block renders ABOVE the live
+// exchange while a dataset import materializes; it never enters the timeline.
+describe("Thread ingest progress block (issue #1485)", () => {
+  it("renders the file name, the batch position and the batch clock while set", () => {
+    renderThread(
+      <Thread
+        entries={[]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        ingestProgress={{
+          currentPath: "/x/员工表.csv",
+          index: 1,
+          total: 2,
+          startedAt: Date.now(),
+        }}
+      />,
+    );
+    const block = screen.getByRole("status");
+    expect(block).toHaveTextContent("正在导入 员工表.csv（第 1/2 个）…");
+  });
+
+  it("renders nothing while no ingest is in flight", () => {
+    renderThread(
+      <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+// Issue #1512: the in-flight replace's transient block rides the same live
+// region beside the ingest block -- the other long IPC that holds the
+// backend session lock.
+describe("Thread replace progress block (issue #1512)", () => {
+  it("renders the reference name, the incoming file and the flight clock while set", () => {
+    renderThread(
+      <Thread
+        entries={[]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        replaceProgress={{
+          referenceName: "orders",
+          path: "/x/新订单表.csv",
+          startedAt: Date.now(),
+        }}
+      />,
+    );
+    const block = screen.getByRole("status");
+    expect(block).toHaveTextContent("正在把 orders 换源为 新订单表.csv…");
+  });
+
+  it("renders nothing while no replace is in flight", () => {
+    renderThread(
+      <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("a replace block alone keeps the rail alive on a fresh session (empty bail-out counts it)", () => {
+    // Same posture as the ingest block's bail-out pin: entries empty, no
+    // live turn -- the replace line is the only thing rendering, and the
+    // section must not bail to null underneath it.
+    renderThread(
+      <Thread
+        entries={[]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        replaceProgress={{
+          referenceName: "orders",
+          path: "/x/新订单表.csv",
+          startedAt: Date.now(),
+        }}
+      />,
+    );
+    expect(screen.getByRole("status")).toBeInTheDocument();
+  });
+
+  it("wires the flight clock into the elapsed suffix (the minute tier shows)", () => {
+    // startedAt 65s back: the initial render already derives 65s from the
+    // stamp, so the tiered face shows the minute tier without waiting on
+    // the 1s ticker -- the clock's wiring, not just the message text.
+    renderThread(
+      <Thread
+        entries={[]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        replaceProgress={{
+          referenceName: "orders",
+          path: "/x/新订单表.csv",
+          startedAt: Date.now() - 65_000,
+        }}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("1分05秒");
   });
 });

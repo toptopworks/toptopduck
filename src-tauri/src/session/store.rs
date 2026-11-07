@@ -817,6 +817,58 @@ impl SessionStore {
         Ok(())
     }
 
+    /// The updater's pre-exit cleanup (ADR-0143, issue #1509): cancel + detach
+    /// EVERY live session, then bounded-wait for their drop signals. Releasing
+    /// a session reaps its external CLI children (whose bridge sidecars
+    /// EOF-exit behind them) and drops its in-memory DuckDB connection -- the
+    /// whole "收 sidecar / 关 DuckDB" cleanup chain in one move. Returns the
+    /// count of sessions still unreleased at the deadline; the caller logs and
+    /// proceeds regardless (the user confirmed the interruption at the update
+    /// dialog, so a straggler must not block the exit).
+    pub fn shutdown_all(&self, timeout: std::time::Duration) -> usize {
+        /// The poll cadence while waiting for drop signals (each turn's
+        /// cancel-then-discard lands in well under a second; the poll only
+        /// bridges to the signal).
+        const RELEASE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+        let ids: Vec<SessionId> = {
+            let map = self
+                .sessions
+                .read()
+                .expect("session store lock poisoned in shutdown_all");
+            map.keys().cloned().collect()
+        };
+        let mut waiters = Vec::new();
+        for id in ids {
+            // detach: mark closing + fire cancel + remove from the map; the
+            // returned handle is dropped here, so the drop signal fires as
+            // soon as no in-flight ask holds another Arc. A detach error on
+            // one id never blocks the rest (the map only holds closeable ids,
+            // so this branch is defensive).
+            match self.detach(&id) {
+                Ok(handle) => waiters.push(handle.take_drop_signal().ok().flatten()),
+                Err(e) => log::warn!("update-exit cleanup: detach {id} failed: {e}"),
+            }
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        let mut remaining: Vec<std::sync::mpsc::Receiver<()>> =
+            waiters.into_iter().flatten().collect();
+        while !remaining.is_empty() && std::time::Instant::now() < deadline {
+            // Disconnected = the sender was never armed (a Session outside any
+            // store) or already dropped -- released either way; Ok(()) is the
+            // armed signal.
+            remaining.retain(|rx| {
+                !matches!(
+                    rx.try_recv(),
+                    Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected)
+                )
+            });
+            if !remaining.is_empty() {
+                std::thread::sleep(RELEASE_POLL_INTERVAL);
+            }
+        }
+        remaining.len()
+    }
+
     /// Close a session and, if its timeline is completely empty (ADR-0089
     /// Decision 6), delete the per-session directory so empty sessions do not
     /// linger as sidebar "新会话" ghost entries. Additionally reclaims a
@@ -1409,7 +1461,7 @@ mod tests {
     /// overwrites the catalog slot.
     #[test]
     fn external_model_config_round_trips_pair_slot_survives_restore() {
-        let store = crate::session_store::SessionStore::new();
+        let store = crate::session::store::SessionStore::new();
         let id = store
             .create(
                 Arc::new(CancelToken::new()),
@@ -1500,6 +1552,46 @@ mod tests {
         assert!(
             approval.trust_list().is_empty(),
             "resume clears the session trust set (ADR-0080)"
+        );
+    }
+
+    /// The updater's shutdown_all (ADR-0143, issue #1509): every live session
+    /// is cancelled + detached and releases within the bound, and the store is
+    /// empty afterwards (subsequent lookups reject). The in-flight release
+    /// semantics themselves are pinned by the close-and-wait tests -- this pin
+    /// covers the batch face: no id is skipped, none left behind.
+    #[test]
+    fn shutdown_all_cancels_and_releases_every_session() {
+        let store = SessionStore::new();
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let id = store
+                .create(
+                    Arc::new(CancelToken::new()),
+                    Box::new(crate::UnwiredProvider),
+                    Default::default(),
+                )
+                .expect("create session");
+            ids.push(id);
+        }
+
+        let stragglers = store.shutdown_all(std::time::Duration::from_secs(5));
+
+        assert_eq!(stragglers, 0, "idle sessions must release immediately");
+        for id in &ids {
+            assert!(
+                store.close(id).is_err(),
+                "shutdown_all must have removed {id} from the map"
+            );
+        }
+    }
+
+    /// The empty store is the trivial no-op face (cold start at update time).
+    #[test]
+    fn shutdown_all_on_an_empty_store_is_a_zero_no_op() {
+        assert_eq!(
+            SessionStore::new().shutdown_all(std::time::Duration::from_secs(1)),
+            0
         );
     }
 }

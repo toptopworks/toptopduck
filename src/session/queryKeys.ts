@@ -140,3 +140,18 @@ export const artifactKeys = {
 export const workspaceKeys = {
   all: () => ["workspaces"] as const,
 } as const;
+
+/** The update-check slice (ADR-0143, issue #1509): one process-wide cached
+ *  check -- the startup auto-check populates it; the sidebar indicator and
+ *  the settings block subscribe (enabled:false reads, no mount refetch) and
+ *  the settings button re-fetches through fetchQuery. Session-agnostic like
+ *  the adapter table / workspace registry above. */
+export const updateKeys = {
+  check: () => ["update-check"] as const,
+  /** The install-in-flight slice: `{ percent: number | null } | null`. An
+   *  install is process-wide (the Rust chain replaces the process), so the
+   *  downloading state lives in the shared cache -- every update face (the
+   *  sidebar indicator, the About button, the install overlay) reads one
+   *  truth, and no face can start a second install while one runs. */
+  install: () => ["update-install"] as const,
+} as const;

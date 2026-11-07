@@ -1,5 +1,5 @@
 //! Tauri command boundary (frontend <-> Rust). Thin wrappers over the
-//! multi-session [`SessionStore`](crate::session_store::SessionStore) (ADR-0056):
+//! multi-session [`SessionStore`](crate::session::store::SessionStore) (ADR-0056):
 //! every session-scoped command takes `session_id` as its first parameter,
 //! parses it into a typed [`SessionId`] (a malformed id surfaces as
 //! [`SessionError::InvalidId`], distinct from a closed session's
@@ -55,11 +55,11 @@ use crate::runtime::acp::user_adapter_store::{
     is_valid_command_token, mint_user_adapter_id, UserAdapterRow, UserAdapterStore,
 };
 use crate::session::loop_contract::DiscoveredRuntime;
+use crate::session::store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::session::{
     PosturePair, RenameSessionError, ResumeEvent, ResumeProgress, Session, SessionRuntimeFacts,
     TurnDeps, TurnPorts,
 };
-use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
     discover_skill_sources, import_skills as import_skills_impl, ImportItem, ImportMode,
     ImportOutcome, SkillError, SkillListing, SkillSource, SkillSourceCandidate, SkillsRoot,
@@ -215,13 +215,42 @@ fn resolve_session(
 /// fine). Deliberately the sync-command shape only: issue #1412 keeps the
 /// `spawn_blocking` task bodies on their hand-written lock, and a blocking
 /// task that ever adopts this helper must clone the `Arc<SessionHandle>`
-/// and call it inside the task (the guard is `!Send`).
+/// and call it inside the task (the guard is `!Send`). An IPC command whose
+/// body merely WAITS on the gate uses the async twin
+/// [`with_session_lock_off_thread`] instead (issue #1486).
 fn with_session_lock<T>(
     handle: &SessionHandle,
     op: impl FnOnce(&mut Session) -> Result<T, SessionError>,
 ) -> Result<T, SessionError> {
     let mut s = handle.session_lock()?;
     op(&mut s)
+}
+
+/// Async twin of [`with_session_lock`] (issue #1486): take the per-session
+/// gate on a blocking-pool thread, never on the calling (IPC) thread. A
+/// sync command that waits on this mutex parks the OS message pump behind it
+/// -- the "not responding" window while an ingest or a whole turn holds the
+/// gate (ADR-0021) -- so every command whose body merely WAITS on the gate
+/// routes through here: clone the `Arc<SessionHandle>` into the task, lock
+/// inside, and await (the `ingest_file` pattern, converged into one helper;
+/// the #1412 hand-written `spawn_blocking` bodies keep their own locks). The
+/// closure must own its captures (`move`), and both it and the result must
+/// be `Send` (they cross a thread boundary); the `!Send` guard never leaves
+/// the task.
+async fn with_session_lock_off_thread<T>(
+    handle: &Arc<SessionHandle>,
+    op: impl FnOnce(&mut Session) -> Result<T, SessionError> + Send + 'static,
+) -> Result<T, SessionError>
+where
+    T: Send + 'static,
+{
+    let handle = Arc::clone(handle);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut s = handle.session_lock()?;
+        op(&mut s)
+    })
+    .await
+    .map_err(|e| SessionError::Engine(e.to_string()))?
 }
 
 /// The wire reply from `create_session` (ADR-0089): the runtime session id +
@@ -328,6 +357,14 @@ pub fn create_session(
             let cfg = live.load();
             let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
             s.set_discovery_snapshot(seed);
+            // #1446: the configured GC valve rides the same
+            // construction-point snapshot as the engine defaults above --
+            // later settings changes reach later sessions only.
+            s.set_result_count_cap(cfg.tunables.result_count_cap as usize);
+            // #1445: the configured window size rides the same snapshot --
+            // the turn runner windows every assembly with this value for the
+            // session's whole life.
+            s.set_window_turns(cfg.tunables.window_turns as usize);
             // ADR-0137 (issue #1381): seat the workspace axis BEFORE the bind so
             // the initial recipe carries the binding. An explicitly selected
             // directory binds canonicalized (Windows 8.3 short paths would let
@@ -408,17 +445,40 @@ fn workspace_row(r: &crate::workspace::WorkspaceRecord) -> RecentWorkspace {
     }
 }
 
+/// The wire envelope of the registry listing (issue #1481): the rows plus
+/// the degraded flag -- `true` only when the tolerant read fell back to
+/// empty on an unreadable file, which a genuinely empty registry (a fresh
+/// install, a fully-removed set) never sets.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkspaceListing {
+    pub workspaces: Vec<RecentWorkspace>,
+    pub degraded: bool,
+}
+
 /// The workspace registry's LRU view (ADR-0138, issue #1384): EVERY record,
 /// most recently used first -- dangling directories included, so the
 /// sidebar's workspace section can keep a missing-directory group with a
 /// state hint (issue #1392). The selector filters on `exists` and slices
 /// its top 10; older workspaces resurface through the folder browse.
-/// Read-only and tolerant -- an unreadable registry lists empty.
+/// Read-only and tolerant -- an unreadable registry lists empty, and the
+/// envelope's `degraded` flag is the only way the wire can tell that
+/// fallback from a genuinely empty registry (issue #1481).
+/// The plain body of the `list_workspaces` command (issue #1481): the
+/// tuple-to-envelope projection, extracted so the flag's only wire hop
+/// pins without a running app.
+fn workspace_listing(registry: &crate::workspace::WorkspaceRegistry) -> WorkspaceListing {
+    let (records, degraded) = registry.all();
+    WorkspaceListing {
+        workspaces: records.iter().map(workspace_row).collect(),
+        degraded,
+    }
+}
+
 #[tauri::command]
 pub fn list_workspaces(
     registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
-) -> Vec<RecentWorkspace> {
-    registry.all().iter().map(workspace_row).collect()
+) -> WorkspaceListing {
+    workspace_listing(&registry)
 }
 
 /// Mint a NAMED workspace for the session-creation selector (issue #1393):
@@ -462,6 +522,73 @@ pub fn create_workspace(
         label,
         explicit: true,
         exists: true,
+    })
+}
+
+/// The register-an-existing-directory reply (issue #1477): the listing
+/// projection plus the honest idempotency marker -- `record_existed` true
+/// means the directory already carried a registry record (the LRU bump +
+/// one-way explicit upgrade path, the title kept), false a freshly seated
+/// one.
+#[derive(Debug, serde::Serialize)]
+pub struct RegisteredWorkspace {
+    #[serde(flatten)]
+    pub workspace: RecentWorkspace,
+    pub record_existed: bool,
+}
+
+/// The register command's validation face (issue #1477), extracted as a
+/// plain helper so its refusal arms are pinnable: the strict validation
+/// [`register_workspace_directory`]'s doc describes, returning the
+/// canonical directory and the normalized title (None = blank, the label
+/// lands on the directory tail).
+fn validated_registration<'a>(
+    path: &str,
+    title: Option<&'a str>,
+) -> Result<(std::path::PathBuf, Option<&'a str>), String> {
+    let canonical =
+        std::fs::canonicalize(path).map_err(|e| format!("workspace directory unavailable: {e}"))?;
+    if !canonical.is_dir() {
+        return Err(format!("not a directory: {}", canonical.display()));
+    }
+    let title = title.map(str::trim).filter(|t| !t.is_empty());
+    if let Some(t) = title {
+        crate::session::workspace::validate_workspace_name(t)?;
+    }
+    Ok((canonical, title))
+}
+
+/// Register an existing directory as a workspace (issue #1477): the
+/// no-session registration path behind the create modal's source-folder
+/// branch, so datasets can be pre-loaded before any session opens. Strict
+/// validation: the directory must exist (canonicalize refuses a missing
+/// path -- no stray directory is minted -- and expands the Windows 8.3
+/// short spelling away, so one directory cannot register under two
+/// spellings) and be a directory. Zero writes at the target -- only the
+/// app-side registry file changes. An already-recorded directory is
+/// idempotent success: the LRU bump, the one-way explicit upgrade, the
+/// title kept (ADR-0138 Decision 3). A blank title falls to the directory
+/// tail; a non-blank one faces the full named-workspace rule -- the
+/// backend is the trust boundary, the error face mirroring
+/// [`create_workspace`]'s String channel.
+#[tauri::command]
+pub fn register_workspace_directory(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    path: String,
+    title: Option<String>,
+) -> Result<RegisteredWorkspace, String> {
+    let (canonical, title) = validated_registration(&path, title.as_deref())?;
+    let record_existed = registry
+        .record_explicit(&canonical, title)
+        .map_err(|detail| format!("workspace registration failed: {detail}"))?;
+    Ok(RegisteredWorkspace {
+        workspace: RecentWorkspace {
+            path: canonical.display().to_string(),
+            label: registry.label_of(&canonical),
+            explicit: true,
+            exists: true,
+        },
+        record_existed,
     })
 }
 
@@ -545,6 +672,162 @@ pub fn remove_workspace(
     path: String,
 ) -> Result<(), String> {
     remove_registry_record(&registry, &path)
+}
+
+/// Why a workspace-dataset command failed (ADR-0141): the adjacently-tagged
+/// `{kind, data}` shape the other command errors use, so the panel can render
+/// the xlsx redirect and the corrupt-manifest posture distinctly instead of a
+/// bare engine string.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum WorkspaceDatasetError {
+    /// xlsx is out of the shared face's first cut (ADR-0141 D11): the catalog
+    /// owns the "convert to CSV/Parquet or use a session-private source"
+    /// redirect this kind triggers.
+    XlsxRejected,
+    LegacyExcel,
+    UnsupportedFormat(String),
+    /// The manifest exists but does not parse (preserved as `.corrupt` and
+    /// refused, ADR-0141 D8).
+    ManifestCorrupt(String),
+    NotFound,
+    /// A rename arrived with a blank display label.
+    InvalidLabel,
+    /// The rename's label is already shown by another entry.
+    DisplayTaken(String),
+    /// The engine could not parse the source file (issue #1483): the panel
+    /// renders its own sentence, this detail rides after it.
+    DataUnreadable(String),
+    Io(String),
+}
+
+impl From<crate::workspace::datasets::StoreError> for WorkspaceDatasetError {
+    fn from(e: crate::workspace::datasets::StoreError) -> Self {
+        use crate::workspace::datasets::StoreError;
+        match e {
+            StoreError::XlsxRejected => WorkspaceDatasetError::XlsxRejected,
+            StoreError::LegacyExcel => WorkspaceDatasetError::LegacyExcel,
+            StoreError::UnsupportedFormat { requested } => {
+                WorkspaceDatasetError::UnsupportedFormat(requested)
+            }
+            StoreError::ManifestCorrupt { detail } => {
+                WorkspaceDatasetError::ManifestCorrupt(detail)
+            }
+            StoreError::NotFound => WorkspaceDatasetError::NotFound,
+            StoreError::InvalidLabel => WorkspaceDatasetError::InvalidLabel,
+            StoreError::DisplayTaken(label) => WorkspaceDatasetError::DisplayTaken(label),
+            StoreError::DataUnreadable { detail } => WorkspaceDatasetError::DataUnreadable(detail),
+            StoreError::Io { detail } => WorkspaceDatasetError::Io(detail),
+        }
+    }
+}
+
+/// The shared-dataset panel's list face (ADR-0141 D4/D8): every manifest
+/// entry, flagged (not hidden) when its store file is missing.
+#[tauri::command]
+pub fn list_workspace_datasets(
+    workspace: String,
+) -> Result<Vec<crate::workspace::ListedDataset>, WorkspaceDatasetError> {
+    crate::workspace::datasets::list(std::path::Path::new(&workspace)).map_err(Into::into)
+}
+
+/// Add a source file to the workspace store (ADR-0141 D2): runs the DuckDB
+/// copy-in off the async/UI thread (a large first-time source converts for
+/// minutes, the same AC the session ingest has).
+#[tauri::command]
+pub async fn add_workspace_dataset(
+    workspace: String,
+    path: String,
+) -> Result<crate::workspace::DatasetEntry, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::add(
+            std::path::Path::new(&workspace),
+            std::path::Path::new(&path),
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Remove a shared dataset (ADR-0141 D7): the manifest drops the name at
+/// once; bound sessions keep their hard links until they end. Runs off the
+/// async/UI thread -- the manifest mutation lock may be held by a converting
+/// add for minutes.
+#[tauri::command]
+pub async fn remove_workspace_dataset(
+    workspace: String,
+    reference_name: String,
+) -> Result<(), WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::remove(std::path::Path::new(&workspace), &reference_name)
+            .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Replace a shared dataset's content under the stable name (ADR-0141 D7).
+/// Copy-in runs off the async/UI thread.
+#[tauri::command]
+pub async fn replace_workspace_dataset(
+    workspace: String,
+    reference_name: String,
+    path: String,
+) -> Result<crate::workspace::DatasetEntry, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::replace(
+            std::path::Path::new(&workspace),
+            &reference_name,
+            std::path::Path::new(&path),
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Rename a shared dataset's display label (ADR-0037's dual-name scheme on
+/// the shared face): the reference name, the resume triple and the injection
+/// card are untouched. Runs off the async/UI thread like the other mutators
+/// (the shared manifest lock).
+#[tauri::command]
+pub async fn rename_workspace_dataset(
+    workspace: String,
+    reference_name: String,
+    new_display: String,
+) -> Result<crate::workspace::DatasetEntry, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::rename(
+            std::path::Path::new(&workspace),
+            &reference_name,
+            &new_display,
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Update a shared dataset's privacy (ADR-0141 D10): a workspace-level asset
+/// attribute, effective for every bound session on its next turn. Runs off
+/// the async/UI thread like the other mutators (the shared manifest lock).
+#[tauri::command]
+pub async fn set_workspace_dataset_privacy(
+    workspace: String,
+    reference_name: String,
+    privacy: crate::model::DatasetPrivacy,
+) -> Result<crate::workspace::DatasetEntry, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::set_privacy(
+            std::path::Path::new(&workspace),
+            &reference_name,
+            privacy,
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
 }
 
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
@@ -716,7 +999,7 @@ pub async fn ingest_file_guided(
 /// takes the session lock like any command, but holds it only for the
 /// retention read (not a SessionHandle lock-light read).
 #[tauri::command]
-pub fn guidance_window(
+pub async fn guidance_window(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     path: String,
@@ -725,64 +1008,67 @@ pub fn guidance_window(
     limit: usize,
 ) -> Result<Vec<Vec<String>>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, move |s| {
         s.guidance_window(&path, &sheet_name, offset, limit).ok_or_else(|| {
             SessionError::Engine(format!(
                 "no retained guidance for sheet \"{sheet_name}\" of {path} (already committed, discarded, or superseded)"
             ))
         })
     })
+    .await
 }
 
 /// Drop the session's retained guided-load parse (issue #750): the dialog's
 /// cancel path frees the retained sheets (commit already drops them
 /// server-side). Idempotent; the frontend fires it best-effort on cancel.
 #[tauri::command]
-pub fn discard_guided_retention(
+pub async fn discard_guided_retention(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<(), SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, |s| {
         s.discard_guidance_retention();
         Ok(())
     })
+    .await
 }
 
 #[tauri::command]
-pub fn list_working_set(
+pub async fn list_working_set(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<DatasetDescriptor>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.list()))
+    with_session_lock_off_thread(&handle, |s| Ok(s.list())).await
 }
 
 #[tauri::command]
-pub fn active_dataset(
+pub async fn active_dataset(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<DatasetDescriptor>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.active()))
+    with_session_lock_off_thread(&handle, |s| Ok(s.active())).await
 }
 
 #[tauri::command]
-pub fn get_dataset(
+pub async fn get_dataset(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
 ) -> Result<Option<DatasetDescriptor>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.get(&reference_name)))
+    with_session_lock_off_thread(&handle, move |s| Ok(s.get(&reference_name))).await
 }
 
 /// Rename a dataset's display label (ADR-0037, slice 4a issue #8): display-only
 /// -- the reference name is untouched, so SQL / recipe / active references stay
-/// valid. Synchronous: no copy-in, just an in-memory label swap. Rejects an
-/// unknown reference or a label already shown by another dataset.
+/// valid. No copy-in, just an in-memory label swap, but the gate wait still
+/// runs off the IPC thread like every gate-waiting command (issue #1486).
+/// Rejects an unknown reference or a label already shown by another dataset.
 #[tauri::command]
-pub fn rename_dataset(
+pub async fn rename_dataset(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
@@ -790,10 +1076,11 @@ pub fn rename_dataset(
 ) -> Result<DatasetDescriptor, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, move |s| {
         s.rename_display(&reference_name, &new_display)
             .map_err(SessionError::RenameDataset)
     })
+    .await
 }
 
 /// Re-upload a file onto an existing dataset's reference name (ADR-0042, issue
@@ -843,7 +1130,7 @@ fn privacy_update_to_result(
 /// shared `error.dataset.notFound` locale message instead of a free-text
 /// Engine string.
 #[tauri::command]
-pub fn set_dataset_privacy(
+pub async fn set_dataset_privacy(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
@@ -851,9 +1138,10 @@ pub fn set_dataset_privacy(
 ) -> Result<DatasetDescriptor, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, move |s| {
         privacy_update_to_result(s.set_privacy(&reference_name, privacy), &reference_name)
     })
+    .await
 }
 
 /// Remove a source Dataset from the working set (issue #38/#39, ADR-0040).
@@ -863,23 +1151,25 @@ pub fn set_dataset_privacy(
 /// and refuses the ACTIVE source when OTHER sources remain (ADR-0035 -> issue
 /// #39: no silent focus jump -- the caller must use `remove_active_source` to
 /// name an explicit continuation). The LAST active source is allowed through
-/// here to an empty working set (AC4, issue #39). Synchronous: the session
-/// Mutex serializes this against an in-flight turn (correctness), and the
-/// frontend additionally disables source management via its shared `loading`
-/// flag during the ADR-0040 execution window (UX) -- the two layers are
-/// independent. The only I/O is a best-effort DETACH + remove_file.
+/// here to an empty working set (AC4, issue #39). The session Mutex still
+/// serializes this against an in-flight turn (correctness), but since issue
+/// #1486 the gate wait runs off the IPC thread; the frontend additionally
+/// disables source management via its shared `loading` flag during the
+/// ADR-0040 execution window (UX) -- the two layers are independent. The
+/// only I/O is a best-effort DETACH + remove_file.
 #[tauri::command]
-pub fn remove_source(
+pub async fn remove_source(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
 ) -> Result<(), SessionError> {
     let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, move |s| {
         s.remove_source(&reference_name)
             .map_err(SessionError::RemoveSource)
     })
+    .await
 }
 
 /// Remove the ACTIVE source and repoint focus at an explicit continuation
@@ -893,7 +1183,7 @@ pub fn remove_source(
 /// typed `SessionError::RemoveSource(RemoveSourceError)` (issue #121), so the
 /// frontend narrows on `kind` and renders a locale message.
 #[tauri::command]
-pub fn remove_active_source(
+pub async fn remove_active_source(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
@@ -901,10 +1191,11 @@ pub fn remove_active_source(
 ) -> Result<(), SessionError> {
     let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, move |s| {
         s.remove_active_source(&reference_name, &continue_with)
             .map_err(SessionError::RemoveSource)
     })
+    .await
 }
 
 /// Preview the delete impact of one source (issue #1063): the live results a
@@ -915,13 +1206,16 @@ pub fn remove_active_source(
 /// itself (the removal path reports `NotFound`). Usable while resuming,
 /// like the other read-only working-set commands.
 #[tauri::command]
-pub fn preview_delete_impact(
+pub async fn preview_delete_impact(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
 ) -> Result<Vec<DeleteImpactEntry>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.delete_impact_preview(&reference_name)))
+    with_session_lock_off_thread(&handle, move |s| {
+        Ok(s.delete_impact_preview(&reference_name))
+    })
+    .await
 }
 
 /// Ask one question (PRD #1) against the named session: run one agent turn
@@ -1103,18 +1397,19 @@ pub fn cancel(store: State<'_, Arc<SessionStore>>, session_id: String) -> Result
 
 /// Read the named session's conversation thread (ADR-0028/0039/0040): the
 /// unified timeline of turns AND source lifecycle events, in order.
-/// Synchronous -- a snapshot read of the session history with no copy-in. The
+/// A snapshot read of the session history with no copy-in; the gate wait
+/// runs off the IPC thread like every gate-waiting command (issue #1486). The
 /// frontend renders this as the always-visible thread (turns + source events);
 /// the window assembler reads only the turns (the session filters source events
 /// out before assembly), so source events never enter the LLM payload.
 #[tauri::command]
-pub fn conversation(
+pub async fn conversation(
     app: tauri::AppHandle,
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<ThreadEntry>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    let entries = with_session_lock(&handle, |s| Ok(s.conversation()))?;
+    let entries = with_session_lock_off_thread(&handle, |s| Ok(s.conversation())).await?;
     // ADR-0124 (issue #1087), tightened to a file-level allowlist by
     // ADR-0137 Decision 6 (#1383): every manifest-named file must be
     // iframe-servable before a card can render -- the whitelist is
@@ -1591,18 +1886,6 @@ pub struct McpProbeResult {
 /// initialize + tools/list cycle on a cold start.
 const PROBE_DEFAULT_TIMEOUT_MS: u32 = 30_000;
 
-/// Kill + reap a child process, logging a warning if reaping fails (the kill
-/// is best-effort; a failed wait would leak a zombie). Used by the stdio
-/// probe path where the Child handle is retained outside `spawn_blocking`.
-fn kill_and_reap_child(child: &mut std::process::Child) {
-    if let Err(e) = child.kill() {
-        log::warn!(target: "toptopduck::mcp", "probe child kill failed: {e}");
-    }
-    if let Err(e) = child.wait() {
-        log::warn!(target: "toptopduck::mcp", "probe child reap failed: {e}");
-    }
-}
-
 /// Map a timeout-bounded probe outcome to an [`McpProbeResult`]. Both the
 /// stdio and SSE/HTTP branches produce the same shape after flattening:
 /// `Result<Vec<Value>, String>` (tools on success, error string on failure)
@@ -1654,11 +1937,11 @@ fn probe_result_from_outcome(
 ///
 /// Async + deadline-bounded (issue #392): the entire spawn + initialize +
 /// tools/list cycle is wrapped in `tokio::time::timeout` with a deadline
-/// from `server.timeout_ms` (or the 30 s default). For stdio the child is
-/// spawned in the async scope (not inside `spawn_blocking`) so the Child
-/// handle is retained for kill-on-timeout — `spawn_blocking` tasks are NOT
-/// cancellable, and the only way to guarantee a hung child is reaped is to
-/// keep the process handle outside the blocking closure.
+/// from `server.timeout_ms` (or the 30 s default). For stdio the child
+/// handle is held outside the deadline race so a timeout still owns the
+/// kill: the handshake future is dropped at expiry (a dropped future
+/// cannot kill anything), while the handle's tree kill + reap run after
+/// it.
 #[tauri::command]
 pub async fn probe_mcp_server(
     live: State<'_, LiveProviderConfig>,
@@ -1670,9 +1953,10 @@ pub async fn probe_mcp_server(
     let deadline = Duration::from_millis(deadline_ms as u64);
     let server_id = server.id.as_str();
 
-    // Stdio: spawn the child in the async scope so we own the Child handle
-    // for kill-on-timeout. The blocking handshake runs in spawn_blocking with
-    // the child's stdin/stdout (issue #392).
+    // Stdio: spawn the child in the async scope so we own the handle (and
+    // its tree guard) for kill-on-timeout. The handshake is natively async
+    // since #1457 (the retired spawn_blocking closure existed only to host
+    // the then-synchronous wire calls), so the deadline races it directly.
     if let McpTransport::Stdio { .. } = &server.transport {
         let mut child = match crate::mcp::client::spawn_stdio_child(&server, &secrets) {
             Ok(c) => c,
@@ -1685,46 +1969,61 @@ pub async fn probe_mcp_server(
                 });
             }
         };
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take();
-        // The blocking task needs an owned attribution label (issue #900).
+        let stdin = child.take_stdin();
+        let stdout = child.take_stdout();
+        // The task needs an owned attribution label (issue #900).
         let server_label = server.display_name.clone();
 
-        let join = tauri::async_runtime::spawn_blocking(move || {
-            let stdin = stdin.ok_or_else(|| "child stdin not available".to_string())?;
-            let stdout = stdout.ok_or_else(|| "child stdout not available".to_string())?;
-            crate::mcp::client::stdio_handshake(stdin, stdout, &server_label)
-                .map_err(|e| e.to_string())
-        });
-
+        // The handshake rides a spawned bridge task so its polls land on
+        // the runtime the pipes registered on (`spawn_on_bridge`); the
+        // deadline race stays on this command's runtime, and an expiry
+        // merely detaches the task -- the kill + reap below end it.
+        // (`block_on` itself is not an option here: it panics from inside
+        // an async context.)
         let outcome = tokio::time::timeout(deadline, async {
-            join.await.map_err(|e| e.to_string()).and_then(|r| r)
+            match (stdin, stdout) {
+                (Some(stdin), Some(stdout)) => {
+                    crate::mcp::client::spawn_transport_task(async move {
+                        crate::mcp::client::stdio_handshake(stdin, stdout, &server_label)
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?
+                }
+                _ => Err("child stdin/stdout not available".to_string()),
+            }
         })
         .await;
 
-        kill_and_reap_child(&mut child);
+        // Kill the whole tree (a wrapper's grandchildren die with it, #1456)
+        // and reap the direct child -- on the bridge runtime, for the same
+        // registration/polling pairing as the handshake.
+        let mut child = child;
+        crate::mcp::client::spawn_transport_task(async move { child.kill_and_reap().await })
+            .await
+            .expect("the reap task joins");
         return Ok(probe_result_from_outcome(outcome, server_id, deadline_ms));
     }
 
-    // SSE/HTTP: the blocking I/O runs inside spawn_blocking wrapped in a
-    // deadline. The outer deadline is the primary bound — spawn_blocking
-    // tasks are not cancelled, so the thread lingers until the I/O returns.
-    // HTTP agents carry HTTP_READ_TIMEOUT so the task eventually resolves;
-    // SSE has a per-read timeout on its reader thread (SSE_READ_TIMEOUT).
-    let server_for_blocking = server.clone();
+    // SSE/HTTP: natively async since #1457 -- the deadline races the connect
+    // + tools/list directly (the retired spawn_blocking wrapper existed only
+    // to host the synchronous wire calls; its uncancellable-thread caveat is
+    // gone with it). HTTP bodies carry a per-read bound (HTTP_READ_TIMEOUT)
+    // so a hung read still resolves under the deadline. The SSE face's
+    // time-bounded parks (GET headers, endpoint event, POST acks)
+    // self-resolve the same way; its response-wait park carries no bound of
+    // its own and the probe path fires no stop signal -- a server that
+    // acks POSTs but never streams responses stays parked until the outer
+    // deadline drops the connect future, which closes the connection and
+    // ends the park (the timeout, not a transport kill, answers the user).
     let result = tokio::time::timeout(deadline, async {
-        tauri::async_runtime::spawn_blocking(move || {
-            let mut client = crate::mcp::client::connect_transport(
-                &server_for_blocking,
-                &secrets,
-                &header_secrets,
-                None,
-            )?;
-            client.list_tools(&server_for_blocking.display_name)
-        })
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|r| r.map_err(|e| e.to_string()))
+        crate::mcp::client::connect_transport(&server, &secrets, &header_secrets, None)
+            .await
+            .map_err(|e| e.to_string())?
+            .list_tools(&server.display_name)
+            .await
+            .map_err(|e| e.to_string())
     })
     .await;
 
@@ -2062,16 +2361,17 @@ pub async fn delete_session(
 /// bound path is untouched, so sidebar addressing stays stable. Rejects a blank
 /// name. Delegates to [`Session::rename`].
 #[tauri::command]
-pub fn rename_session(
+pub async fn rename_session(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     new_name: String,
 ) -> Result<String, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, move |s| {
         s.rename(&new_name).map_err(SessionError::RenameSession)
     })
+    .await
 }
 
 /// Read the OPEN session's current display name (ADR-0089 Decision 4). The
@@ -2081,14 +2381,15 @@ pub fn rename_session(
 /// `recipe.json` file from disk. Returns the name carried by the in-memory
 /// persister (the same value the next atomic write will persist).
 #[tauri::command]
-pub fn get_session_name(
+pub async fn get_session_name(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<String, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| {
+    with_session_lock_off_thread(&handle, |s| {
         Ok(s.session_name().unwrap_or_default().to_string())
     })
+    .await
 }
 
 /// The cold-rename file operation, extracted so the blank-name short-circuit
@@ -2391,6 +2692,21 @@ pub async fn open_recipe(
     // closure; the snapshot is plain data) and the auto-include fold below.
     let cfg = live.load();
     let engine_defaults = cfg.engine.clone();
+    // #1446: the count-cap snapshot crosses into the 'static closure as plain
+    // data, same as the engine defaults, and is applied below before the
+    // session lands in the store -- the resumed session takes the CURRENT
+    // config exactly like a new one from its first live turn (the recipe
+    // carries no tunables). The replay inside open_recipe still runs on the
+    // bare default seed; that window is inert (replay registers only active
+    // results, so its GC finds no stale candidates) -- if replay ever sees
+    // stale registrations, the cap must cross as an open_recipe argument
+    // instead, beside the engine defaults.
+    let result_count_cap = cfg.tunables.result_count_cap as usize;
+    // #1445: the window snapshot crosses the same way -- plain data, applied
+    // below beside the count cap. The replay inside open_recipe assembles no
+    // provider payload (it re-registers results, asks nothing), so the bare
+    // default seed during replay is inert for the window too.
+    let window_turns = cfg.tunables.window_turns as usize;
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_recipe(
             &path,
@@ -2438,6 +2754,13 @@ pub async fn open_recipe(
         // binding inside open_recipe; this root only ever mints. Same FIXED
         // product-domain placement as create_session.
         new_session.set_workspaces_root(Some(workspaces_root_path));
+        // #1446: apply the count-cap snapshot before the session lands in the
+        // store -- identical semantics to create_session's construction-point
+        // wiring.
+        new_session.set_result_count_cap(result_count_cap);
+        // #1445: same construction-point snapshot as above -- the resumed
+        // session windows with the CURRENT config from its first turn.
+        new_session.set_window_turns(window_turns);
         // ADR-0138 (issue #1384): seat the registry on the resumed session
         // too -- a later first disk-need mint records, and the close-time
         // reclaim removes. The restored binding itself never re-records
@@ -2523,12 +2846,12 @@ pub async fn open_recipe(
 /// failure. The outer [`SessionError`] is the addressing failure (invalid id /
 /// unknown session / lock poison) -- distinct from the persist error itself.
 #[tauri::command]
-pub fn take_persist_error(
+pub async fn take_persist_error(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<SaveError>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.take_persist_error()))
+    with_session_lock_off_thread(&handle, |s| Ok(s.take_persist_error())).await
 }
 
 /// Read + clear the named session's resume-hit source status notices
@@ -2540,12 +2863,12 @@ pub fn take_persist_error(
 /// every replay-path resume (the replay path's blocking semantics are
 /// unchanged, ADR-0035).
 #[tauri::command]
-pub fn take_source_notices(
+pub async fn take_source_notices(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<crate::SourceNotice>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.take_source_notices()))
+    with_session_lock_off_thread(&handle, |s| Ok(s.take_source_notices())).await
 }
 
 /// Read + clear the named session's pending external-change conflict, if any
@@ -2558,12 +2881,12 @@ pub fn take_source_notices(
 /// file. Returns `None` when no conflict is pending or after a prior read
 /// cleared it.
 #[tauri::command]
-pub fn take_pending_conflict(
+pub async fn take_pending_conflict(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<crate::PendingConflict>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock(&handle, |s| Ok(s.take_pending_conflict()))
+    with_session_lock_off_thread(&handle, |s| Ok(s.take_pending_conflict())).await
 }
 
 // --- Tiered tool approval (ADR-0080, issue #294) -------------------------
@@ -3541,9 +3864,9 @@ fn segment_start_posture(target: Option<&AdapterSpec>, live: &LiveProviderConfig
 
 /// Convert the app-config posture (the backfill map's value shape) onto the
 /// session-local pair (the handle slot / Session storage shape): the
-/// boundary conversion lives here because `session_store` deliberately
-/// imports no app-config types -- the two shapes are structurally identical
-/// but never aliased.
+/// boundary conversion lives here because `session::store` deliberately
+/// imports no app-config posture types -- the two shapes are structurally
+/// identical but never aliased.
 fn session_posture(p: ModelPosture) -> PosturePair {
     PosturePair {
         model: p.model,
@@ -3721,14 +4044,22 @@ pub fn get_session_model_config(
 /// ADR-0035 suspension read in-process right after the persist, so the
 /// picker can warn without a second IPC racing the banner poll.
 #[tauri::command]
-pub fn set_session_posture(
+pub async fn set_session_posture(
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
     session_id: String,
     posture: PosturePair,
 ) -> Result<SetPosturePersistOutcome, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    apply_posture_set(&handle, live.inner(), posture)
+    // issue #1486: the pair write + persist-now batch inside takes the
+    // session gate, so the whole body runs on the blocking pool. The config
+    // handle is cloned out of `State` first -- the `spawn_blocking` closure
+    // must be `'static`, and a `State` borrow lives only as long as the
+    // command invocation.
+    let live = live.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || apply_posture_set(&handle, &live, posture))
+        .await
+        .map_err(|e| SessionError::Engine(e.to_string()))?
 }
 
 /// The set command's body (issue #600, single full-pair command since
@@ -4106,7 +4437,7 @@ pub fn tray_ready(app: tauri::AppHandle, readiness: State<'_, crate::tray::TrayR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_store::UNKNOWN_SESSION;
+    use crate::session::store::UNKNOWN_SESSION;
     use crate::CancelToken;
 
     // ADR-0124 (issue #1087): the artifact presentation commands -- exists
@@ -4206,6 +4537,56 @@ mod tests {
         assert!(
             err.contains("cannot write export"),
             "the error names the lane: {err}"
+        );
+    }
+
+    // Issue #1477: the register command's validation face as a plain
+    // helper -- the refusal arms the State-taking command could never pin.
+    #[test]
+    fn validated_registration_refuses_a_missing_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = validated_registration(dir.path().join("gone").to_str().expect("utf-8"), None)
+            .expect_err("a missing path refuses");
+        assert!(
+            err.starts_with("workspace directory unavailable"),
+            "the refusal names the unavailable directory: {err}"
+        );
+    }
+
+    #[test]
+    fn validated_registration_refuses_a_file_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, "x").expect("write");
+        let err = validated_registration(file.to_str().expect("utf-8"), None)
+            .expect_err("a file path never registers");
+        assert!(
+            err.starts_with("not a directory"),
+            "the refusal names the non-directory: {err}"
+        );
+    }
+
+    #[test]
+    fn validated_registration_trims_the_title_and_blanks_fall_to_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().expect("utf-8");
+        let (canonical, title) = validated_registration(root, Some("  named  "))
+            .expect("an existing directory with a valid title validates");
+        assert!(canonical.is_dir());
+        assert_eq!(title, Some("named"), "the title lands trimmed");
+        let (_, blank) = validated_registration(root, Some("   "))
+            .expect("a blank title is legal on the register path");
+        assert_eq!(blank, None, "the label falls back to the directory tail");
+    }
+
+    #[test]
+    fn validated_registration_faces_the_full_name_guard() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = validated_registration(dir.path().to_str().expect("utf-8"), Some("a/b"))
+            .expect_err("an illegal title refuses through the backend guard");
+        assert_eq!(
+            err,
+            "workspace name contains a path-illegal or control character"
         );
     }
 
@@ -4729,7 +5110,7 @@ mod tests {
     /// #890: the resume seam stamps the SAME id onto the reopened Session
     /// -- the kill log's session attribution on a resumed turn rides this
     /// stamp (#886), and nothing else would catch its deletion (the store's
-    /// create half is pinned in session_store; this is the resume half).
+    /// create half is pinned in session::store; this is the resume half).
     /// The closure's CALL of the seam is the accepted blind spot declared
     /// on the seam (the `apply_resumed_postures` precedent).
     #[test]
@@ -5462,7 +5843,7 @@ mod tests {
     }
 
     /// An unknown / closed session_id rejects with NotFound. The
-    /// malformed-id path (InvalidId) is covered in session_store tests; this
+    /// malformed-id path (InvalidId) is covered in session::store tests; this
     /// pins the NotFound branch the command boundary surfaces.
     #[test]
     fn unknown_session_id_rejects_not_found() {
@@ -5533,6 +5914,79 @@ mod tests {
             Err(e) => assert_eq!(e, SessionError::InvalidId),
             Ok(_) => panic!("malformed id must reject"),
         }
+    }
+
+    /// Issue #1486 regression pin: the async twin parks its lock WAIT on the
+    /// blocking pool, never on the calling (IPC) thread. While another
+    /// thread holds the session gate, one poll of the helper's future must
+    /// come back `Pending` promptly -- a caller-thread lock wait would park
+    /// the poller on the gate (the frozen-window failure mode) and the
+    /// watchdog fires instead -- and once the gate releases, the helper
+    /// completes with the closure's value.
+    #[test]
+    fn with_session_lock_off_thread_waits_on_the_blocking_pool_not_the_caller() {
+        use std::future::Future;
+        use std::sync::mpsc;
+        use std::task::{Context, Waker};
+        use std::time::Duration;
+
+        const POLL_WATCHDOG: Duration = Duration::from_secs(5);
+        const DONE_WATCHDOG: Duration = Duration::from_secs(10);
+
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+                Default::default(),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("handle for the minted id");
+
+        // Gate holder: lock, confirm held, hold until the release signal,
+        // then drop the guard.
+        let (held_tx, held_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let holder_handle = Arc::clone(&handle);
+        let holder = std::thread::spawn(move || {
+            let guard = holder_handle.session_lock().expect("holder takes the gate");
+            held_tx.send(()).expect("held signal");
+            release_rx.recv().expect("release signal");
+            drop(guard);
+        });
+        held_rx.recv().expect("gate is held before the poll");
+
+        // Poller: one poll under a held gate (the caller-side-park probe),
+        // then drive the future to completion once this thread releases.
+        let (pending_tx, pending_rx) = mpsc::channel::<bool>();
+        let (done_tx, done_rx) = mpsc::channel::<Result<Vec<DatasetDescriptor>, SessionError>>();
+        let poll_handle = Arc::clone(&handle);
+        let poller = std::thread::spawn(move || {
+            let mut fut = Box::pin(with_session_lock_off_thread(&poll_handle, |s| Ok(s.list())));
+            let mut cx = Context::from_waker(Waker::noop());
+            let is_pending = fut.as_mut().poll(&mut cx).is_pending();
+            pending_tx.send(is_pending).expect("poll verdict");
+            let outcome = tauri::async_runtime::block_on(fut);
+            done_tx.send(outcome).expect("done verdict");
+        });
+        let is_pending = pending_rx
+            .recv_timeout(POLL_WATCHDOG)
+            .expect("one poll returns while the gate is held");
+        assert!(
+            is_pending,
+            "a held gate parks the pool task, not the caller"
+        );
+        release_tx.send(()).expect("release the gate");
+        let datasets = done_rx
+            .recv_timeout(DONE_WATCHDOG)
+            .expect("helper completes after the gate releases")
+            .expect("closure value crosses whole");
+        assert!(
+            datasets.is_empty(),
+            "a fresh session lists an empty working set"
+        );
+        holder.join().expect("holder exits cleanly");
+        poller.join().expect("poller exits cleanly");
     }
 
     /// set_dataset_privacy rejects an unknown reference name as the typed
@@ -5955,11 +6409,45 @@ mod tests {
 
         let echo = dir.to_string_lossy().into_owned();
         rename_registry_record(&registry, &echo, "T").expect("rename lands");
-        assert_eq!(registry.all()[0].title.as_deref(), Some("T"));
+        assert_eq!(registry.all().0[0].title.as_deref(), Some("T"));
         remove_registry_record(&registry, &echo).expect("remove lands");
         assert!(
-            registry.all().is_empty(),
+            registry.all().0.is_empty(),
             "the record is gone despite the drift"
+        );
+    }
+
+    // Issue #1481: the flag's only wire hop. The envelope projection must
+    // carry the degraded flag through, or the sweep judges on a
+    // permanently-false flag -- pinned here at the command's plain body,
+    // one layer above the registry's three-face test.
+    #[test]
+    fn the_listing_command_carries_the_degraded_flag_onto_the_wire() {
+        let root = tempfile::tempdir().expect("registry dir");
+        let registry = crate::workspace::WorkspaceRegistry::new(
+            root.path().join(crate::workspace::WORKSPACES_FILE_NAME),
+        );
+        let dir = root.path().join("Alpha");
+        std::fs::create_dir(&dir).expect("mkdir");
+        registry
+            .record_at(&dir, Some("Seed"), true, 1_000)
+            .expect("record");
+        let listing = workspace_listing(&registry);
+        assert_eq!(listing.workspaces.len(), 1);
+        assert!(!listing.degraded, "a healthy read carries the flag false");
+        std::fs::write(
+            root.path().join(crate::workspace::WORKSPACES_FILE_NAME),
+            "{ not json",
+        )
+        .expect("corrupt");
+        let listing = workspace_listing(&registry);
+        assert!(
+            listing.workspaces.is_empty(),
+            "the tolerant read still empties the rows"
+        );
+        assert!(
+            listing.degraded,
+            "the corrupt read carries the flag true -- the tell"
         );
     }
 }

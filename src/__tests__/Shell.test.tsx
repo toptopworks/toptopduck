@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MockInstance } from "vitest";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import type { DatasetDescriptor, RowPage } from "../types/dataset";
 import type { ResumeProgress, TurnProgress } from "../types/session";
@@ -40,7 +40,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   }),
 }));
 
-// WindowControls (custom titlebar, ADR-0074) is the sole remaining
+// WindowsWindowControls (custom titlebar, ADR-0074) is the sole remaining
 // consumer of getCurrentWindow. The shared stub keeps jsdom off the real
 // runtime (which reads window.__TAURI metadata and crashes the shell-level
 // boundary).
@@ -184,6 +184,7 @@ import {
 } from "../api";
 import type { AppConfig } from "../types/app-config";
 import type { McpServerConfig } from "../types/mcp";
+import { toast, useToast } from "../components/ui/use-toast";
 import { baseAppConfig as sharedBaseAppConfig, skillEntry } from "../test-fixtures";
 import { artifactTurn, recordedTurn, textual } from "../session/__tests__/fixtures";
 import { embedOk } from "../components/common/__tests__/helpers";
@@ -236,6 +237,7 @@ function src(name: string): DatasetDescriptor {
     row_count: 1,
     sample: [["1", "a"]],
     fingerprint: "ff".repeat(32),
+    size_bytes: 0,
     rectify: { kind: "NotApplicable" },
     privacy: { send_samples: true, type_only_columns: [] },
   };
@@ -3363,5 +3365,35 @@ describe("shell submit fire-path defensive log (#825)", () => {
     expect(
       ring.compareDocumentPosition(picker) & FOLLOWING,
     ).toBeTruthy();
+  });
+});
+
+describe("App toast viewport mount (ADR-0142, issue #1494)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("mounts the viewport outside the shell grid so the settings-mode swap cannot hide it", async () => {
+    render(<App />);
+    act(() => {
+      toast({ title: "Shell mount pin" });
+    });
+    const vp = document.querySelector("[data-slot=\"toast-viewport\"]");
+    expect(vp).toBeInTheDocument();
+    // The settings-mode display rule (styles.css) hides every non-exempt
+    // direct shell child; the viewport must not be one -- a failure toast
+    // landing while settings is open still has to show.
+    expect(vp!.closest(".shell")).toBeNull();
+    expect(screen.getByText("Shell mount pin")).toBeInTheDocument();
+    // Settle the module store for later suites: dismiss through the public
+    // hook so no live toast outlives this test's DOM.
+    const { result } = renderHook(() => useToast());
+    act(() => {
+      result.current.dismiss();
+    });
   });
 });

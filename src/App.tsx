@@ -42,19 +42,22 @@ import type { AuthMode } from "./types/approval";
 import { AUTH_MODE_DEFAULT } from "./types/approval";
 import { usePlatform } from "./shell/use-platform";
 import { SidebarToggle } from "./shell/SidebarToggle";
+import { UpdateInstallOverlay } from "./shell/UpdateInstallOverlay";
 import { NavButtons } from "./shell/NavButtons";
 import { NavigationHistoryProvider } from "./shell/NavigationHistoryContext";
 import type { NavEntry } from "./shell/navigationHistory";
-import { WindowControls } from "./shell/WindowControls";
+import { WindowsWindowControls } from "./shell/WindowsWindowControls";
 import { ResumeProgress } from "./shell/ResumeProgress";
 import { ErrorBanner } from "./components/common/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/common/ErrorBoundary";
 import { SettingsView } from "./components/settings/SettingsView";
 import type { SettingsSection, WorkspaceExitIntent } from "./components/settings/sections";
 import { Alert } from "./components/ui/alert";
+import { Toaster } from "./components/ui/toaster";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
+import { StagedWorkspaceSweep } from "./shell/useStagedWorkspaceSweep";
 import { catalogFor } from "./i18n";
 import { useTheme } from "./theme/useTheme";
 import { adapterKeys, workspaceKeys } from "./session/queryKeys";
@@ -121,10 +124,11 @@ export default function App() {
 
   const { shellError, setShellError } = useShellError();
 
-  // Platform dispatch (ADR-0074, issue #263): macOS traffic-light window
-  // controls render at the topbar's LEFT edge (before SidebarToggle); Windows
-  // and Linux keep the right-side cluster at the topbar's tail. usePlatform()
-  // is module-cached, so this is a cheap synchronous read in render.
+  // Platform dispatch (ADR-0140 mac / ADR-0074 Windows+Linux): macOS keeps
+  // the native Overlay-titlebar traffic lights (the topbar's left edge
+  // reserves their inset); Windows and Linux render the right-side cluster
+  // at the topbar's tail. usePlatform() is module-cached, so this is a cheap
+  // synchronous read in render.
   const platform = usePlatform();
 
   // --- App-level UI state --------------------------------------------------
@@ -849,6 +853,7 @@ export default function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
+      <StagedWorkspaceSweep staged={pendingWorkspace} onReset={setPendingWorkspace} />
       {/* TooltipProvider (ADR-0050/0054, issue #106): one ancestor high in the
           tree so every tail-ellipsis card truncation site (Thread rail cards)
           can mount a Radix Tooltip without per-site providers. delayDuration 0
@@ -861,6 +866,13 @@ export default function App() {
           defaultLocale="en-US"
           onError={handleIntlError}
         >
+          {/* The install-in-flight overlay (issue #1509): centered progress
+              card while the one-shot install chain runs -- reads the shared
+              install slice, so it mirrors an install started from any update
+              face. Inside the IntlProvider (its copy is translated) and
+              above every view chrome so the backdrop covers the whole
+              shell. */}
+          <UpdateInstallOverlay />
           {/* ADR-0058 L3 top-level fallback: the last line of defense against a
             shell-level render throw. Every session is already isolated by its
             own L2 session-body boundary (in SessionPane), so this boundary
@@ -947,9 +959,11 @@ export default function App() {
                 />
 
                 {/* Row 1: thin top bar (ADR-0060/0062 R1), spans the full shell
-              width as a custom titlebar (decorations: false). Shell-wide
-              controls only: the sidebar collapse toggle (left) + nav buttons
-              + window controls (right). The session name + workspace toggle
+              width as a custom titlebar (decorations: false on
+              Windows/Linux; macOS rides the native Overlay titlebar).
+              Shell-wide controls only: the sidebar collapse toggle (left) +
+              nav buttons + window controls (right, Windows/Linux). The
+              session name + workspace toggle
               live in each SessionPane's own header (session-scoped chrome
               lives with the session). The Open / Save recipe.json buttons live in
               the session sidebar (below New session). ADR-0067 (#171): visual
@@ -966,7 +980,13 @@ export default function App() {
                   className="topbar gap-3 px-4 border-b border-border bg-background"
                   data-tauri-drag-region
                 >
-                  {platform === "macos" && <WindowControls />}
+                  {platform === "macos" && (
+                    // Native traffic-light inset (ADR-0140): the macOS
+                    // Overlay titlebar floats the system buttons over the
+                    // topbar's left edge; this spacer keeps SidebarToggle
+                    // clear of them and joins the drag region.
+                    <div className="w-[78px] shrink-0" data-tauri-drag-region />
+                  )}
                   {settingsView.open ? (
                     <SidebarToggle
                       kind="settings"
@@ -1010,7 +1030,7 @@ export default function App() {
                       )}
                     </>
                   )}
-                  {platform !== "macos" && <WindowControls />}
+                  {platform !== "macos" && <WindowsWindowControls />}
                 </header>
 
                 {/* Row 3 (cols 2+): main area = session panes + shell-level bar.
@@ -1134,6 +1154,7 @@ export default function App() {
                         onSubmit={handleShellSubmit}
                         onCancel={handleShellCancel}
                         loading={composer.loading}
+                        queued={composer.queued}
                         phase={composer.phase}
                         turnStartedAt={composer.turnStartedAt}
                         turnPausedSince={composer.turnPausedSince}
@@ -1277,6 +1298,17 @@ export default function App() {
                     void openPersisted(path, name)}
                 />
               </div>
+              {/* ADR-0142 (issue #1494): the app-level transient-event
+                  feedback face. Sits OUTSIDE the shell div -- the
+                  settings-mode display swap (styles.css) hides every
+                  non-exempt direct shell child, viewport included, and a
+                  failure toast landing during settings must still show --
+                  but INSIDE the root boundary so a throwing consumer node
+                  degrades the app instead of white-screening it. The
+                  viewport (main-area column top, measured) never rides a
+                  panel mount; in-panel banners keep the panel-present
+                  failure face. */}
+              <Toaster />
             </NavigationHistoryProvider>
           </ErrorBoundary>
         </IntlProvider>

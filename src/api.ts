@@ -26,6 +26,10 @@ import type {
   SkillSource,
 } from "./types/skills";
 import type {
+  ListedWorkspaceDataset,
+  WorkspaceDatasetEntry,
+} from "./types/workspace-datasets";
+import type {
   ResumeProgress,
   SaveError,
   SessionMetadata,
@@ -92,9 +96,16 @@ export interface RecentWorkspace {
 // sidebar's workspace section can keep a missing-directory group with a
 // state hint (issue #1392). The selector filters on `exists` and slices its
 // top 10; older workspaces resurface through the folder browse. Tolerant --
-// an unreadable registry lists empty.
-export async function listWorkspaces(): Promise<RecentWorkspace[]> {
-  return invoke<RecentWorkspace[]>("list_workspaces");
+// an unreadable registry lists empty, and `degraded` (issue #1481) is the
+// only way to tell that fallback from a genuinely empty registry.
+// Mirrors `commands::WorkspaceListing`.
+export interface WorkspaceListing {
+  workspaces: RecentWorkspace[];
+  degraded: boolean;
+}
+
+export async function listWorkspaces(): Promise<WorkspaceListing> {
+  return invoke<WorkspaceListing>("list_workspaces");
 }
 
 // Rename a workspace record (issue #1392): the display title only -- the
@@ -117,6 +128,103 @@ export async function removeWorkspace(path: string): Promise<void> {
 // "select the existing one" ruling.
 export async function createWorkspace(name: string): Promise<RecentWorkspace> {
   return invoke<RecentWorkspace>("create_workspace", { name });
+}
+
+// The register-an-existing-directory reply (issue #1477): the listing
+// projection plus the honest idempotency marker -- `record_existed` true
+// means the directory already carried a registry record (the LRU bump +
+// one-way explicit upgrade; the title kept). Mirrors
+// `commands::RegisteredWorkspace`; the snake_case field follows the wire
+// projection convention (the datasets faces' `reference_name` et al.).
+export interface RegisteredWorkspace extends RecentWorkspace {
+  record_existed: boolean;
+}
+
+// Register an existing directory as a workspace (issue #1477): the
+// no-session registration path behind the sidebar create modal's
+// source-folder branch. The backend validates strictly (exists + is_dir;
+// the canonicalize expands 8.3 spellings) and re-validates a non-blank
+// title as the trust boundary; a null title falls back to the directory
+// tail. Idempotent on an already-recorded directory.
+export async function registerWorkspaceDirectory(
+  path: string,
+  title: string | null,
+): Promise<RegisteredWorkspace> {
+  return invoke<RegisteredWorkspace>("register_workspace_directory", {
+    path,
+    title,
+  });
+}
+
+// --- Workspace shared datasets (ADR-0141) ----------------------------------
+
+// The panel's list face: every manifest entry, flagged (not hidden) when its
+// store file is missing. `workspace` is the canonical path the sidebar's
+// listing projection carries.
+export async function listWorkspaceDatasets(
+  workspace: string,
+): Promise<ListedWorkspaceDataset[]> {
+  return invoke<ListedWorkspaceDataset[]>("list_workspace_datasets", { workspace });
+}
+
+// Add a source file to the workspace store (content-keyed; a repeated
+// content hits the store and skips conversion). Runs the copy-in off the UI
+// thread server-side.
+export async function addWorkspaceDataset(
+  workspace: string,
+  path: string,
+): Promise<WorkspaceDatasetEntry> {
+  return invoke<WorkspaceDatasetEntry>("add_workspace_dataset", { workspace, path });
+}
+
+// Remove a shared dataset: the manifest drops the name immediately; bound
+// sessions keep their hard links until they end.
+export async function removeWorkspaceDataset(
+  workspace: string,
+  referenceName: string,
+): Promise<void> {
+  return invoke<void>("remove_workspace_dataset", { workspace, referenceName });
+}
+
+// Replace a shared dataset's content under the stable name.
+export async function replaceWorkspaceDataset(
+  workspace: string,
+  referenceName: string,
+  path: string,
+): Promise<WorkspaceDatasetEntry> {
+  return invoke<WorkspaceDatasetEntry>("replace_workspace_dataset", {
+    workspace,
+    referenceName,
+    path,
+  });
+}
+
+// Rename a shared dataset's display label (ADR-0037's dual-name scheme on
+// the shared face): the reference name and the resume triple are untouched.
+export async function renameWorkspaceDataset(
+  workspace: string,
+  referenceName: string,
+  newDisplay: string,
+): Promise<WorkspaceDatasetEntry> {
+  return invoke<WorkspaceDatasetEntry>("rename_workspace_dataset", {
+    workspace,
+    referenceName,
+    newDisplay,
+  });
+}
+
+// Update a shared dataset's privacy -- a workspace-level asset attribute,
+// effective for every bound session on its next turn.
+export async function setWorkspaceDatasetPrivacy(
+  workspace: string,
+  referenceName: string,
+  privacy: DatasetPrivacy,
+): Promise<WorkspaceDatasetEntry> {
+  return invoke<WorkspaceDatasetEntry>("set_workspace_dataset_privacy", {
+    workspace,
+    referenceName,
+    privacy,
+  });
 }
 
 // Create a new session (ADR-0056/0089): the backend builds an independent
@@ -1184,4 +1292,46 @@ export async function setUserAdapterEnabled(
   enabled: boolean,
 ): Promise<void> {
   return invoke<void>("set_user_adapter_enabled", { adapterId, enabled });
+}
+
+// --- App updater (ADR-0143, issue #1509) -------------------------------------
+
+/** A discovered update (camelCase from the Rust `UpdateInfo`): the target
+ *  version, its release notes, and the running version. `null` from a check
+ *  means up to date. */
+export interface UpdateInfo {
+  version: string;
+  notes: string | null;
+  currentVersion: string;
+}
+
+/** The `update-download-progress` event payload: bytes downloaded and, when
+ *  the server advertises it, the total content length. Percent-step
+ *  throttled on the Rust side. */
+export interface UpdateDownloadProgress {
+  downloaded: number;
+  contentLength: number | null;
+}
+
+/** Manual / startup update check. Always fresh on the Rust side (the plugin
+ *  check never reuses a prior result). */
+export function checkForUpdates(): Promise<UpdateInfo | null> {
+  return invoke<UpdateInfo | null>("check_for_updates");
+}
+
+/** The one-shot atomic install: fresh check -> download (progress events
+ *  below) -> cleanup -> install -> relaunch. Never resolves in the success
+ *  path -- the process is replaced by the installer (Windows) or the
+ *  relaunch (macOS/Linux); only the error path resolves. */
+export function installUpdate(): Promise<void> {
+  return invoke<void>("install_update");
+}
+
+/** Subscribe to download progress during `installUpdate`. */
+export async function onUpdateDownloadProgress(
+  cb: (p: UpdateDownloadProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<UpdateDownloadProgress>("update-download-progress", (e) =>
+    cb(e.payload),
+  );
 }

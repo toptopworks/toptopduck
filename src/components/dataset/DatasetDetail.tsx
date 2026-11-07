@@ -1,4 +1,4 @@
-import { FormattedMessage, useIntl } from "react-intl";
+import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import type { ColumnSchema, DatasetDescriptor, DatasetPrivacy } from "../../types/dataset";
 import { PrivacyControls } from "./PrivacyControls";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
@@ -27,6 +27,38 @@ interface DatasetDetailProps {
   // flight, and applies a new privacy config to this dataset (ADR-0011, #9).
   loading?: boolean;
   onPrivacyChange?: (referenceName: string, privacy: DatasetPrivacy) => void;
+}
+
+// The sniffer-fallback fingerprint (issue #1483): when DuckDB's delimiter
+// search fails, the whole header line lands as ONE column whose name still
+// carries one of the candidate separators (comma, pipe, semicolon, tab). A
+// genuine single-column dataset (a count column, a join dimension) will not
+// carry a separator in its name -- a quoted header field is the one
+// false-positive shape, and the warning never gates, so a stray hint costs
+// nothing. Pure derivation, no wire field: it warns only, the rows still
+// read fine.
+function isProbableSnifferFallback(columns: ColumnSchema[]): boolean {
+  if (columns.length !== 1) return false;
+  return /[,;|\t]/.test(columns[0].name);
+}
+
+// Human-readable byte size (issue #1485): the store file's on-disk size,
+// tiered at binary units (1024-step) so a 1GB file reads "1 GB" not
+// "1073741824 bytes". The Intl unit style localizes the unit spelling.
+function formatBytes(intl: IntlShape, bytes: number): string {
+  const units = ["byte", "kilobyte", "megabyte", "gigabyte", "terabyte"] as const;
+  let unit = 0;
+  let value = bytes;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return intl.formatNumber(value, {
+    style: "unit",
+    unit: units[unit],
+    unitDisplay: "short",
+    maximumFractionDigits: value < 10 ? 1 : 0,
+  });
 }
 
 export function DatasetDetail({
@@ -97,7 +129,30 @@ export function DatasetDetail({
           defaultMessage="Rows: {rows}"
           values={{ rows: dataset.row_count }}
         />
+        {dataset.size_bytes > 0 && (
+          // 0 = unknown (an old manifest row / a stat failure): render no
+          // size line at all rather than a fake figure (issue #1485).
+          <>
+            {" · "}
+            <FormattedMessage
+              id="workingSet.detail.size"
+              defaultMessage="Size: {size}"
+              values={{ size: formatBytes(intl, dataset.size_bytes) }}
+            />
+          </>
+        )}
       </p>
+
+      {isProbableSnifferFallback(dataset.columns) && (
+        // The warning rides under the meta line, before the schema table: the
+        // user should read it BEFORE trusting the single column below.
+        <p className="text-warning text-sm mb-3">
+          <FormattedMessage
+            id="workspace.datasets.detail.sniffWarning"
+            defaultMessage="The delimiter may not have been recognized: the whole header landed as one column. Check the source file's delimiter and encoding, then re-add it."
+          />
+        </p>
+      )}
 
       <h3 className="text-base font-semibold">
         <FormattedMessage
@@ -194,8 +249,9 @@ export function DatasetDetail({
           empty (no file provenance to show -- the fingerprint is a file-change
           proof, so it has nothing to attach to either), and the full
           fingerprint sits directly under the path so a troubleshooting check
-          needs no hover. Both lines break-all: a long path / the 64-char
-          fingerprint wrap instead of stretching the panel. */}
+          needs no hover. Both lines break-all: a long path / the long
+          fingerprint (up to ~81 chars on the private face) wrap instead of
+          stretching the panel. */}
       {dataset.source_path !== "" && (
         <>
           <p className="source text-muted-foreground text-[0.85rem] break-all">
@@ -211,7 +267,8 @@ export function DatasetDetail({
               defaultMessage="Fingerprint: {fingerprint}"
               values={{
                 // The hex value rides the {typography.code} mono token (the
-                // schema-type <code> form): a 64-char data identifier reads
+                // schema-type <code> form): a long data identifier (bare hex
+                // on the shared face, v2-prefixed on the private face) reads
                 // best monospaced, the prose prefix stays in the body font.
                 fingerprint: (
                   <code className="font-mono text-[13px]">{dataset.fingerprint}</code>

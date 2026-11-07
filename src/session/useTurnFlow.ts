@@ -603,6 +603,12 @@ export interface UseTurnFlow {
   // TypeScript's void-return covariance.
   handleAsk: (question: string, invocations?: string[]) => Promise<void>;
   handleCancel: () => Promise<void>;
+  /** The synchronous live-turn probe (issue #1503): reads liveRef, so it is
+   *  accurate off the render cycle -- unlike the liveTurn state mirror,
+   *  which lags until the flush. Consumers outside the React cycle (the
+   *  composer queue's settle continuation) must probe through this, never
+   *  through the state. */
+  hasLiveTurn: () => boolean;
 }
 
 /** The round-evolving slice of a live fold (issue #1356): the fields the
@@ -996,6 +1002,12 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
     setLive(next);
   }, []);
 
+  // Issue #1503: the synchronous probe for consumers outside the render
+  // cycle. The single-turn guard reads liveRef (handleAsk's opening), so the
+  // probe answers from the SAME source -- a settle continuation asking "can
+  // I auto-send?" gets the truth at that instant, not the last flush.
+  const hasLiveTurn = useCallback(() => liveRef.current !== null, []);
+
   // ADR-0059 C-4: a LONG-LIVED turn-progress listener -- mount listen once,
   // unmount unlisten. Reused across ALL turns (NOT a per-turn listen, which
   // would amplify a subscribe-before-ask race + cost one IPC per turn). The
@@ -1312,5 +1324,6 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
     turnPausedSince,
     handleAsk,
     handleCancel,
+    hasLiveTurn,
   };
 }

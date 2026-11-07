@@ -143,10 +143,20 @@ pub struct DatasetDescriptor {
     pub row_count: u64,
     /// First 3 rows frozen at copy-in (ADR-0026), each a vector of rendered cells.
     pub sample: Vec<Vec<String>>,
-    /// SHA256 (hex) of the post-copy-in snapshot (ADR-0042); the content hash of
-    /// the *post-rectify* table, so different rectify choices yield different
-    /// fingerprints when they change the materialized rows.
+    /// Content identity (ADR-0042): on the private face the v2 source hash --
+    /// `v2:` + the streaming SHA256 of the file copy-in reads + the reader fn
+    /// spelling; on the shared face the store's content key (a bare SHA256
+    /// hex). Rectify choices still partition it (they change what copy-in
+    /// reads). Resume compares it against the recipe's record; a materialized
+    /// result_N ships it empty (identity = the reference name).
     pub fingerprint: String,
+    /// The snapshot file's byte size (issue #1485): the data body's on-disk
+    /// size, stat'ed off the store file at landing (the source file may have
+    /// moved; the store file IS the data). `#[serde(default)]` keeps older
+    /// manifests and recipes deserializing to 0 -- the detail pane renders no
+    /// size line for 0, never a fake value.
+    #[serde(default)]
+    pub size_bytes: u64,
     /// Rectify provenance (ADR-0042): how the dataset's header/skip state was
     /// determined -- format N/A, Excel auto-tidy (not recorded), or the user's
     /// explicit guided choices (carried so a future recipe can persist them).
@@ -361,6 +371,11 @@ impl std::error::Error for LoadError {}
 /// Outcome of an ingest attempt at the command boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
+// The size_bytes field (issue #1485) tips the Loaded variant over clippy's
+// variant-size heuristic; the enum crosses IPC whole, so boxing the descriptor
+// would tax every construction and match site for no allocation saved where
+// it matters.
+#[allow(clippy::large_enum_variant)]
 pub enum LoadOutcome {
     Loaded(DatasetDescriptor),
     /// Auto-tidy couldn't confidently rectify an Excel sheet (ADR-0015): the
@@ -375,7 +390,7 @@ pub enum LoadOutcome {
 /// the display name -- never the reference name -- so a rejection leaves the
 /// working set and every existing reference (SQL FROM, recipe chain, active
 /// pointer) unchanged. Crosses IPC as this serde struct, wrapped in
-/// [`SessionError::RenameDataset`](crate::session_store::SessionError) (issue
+/// [`SessionError::RenameDataset`](crate::session::store::SessionError) (issue
 /// #121); the frontend narrows on `kind` and renders a locale message, so the
 /// hand-written `Display` below is Rust-log-only -- NOT the IPC contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,7 +426,7 @@ impl std::error::Error for RenameError {}
 /// failures are [`TurnOutcome::Failed`] (ADR-0028), so a turn always produces an
 /// outcome. This type remains only for [`crate::session::Session::read_rows`]: a
 /// row read is not a turn, and its failures cross IPC as this serde struct,
-/// wrapped in [`SessionError::RowRead`](crate::session_store::SessionError) (issue
+/// wrapped in [`SessionError::RowRead`](crate::session::store::SessionError) (issue
 /// #121); the frontend narrows on `kind` and renders a locale message. The
 /// hand-written `Display` below is Rust-log-only -- NOT the IPC contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,7 +487,7 @@ pub enum ExportIoStep {
 /// reuses [`RowReadError`] 1:1 with the paged read; a destination-file failure
 /// (create / write / flush / rename) carries the step, the path, and the
 /// underlying detail. The whole type crosses IPC wrapped in
-/// [`SessionError::Export`](crate::session_store::SessionError) -- the
+/// [`SessionError::Export`](crate::session::store::SessionError) -- the
 /// frontend recurses `Export.data.kind` and renders the export-domain locale
 /// message (the destination half previously rode `SessionError::Engine` and
 /// rendered the generic internal-error wording). The hand-written `Display`

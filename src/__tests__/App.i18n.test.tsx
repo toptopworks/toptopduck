@@ -16,14 +16,15 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 // Platform mock (ADR-0074). Default is "windows" (set in each describe's
 // beforeEach); the macOS placement describe overrides to "macos". The Windows
 // default keeps the Windows-path suite (Restore glyph flip + onResized
-// subscription) valid; the macOS path's own click + dispatch coverage lives in
-// src/shell/__tests__/WindowControls.test.tsx.
+// subscription) valid; the cluster's click + failure routing coverage lives in
+// src/shell/__tests__/WindowsWindowControls.test.tsx (macOS traffic lights are
+// native titlebar buttons — nothing frontend to click-test).
 const { platformMock } = vi.hoisted(() => ({ platformMock: vi.fn<() => string>() }));
 vi.mock("@tauri-apps/plugin-os", () => ({ platform: platformMock }));
 
-// WindowControls (custom titlebar, ADR-0074) is the sole remaining
+// WindowsWindowControls (custom titlebar, ADR-0074) is the sole remaining
 // consumer of getCurrentWindow. The shared stub captures the bridge
-// handle so the WindowControls behavior tests below can fire clicks,
+// handle so the cluster behavior tests below can fire clicks,
 // emit onResized, and assert on the IPC spies.
 import { buildTauriWindowMock, type WindowBridge } from "./setup/tauriWindowMock";
 
@@ -62,7 +63,7 @@ const { appConfigWith } = vi.hoisted(() => {
         active_profile: "default",
       },
       export: { last_dir: null, default_format: "csv" },
-      tunables: { window_turns: 6, far_window: 12 },
+      tunables: { window_turns: 6, result_count_cap: 12 },
       shell: { sidebar_collapsed: false },
       cli_tools: { tools: [] },
       mcp_servers: { servers: [] },
@@ -221,7 +222,7 @@ describe("App window controls (Windows path)", () => {
   it("fires the matching window IPC on each control click", async () => {
     vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("zh-CN"));
     render(<App />);
-    // Wait for the topbar (incl. WindowControls) to mount so the bridge is
+    // Wait for the topbar (incl. the window cluster) to mount so the bridge is
     // populated and the buttons are queryable.
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
@@ -292,7 +293,7 @@ describe("App window controls (Windows path)", () => {
   });
 });
 
-describe("App window-controls platform placement (ADR-0074)", () => {
+describe("App window-controls platform placement (ADR-0140)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     platformMock.mockReturnValue("macos");
@@ -301,18 +302,17 @@ describe("App window-controls platform placement (ADR-0074)", () => {
     // Windows-path suites above have already latched "windows" by the time
     // this describe runs. resetModules + dynamic re-import of App/api makes
     // use-platform re-read the mocked "macos" value instead of serving the
-    // stale cache (mirrors the per-scenario re-import in
-    // WindowControls.test.tsx).
+    // stale cache.
     vi.resetModules();
   });
 
-  it("places macOS traffic lights at the topbar LEFT edge (not the right-side cluster)", async () => {
-    // ADR-0074: macOS renders <WindowControls /> before SidebarToggle (left
-    // edge); Windows/Linux renders it after NavButtons (right edge). This
-    // pins the App.tsx positional invariant -- a regression that flips or
-    // drops the left-edge branch would otherwise pass every other suite
-    // (dispatcher unit tests render the component in isolation, and the
-    // Windows-path suite above pins platform to "windows").
+  it("reserves the macOS traffic-light inset and renders no frontend window controls", async () => {
+    // ADR-0140: macOS rides the native Overlay titlebar -- the topbar's first
+    // child is the drag-region spacer reserving the native buttons' strip,
+    // and no Windows/Linux cluster renders. This pins the App.tsx branch: a
+    // regression that renders the cluster (or drops the spacer) would
+    // otherwise pass every other suite (the Windows-path suite above pins
+    // platform to "windows").
     const { default: App } = await import("../App");
     const { getAppConfig } = await import("../api");
     vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("en-US"));
@@ -321,19 +321,47 @@ describe("App window-controls platform placement (ADR-0074)", () => {
       expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument(),
     );
 
-    const macControls = document.querySelector(".macos-window-controls");
-    expect(macControls).not.toBeNull();
-    // The macOS container precedes the NavButtons (Back) in DOM order
-    // (DOCUMENT_POSITION_FOLLOWING = Back comes after macControls). The
-    // reference is a topbar action, not the settings gear: since issue #282
-    // the gear rides the session sidebar, which precedes the topbar in DOM
-    // order and would invert this positional assertion.
+    const topbar = document.querySelector(".topbar");
+    expect(topbar).not.toBeNull();
+    // The spacer precedes the NavButtons (Back) in DOM order. The reference
+    // is a topbar action, not the settings gear: since issue #282 the gear
+    // rides the session sidebar, which precedes the topbar in DOM order and
+    // would invert this positional assertion.
+    const inset = (topbar as Element).firstElementChild as Element;
+    expect(inset.hasAttribute("data-tauri-drag-region")).toBe(true);
     const back = screen.getByRole("button", { name: "Back" });
     expect(
-      (macControls as Element).compareDocumentPosition(back) &
-      Node.DOCUMENT_POSITION_FOLLOWING,
+      inset.compareDocumentPosition(back) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    // The Windows right-side cluster must NOT also render on macOS.
+    // The Windows/Linux right-side cluster must NOT render on macOS.
     expect(document.querySelector(".window-controls")).toBeNull();
+  });
+
+  it("renders the right-side cluster and no inset spacer on Linux", async () => {
+    // The retired dispatcher suite's Linux case was the only test that ever
+    // pushed "linux" through App's platform predicate; without this pin a
+    // regression narrowing the tail branch to windows-only would leave the
+    // Linux desktop with no window controls under decorations:false while
+    // every other suite stays green.
+    platformMock.mockReturnValue("linux");
+    vi.resetModules();
+    const { default: App } = await import("../App");
+    const { getAppConfig } = await import("../api");
+    vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("en-US"));
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument(),
+    );
+
+    const topbar = document.querySelector(".topbar");
+    expect(topbar).not.toBeNull();
+    // No macOS inset spacer: the topbar's first child is the sidebar toggle,
+    // not a drag-region spacer.
+    expect(
+      (topbar as Element).firstElementChild?.hasAttribute("data-tauri-drag-region"),
+    ).toBe(false);
+    // The Windows/Linux cluster DOES render on Linux -- the sole window
+    // controls under decorations:false.
+    expect(document.querySelector(".window-controls")).not.toBeNull();
   });
 });

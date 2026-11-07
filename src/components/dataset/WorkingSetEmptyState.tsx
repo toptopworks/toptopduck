@@ -6,9 +6,10 @@ import { pickDataFiles } from "./pickDataFiles";
 // card -- not the two-column master/detail shell with a near-empty pair. The
 // card keeps the drop hint (the window dropzone still works) and carries the
 // inline add entry the old copy only pointed at: the picker routes through
-// the same handleIngestMany pipeline as the composer's + entry, so the
-// guided-load dock, error banner, and batch queue all apply unchanged. The
-// caller wraps this in the tab's panel chrome (PANEL_CARD_BASE).
+// the same pipeline as the composer's + entry (the pane's tracked
+// ingestMany), so the guided-load dock, error banner, batch queue, and the
+// queued posture all apply unchanged. The caller wraps this in the tab's
+// panel chrome (PANEL_CARD_BASE).
 export function WorkingSetEmptyState({
   onAddFiles,
   loading = false,

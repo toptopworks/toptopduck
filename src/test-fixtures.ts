@@ -54,7 +54,7 @@ export function baseAppConfig(overrides?: Partial<AppConfig>): AppConfig {
       active_profile: "default",
     },
     export: { last_dir: null, default_format: "csv" },
-    tunables: { window_turns: 6, far_window: 12 },
+    tunables: { window_turns: 6, result_count_cap: 12 },
     shell: { sidebar_collapsed: false },
     mcp_servers: { servers: [] },
     cli_tools: { tools: [] },

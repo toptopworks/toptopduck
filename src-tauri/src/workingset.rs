@@ -11,8 +11,11 @@ use crate::model::{
 /// Hard ceiling on the number of registered `result_N` (ADR-0013 M=100). When
 /// a freshly materialized result pushes the count over the cap, the oldest
 /// stale results are auto-reclaimed; active results are never auto-deleted.
-/// Tunable via [`crate::session::Session::set_result_count_cap`] (tests lower
-/// it for a fast, deterministic GC trigger -- mirroring the row-cap twin).
+/// This constant is now ONLY the default-value source: the persisted,
+/// user-tunable copy lives on `Tunables.result_count_cap` (#1446 -- the
+/// create/resume command layer snapshots it onto each session via
+/// [`crate::session::Session::set_result_count_cap`]; tests lower the same
+/// setter for a fast, deterministic GC trigger).
 pub const DEFAULT_RESULT_COUNT_CAP: usize = 100;
 
 #[derive(Debug, Default)]
@@ -59,8 +62,20 @@ impl WorkingSet {
         self.deconflict_loop(candidate, taken, |c, n| format!("{c}_{n}"))
     }
 
-    fn taken(&self, name: &str) -> bool {
+    /// Whether a reference name is currently held by any member (source or
+    /// result). Pub for the shared-dataset attach resolver (ADR-0141 D6: the
+    /// occupancy check behind "私有让位，共享保名").
+    pub fn taken(&self, name: &str) -> bool {
         self.datasets.iter().any(|d| d.reference_name == name)
+    }
+
+    /// Point the active-SOURCE pointer at an existing source (or clear it).
+    /// Used by the shared-dataset attach to preserve the user's default target
+    /// -- a lazy attach is agent-triggered, not a user upload, and must not
+    /// hijack `active` (the private ingest faces -- upload and replace --
+    /// are the active-movers; attach restores, never moves).
+    pub fn set_active_source(&mut self, name: Option<&str>) {
+        self.active = name.map(str::to_string);
     }
 
     /// De-conflict a candidate display label at the display layer (ADR-0037):
@@ -579,6 +594,28 @@ impl WorkingSet {
         newly_stale
     }
 
+    /// Invalidate a shared-attached source in place and cascade to its
+    /// dependents (ADR-0141 D7): the workspace entry behind the attach is
+    /// gone or replaced, so the reference turns stale at its next SQL
+    /// mention (the lazy, at-reference-time analogue of a private source
+    /// removal -- zero new cross-session sync; the replace path calls this
+    /// too, then un-marks the name itself). Returns the cascade's reach for
+    /// logging.
+    pub fn retire_shared_source(
+        &mut self,
+        reference_name: &str,
+        anchor: StaleAnchor,
+    ) -> Vec<String> {
+        if let Some(slot) = self
+            .datasets
+            .iter_mut()
+            .find(|d| d.reference_name == reference_name)
+        {
+            slot.stale = Some(anchor.clone());
+        }
+        self.cascade_stale(reference_name, anchor)
+    }
+
     /// Mark one result_N stale by setting its descriptor's anchor. Private --
     /// the only caller is `cascade_stale` (stale is a consequence of a source
     /// event, never a standalone mutation).
@@ -628,6 +665,7 @@ mod tests {
             fingerprint: reference_name.into(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: None,
         }
     }
@@ -913,6 +951,7 @@ mod tests {
             fingerprint: name.into(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: None,
         }
     }

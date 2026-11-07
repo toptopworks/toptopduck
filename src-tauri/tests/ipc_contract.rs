@@ -12,6 +12,7 @@ use toptopduck_lib::commands::LiveSessionEntry;
 use toptopduck_lib::{
     DatasetDescriptor, DatasetPrivacy, GuidanceReason, GuidanceRequest, GuidanceSheet,
     GuidanceSheetState, LoadError, LoadOutcome, RectifyProvenance, SessionId, SheetRectify,
+    Tunables,
 };
 
 /// Serialize `value`, assert the JSON equals `expected` (the pinned wire
@@ -111,6 +112,7 @@ fn sample_descriptor() -> DatasetDescriptor {
         fingerprint: "abcd".into(),
         rectify: RectifyProvenance::NotApplicable,
         privacy: DatasetPrivacy::default(),
+        size_bytes: 0,
         stale: None,
     }
 }
@@ -123,7 +125,7 @@ fn load_outcome_loaded_carries_descriptor_in_data() {
     // so the cross-PRD contract (issue #9) is pinned here for the frontend mirror.
     assert_wire(
         &LoadOutcome::Loaded(sample_descriptor()),
-        r#"{"kind":"Loaded","data":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}}}"#,
+        r#"{"kind":"Loaded","data":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","size_bytes":0,"rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}}}"#,
     );
 }
 
@@ -243,7 +245,7 @@ fn turn_outcome_materialized_carries_the_promotion_chain_and_assumption() {
             body: None,
             assumption: None,
         },
-        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":null,"body":null,"assumption":null}}"#,
+        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","size_bytes":0,"rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":null,"body":null,"assumption":null}}"#,
     );
 }
 
@@ -270,7 +272,7 @@ fn turn_outcome_materialized_carries_a_viz_spec() {
             body: None,
             assumption: None,
         },
-        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":{"kind":"bar","spec":"{\"mark\":\"bar\"}"},"body":null,"assumption":null}}"#,
+        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","size_bytes":0,"rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":{"kind":"bar","spec":"{\"mark\":\"bar\"}"},"body":null,"assumption":null}}"#,
     );
 }
 
@@ -994,7 +996,7 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
     // `{"kind":"X"}` with no `data`; Engine carries its detail string under
     // `data`. The thiserror `#[error(...)]` Display strings are Rust-log-only,
     // NOT the IPC contract (commands no longer map through Display; the Display
-    // wording is pinned separately in the session_store unit tests).
+    // wording is pinned separately in the session::store unit tests).
     use toptopduck_lib::SessionError;
     assert_wire(&SessionError::InvalidId, r#"{"kind":"InvalidId"}"#);
     assert_wire(&SessionError::NotFound, r#"{"kind":"NotFound"}"#);
@@ -2232,5 +2234,25 @@ fn agent_warning_serializes_state_tagged() {
             name: "general-purpose".into(),
         },
         r#"{"state":"deferred","name":"general-purpose"}"#,
+    );
+}
+
+#[test]
+fn tunables_wire_shape_pins_the_config_mirror_keys() {
+    // Tunables crosses the wire on every app-config read/write, and the TS
+    // mirror (src/types/app-config.ts) is hand-maintained -- the #1446
+    // `far_window` -> `result_count_cap` rename rode grep across eight TS
+    // files, not types. Pin the key set here like the sibling shapes so a
+    // serde rename fails the build before the mirror drifts: a stale Rust
+    // key would round-trip a set_app_config write to the serde default with
+    // no compile error on either side. (A pre-rename `far_window` key in a
+    // config FILE is still ignored at parse -- serde default fills the
+    // missing field; this pin is about the wire shape only.)
+    assert_wire(
+        &Tunables {
+            window_turns: 3,
+            result_count_cap: 7,
+        },
+        r#"{"window_turns":3,"result_count_cap":7}"#,
     );
 }

@@ -451,7 +451,12 @@ impl<'a> Resumer<'a> {
         // working set -- register the placeholders first (ADR-0013: stale is
         // not silently discarded). `end` bounds the pre-pass, not the map:
         // turns from the break on render degraded-Failed and never look up
-        // descriptors, so their promotions register nothing here.
+        // descriptors, so their promotions register nothing here. The
+        // pre-pass must also stay AFTER replay: replay's per-materialization
+        // GC runs on the session's bare default cap (the #1446 configured
+        // snapshot is applied after open_recipe returns), so stale
+        // registrations visible during replay would reclaim at the default
+        // under a user-configured higher cap.
         register_stale_placeholders(working_set, self.recipe, end);
 
         let timeline = self
@@ -631,6 +636,7 @@ impl<'a> Resumer<'a> {
                 }
                 RecipeEntry::Source(ev) => Ok(TimelineEntry::Source(ev.clone())),
                 RecipeEntry::Skill(ev) => Ok(TimelineEntry::Skill(ev.clone())),
+                RecipeEntry::SharedAttach(ev) => Ok(TimelineEntry::SharedAttach(ev.clone())),
             })
             .collect::<Result<Vec<_>, ResumeError>>()?;
         Ok(timeline)
@@ -726,6 +732,7 @@ fn register_stale_placeholders(working_set: &mut WorkingSet, recipe: &Recipe, en
                 row_count: 0,
                 sample: Vec::new(),
                 fingerprint: String::new(),
+                size_bytes: 0,
                 rectify: RectifyProvenance::NotApplicable,
                 privacy: DatasetPrivacy::default(),
                 stale: Some(anchor.clone()),
@@ -870,6 +877,10 @@ impl super::Session {
         // existing replay path below rebuilds it verbatim (legacy
         // pure-recipe sessions enter the hit path this way after one replay).
         session.point_engine_at_tree();
+        // ADR-0137: the workspace binding restores EARLY here so the shared
+        // attach restore below can resolve the manifest; the phase-5 facts
+        // block re-writes it verbatim (same value, idempotent).
+        session.runtime_facts.workspace = recipe.workspace.clone();
         let restored = if let Some(meta) = super::companion::probe(path, &recipe) {
             // A probe-validated companion failing mid-restore is a fresh
             // corruption (TOCTOU window), not a cache miss: the replay
@@ -889,6 +900,18 @@ impl super::Session {
         if !restored {
             super::companion::discard(path);
         }
+        // ADR-0141 D9: restore the recorded shared attaches before any
+        // replay consumption -- a fingerprint match re-attaches from the
+        // workspace store (zero conversion), a miss or a gone entry
+        // registers the 挂名 stale so replay SQL refuses honestly.
+        // Idempotent against the companion hit path (an already-attached
+        // name only records its table entry). This runs AFTER the companion
+        // probe, not before: the attach's ATTACH statement activates the
+        // admin engine's RW handle on the companion file itself, and a
+        // read-only probe against that handle fails the open -- a false
+        // miss that forced the replay path and re-materialized result_N
+        // over tables the companion already held.
+        session.restore_shared_attaches(&recipe.history);
 
         // Phase 1 (replay path only): re-read + verify each source
         // (interactive re-link / rebuild). Returns the set of rebuilt
@@ -947,6 +970,12 @@ impl super::Session {
                     workspace_registry: None,
                     snapshot_dir,
                     tool_output_refs: &mut session.tool_output_refs,
+                    // ADR-0141 D9: the shared axis stays disconnected for the
+                    // replay -- the restore above already re-attached (or
+                    // staled) every recorded attach, so the replayed SQL finds
+                    // its names in the working set; no new lazy attach can
+                    // legitimately fire mid-replay.
+                    shared_attaches: None,
                 };
                 resumer.replay(&mut deps, &mut on_progress)?
             };
@@ -1095,8 +1124,10 @@ impl super::Session {
     /// ([`Self::resolve_source_path`]); the source is ingested under the
     /// recipe's reference name via [`Self::resume_ingest_at`] (no name derive
     /// / de-conflict / Added-event -- resume replays the recipe's own events
-    /// in phase 4, not new ones); the resulting post-rectify fingerprint must
-    /// match the recipe (ADR-0035/0042). On Missing (path gone / unreadable)
+    /// in phase 4, not new ones); the resulting v2 source-hash fingerprint
+    /// must match the recipe, with a pre-v2 bare hash allowed through as an
+    /// algorithm upgrade without rewriting (ADR-0035/0042). On Missing (path
+    /// gone / unreadable)
     /// or Drift (present but fingerprint differs) the caller's `on_source_issue`
     /// callback decides: Relink (re-ingest a new path + re-verify, looping),
     /// Abort (stop resume, on-disk recipe untouched), or Rebuild (drop this one
@@ -1142,10 +1173,43 @@ impl super::Session {
                     src.reader.as_deref(),
                 ) {
                     Ok(descriptor) => {
-                        if descriptor.fingerprint == src.fingerprint {
+                        // Fingerprint algorithm upgrade (issue #1507): a
+                        // recipe recorded before the source-hash fingerprint
+                        // carries a bare post-load hash, so the v2 read
+                        // mismatches without any data change. An algorithm
+                        // upgrade is not drift -- allow the source through,
+                        // log it, and pin the working set to the recorded
+                        // value so the post-resume persist keeps the recipe
+                        // verbatim (rewriting to v2 would change
+                        // chain_digest and force a watermark miss / full
+                        // replay on the next resume). The allow is a prefix
+                        // check that cannot compare content (a bare hash is
+                        // a post-load table hash, the fresh read a source
+                        // hash -- disjoint domains), so drift detection stays
+                        // disarmed for this source until it converges, and
+                        // convergence is in-app only: a re-uploaded or
+                        // in-app-replaced source writes v2; an on-disk
+                        // replacement or a resume re-link (which updates the
+                        // path but not the fingerprint) never does.
+                        let upgraded =
+                            Self::is_fingerprint_upgrade(&src.fingerprint, &descriptor.fingerprint);
+                        if descriptor.fingerprint == src.fingerprint || upgraded {
                             // Match -- restore the recipe's display label over
                             // the path-derived one (ADR-0037 rename survives).
-                            if descriptor.display_name != src.display_name {
+                            let rename_needed = descriptor.display_name != src.display_name;
+                            if upgraded {
+                                log::info!(
+                                    target: "toptopduck::session",
+                                    "source {} carries a pre-v2 fingerprint; allowing the \
+                                     algorithm upgrade without rewriting the recipe",
+                                    src.reference_name,
+                                );
+                                self.working_set.replace(DatasetDescriptor {
+                                    fingerprint: src.fingerprint.clone(),
+                                    ..descriptor
+                                });
+                            }
+                            if rename_needed {
                                 // Backend log only: a failure to restore the
                                 // recipe's label is logged (not silently
                                 // swallowed), but no IPC event or banner is
@@ -1235,6 +1299,18 @@ impl super::Session {
         Ok(rebuilt)
     }
 
+    /// Whether a fingerprint mismatch is the v2 algorithm upgrade (issue
+    /// #1507): the recipe recorded a bare post-load hash (no `v2:` prefix)
+    /// while the fresh read produced a source-hash fingerprint. Algorithm
+    /// upgrade != data drift -- the caller allows the source through and
+    /// pins the recorded value. An EMPTY recorded fingerprint is corruption
+    /// (the shared manifest rejects an empty store key as corrupt), not a
+    /// pre-v2 posture -- it falls through to the Drift face instead.
+    fn is_fingerprint_upgrade(recorded: &str, found: &str) -> bool {
+        let prefix = crate::ingest::loader::FINGERPRINT_V2_PREFIX;
+        !recorded.is_empty() && !recorded.starts_with(prefix) && found.starts_with(prefix)
+    }
+
     /// Ingest a source for resume under an explicit reference name + display
     /// label (no derive / de-conflict / Added-event append). The recipe
     /// already fixed the name + the timeline; resume just needs the snapshot
@@ -1309,6 +1385,9 @@ impl super::Session {
                 detail: format!("挂载快照失败：{e}"),
             });
         }
+        // Stat before the file_path move (the writing connection is dropped by
+        // copy_in, so the on-disk size is final, issue #1485).
+        let size_bytes = crate::session::snapshot::snapshot_len(&snap.file_path);
         self.source_files
             .insert(reference_name.to_string(), snap.file_path);
         // Refill the reader-recording map (ADR-0137 D4): the post-resume
@@ -1324,6 +1403,7 @@ impl super::Session {
             row_count: snap.row_count,
             sample: snap.sample,
             fingerprint: snap.fingerprint,
+            size_bytes,
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
             stale: None,
@@ -1395,9 +1475,12 @@ impl super::Session {
             self.working_set
                 .record_provenance(result, deps.iter().cloned().collect());
         }
-        if let Some(active) = &meta.active {
-            self.working_set.set_active(active);
-        }
+        // Restore the settled active pointer verbatim, None included: the
+        // register loop above leaves `active` on the LAST descriptor's name
+        // (register is an active-mover), and a settle-time None must clear
+        // that residue -- otherwise a shared-attach name ordered last would
+        // resurrect as active and violate the persister's sources invariant.
+        self.working_set.set_active_source(meta.active.as_deref());
         // Source status: stat-level only. A file that no longer resolves or
         // stats is Missing; a (mtime, size) difference from the settle-time
         // stamp is Changed. No content check -- reading the file is exactly
@@ -1472,6 +1555,7 @@ mod tests {
             fingerprint: format!("fp_{name}"),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: None,
         }
     }
@@ -1488,6 +1572,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: None,
         }
     }

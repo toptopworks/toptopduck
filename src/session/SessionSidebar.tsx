@@ -37,6 +37,7 @@ import {
 import type { SessionMetadata } from "../types/session";
 import type { ProviderConfig } from "../types/provider";
 import { Button } from "@/components/ui/button";
+import { UpdateIndicator } from "../shell/UpdateIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   HoverCard,
@@ -201,7 +202,7 @@ export function SessionSidebar({
     staleTime: 0,
   });
   const workspaceGroups = buildWorkspaceGroups(
-    workspaceList ?? [],
+    workspaceList?.workspaces ?? [],
     sessions,
     openSessions,
     activeSessionId,
@@ -514,7 +515,7 @@ export function SessionSidebar({
           until app-config resolves (see the provider prop note) to keep the
           white-screen state unreachable. */}
       {provider && (
-        <div className="sidebar-footer border-border border-t p-2">
+        <div className="sidebar-footer border-border flex items-center gap-1 border-t p-2">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -529,6 +530,11 @@ export function SessionSidebar({
             </TooltipTrigger>
             <TooltipContent>{settingsLabel}</TooltipContent>
           </Tooltip>
+          {/* The update indicator (issue #1509): self-showing beside the gear
+              while the shared update-check cache carries an update; the click
+              installs directly (active-turn confirm gates it). Also owns the
+              startup auto-check mount -- see UpdateIndicator. */}
+          <UpdateIndicator />
         </div>
       )}
     </aside>

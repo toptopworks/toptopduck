@@ -573,6 +573,10 @@ use std::time::Duration;
 struct ServerState {
     sse_queue: Mutex<VecDeque<String>>,
     shutdown: AtomicBool,
+    /// Set by the SseMalformed POST handler when a `tools/call` has been
+    /// acknowledged; the GET loop then injects one malformed `message` event
+    /// (issue #647 on the async face, #1455) and clears the flag.
+    malformed_due: AtomicBool,
     /// Every request's captured headers (name lowercased, value verbatim),
     /// appended per connection in arrival order (issue #901): the
     /// header-injection pins read this back to assert what the transports
@@ -596,12 +600,12 @@ enum ServerMode {
     /// Legacy SSE: GET opens SSE stream; POST sends messages.
     Sse,
     /// Legacy SSE that accepts the POST but never forwards the response
-    /// onto the GET stream (issue #889): the client's `recv` parks on a
+    /// onto the GET stream (issue #889): the request parks on the stream read of a
     /// live-but-silent connection -- the deadline fixture for the SSE half.
     SseSilent,
     /// Legacy SSE whose silence starts at the handshake (issue #897): the
     /// endpoint event rides the GET stream, every POST is acknowledged,
-    /// but no response event is EVER forwarded -- the initialize `recv`
+    /// but no response event is EVER forwarded -- the initialize request
     /// parks mid-connect, the connect-phase half that `SseSilent` (which
     /// silences only `tools/call`) never modeled.
     SseHandshakeSilent,
@@ -628,6 +632,30 @@ enum ServerMode {
     /// are configured, plain connection failure (no guard) when not
     /// (issue #901).
     SseCrossOriginEndpoint,
+    /// Legacy SSE that answers the GET with SSE headers and then never
+    /// sends the `endpoint` event — the connect-phase silent window. The
+    /// ack window (#1455: the retired tick's honest core) must fail the
+    /// connect on its own, and a kill landing inside the window must break
+    /// it immediately (the endpoint read is raced against the stop wake).
+    SseEndpointSilent,
+    /// Streamable HTTP answering every POST with `404` — pins the
+    /// transport-level non-2xx refusal: the retired ureq face surfaced
+    /// statuses >= 400 from its error channel, and the reqwest face carries
+    /// the same classification explicitly (#1455), so an HTTP error status
+    /// reads as an HTTP fault, not as a bogus JSON-RPC envelope.
+    HttpErrorStatus,
+    /// Legacy SSE whose GET stream is stock but every POST is answered
+    /// `500` — pins the same non-2xx refusal on the SSE face (#1455): the
+    /// handshake's initialize POST rides `SseClient::request`, where a
+    /// dropped guard would read the 500 as an ack and park the call on the
+    /// stream read (which carries no bound of its own).
+    SseErrorStatus,
+    /// Legacy SSE whose GET stream injects one malformed `message` event
+    /// once a `tools/call` POST has been acknowledged — exercises the #647
+    /// fail-fast on the async face (#1455): the waiting request gets a
+    /// `Framing(InvalidData)` attribution, and the poisoned stream fails
+    /// later requests fast with `ServerClosed`.
+    SseMalformed,
 }
 
 /// A minimal in-process HTTP MCP server for integration testing (issue #389).
@@ -647,6 +675,7 @@ impl HttpMcpServer {
         let state = Arc::new(ServerState {
             sse_queue: Mutex::new(VecDeque::new()),
             shutdown: AtomicBool::new(false),
+            malformed_due: AtomicBool::new(false),
             captured_headers: Mutex::new(Vec::new()),
         });
         let state_clone = state.clone();
@@ -754,6 +783,9 @@ fn handle_connection(
 
     match (mode, method) {
         (ServerMode::Http, "POST") => handle_jsonrpc_post(&mut stream, &body, "http-fake"),
+        (ServerMode::HttpErrorStatus, "POST") => {
+            write_response(&mut stream, 404, "application/json", "not found")
+        }
         (ServerMode::HttpSse, "POST") => {
             handle_jsonrpc_sse_post(&mut stream, &body, "http-sse-fake")
         }
@@ -779,6 +811,32 @@ fn handle_connection(
             // A cross-origin absolute endpoint: port 9 (discard) is not this
             // listener's port, so the origin differs by construction.
             handle_sse_stream_with_endpoint(&mut stream, "http://127.0.0.1:9/message");
+        }
+        (ServerMode::SseEndpointSilent, "GET") => {
+            use std::io::Read as _;
+            let header = "HTTP/1.1 200 OK
+Content-Type: text/event-stream
+
+";
+            let _ = stream.write_all(header.as_bytes());
+            // Hold the stream open in silence: closing it would surface EOF
+            // (a different error), not the ack window the pin drives.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut sink = [0u8; 64];
+            loop {
+                match stream.read(&mut sink) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => continue,
+                }
+            }
+        }
+        (ServerMode::SseMalformed, "GET") => {
+            handle_sse_stream_malformed(&mut stream, &state, base_url)
+        }
+        (ServerMode::SseMalformed, "POST") => handle_sse_post_malformed(&mut stream, &body, &state),
+        (ServerMode::SseErrorStatus, "GET") => handle_sse_stream(&mut stream, &state, base_url),
+        (ServerMode::SseErrorStatus, "POST") => {
+            write_response(&mut stream, 500, "application/json", "internal error")
         }
         _ => {
             write_response(&mut stream, 404, "text/plain", "not found");
@@ -954,7 +1012,7 @@ fn handle_sse_post(stream: &mut TcpStream, body: &[u8], state: &ServerState) {
 /// POST handler for the silent-SSE fixture (issue #889): the handshake
 /// (`initialize` / `tools/list`) is answered normally so the connect phase
 /// succeeds, but a `tools/call` is acknowledged and never forwarded onto
-/// the GET stream -- the client's `recv` parks on a live-but-silent
+/// the GET stream -- the request parks on the stream read of a live-but-silent
 /// connection, the SSE half of the deadline shape.
 fn handle_sse_post_silent(stream: &mut TcpStream, body: &[u8], state: &ServerState) {
     let Some(req) = parse_sse_post(stream, body) else {
@@ -969,7 +1027,7 @@ fn handle_sse_post_silent(stream: &mut TcpStream, body: &[u8], state: &ServerSta
 
 /// POST handler for the handshake-silent SSE fixture (issue #897): every
 /// POST is acknowledged (202) but nothing is ever enqueued -- the initialize
-/// handshake itself parks the client's `recv` on a live-but-silent
+/// handshake itself parks the request on a live-but-silent
 /// connection.
 fn handle_sse_post_handshake_silent(stream: &mut TcpStream, body: &[u8]) {
     if parse_sse_post(stream, body).is_none() {
@@ -978,11 +1036,65 @@ fn handle_sse_post_handshake_silent(stream: &mut TcpStream, body: &[u8]) {
     write_response(stream, 202, "application/json", "");
 }
 
+/// GET handler for the malformed-message SSE fixture (issue #647 on the
+/// async face, #1455): a stock SSE stream (endpoint event + queued
+/// responses) that injects ONE malformed `message` event the moment a
+/// `tools/call` POST has been acknowledged (the POST handler's flag) -- the
+/// event reaches the request parked on the stream read.
+fn handle_sse_stream_malformed(stream: &mut TcpStream, state: &ServerState, base_url: &str) {
+    let header = "HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream\r\n\
+                  Cache-Control: no-cache\r\n\
+                  Connection: keep-alive\r\n\
+                  \r\n";
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.flush();
+
+    let post_url = format!("{}/message", base_url);
+    let endpoint = format!("event: endpoint\r\ndata: {}\r\n\r\n", post_url);
+    let _ = stream.write_all(endpoint.as_bytes());
+    let _ = stream.flush();
+
+    while !state.shutdown.load(Ordering::SeqCst) {
+        while let Some(resp) = state.sse_queue.lock().unwrap().pop_front() {
+            let sse = format!("event: message\r\ndata: {}\r\n\r\n", resp);
+            if stream.write_all(sse.as_bytes()).is_err() {
+                return;
+            }
+            let _ = stream.flush();
+        }
+        if state.malformed_due.swap(false, Ordering::SeqCst) {
+            let malformed = "event: message\r\ndata: not-json\r\n\r\n";
+            if stream.write_all(malformed.as_bytes()).is_err() {
+                return;
+            }
+            let _ = stream.flush();
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// POST handler for the malformed-message SSE fixture: the handshake
+/// (`initialize` / `tools/list`) is answered normally through the queue, but
+/// a `tools/call` is acknowledged and arms the GET stream's malformed-event
+/// injection instead of a response.
+fn handle_sse_post_malformed(stream: &mut TcpStream, body: &[u8], state: &ServerState) {
+    let Some(req) = parse_sse_post(stream, body) else {
+        return;
+    };
+    if req.get("method").and_then(Value::as_str) == Some("tools/call") {
+        write_response(stream, 202, "application/json", "");
+        state.malformed_due.store(true, Ordering::SeqCst);
+        return;
+    }
+    enqueue_and_ack_sse_response(stream, &req, state);
+}
+
 /// POST handler for the redirect-on-one-method SSE fixture (issue #904): the
 /// parameterized method's POST is answered `301` + Location, every other
 /// POST behaves stock. The redirect ALSO shuts the fixture down, closing the
 /// GET stream: a mutant client that skips the redirect check parks its
-/// `recv` on a stream that will never carry the response -- with the stream
+/// stream read on a connection that will never carry the response -- with the stream
 /// closed it surfaces a terminal `ServerClosed` instead, so the pin fails
 /// with an assertion (wrong error), not a hang.
 fn handle_sse_post_redirect(
@@ -1101,6 +1213,15 @@ fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body:
     let _ = stream.flush();
 }
 
+/// Drive one async-client future on the transport bridge runtime: clients
+/// that carry live IO (the SSE stream above all) must have every poll on
+/// that one runtime -- a throwaway current-thread runtime per call leaves
+/// the carried IO's wakers bound to a dead runtime and the next call dies
+/// mid-body ("error decoding response body").
+fn drive<F: std::future::Future>(fut: F) -> F::Output {
+    toptopduck_lib::mcp::client::block_on(fut)
+}
+
 // --- HTTP transport integration tests --------------------------------------
 
 #[test]
@@ -1108,23 +1229,22 @@ fn http_transport_connect_tools_list_and_call() {
     let server = HttpMcpServer::spawn(ServerMode::Http);
     let url = format!("{}/mcp", server.url());
 
-    let mut client = toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new())
-        .expect("http connect");
+    let mut client = drive(toptopduck_lib::mcp::client::HttpClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .expect("http connect");
 
-    let tools = client.list_tools("http-fake").expect("tools/list");
+    let tools = drive(client.list_tools("http-fake")).expect("tools/list");
     assert_eq!(tools.len(), 2, "http server advertises echo + add");
     assert_eq!(tools[0]["name"], "echo");
     assert_eq!(tools[1]["name"], "add");
 
-    let result = client
-        .call("add", &json!({"a": 7, "b": 8}))
-        .expect("tools/call");
+    let result = drive(client.call("add", &json!({"a": 7, "b": 8}))).expect("tools/call");
     let text = first_text(&result);
     assert_eq!(text, "15");
 
-    let echo = client
-        .call("echo", &json!({"message": "hello-http"}))
-        .expect("echo call");
+    let echo = drive(client.call("echo", &json!({"message": "hello-http"}))).expect("echo call");
     assert_eq!(first_text(&echo), "Echo: hello-http");
 }
 
@@ -1175,17 +1295,17 @@ fn http_transport_handles_sse_response_branch() {
     let server = HttpMcpServer::spawn(ServerMode::HttpSse);
     let url = format!("{}/mcp", server.url());
 
-    let mut client = toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new())
-        .expect("http-sse connect");
+    let mut client = drive(toptopduck_lib::mcp::client::HttpClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .expect("http-sse connect");
 
-    let tools = client
-        .list_tools("http-sse-fake")
-        .expect("tools/list via SSE response");
+    let tools = drive(client.list_tools("http-sse-fake")).expect("tools/list via SSE response");
     assert_eq!(tools.len(), 2, "http-sse server advertises echo + add");
 
-    let result = client
-        .call("add", &json!({"a": 20, "b": 22}))
-        .expect("tools/call via SSE response");
+    let result =
+        drive(client.call("add", &json!({"a": 20, "b": 22}))).expect("tools/call via SSE response");
     assert_eq!(first_text(&result), "42");
 }
 
@@ -1199,7 +1319,10 @@ fn http_transport_sse_malformed_data_fails_as_framing() {
     let server = HttpMcpServer::spawn(ServerMode::HttpSseMalformed);
     let url = format!("{}/mcp", server.url());
 
-    let err = match toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new()) {
+    let err = match drive(toptopduck_lib::mcp::client::HttpClient::connect(
+        &url,
+        &BTreeMap::new(),
+    )) {
         Ok(_) => panic!("malformed SSE data must fail the request"),
         Err(e) => e,
     };
@@ -1229,7 +1352,10 @@ fn sse_transport_rejects_non_endpoint_first_event() {
     let server = HttpMcpServer::spawn(ServerMode::SseBadFirstEvent);
     let url = format!("{}/sse", server.url());
 
-    let result = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new());
+    let result = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ));
     let err = match result {
         Ok(_) => panic!("non-endpoint first event should be rejected"),
         Err(e) => e,
@@ -1243,30 +1369,271 @@ fn sse_transport_rejects_non_endpoint_first_event() {
 
 // --- SSE transport integration tests ---------------------------------------
 
+/// #647 on the async face (#1455): a malformed `message` event reaches the
+/// request parked on the stream read and fails it FAST with the shared
+/// `Framing(InvalidData)` attribution -- instead of hanging until the turn
+/// watchdog cancels -- and the poisoned stream fails a later request
+/// immediately with `ServerClosed` (the retired reader thread exited after
+/// forwarding; the async client carries that as the poison flag).
+#[test]
+fn sse_transport_malformed_message_fails_the_waiting_request_and_poisons_the_stream() {
+    use toptopduck_lib::mcp::client::ClientError;
+
+    let server = HttpMcpServer::spawn(ServerMode::SseMalformed);
+    let url = format!("{}/sse", server.url());
+
+    let mut client = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .expect("the handshake is answered normally");
+    let err = match drive(client.call("echo", &json!({"message": "x"}))) {
+        Ok(_) => panic!("the malformed event must fail the waiting call"),
+        Err(e) => e,
+    };
+    match err {
+        ClientError::Framing(ref e) => {
+            assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::InvalidData,
+                "malformed -> Framing(InvalidData), got {e:?}"
+            );
+            assert!(
+                e.to_string().contains("malformed JSON in SSE event"),
+                "the shared attribution wording, got {e}"
+            );
+        }
+        other => panic!("expected Err(Framing), got {other:?}"),
+    }
+    // Poisoned: the next call fails fast without touching the stream.
+    let started = std::time::Instant::now();
+    let err2 = match drive(client.call("echo", &json!({"message": "x"}))) {
+        Err(e) => e,
+        Ok(_) => panic!("a poisoned stream must refuse later requests"),
+    };
+    assert!(
+        matches!(err2, ClientError::ServerClosed),
+        "poisoned -> ServerClosed, got {err2:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "the poisoned refusal is immediate, no stream park"
+    );
+}
+
+/// The connect-phase silent window (#1455): a stream that opens but never
+/// carries the `endpoint` event fails the connect on its own within the ack
+/// window — the retired two-second read timeout's self-resolving core, which
+/// is what lets a probe's bounded parks (this endpoint read, and every POST
+/// ack) wind down after their deadline (issue #392); the response-wait park
+/// carries no such bound.
+#[test]
+fn sse_transport_endpoint_silence_fails_the_connect_within_the_ack_window() {
+    use std::time::Instant;
+
+    let server = HttpMcpServer::spawn(ServerMode::SseEndpointSilent);
+    let url = format!("{}/sse", server.url());
+
+    let started = Instant::now();
+    let err = match drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("a stream with no endpoint event must fail the connect"),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no endpoint event within"),
+        "names the ack window, got: {msg}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "the ack window self-resolves the connect, took {:?}",
+        started.elapsed()
+    );
+}
+
+/// #1455's immediacy AC: a request parked on a live-but-silent SSE stream
+/// (the SseSilent fixture) returns the moment the kill handle fires -- the
+/// retired sync design waited out a two-second read-timeout tick; the
+/// async face's `select!` wake must land far inside that bound.
+#[test]
+fn sse_transport_stop_wake_is_immediate_under_a_parked_request() {
+    use std::time::Instant;
+    use toptopduck_lib::mcp::client::ClientError;
+
+    let server = HttpMcpServer::spawn(ServerMode::SseSilent);
+    let url = format!("{}/sse", server.url());
+
+    let mut client = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .expect("the handshake is answered normally");
+    let kill = client.kill_handle();
+
+    let caller = std::thread::spawn(move || drive(client.call("echo", &json!({"message": "x"}))));
+    // Let the call park: the POST is acknowledged, the stream stays silent.
+    thread::sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    kill.kill();
+    let outcome = caller.join().expect("the parked call returns, not panics");
+    assert!(
+        matches!(outcome, Err(ClientError::ServerClosed)),
+        "killed park -> ServerClosed, got {outcome:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(1_500),
+        "the stop wake lands far inside the retired 2s tick, took {:?}",
+        started.elapsed()
+    );
+}
+
+/// The non-2xx refusal (#1455): a streamable-HTTP 404 fails the request as
+/// a transport-level `Http` error naming the status -- the classification the
+/// retired ureq face carried through its error channel -- never as a JSON-RPC
+/// envelope parsed out of the error body.
+#[test]
+fn http_transport_refuses_a_non_2xx_status_as_an_http_fault() {
+    let server = HttpMcpServer::spawn(ServerMode::HttpErrorStatus);
+    let url = format!("{}/mcp", server.url());
+
+    let err = match drive(toptopduck_lib::mcp::client::HttpClient::connect(
+        &url,
+        &BTreeMap::new(),
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("a 404 POST must fail the handshake, not parse the error body"),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("HTTP error status 404"),
+        "names the refused status, got: {msg}"
+    );
+}
+
+/// The non-2xx refusal on the SSE face (#1455): the handshake's initialize
+/// POST (which rides `SseClient::request`) is answered `500` and must fail
+/// as a transport-level `Http` fault naming the status -- not read as an
+/// ack and left parking on the stream read, which carries no bound of its
+/// own. Asserted by VARIANT, the shape the HTTP-face pin and the four
+/// redirect pins lack: a message-string assert stays green through a
+/// variant-mapping refactor.
+#[test]
+fn sse_transport_refuses_a_non_2xx_post_as_an_http_fault() {
+    use toptopduck_lib::mcp::client::ClientError;
+
+    let server = HttpMcpServer::spawn(ServerMode::SseErrorStatus);
+    let url = format!("{}/sse", server.url());
+
+    // The connect rides a thread with a bound: a dropped guard would read
+    // the 500 as an ack and park the handshake on the stream read, which
+    // carries no bound of its own -- the pin must surface that regression
+    // as a red assert, not a hang.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(drive(toptopduck_lib::mcp::client::SseClient::connect(
+            &url,
+            &BTreeMap::new(),
+        )));
+    });
+    let err = match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Err(e)) => e,
+        Ok(Ok(_)) => panic!("a 500 POST must fail the handshake, not parse the ack"),
+        Err(_) => panic!("the 500 refusal is immediate, not a park on the unbounded stream read"),
+    };
+    match err {
+        ClientError::Http(ref msg) => assert!(
+            msg.contains("HTTP error status 500"),
+            "names the refused status, got: {msg}"
+        ),
+        other => panic!("expected the Http variant, got {other:?}"),
+    }
+}
+
+/// Poisoning at stream death (#1455, review round): a call whose parked
+/// stream read ends at the GET stream's death poisons the client, so the
+/// NEXT call refuses at the entry check -- without the poison it would
+/// burn a full POST round against the now-dead listener and surface the
+/// connection refusal as an `Http` error instead. The death itself
+/// surfaces either way Windows races the fixture's close: a clean EOF
+/// (`ServerClosed`) or a reset (`Framing` transport fault) -- both arms
+/// poison, and both are accepted here.
+#[test]
+fn sse_transport_poisons_the_stream_at_eof_so_a_later_call_skips_the_post() {
+    use toptopduck_lib::mcp::client::ClientError;
+
+    let server = HttpMcpServer::spawn(ServerMode::SseSilent);
+    let url = format!("{}/sse", server.url());
+
+    let mut client = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .expect("the handshake is answered normally");
+
+    // Park THIS thread's call on the stream read (the SseSilent fixture
+    // acks the POST and never forwards the response), then kill the fixture
+    // from a side thread: its Drop closes the GET stream, so the parked
+    // read ends at EOF. The kill waits until the POST has actually arrived
+    // (each request is its own connection, so the header capture grows)
+    // instead of a fixed sleep a loaded parallel run can outrun.
+    let state = Arc::clone(&server.state);
+    let killer = std::thread::spawn(move || {
+        let seen = state.captured_headers.lock().expect("poisoned").len();
+        for _ in 0..500 {
+            if state.captured_headers.lock().expect("poisoned").len() > seen {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        drop(server);
+    });
+    let first = drive(client.call("echo", &json!({"message": "x"})));
+    match first {
+        Err(ClientError::ServerClosed) | Err(ClientError::Framing(_)) => {}
+        other => {
+            panic!("the stream death surfaces as ServerClosed or a Framing fault, got {other:?}")
+        }
+    }
+    killer
+        .join()
+        .expect("the fixture-drop thread exits, not panics");
+
+    // The poisoned client refuses instantly: no POST leaves, so the dead
+    // listener's connection refusal cannot surface here.
+    let second = drive(client.call("echo", &json!({"message": "x"})));
+    assert!(
+        matches!(second, Err(ClientError::ServerClosed)),
+        "poisoned -> ServerClosed at the entry check, got {second:?}"
+    );
+}
+
 #[test]
 fn sse_transport_connect_tools_list_and_call() {
     let server = HttpMcpServer::spawn(ServerMode::Sse);
     let url = format!("{}/sse", server.url());
 
-    let mut client = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .expect("sse connect");
+    let mut client = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .expect("sse connect");
 
-    let tools = client.list_tools("sse-fake").expect("tools/list");
+    let tools = drive(client.list_tools("sse-fake")).expect("tools/list");
     assert_eq!(tools.len(), 2, "sse server advertises echo + add");
     assert_eq!(tools[0]["name"], "echo");
     assert_eq!(tools[1]["name"], "add");
 
-    let result = client
-        .call("add", &json!({"a": 3, "b": 4}))
-        .expect("tools/call");
+    let result = drive(client.call("add", &json!({"a": 3, "b": 4}))).expect("tools/call");
     assert_eq!(first_text(&result), "7");
 
-    let echo = client
-        .call("echo", &json!({"message": "hello-sse"}))
-        .expect("echo call");
+    let echo = drive(client.call("echo", &json!({"message": "hello-sse"}))).expect("echo call");
     assert_eq!(first_text(&echo), "Echo: hello-sse");
 
-    // Dropping the client stops the reader thread (stop flag + join).
+    // Dropping the client drops the stream receiver, which ends the pump
+    // task and its connection with it.
     drop(client);
 }
 
@@ -1306,7 +1673,8 @@ fn sse_transport_aggregator_connect_and_route() {
         .expect("route ok");
     assert_eq!(first_text(&result), "11");
 
-    // Dropping the aggregator drops the SseClient (stop flag + thread join).
+    // Dropping the aggregator drops each SseClient with it (the stream
+    // receiver's drop ends the pump and its connection).
     drop(agg);
 }
 
@@ -1515,13 +1883,15 @@ fn route_deadline_attributed_and_server_unavailable_for_the_turn() {
     use toptopduck_lib::mcp::client::ClientError;
 
     let mut agg = McpAggregator::empty();
-    agg.connect_all(
+    let results = agg.connect_all(
         &[hang_call_config("hang-2", "HangCall", 2_000)],
         &common::keychain(),
     );
-    assert_eq!(
-        meta_names(&agg).len(),
-        3,
+    // The mounted-name count holds even when a connect failed (the trio
+    // mounts on the attempted set), so assert on the connected flag -- the
+    // observable that actually distinguishes a healthy handshake.
+    assert!(
+        results[0].connected,
         "the handshake answered normally -- only tools/call swallows"
     );
 
@@ -1627,7 +1997,7 @@ fn cancel_teardown_unblocks_a_parked_call_and_stands_down_when_done() {
 }
 
 /// The SSE half (issue #889): a live connection that acknowledges the POST
-/// but never delivers the response event parks the `recv` -- the same
+/// but never delivers the response event parks the stream read -- the same
 /// per-call deadline bounds it with the same attribution shape.
 #[test]
 fn route_deadline_bounds_a_silent_sse_connection() {
@@ -1661,7 +2031,7 @@ fn route_deadline_bounds_a_silent_sse_connection() {
     };
     assert!(
         started.elapsed() < Duration::from_secs(5),
-        "the recv park is bounded by the deadline"
+        "the stream-read park is bounded by the deadline"
     );
     let msg = err.to_string();
     assert!(
@@ -1670,9 +2040,9 @@ fn route_deadline_bounds_a_silent_sse_connection() {
     );
 }
 
-/// The SSE cancel half (issue #889): a token fire while the `recv` is
-/// parked on a silent stream sets the reader stop flag -- the reader exits,
-/// the channel disconnects, and the parked call returns `ServerClosed` well
+/// The SSE cancel half (issue #889): a token fire while the request is
+/// parked on a silent stream fires the transport's stop signal -- the
+/// parked read wakes immediately, and the call returns `ServerClosed` well
 /// under the budget.
 #[test]
 fn cancel_teardown_unblocks_a_silent_sse_park() {
@@ -1716,21 +2086,21 @@ fn cancel_teardown_unblocks_a_silent_sse_park() {
     };
     assert!(
         started.elapsed() < Duration::from_secs(10),
-        "cancel unblocks the recv park well under the 60s budget"
+        "cancel unblocks the stream-read park well under the 60s budget"
     );
     assert!(
         matches!(err, ClientError::ServerClosed),
-        "a stop-flagged reader disconnects the channel into ServerClosed, got {err:?}"
+        "a stop-fired wake breaks the parked read into ServerClosed, got {err:?}"
     );
 }
 
 /// Issue #897: the SSE half of the connect-phase cancel. The silence starts
 /// at the handshake (every POST acked, no response event ever forwarded), so
-/// the initialize `recv` parks mid-connect with nobody but the
-/// pre-registered stop flag to break it -- arming before `connect_all`
-/// means the token fire stop-flags the reader, the channel disconnects, and
-/// the connect returns a transport death within one `SSE_READ_TIMEOUT` wake
-/// instead of the 60s budget. The failure must be the killed transport,
+/// the initialize request parks mid-connect with nobody but the
+/// pre-registered stop signal to break it -- arming before `connect_all`
+/// means the token fire wakes the parked read immediately (no wake-tick
+/// window since #1455) and the connect returns a transport death well
+/// inside the 60s budget. The failure must be the killed transport,
 /// not a skip: the fire landed mid-connect, so only the first server was
 /// parked (an inverted gap check -- armed means skip -- turns the wording
 /// assertion red at 0s).
@@ -2022,9 +2392,11 @@ fn http_transport_sends_configured_headers_on_every_post() {
     let mut headers = BTreeMap::new();
     headers.insert("X-Test-Token".into(), "plain-config-value".into());
 
-    let mut client =
-        toptopduck_lib::mcp::client::HttpClient::connect(&url, &headers).expect("http connect");
-    client.list_tools("hdr-fake").expect("tools/list");
+    let mut client = drive(toptopduck_lib::mcp::client::HttpClient::connect(
+        &url, &headers,
+    ))
+    .expect("http connect");
+    drive(client.list_tools("hdr-fake")).expect("tools/list");
 
     assert!(
         captured_has(&server, "x-test-token", "plain-config-value"),
@@ -2093,10 +2465,14 @@ fn connect_transport_injects_keychain_header_secrets_into_http_requests() {
     };
     let header_secrets: Vec<SecretEnv> =
         vec![("X-Test-Token".into(), "probe-keychain-value".into())];
-    let mut client =
-        toptopduck_lib::mcp::client::connect_transport(&config, &[], &header_secrets, None)
-            .expect("connect via the probe's transport entry");
-    client.list_tools("ProbeHdr").expect("tools/list");
+    let mut client = drive(toptopduck_lib::mcp::client::connect_transport(
+        &config,
+        &[],
+        &header_secrets,
+        None,
+    ))
+    .expect("connect via the probe's transport entry");
+    drive(client.list_tools("ProbeHdr")).expect("tools/list");
 
     assert!(
         captured_has(&server, "x-test-token", "probe-keychain-value"),
@@ -2131,10 +2507,14 @@ fn connect_transport_injects_keychain_env_secrets_into_the_child_env() {
         "TOPTOPDUCK_TEST_MCP_SECRET".into(),
         "probe-env-value".into(),
     )];
-    let mut client = toptopduck_lib::mcp::client::connect_transport(&config, &secrets, &[], None)
-        .expect("stdio connect via the probe's transport entry");
-    let result = client
-        .call("echo_env", &json!({"key": "TOPTOPDUCK_TEST_MCP_SECRET"}))
+    let mut client = drive(toptopduck_lib::mcp::client::connect_transport(
+        &config,
+        &secrets,
+        &[],
+        None,
+    ))
+    .expect("stdio connect via the probe's transport entry");
+    let result = drive(client.call("echo_env", &json!({"key": "TOPTOPDUCK_TEST_MCP_SECRET"})))
         .expect("echo_env call ok");
     let text = result
         .get("content")
@@ -2155,9 +2535,11 @@ fn sse_transport_sends_headers_on_get_stream_and_post() {
     let mut headers = BTreeMap::new();
     headers.insert("X-Test-Token".into(), "sse-config-value".into());
 
-    let mut client =
-        toptopduck_lib::mcp::client::SseClient::connect(&url, &headers).expect("sse connect");
-    client.list_tools("sse-hdr-fake").expect("tools/list");
+    let mut client = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url, &headers,
+    ))
+    .expect("sse connect");
+    drive(client.list_tools("sse-hdr-fake")).expect("tools/list");
 
     // The GET stream + at least one POST: two requests carrying the pair.
     let captured = server.state.captured_headers.lock().expect("poisoned");
@@ -2184,9 +2566,11 @@ fn sse_transport_rejects_cross_origin_endpoint_when_headers_configured() {
     let mut headers = BTreeMap::new();
     headers.insert("X-Test-Token".into(), "v".into());
 
-    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &headers)
-        .err()
-        .expect("cross-origin endpoint must be refused");
+    let err = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url, &headers,
+    ))
+    .err()
+    .expect("cross-origin endpoint must be refused");
     let msg = err.to_string();
     assert!(
         msg.contains("cross-origin"),
@@ -2211,9 +2595,12 @@ fn sse_transport_cross_origin_endpoint_without_headers_is_not_guard_refused() {
     let server = HttpMcpServer::spawn(ServerMode::SseCrossOriginEndpoint);
     let url = format!("{}/sse", server.url());
 
-    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .err()
-        .expect("the dead advertised host still fails the connect");
+    let err = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .err()
+    .expect("the dead advertised host still fails the connect");
     let msg = err.to_string();
     assert!(
         !msg.contains("cross-origin"),
@@ -2228,9 +2615,12 @@ fn http_transport_refuses_redirect_instead_of_following() {
     let server = HttpMcpServer::spawn(ServerMode::HttpRedirect);
     let url = format!("{}/mcp", server.url());
 
-    let err = toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new())
-        .err()
-        .expect("a redirecting endpoint must fail the connect");
+    let err = drive(toptopduck_lib::mcp::client::HttpClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .err()
+    .expect("a redirecting endpoint must fail the connect");
     let msg = err.to_string();
     assert!(
         msg.contains("301") && msg.contains("/moved"),
@@ -2249,9 +2639,12 @@ fn sse_transport_refuses_redirect_on_get_stream() {
     let server = HttpMcpServer::spawn(ServerMode::SseRedirectGet);
     let url = format!("{}/sse", server.url());
 
-    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .err()
-        .expect("a redirecting stream must fail the connect");
+    let err = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .err()
+    .expect("a redirecting stream must fail the connect");
     let msg = err.to_string();
     assert!(
         msg.contains("301") && msg.contains("redirect") && msg.contains("/elsewhere"),
@@ -2269,9 +2662,12 @@ fn sse_transport_refuses_redirect_on_initialize_post() {
     let server = HttpMcpServer::spawn(ServerMode::SseRedirectPost("initialize"));
     let url = format!("{}/sse", server.url());
 
-    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .err()
-        .expect("a redirecting initialize POST must fail the connect");
+    let err = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .err()
+    .expect("a redirecting initialize POST must fail the connect");
     let msg = err.to_string();
     assert!(
         msg.contains("301") && msg.contains("redirect") && msg.contains("/sse-post-redirected"),
@@ -2290,9 +2686,12 @@ fn sse_transport_refuses_redirect_on_initialized_notification() {
     let server = HttpMcpServer::spawn(ServerMode::SseRedirectPost("notifications/initialized"));
     let url = format!("{}/sse", server.url());
 
-    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .err()
-        .expect("a redirecting notification POST must fail the connect");
+    let err = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .err()
+    .expect("a redirecting notification POST must fail the connect");
     let msg = err.to_string();
     assert!(
         msg.contains("301") && msg.contains("redirect") && msg.contains("/sse-post-redirected"),

@@ -127,14 +127,29 @@ impl WorkspaceRegistry {
 
     /// The named-workspace creation mount point (issue #1393): a fresh mint
     /// records with the user's name as the `title`. On an existing record the
-    /// call degrades to [`Self::record`] -- the bump only, the title never
-    /// rewrites (identity is immutable, ADR-0138 Decision 3). Unlike
+    /// call takes the LRU bump plus the one-way explicit upgrade -- this
+    /// mount registers explicitly -- never rewriting the title (identity is
+    /// immutable, ADR-0138 Decision 3). Unlike
     /// [`Self::record`] this mount FAILS the caller: it serves the explicit
     /// create command, whose essence is the record itself -- not bookkeeping
     /// riding a session event, which is the reach of ADR-0138's best-effort
     /// stance. A record that never lands must not report a successful create.
+    /// The untitled-registration mount [`Self::record_explicit`] (issue
+    /// #1477) is this mount's general shape; the titled call is its
+    /// always-titled special case.
     pub fn record_titled(&self, canonical: &Path, title: &str) -> Result<(), String> {
-        self.record_at(canonical, Some(title), true, now_millis())
+        self.record_explicit(canonical, Some(title)).map(|_| ())
+    }
+
+    /// The existing-directory registration mount (issue #1477): the
+    /// register-without-a-session command's essence -- [`Self::record_at`]
+    /// with `explicit=true` and the registry's own clock, FAILING the
+    /// caller like [`Self::record_titled`] (the record IS the command the
+    /// user asked for). Returns whether the record already existed (the
+    /// bump + one-way upgrade path) so the command layer can project an
+    /// honest idempotency marker.
+    pub fn record_explicit(&self, canonical: &Path, title: Option<&str>) -> Result<bool, String> {
+        self.record_at(canonical, title, true, now_millis())
     }
 
     /// The create-session explicit-binding mount (issue #1392): the user
@@ -157,7 +172,8 @@ impl WorkspaceRegistry {
     /// selector's existing-directory branch (a same-name mint that found a
     /// never-recorded directory still needs a label).
     pub fn label_of(&self, canonical: &Path) -> String {
-        self.load()
+        let (records, _) = self.load();
+        records
             .into_iter()
             .find(|r| r.path == canonical)
             .map(|r| r.label())
@@ -171,7 +187,8 @@ impl WorkspaceRegistry {
     /// directory return `None`: their directory tail is a machine timestamp
     /// (or a path the user never bound), not a face worth showing.
     pub fn explicit_label_of(&self, canonical: &Path) -> Option<String> {
-        self.load()
+        let (records, _) = self.load();
+        records
             .into_iter()
             .find(|r| r.path == canonical && r.explicit)
             .map(|r| r.label())
@@ -228,7 +245,7 @@ impl WorkspaceRegistry {
     /// back (a bound session's next launch re-creates it on demand), so
     /// hiding beats deleting.
     pub fn recent(&self) -> Vec<WorkspaceRecord> {
-        let mut records = self.load();
+        let (mut records, _) = self.load();
         records.retain(|r| r.path.exists());
         sort_lru(&mut records);
         records
@@ -237,33 +254,41 @@ impl WorkspaceRegistry {
     /// The sidebar section's view (issue #1392): every record in the same
     /// LRU order as [`Self::recent`], dangling records INCLUDED -- the
     /// section keeps them with a missing-state hint instead of letting a
-    /// group vanish silently.
-    pub fn all(&self) -> Vec<WorkspaceRecord> {
-        let mut records = self.load();
+    /// group vanish silently. The paired flag marks a degraded read (issue
+    /// #1481): the records came back empty because the file was UNREADABLE,
+    /// not because the registry is empty -- the wire projection carries it
+    /// so state-destroying consumers can hold their judgment.
+    pub fn all(&self) -> (Vec<WorkspaceRecord>, bool) {
+        let (mut records, degraded) = self.load();
         sort_lru(&mut records);
-        records
+        (records, degraded)
     }
 
     /// [`Self::record`] with an injectable clock and title for tests. The
-    /// title lands only on a NEW record -- an existing one takes the LRU bump
-    /// alone (a titled call on a known path degrades to the plain record).
+    /// title lands only on a NEW record -- an existing one takes the LRU
+    /// bump, plus the one-way explicit upgrade when the call carries
+    /// `explicit` (the title never rewrites).
+    /// Returns whether the record already existed: the same-machine seam the
+    /// strict wrapping [`Self::record_explicit`] projects upward.
     pub(crate) fn record_at(
         &self,
         canonical: &Path,
         title: Option<&str>,
         explicit: bool,
         now: u64,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let Ok(_guard) = self.write_lock.lock() else {
             return Err("workspace registry write lock poisoned".to_string());
         };
         let mut records = self.load_for_write()?;
+        let mut existed = false;
         match records.iter_mut().find(|r| r.path == canonical) {
             // Same canonical path: one record, LRU bump only (created_at, id,
             // and title are identity and never rewrite). The explicit mark is
             // the one-way upgrade: a lazily-minted record the user later
             // binds explicitly joins the sidebar section for good.
             Some(existing) => {
+                existed = true;
                 existing.last_used_at = now;
                 if explicit {
                     existing.explicit = true;
@@ -278,7 +303,8 @@ impl WorkspaceRegistry {
                 last_used_at: now,
             }),
         }
-        self.save(&records)
+        self.save(&records)?;
+        Ok(existed)
     }
 
     /// Returns whether a record was deleted (false = never recorded /
@@ -299,17 +325,19 @@ impl WorkspaceRegistry {
 
     /// The tolerant read (both faces): a missing file is the first-run
     /// state; ANY other failure degrades to empty with a warn so a broken
-    /// file stays diagnosable from the log dir.
-    fn load(&self) -> Vec<WorkspaceRecord> {
+    /// file stays diagnosable from the log dir. The paired flag marks the
+    /// degraded arm (issue #1481): the empty fallback must stay tellable
+    /// from a genuinely empty registry on the listing view.
+    fn load(&self) -> (Vec<WorkspaceRecord>, bool) {
         match self.load_for_write() {
-            Ok(records) => records,
+            Ok(records) => (records, false),
             Err(detail) => {
                 log::warn!(
                     target: "toptopduck::workspace_registry",
                     "workspace registry {} unreadable, reading empty: {detail}",
                     self.path.display()
                 );
-                Vec::new()
+                (Vec::new(), true)
             }
         }
     }
@@ -517,6 +545,38 @@ mod tests {
     }
 
     #[test]
+    fn a_degraded_read_flags_the_listing_and_a_healthy_one_does_not() {
+        // Issue #1481: the tolerant-empty fallback must stay TELLABLE from a
+        // genuinely empty registry -- the listing view pairs its records with
+        // a degraded flag so state-destroying consumers (the staged-pick
+        // sweep) can hold their judgment through a read failure instead of
+        // reading the empty fallback as "every record was removed".
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let (records, degraded) = reg.all();
+        assert!(records.is_empty());
+        assert!(
+            !degraded,
+            "a missing file is the first-run empty, not a degradation"
+        );
+        let dir = dir_under(root.path(), "alpha");
+        reg.record_at(&dir, None, false, 1_000).expect("record");
+        let (records, degraded) = reg.all();
+        assert_eq!(records.len(), 1);
+        assert!(!degraded, "a healthy read never flags");
+        std::fs::write(root.path().join(WORKSPACES_FILE_NAME), "{ not json").expect("corrupt");
+        let (records, degraded) = reg.all();
+        assert!(
+            records.is_empty(),
+            "the corrupt file still degrades to empty"
+        );
+        assert!(
+            degraded,
+            "a corrupt read is degraded -- the flag is the tell"
+        );
+    }
+
+    #[test]
     fn a_pre_title_file_opens_and_the_title_serializes_additively() {
         let root = tempfile::tempdir().expect("tempdir");
         let dir = dir_under(root.path(), "alpha");
@@ -688,6 +748,73 @@ mod tests {
     }
 
     #[test]
+    fn record_explicit_seats_a_fresh_explicit_record_and_reports_it_new() {
+        // The registration mount (issue #1477): a fresh directory seats an
+        // explicit record -- title optional, the label deriving from the
+        // tail -- and the `existed` marker reports the fresh path so the
+        // command layer can project an honest idempotency face.
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let dir = dir_under(root.path(), "my-project");
+        let existed = reg.record_explicit(&dir, None).expect("record");
+        assert!(!existed, "a fresh registration reports new");
+        let recent = reg.recent();
+        assert_eq!(recent.len(), 1);
+        assert!(recent[0].explicit, "the registration is explicit");
+        assert_eq!(recent[0].title, None, "no title lands");
+        assert_eq!(recent[0].label(), "my-project", "the tail is the face");
+
+        let named = dir_under(root.path(), "alpha");
+        reg.record_explicit(&named, Some("Alpha")).expect("record");
+        let recent = reg.recent();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(
+            recent[0].title.as_deref(),
+            Some("Alpha"),
+            "a non-blank title seats as the record's face"
+        );
+    }
+
+    #[test]
+    fn record_explicit_upgrades_an_existing_record_and_reports_it_existed() {
+        // Idempotent success (issue #1477): the same directory again is the
+        // LRU bump plus the one-way explicit upgrade -- the title never
+        // rewrites (ADR-0138 Decision 3), no second record forks, and the
+        // `existed` marker tells the two outcomes apart.
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let dir = dir_under(root.path(), "alpha");
+        reg.record_at(&dir, Some("Original"), false, 1_000)
+            .expect("seed an implicit titled record");
+        let existed = reg
+            .record_explicit(&dir, Some("Sneaky Rename"))
+            .expect("register again");
+        assert!(existed, "a known directory reports existed");
+        let recent = reg.recent();
+        assert_eq!(recent.len(), 1, "no fork");
+        assert_eq!(
+            recent[0].title.as_deref(),
+            Some("Original"),
+            "the title is identity and never rewrites"
+        );
+        assert!(recent[0].explicit, "the one-way upgrade lands");
+    }
+
+    #[test]
+    fn record_explicit_fails_the_caller_when_the_write_refuses() {
+        // Strict like the other explicit-user-action mounts: a refused
+        // write surfaces as Err, never a warn-and-continue.
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join(WORKSPACES_FILE_NAME), "{ not json").expect("corrupt");
+        let reg = registry(&root);
+        let dir = dir_under(root.path(), "alpha");
+        assert!(
+            reg.record_explicit(&dir, None).is_err(),
+            "a refused write surfaces as Err"
+        );
+    }
+
+    #[test]
     fn explicit_rides_selected_records_and_old_files_read_false() {
         // Issue #1392: `explicit` marks the user-chosen workspaces the
         // sidebar section shows. The additive field reads `false` from a
@@ -698,12 +825,12 @@ mod tests {
         let dir = dir_under(root.path(), "alpha");
         let reg = registry(&root);
         reg.record_at(&dir, None, false, 1_000).expect("record");
-        assert!(!reg.all()[0].explicit, "the plain record stays implicit");
+        assert!(!reg.all().0[0].explicit, "the plain record stays implicit");
         let raw = std::fs::read_to_string(root.path().join(WORKSPACES_FILE_NAME)).expect("read");
         assert!(!raw.contains("explicit"), "false skips the key");
         reg.record_selected(&dir);
         assert!(
-            reg.all()[0].explicit,
+            reg.all().0[0].explicit,
             "the explicit bind upgrades the same record"
         );
         let raw = std::fs::read_to_string(root.path().join(WORKSPACES_FILE_NAME)).expect("read");
@@ -718,7 +845,7 @@ mod tests {
         reg.record_at(&dir, Some("Old"), true, 1_000)
             .expect("record");
         reg.rename(&dir, "New").expect("rename");
-        let record = &reg.all()[0];
+        let record = &reg.all().0[0];
         assert_eq!(record.title.as_deref(), Some("New"));
         assert_eq!(record.path, dir, "the path never rewrites");
         assert_eq!(record.created_at, 1_000);
@@ -732,6 +859,7 @@ mod tests {
         reg.rename(&twin, "New").expect("rename twin");
         assert_eq!(
             reg.all()
+                .0
                 .iter()
                 .filter(|r| r.title.as_deref() == Some("New"))
                 .count(),
@@ -757,7 +885,7 @@ mod tests {
             "the recorded path deletes its record"
         );
         assert!(dir.exists(), "the directory stays");
-        assert!(reg.all().is_empty());
+        assert!(reg.all().0.is_empty());
         // Removing an unknown path is an idempotent Ok -- a miss, not a write.
         assert!(!reg.remove_record(&dir).expect("remove again"));
     }
@@ -773,7 +901,7 @@ mod tests {
         reg.record_at(&old, None, true, 1_000).expect("old");
         reg.record_at(&gone, None, true, 5_000).expect("gone");
         std::fs::remove_dir(&gone).expect("the directory disappears");
-        let all = reg.all();
+        let all = reg.all().0;
         assert_eq!(
             all.iter().map(|r| r.path.as_path()).collect::<Vec<_>>(),
             vec![gone.as_path(), old.as_path()],

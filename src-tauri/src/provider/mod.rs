@@ -9,7 +9,7 @@
 
 pub(crate) mod context_window;
 pub mod fake;
-pub mod http;
+pub(crate) mod http;
 pub mod keychain;
 pub mod live_config;
 pub(crate) mod output_cap;
@@ -195,7 +195,7 @@ pub struct ProviderRequest {
 /// http/https") reaches the UI fold (issue #277).
 ///
 /// `Display` is derived via `thiserror` (issue #277) -- matching the
-/// `commands.rs` / `session_store.rs` style -- and is Rust-log-only, not the
+/// `commands.rs` / `session/store.rs` style -- and is Rust-log-only, not the
 /// IPC contract (the orchestrator maps each variant to a typed
 /// [`crate::model::TurnFailure`] that the frontend renders via its locale
 /// catalog).
@@ -404,6 +404,7 @@ mod tests {
             fingerprint: "fp".into(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: Default::default(),
+            size_bytes: 0,
             stale: None,
         };
         let outcome = TurnOutcome::Materialized {

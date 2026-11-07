@@ -38,7 +38,7 @@ vi.mock("@tauri-apps/plugin-os", () => ({ platform: platformMock }));
 import { buildTauriWindowMock } from "./setup/tauriWindowMock";
 
 // The shell stub keeps jsdom off the real window bridge; no test here drives
-// WindowControls clicks, so the bridge handle itself is not captured.
+// window-control clicks, so the bridge handle itself is not captured.
 vi.mock("@tauri-apps/api/window", () => {
   const { module } = buildTauriWindowMock();
   return module;
@@ -140,7 +140,7 @@ const { appConfigWith } = vi.hoisted(() => {
         active_profile: "default",
       },
       export: { last_dir: null, default_format: "csv" },
-      tunables: { window_turns: 6, far_window: 12 },
+      tunables: { window_turns: 6, result_count_cap: 12 },
       shell: { sidebar_collapsed: false },
       cli_tools: { tools: [] },
       mcp_servers: { servers: [] },

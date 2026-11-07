@@ -14,40 +14,72 @@
 //! through a scripted FakeProvider at the ask -> outcome seam -- offline and
 //! deterministic.
 
+// Module placement rule: (1) a module whose domain has a directory must
+// live inside that directory -- drift is a bug. (2) Shells, primitives,
+// cross-domain modules, and single-file domains with no owning directory
+// legitimately stay at the crate root. (3) A domain earns its directory
+// when it grows a second file -- never pre-created.
+
+// Shells -- the Tauri app surface.
+pub mod commands;
+// In-app updater (ADR-0143, issue #1509): desktop-only with its plugin
+// dependency's Cargo target gate.
+#[cfg(desktop)]
+pub mod updater;
+// cfg(desktop) mirrors the tauri `tray-icon` feature's own desktop gate --
+// mobile builds neither compile the tray surface nor register it.
+#[cfg(desktop)]
+pub mod tray;
+pub mod window;
+
+// Primitives -- no `use crate::` imports.
+pub mod cancel;
+pub mod guardrail;
+pub mod util;
+
+// Startup PATH hydration for non-Windows desktop launches (#1467): the
+// trimmed session PATH a desktop launch inherits hides user-installed
+// runtimes from every detection and spawn surface.
+mod path_hydration;
+
+// Platform process-tree termination (ADR-0108 Decision 5), shared by the CLI
+// tool executor and the MCP stdio transport (#1456).
+mod process_tree;
+
+// The process-shared egress client seam (ADR-0139): live turns, preflight
+// probes, and the MCP remote transports all draw from here.
+pub mod egress;
+
+// Cross-domain -- imports from several domains itself.
+pub mod sandbox_sql;
+pub mod turn_window;
+
+// Single-file domains -- a directory is earned at the second file.
+pub mod fs_acl;
+pub mod provenance;
+pub mod workingset;
+
+// Domain directories.
 pub mod agents;
+pub mod analysis_tools;
 pub mod app_config;
 pub mod approval;
+pub mod cli_tools;
+pub mod ingest;
+pub mod mcp;
+pub mod model;
+pub mod persistence;
+pub mod provider;
+pub mod runtime;
+pub mod session;
+pub mod skills;
+pub mod workspace;
+
 // Re-exported from the `bounded-line` workspace crate so every
 // `crate::bounded_line::` path stays put; the ACP bridge binary links the
 // same crate without linking this one (ADR-0085: the bridge links no app
 // crate).
 pub(crate) use bounded_line::bounded_line;
-pub mod analysis_tools;
-pub mod cancel;
-pub mod cli_tools;
-pub mod commands;
-pub mod fs_acl;
-pub mod guardrail;
-pub mod ingest;
-pub mod mcp;
-pub mod model;
-pub mod persistence;
-pub mod provenance;
-pub mod provider;
-pub mod runtime;
-pub mod sandbox_sql;
-pub mod session;
-pub mod session_store;
-pub mod skills;
-pub mod turn_window;
-// cfg(desktop) mirrors the tauri `tray-icon` feature's own desktop gate --
-// mobile builds neither compile the tray surface nor register it.
-#[cfg(desktop)]
-pub mod tray;
-pub mod util;
-pub mod window;
-pub mod workingset;
-pub mod workspace;
 
 pub use app_config::{
     AppConfig, EngineDefaults, ExportDefaults, PrivacyDefaults, Theme, Tunables,
@@ -80,14 +112,14 @@ pub use provider::keychain::{KeychainStore, ProviderConfigSource, StaticConfig};
 pub use provider::live_config::LiveProviderConfig;
 pub use provider::prompt::ResponseLocale;
 pub use provider::{LiveProvider, Provider, ProviderError, UnwiredProvider};
+pub use session::store::{
+    ClosingFlag, LiveSessionSnapshot, SessionError, SessionHandle, SessionId, SessionStore,
+    UNKNOWN_SESSION,
+};
 pub use session::{
     is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, RenameSessionError,
     ResumeError, ResumeEvent, ResumeProgress, Session, SourceIssue, SourceNotice, SourceResolution,
     TurnDeps, TurnInputs, TurnPorts,
-};
-pub use session_store::{
-    ClosingFlag, LiveSessionSnapshot, SessionError, SessionHandle, SessionId, SessionStore,
-    UNKNOWN_SESSION,
 };
 pub use skills::{
     Acquired, DiscoveredSkill, DiscoveredSkillStatus, ImportItem, ImportMode, ImportOutcome,
@@ -123,6 +155,16 @@ use tauri::Manager;
 /// across launches) rather than crashing.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Startup PATH hydration (issue #1467): a desktop-launched bundle on
+    // macOS/Linux inherits the login session's trimmed PATH, hiding
+    // user-installed runtimes (npm globals under a version manager, a
+    // custom npm prefix, Homebrew) from every detection and spawn surface.
+    // Must run before the builtin startup scan in `setup` and any adapter
+    // detection -- both read the process PATH, so one write here covers
+    // detection, scanning, and spawning symmetrically. No-op on Windows
+    // (the registry PATH is inherited wholesale).
+    path_hydration::hydrate_process_path();
+
     let mut app_builder = tauri::Builder::default();
 
     // Multi-instance guard (issue #100). single-instance MUST be the first
@@ -167,13 +209,21 @@ pub fn run() {
     {
         app_builder = app_builder.plugin(
             tauri_plugin_window_state::Builder::new()
-                .with_state_flags(
-                    tauri_plugin_window_state::StateFlags::SIZE
-                        | tauri_plugin_window_state::StateFlags::POSITION
-                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
-                )
+                .with_state_flags(updater::window_state_flags())
                 .build(),
         );
+    }
+
+    // In-app updater (ADR-0143, issue #1509): registration only. Every check
+    // / download / install orchestration lives in the `updater` module, which
+    // builds a per-use Updater from `updater_builder()` -- that per-use
+    // construction is what carries the AppHandle into the on_before_exit
+    // cleanup chain and the Windows installer args, neither of which a
+    // registration-time plugin Builder can express. cfg(desktop) mirrors the
+    // Cargo target gate on tauri-plugin-updater.
+    #[cfg(desktop)]
+    {
+        app_builder = app_builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
 
     let app = app_builder
@@ -319,6 +369,15 @@ pub fn run() {
                     Some(color) => main_window_builder.background_color(color),
                     None => main_window_builder,
                 };
+            // The config's `decorations: false` is the Windows/Linux frameless
+            // base (ADR-0074); macOS flips it back on so the native titlebar
+            // (`titleBarStyle: Overlay` + `hiddenTitle`, ADR-0140) supplies
+            // the traffic lights and the system double-click zoom/minimize
+            // semantics. The builder chain overrides the config value, keeping
+            // tauri.conf.json the single source of truth for the
+            // platform-neutral parameters.
+            #[cfg(target_os = "macos")]
+            let main_window_builder = main_window_builder.decorations(true);
             // Tray-ready handshake state (issue #1142): managed BEFORE
             // this window build (so the page-load hook below never
             // observes a missing state) and before tray::init (so menu
@@ -446,13 +505,31 @@ pub fn run() {
             // logical units over directories -- deliberately outside
             // app-config (machine bookkeeping vs user preference: semantics,
             // write frequency, and lifecycle all differ).
-            app.manage(Arc::new(crate::workspace::WorkspaceRegistry::new(
-                app_data_path(
+            let workspace_registry =
+                Arc::new(crate::workspace::WorkspaceRegistry::new(app_data_path(
                     app.handle(),
                     crate::workspace::WORKSPACES_FILE_NAME,
                     "workspace registry",
-                ),
-            )));
+                )));
+            // ADR-0141 D8: the startup orphan sweep. Store files no manifest
+            // entry references are zero-risk deletes; a corrupt manifest
+            // aborts that workspace's sweep (honest refusal -- deleting
+            // against an unreadable manifest could destroy the only copy).
+            // Logged per workspace, never fatal to boot.
+            // A degraded read lands here as zero records too -- the sweep
+            // skips whole rather than judging unreadable state.
+            let (orphan_sweep_records, _) = workspace_registry.all();
+            for record in orphan_sweep_records {
+                if record.path.exists() {
+                    if let Err(detail) = crate::workspace::datasets::sweep_orphans(&record.path) {
+                        log::warn!(
+                            "workspace dataset orphan sweep skipped for {}: {detail}",
+                            record.path.display()
+                        );
+                    }
+                }
+            }
+            app.manage(workspace_registry);
 
             // System tray residency (ADR-0125, issue #1140). The tray is the
             // resident surface while the main window is hidden: closing the
@@ -514,8 +591,15 @@ pub fn run() {
             commands::list_live_sessions,
             commands::list_workspaces,
             commands::create_workspace,
+            commands::register_workspace_directory,
             commands::rename_workspace,
             commands::remove_workspace,
+            commands::list_workspace_datasets,
+            commands::add_workspace_dataset,
+            commands::remove_workspace_dataset,
+            commands::replace_workspace_dataset,
+            commands::set_workspace_dataset_privacy,
+            commands::rename_workspace_dataset,
             commands::ingest_file,
             commands::ingest_file_guided,
             commands::guidance_window,
@@ -610,6 +694,11 @@ pub fn run() {
             // Desktop-only with the tray surface (issue #1142 handshake).
             #[cfg(desktop)]
             commands::tray_ready,
+            // Desktop-only with the updater plugin (ADR-0143, issue #1509).
+            #[cfg(desktop)]
+            updater::check_for_updates,
+            #[cfg(desktop)]
+            updater::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

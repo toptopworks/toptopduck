@@ -195,6 +195,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: Some(StaleAnchor {
                 reference_name: "people".into(),
                 display_name: "people".into(),
@@ -260,6 +261,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: None,
         });
         let mut sources = HashMap::new();

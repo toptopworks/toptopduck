@@ -975,3 +975,242 @@ describe("useIngestFlow", () => {
     });
   });
 });
+
+// Issue #1485: the transient ingest-progress block's state machine -- set at
+// the batch entry, updated per file inside the loop, cleared on EVERY exit
+// (drain / park / halt / single-file finally). One batch clock (the entry
+// stamp), never a per-file clock. Mid-flight asserts follow the
+// cancel-during-refresh precedent: the launch rides its own act (the exit
+// flushes the render), the asserts read outside it.
+describe("ingestProgress (issue #1485)", () => {
+  function deferredOutcomes(): Array<(o: LoadOutcome) => void> {
+    const gates: Array<(o: LoadOutcome) => void> = [];
+    vi.mocked(ingestFile).mockImplementation(
+      () =>
+        new Promise<LoadOutcome>((resolve) => {
+          gates.push(resolve);
+        }),
+    );
+    return gates;
+  }
+
+  it("sets the block while a single-file ingest is in flight and clears it in the finally", async () => {
+    const { deps } = setup();
+    const gates = deferredOutcomes();
+    const { result } = renderHook(() => useIngestFlow(SID, deps));
+
+    let done: Promise<void> = Promise.resolve();
+    await act(async () => {
+      done = result.current.handleIngest("/a.csv");
+    });
+    expect(result.current.ingestProgress).toMatchObject({
+      currentPath: "/a.csv",
+      index: 1,
+      total: 1,
+    });
+    expect(result.current.ingestProgress?.startedAt).toBeGreaterThan(0);
+    await act(async () => {
+      gates[0](loaded("r"));
+      await done;
+    });
+    expect(result.current.ingestProgress).toBeNull();
+  });
+
+  it("updates per file inside a batch (1/2 then 2/2) and clears on drain", async () => {
+    const { deps } = setup();
+    const gates = deferredOutcomes();
+    const { result } = renderHook(() => useIngestFlow(SID, deps));
+
+    let promise!: Promise<boolean>;
+    await act(async () => {
+      promise = result.current.handleIngestMany(["/a.csv", "/b.csv"]);
+    });
+    expect(result.current.ingestProgress).toMatchObject({
+      currentPath: "/a.csv",
+      index: 1,
+      total: 2,
+    });
+    const entryStamp = result.current.ingestProgress!.startedAt;
+    await act(async () => {
+      gates[0](loaded("a"));
+      await Promise.resolve();
+    });
+    expect(result.current.ingestProgress).toMatchObject({
+      currentPath: "/b.csv",
+      index: 2,
+      total: 2,
+    });
+    // ONE batch clock: the second file keeps the entry stamp instead of
+    // resetting it (the Q2 ruling -- a per-file clock visibly restarts).
+    expect(result.current.ingestProgress!.startedAt).toBe(entryStamp);
+    await act(async () => {
+      gates[1](loaded("b"));
+      await promise;
+    });
+    expect(result.current.ingestProgress).toBeNull();
+    expect(promise).resolves.toBe(true);
+  });
+
+  it("clears the block when the batch parks on NeedsGuidance (the dialog owns the wait)", async () => {
+    const { deps } = setup();
+    vi.mocked(ingestFile).mockResolvedValue(needsGuidance());
+    const { result } = renderHook(() => useIngestFlow(SID, deps));
+
+    await act(async () => {
+      void result.current.handleIngestMany(["/a.xlsx"]);
+    });
+    expect(result.current.guidance).not.toBeNull();
+    expect(result.current.ingestProgress).toBeNull();
+  });
+
+  it("mints a fresh clock but keeps the GLOBAL i/n on the post-guidance resume", async () => {
+    // The 3-file batch (a loads, b parks, c resumes after the guided load):
+    // the resume segment must not restart the count at "1 of 2" over the
+    // remainder (the reviewer's HIGH finding), and its clock is a fresh mint
+    // (the guidance interaction sat between the segments).
+    const { deps } = setup();
+    const gates: Array<(o: LoadOutcome) => void> = [];
+    vi.mocked(ingestFile)
+      .mockResolvedValueOnce(loaded("a"))
+      .mockResolvedValueOnce(needsGuidance())
+      .mockImplementationOnce(
+        () => new Promise<LoadOutcome>((resolve) => gates.push(resolve)),
+      );
+    vi.mocked(ingestFileGuided).mockResolvedValue(loaded("c"));
+    const { result } = renderHook(() => useIngestFlow(SID, deps));
+
+    await act(async () => {
+      void result.current.handleIngestMany(["/a.csv", "/b.xlsx", "/c.csv"]);
+    });
+    // Parked on b: the block cleared, the dialog owns the wait.
+    expect(result.current.guidance).not.toBeNull();
+    expect(result.current.ingestProgress).toBeNull();
+
+    // The guided submit loads c and auto-resumes the remainder [c]; sample
+    // the block while the segment sits inside the pending c IPC.
+    let submitted!: Promise<void>;
+    await act(async () => {
+      submitted = result.current.handleGuidedSubmit(sheetGuidance);
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.guidance).toBeNull();
+    expect(result.current.ingestProgress).toMatchObject({
+      currentPath: "/c.csv",
+      index: 3,
+      total: 3,
+    });
+    await act(async () => {
+      gates[0](loaded("c"));
+      await submitted;
+    });
+    expect(result.current.ingestProgress).toBeNull();
+  });
+
+  it("keeps the global i/n and a per-segment clock across a SECOND park", async () => {
+    // The 5-file batch (a loads, x1 parks, c loads on the resume, x2 parks
+    // AGAIN, d drains on the second resume): the re-park must carry the
+    // ORIGINAL batch's figures -- segment-local totals would show d as
+    // "file 1 of 1" -- while each resume segment mints its own clock and
+    // shares it across its own files (no per-file recast).
+    const { deps } = setup();
+    const gates = deferredOutcomes();
+    vi.mocked(ingestFileGuided).mockResolvedValue(loaded("guided"));
+    let clock = 1_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => (clock += 10));
+    const { result } = renderHook(() => useIngestFlow(SID, deps));
+
+    let batch!: Promise<boolean>;
+    await act(async () => {
+      batch = result.current.handleIngestMany([
+        "/a.csv",
+        "/x1.xlsx",
+        "/c.csv",
+        "/x2.xlsx",
+        "/d.csv",
+      ]);
+    });
+    const tracker = trackResolution(batch);
+    const beat = async (op?: () => void) => {
+      await act(async () => {
+        op?.();
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+      });
+    };
+
+    // Segment 1: a loads, x1 parks (the first guidance dialog).
+    await beat(() => gates[0](loaded("a")));
+    expect(result.current.ingestProgress).toMatchObject({
+      currentPath: "/x1.xlsx",
+      index: 2,
+      total: 5,
+    });
+    await beat(() => gates[1](needsGuidance()));
+    expect(result.current.guidance).toEqual({
+      request: guidanceRequest,
+      path: "/x1.xlsx",
+    });
+    expect(result.current.ingestProgress).toBeNull();
+
+    // Resume segment [c, x2, d]: c shows the global 3-of-5, x2 the 4-of-5,
+    // and both share the segment's one clock stamp.
+    await act(async () => {
+      void result.current.handleGuidedSubmit(sheetGuidance);
+    });
+    await beat();
+    expect(result.current.ingestProgress).toMatchObject({
+      currentPath: "/c.csv",
+      index: 3,
+      total: 5,
+    });
+    const resumeOneClock = result.current.ingestProgress!.startedAt;
+    await beat(() => gates[2](loaded("c")));
+    expect(result.current.ingestProgress).toMatchObject({
+      currentPath: "/x2.xlsx",
+      index: 4,
+      total: 5,
+    });
+    expect(result.current.ingestProgress!.startedAt).toBe(resumeOneClock);
+    await beat(() => gates[3](needsGuidance()));
+    expect(result.current.guidance).toEqual({
+      request: guidanceRequest,
+      path: "/x2.xlsx",
+    });
+
+    // Second resume segment [d]: the re-parked figures keep the original
+    // denominator -- d is "file 5 of 5", not "file 1 of 1" -- on a freshly
+    // minted clock.
+    await act(async () => {
+      void result.current.handleGuidedSubmit(sheetGuidance);
+    });
+    await beat();
+    expect(result.current.ingestProgress).toMatchObject({
+      currentPath: "/d.csv",
+      index: 5,
+      total: 5,
+    });
+    expect(result.current.ingestProgress!.startedAt).toBeGreaterThan(resumeOneClock);
+    await beat(() => gates[4](loaded("d")));
+    expect(tracker.resolved).toBe(true);
+    expect(result.current.ingestProgress).toBeNull();
+    nowSpy.mockRestore();
+  });
+
+  it("clears the block when the batch halts on Error", async () => {
+    const { deps } = setup();
+    vi.mocked(ingestFile).mockResolvedValue(loadError);
+    const { result } = renderHook(() => useIngestFlow(SID, deps));
+
+    await act(async () => {
+      await result.current.handleIngestMany(["/a.csv", "/b.csv"]);
+    });
+    expect(result.current.haltedRemaining).toBe(1);
+    expect(result.current.ingestProgress).toBeNull();
+  });
+});

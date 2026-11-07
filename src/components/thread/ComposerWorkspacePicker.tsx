@@ -117,7 +117,7 @@ export function ComposerWorkspacePicker({
     enabled: openState,
     staleTime: 0,
   });
-  const recent = (data ?? []).filter((w) => w.exists);
+  const recent = (data?.workspaces ?? []).filter((w) => w.exists);
   // The typed view widens to the full registry (issue #1393's second recall
   // channel); the untyped view keeps the top-10 cap.
   const trimmedQuery = query.trim().toLowerCase();

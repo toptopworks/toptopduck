@@ -9,6 +9,7 @@ import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useRailFollow } from "./useRailFollow";
 import { useSessionState } from "./useSessionState";
+import { useComposerQueue } from "./useComposerQueue";
 import { consumePendingPayload } from "./pendingPayload";
 import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
@@ -24,6 +25,11 @@ import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { WorkspaceWorkingSet } from "../components/dataset/WorkspaceWorkingSet";
+import {
+  type ReplaceFlightInfo,
+  type ReplaceProgress,
+  type UseWorkingSetSurfaces,
+} from "./useWorkingSet";
 import { cn } from "@/lib/utils";
 import type { ThreadEntry } from "../types/thread";
 import type { WorkspaceContent } from "./workspace";
@@ -39,8 +45,9 @@ import { useSkillsRegistry } from "../skills/registry";
 //
 // ADR-0092: QuestionBar moved to the shell level. SessionPane no longer owns
 // the bar or its composer controls. It reports its bar-relevant fields
-// (loading / phase / handleAsk / handleCancel / handleIngestFiles) upward via
-// onComposerFields so the shell-level bar can read them for the active session.
+// (loading / queued / phase / handleAsk / handleCancel / handleIngestFiles)
+// upward via onComposerFields so the shell-level bar can read them for the
+// active session.
 // Pending payloads from a cold-start submit (#500) are consumed on mount by
 // consumePendingPayload (pendingPayload.ts) -- the ordering contract and its
 // history live in that module header.
@@ -65,16 +72,18 @@ interface SessionPaneProps {
   onIngestConsumed: () => void;
   /** ADR-0092: a pending question from the shell-level cold-start bar. Set
    *  when the user submits from the centered bar with no active session; the
-   *  shell creates a session carrying the question, and SessionPane fires it
-   *  via handleAsk once the pending ingest settles. null once consumed or for
-   *  sessions opened by any other action. */
+   *  shell creates a session carrying the question, and the pane holds it
+   *  into the composer queue slot (#1500), whose settle auto-sends it once
+   *  the pending ingest fully loads (seeding it back on a halt). null once
+   *  consumed or for sessions opened by any other action. */
   pendingQuestion: string | null;
   /** The skill names staged on the cold-start bar beside the pending
    *  question (ADR-0119: the first ask's user invocations). Consumed in the
    *  same one-shot effect; cleared by onQuestionConsumed. */
   pendingSkillInvocations: string[];
-  /** ADR-0092: shell callback after the pending question is fired, so the
-   *  OpenSession entry is cleared and a remount cannot re-fire. */
+  /** ADR-0092: shell callback after the pane takes the pending question
+   *  into the queue slot, so the OpenSession entry is cleared and a remount
+   *  cannot re-fire. */
   onQuestionConsumed: () => void;
   /** #500: hand a held-back pending question back into the bar draft. Fires
    *  when the pending ingest batch halts (NeedsGuidance / Error): the
@@ -86,9 +95,9 @@ interface SessionPaneProps {
    *  re-seed -- the staged names go back into the session's composer
    *  staging, so a resubmit carries the pick + question pair whole. */
   onSeedInvocations: (sessionId: string, names: string[]) => void;
-  /** ADR-0092: lifts this session's bar-relevant fields (loading / phase /
-   *  handleAsk / handleCancel / handleIngestFiles) to the shell-level bar.
-   *  Called via useEffect whenever the fields change. */
+  /** ADR-0092: lifts this session's bar-relevant fields (loading / queued /
+   *  phase / handleAsk / handleCancel / handleIngestFiles) to the
+   *  shell-level bar. Called via useEffect whenever the fields change. */
   onComposerFields: (sessionId: string, fields: ComposerSessionFields) => void;
   /** ADR-0092: drop this session's bar-fields entry on unmount (close / delete
    *  / error-boundary replacement). A dedicated callback replaces the prior
@@ -189,6 +198,60 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     handleApprovalsSettled,
     onFirstTurnSettled,
   );
+  // Issue #1500: the composer question's queue behind an in-flight ingest
+  // batch. The tracked ingestMany is the ingest arming point -- one of two
+  // (#1512): the manual "+" section (the shell-reported handleIngestFiles),
+  // the working-set tab's add entry (issue #792), and the pendingPayload
+  // consumption below all route through it, so a cold-start batch gates the
+  // bar exactly like a manual one; the replace flight arms the same window
+  // separately, through trackWindow below. The pendingPayload
+  // chain's held question occupies the SAME slot (hold below), so the
+  // session can never carry two pending questions and the bar honestly
+  // shows the queued posture during the chain window. The wrapped
+  // handleAsk is the fire for BOTH the bar and the ask-again sink (issue
+  // #1503: a rail retry / banner rerun mid-batch enters the same slot
+  // instead of silently parking on the backend session lock). onSeedDraft /
+  // onSeedInvocations are useCallback-stable in the shell (the #991
+  // atomic-rollback channels).
+  const { queued, ingestMany, trackWindow, handleAsk: queuedHandleAsk, hold } = useComposerQueue({
+    sessionId,
+    ingestMany: s.handleIngestMany,
+    ask: s.handleAsk,
+    onSeedDraft,
+    onSeedInvocations,
+    hasLiveTurn: s.hasLiveTurn,
+  });
+  // The replace window's arming + the rail's progress line (#1512): the
+  // working-set seam hands the verdict flight here at entry; the pane mints
+  // the progress stamp (ONE clock per flight, minted at this single call
+  // site), arms the queue window (the replace holds the backend session
+  // lock, so a question submitted mid-replace must queue, not silently
+  // block on it), and clears the line at the settle. The flight ref is the
+  // identity gate: a stale settle must not clear a newer flight's line (the
+  // queue's own gate already ignores stale verdicts by the same rule).
+  const progressFlightRef = useRef<Promise<boolean> | null>(null);
+  // The line's content state, pane-local beside its identity gate: every
+  // writer and reader of this value is this pane (the Thread prop and the
+  // empty-rail gate below), so -- unlike ingestProgress, which a state hook
+  // produces -- it never crosses a hook interface.
+  const [replaceProgress, setReplaceProgress] = useState<ReplaceProgress | null>(null);
+  const trackReplace = useCallback(
+    (flight: Promise<boolean>, info: ReplaceFlightInfo) => {
+      progressFlightRef.current = flight;
+      setReplaceProgress({ ...info, startedAt: Date.now() });
+      trackWindow(flight);
+      void flight.then(
+        () => {
+          if (progressFlightRef.current === flight) setReplaceProgress(null);
+        },
+        () => {
+          if (progressFlightRef.current === flight) setReplaceProgress(null);
+        },
+      );
+    },
+    [trackWindow, setReplaceProgress],
+  );
+  const workingSetSurfaces: UseWorkingSetSurfaces = { ...s.mutationSurfaces, trackReplace };
   // Issue #829: the rail's stick-to-bottom posture. Signals only -- the
   // settled count grows on appends, liveTurn's identity changes per streaming
   // event and per approval-channel update (and its null -> live transition
@@ -221,23 +284,25 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   useEffect(() => {
     onComposerFields(sessionId, {
       loading: s.turnLoading,
+      queued,
       phase: s.phase,
       turnStartedAt: s.turnStartedAt,
       turnPausedSince: s.turnPausedSince,
-      handleAsk: s.handleAsk,
+      handleAsk: queuedHandleAsk,
       handleCancel: s.handleCancel,
-      handleIngestFiles: s.handleIngestMany,
+      handleIngestFiles: ingestMany,
       workspaceCollapsed: s.workspaceCollapsed,
     });
   }, [
     sessionId,
     s.turnLoading,
+    queued,
     s.phase,
     s.turnStartedAt,
     s.turnPausedSince,
-    s.handleAsk,
+    queuedHandleAsk,
     s.handleCancel,
-    s.handleIngestMany,
+    ingestMany,
     s.workspaceCollapsed,
     onComposerFields,
   ]);
@@ -261,19 +326,17 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   const consumedPendingRef = useRef<string | null>(null);
   useEffect(() => {
     void consumePendingPayload({
-      sessionId,
       paths: pendingIngestPaths,
       question: pendingQuestion,
       invocations: pendingSkillInvocations,
       consumedRef: consumedPendingRef,
       onIngestConsumed,
       onQuestionConsumed,
-      onSeedDraft,
-      onSeedInvocations,
-      ingestMany: s.handleIngestMany,
+      ingestMany,
+      hold,
       ask: s.handleAsk,
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: s.handleIngestMany / s.handleAsk are stable inside useSessionState, the consumed callbacks are useCallback-stable in useShellSessions
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: the tracked ingestMany / hold / s.handleAsk are stable inside useSessionState + useComposerQueue, the consumed callbacks are useCallback-stable in useShellSessions
   }, [pendingIngestPaths, pendingQuestion, pendingSkillInvocations, sessionId, onSeedDraft, onSeedInvocations]);
 
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
@@ -363,25 +426,28 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
 
   // Issue #758: the ask-again sink -- the stale banner's rerun and the rail's
   // Failed/Cancelled retry buttons all funnel here, firing the held question
-  // as a fresh turn. Direct fire, never through the composer draft; handleAsk
-  // catches its own failures internally (session error state), the `.catch`
-  // is the same defensive log the pendingQuestion path uses. handleAsk is
-  // destructured out first: it is useCallback-stable inside useSessionState
-  // while the `s` return object is rebuilt every render, so depending on the
-  // method (not the object) keeps handleAskAgain identity-stable (the same
-  // pattern the approval callbacks above use).
-  const { handleAsk } = s;
+  // as a fresh turn. Never through the composer draft; the queue-aware
+  // handleAsk (issue #1503) fires direct outside a batch and enters the
+  // pending slot inside one -- the bar's queued axis carries the feedback
+  // (the pre-#1503 direct fire silently parked on the backend session lock).
+  // It catches its own failures internally (session error state), the
+  // `.catch` is the same defensive log the pendingQuestion path uses.
+  // queuedHandleAsk is useCallback-stable inside useComposerQueue (its ask
+  // dep is useCallback-stable inside useSessionState, while the `s` return
+  // object is rebuilt every render), so depending on the method keeps
+  // handleAskAgain identity-stable (the same pattern the approval callbacks
+  // above use).
   const handleAskAgain = useCallback(
     (question: string) => {
       // The composer's empty-input twin: ask-again consumes a raw persisted
       // string (the only ask generator that does), so a blank question -- a
       // legacy or hand-edited session file -- must not fire a hollow turn.
       if (!question.trim()) return;
-      void handleAsk(question).catch((e) =>
+      void queuedHandleAsk(question).catch((e) =>
         log.error("SessionPane", "ask-again handleAsk threw unexpectedly", e),
       );
     },
-    [handleAsk],
+    [queuedHandleAsk],
   );
 
   // ADR-0124 Decision 3: the single stage's two faces -- the dataset name
@@ -561,19 +627,29 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   // recorded thread while a turn runs.
                   liveTurn={s.liveTurn}
                   waitStartedAt={s.waitStartedAt}
+                  ingestProgress={s.ingestProgress}
+                  replaceProgress={replaceProgress}
                   onRespondApproval={handleRespondApproval}
                   onLoadApprovalAttachments={handleLoadApprovalAttachments}
                   onRetryTurn={handleAskAgain}
                   busy={s.loading}
                 />
               </ErrorBoundary>
-              {s.thread.length === 0 && s.liveTurn === null && (
+              {s.thread.length === 0 &&
+                s.liveTurn === null &&
+                s.ingestProgress === null &&
+                replaceProgress === null && (
               // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
               // padding) + the .muted color rule retired onto utility; the class
               // hooks had no selector / test dependents and are dropped. Gated on
               // liveTurn too (issue #297): a brand-new session's FIRST in-flight
               // turn already renders the live card -- the "no conversations yet"
-              // hint would contradict it.
+              // hint would contradict it. Gated on the ingest block too (#1485's
+              // pane-level follow-up): an in-flight import renders its progress
+              // card in the same rail -- "load data to begin" under a running
+              // load is the same contradiction. And gated on the replace block
+              // (#1512): an in-flight replace renders its progress line in the
+              // same rail -- the identical contradiction for the other long IPC.
                 <p className="text-[0.85rem] p-2 text-muted-foreground">
                   <FormattedMessage
                     id="session.rail.empty"
@@ -776,8 +852,8 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               <WorkspaceWorkingSet
                 sessionId={sessionId}
                 busy={s.loading}
-                onAddFiles={s.handleIngestMany}
-                surfaces={s.mutationSurfaces}
+                onAddFiles={ingestMany}
+                surfaces={workingSetSurfaces}
               />
             </div>
           </div>

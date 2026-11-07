@@ -19,7 +19,7 @@ use crate::approval::{ApprovalSink, ApprovalState};
 use crate::mcp::config::McpServerConfig;
 use crate::model::{TurnOutcome, TurnPhase};
 use crate::provider::live_config::LiveProviderConfig;
-use crate::session_store::{SessionError, SessionHandle};
+use crate::session::store::{SessionError, SessionHandle};
 use crate::skills::{resolve_prompt_fragments, SkillPromptFragment};
 
 use super::{turn_runner::TurnInputs, Session};
@@ -239,8 +239,8 @@ mod tests {
     use crate::cancel::CancelToken;
     use crate::provider::keychain::KeychainStore;
     use crate::session::loop_contract::DiscoveredRuntime;
+    use crate::session::store::SessionStore;
     use crate::session::PosturePair;
-    use crate::session_store::SessionStore;
     use crate::{Provider, ProviderError, UnwiredProvider};
 
     /// A no-op approval sink: the real one is Tauri-bound (transport side),

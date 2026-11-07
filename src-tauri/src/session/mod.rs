@@ -20,9 +20,11 @@ pub mod recipe_persister;
 pub mod resume;
 mod rows_io;
 pub mod sandbox;
+pub mod shared_datasets;
 pub mod skills;
 pub mod snapshot;
 pub mod source_lifecycle;
+pub mod store;
 pub(crate) mod turn_dispatch;
 pub mod turn_entry;
 pub mod turn_runner;
@@ -56,9 +58,9 @@ use crate::provider::{Provider, UnwiredProvider};
 use crate::runtime::acp::adapter::AdapterSpec;
 use crate::session::loop_contract::LoopRound;
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer};
-use crate::session_store::ClosingFlag;
+use crate::session::store::ClosingFlag;
 use crate::turn_window;
-use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
+use crate::workingset::WorkingSet;
 use crate::SessionId;
 
 // Re-export the resume global-state probe (ADR-0053 Decision 3) after its
@@ -120,7 +122,7 @@ fn truncate_session_name(question: &str) -> String {
 ///
 /// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
 /// "data")]`, the adjacently-tagged shape the rest of the wire contract uses
-/// (the same as [`crate::session_store::SessionError`]). The `open_recipe`
+/// (the same as [`crate::session::store::SessionError`]). The `open_recipe`
 /// command wraps this in [`SessionError::Resume`], so the frontend recurses
 /// `Resume.data.kind`
 /// and renders a locale message; the `Load` variant recurses into the nested
@@ -233,7 +235,7 @@ impl std::error::Error for ResumeError {}
 /// is a blank name; a persist write failure does NOT surface here -- it rides
 /// [`Session::take_persist_error`] (best-effort persist, self-heals on the next
 /// write). Crosses IPC as this serde struct, wrapped in
-/// [`SessionError::RenameSession`](crate::session_store::SessionError) (issue
+/// [`SessionError::RenameSession`](crate::session::store::SessionError) (issue
 /// #121); the frontend narrows on `kind` and renders a locale message. The
 /// `Display` is Rust-log-only -- NOT the IPC contract.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -296,9 +298,9 @@ pub enum SourceIssue {
         /// The underlying read failure detail (LoadError display string).
         reason: String,
     },
-    /// The source is present at its path but the post-rectify fingerprint
-    /// differs from the recipe's record (ADR-0035 "drift") -- the data
-    /// changed since the recipe was written. The engine must NEVER silently
+    /// The source is present at its path but the fingerprint differs from
+    /// the recipe's record (ADR-0035 "drift") -- the data changed since the
+    /// recipe was written. The engine must NEVER silently
     /// replay with the new data; the user decides to rebuild (the data is
     /// genuinely different) or abort. A re-link to a backup whose fingerprint
     /// matches the recipe is also accepted (the verify loop re-checks).
@@ -306,7 +308,8 @@ pub enum SourceIssue {
         reference_name: String,
         /// The path actually read (post resolve, after any prior re-link).
         path: String,
-        /// The fingerprint the recipe recorded (the canonical-content hash).
+        /// The fingerprint the recipe recorded (a v2 source hash, or a
+        /// pre-v2 bare post-load hash on a legacy recipe).
         expected: String,
         /// The fingerprint computed from the file currently at `path`.
         found: String,
@@ -387,7 +390,7 @@ pub use self::recipe_persister::PendingConflict;
 /// deterministic progress bar.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResumeEvent {
-    /// Verifying source `index` of `total` (post-rectify fingerprint check).
+    /// Verifying source `index` of `total` (fingerprint check).
     Source {
         index: usize,
         total: usize,
@@ -422,9 +425,9 @@ pub struct ResumeProgress {
 /// a unit, so a transposed `(model, thought_level)` cannot compile
 /// silently -- two same-typed `Option<String>` parameters could. Same
 /// shape as `app_config::ModelPosture` but deliberately session-local:
-/// this module (and `session_store`) imports no app-config types, so the
-/// persisted recipe facts and the machine-preference config stay separate
-/// layers. The serde derives carry no app-config dependency -- the wire
+/// this module (and `session::store`) imports no app-config posture types,
+/// so the persisted recipe facts and the machine-preference config stay
+/// separate layers. The serde derives carry no app-config dependency -- the wire
 /// keys are this type's own field names, and unknown keys are rejected so
 /// a drifted mirror cannot silently read as `None` (issue #606).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -535,10 +538,24 @@ pub struct Session {
     /// Ceiling on the number of registered `result_N` (ADR-0013 M=100). When a
     /// freshly materialized result pushes the count over the cap, the oldest
     /// stale results are auto-reclaimed; active results are never auto-deleted.
-    /// Defaults to [`DEFAULT_RESULT_COUNT_CAP`]; tunable via
-    /// [`Self::set_result_count_cap`] (tests lower it for a fast, deterministic
-    /// GC trigger -- the count-cap twin of [`Self::result_row_cap`]).
+    /// Defaults to `Tunables`' (so a bare construction matches the unconfigured
+    /// config default); the create/resume command layer overrides it from the
+    /// current app-config at the construction point (#1446 -- the same
+    /// session-level snapshot semantics as the engine defaults, so changes
+    /// reach later sessions only). Tests lower it via
+    /// [`Self::set_result_count_cap`] for a fast, deterministic GC trigger --
+    /// the count-cap twin of [`Self::result_row_cap`].
     result_count_cap: usize,
+    /// Recent-turn window size N (ADR-0023): how many trailing turns the
+    /// window assembler ships full before folding older turns to summaries.
+    /// Defaults to `Tunables`' (so a bare construction matches the
+    /// unconfigured config default); the create/resume command layer
+    /// overrides it from the current app-config at the construction point
+    /// (#1445 -- the same session-level snapshot semantics as the engine
+    /// defaults, so changes reach later sessions only). Written once by the
+    /// create/resume command layer and never mutated afterward; the turn
+    /// runner threads it into every `turn_window` assembly entry.
+    window_turns: usize,
     /// Each loaded source's reference name -> the `.duckdb` snapshot file admin
     /// currently holds attached, so the sandbox can re-attach it READ_ONLY
     /// (ADR-0005 read_* closure). Tracked here rather than reconstructed from
@@ -555,6 +572,10 @@ pub struct Session {
     /// does not need this: recipe SQL already has catalog refs, so process()'s
     /// extract_read_paths finds no read_* calls.
     tool_output_refs: HashMap<String, CachedDerivedRef>,
+    /// The workspace shared-dataset attach table (ADR-0141 D6/D9): 挂名 →
+    /// manifest entry + attach fingerprint. Sticky per session; restored from
+    /// the recipe's SharedAttach events at resume.
+    shared_attaches: shared_datasets::SharedAttaches,
     /// The parsed sheets of a workbook parked on the guided-load dialog (issue
     /// #750): auto-tidy parsed the workbook fully for the `NeedsGuidance`
     /// outcome, and holding the parse until the dialog resolves makes
@@ -569,7 +590,7 @@ pub struct Session {
     /// lock is taken (e.g. the command layer registers it as managed state).
     cancel: Arc<CancelToken>,
     /// ADR-0055 close-tab lifecycle: the shared closing flag, set by
-    /// `close_session` (via the [`SessionStore`](crate::session_store::SessionStore)
+    /// `close_session` (via the [`SessionStore`](crate::session::store::SessionStore)
     /// handle) and read by [`Self::ask`]'s post-turn check. When set, an
     /// in-flight turn that finishes (Cancelled or otherwise) is DISCARDED -- not
     /// appended to the thread, not persisted to the recipe -- so a closed
@@ -588,7 +609,7 @@ pub struct Session {
     /// state machine are testable without a DuckDB connection.
     persister: recipe_persister::RecipePersister,
     /// ADR-0063: the sender half of the close-and-wait-release drop signal. The
-    /// matching receiver lives on the [`SessionHandle`](crate::session_store::SessionHandle);
+    /// matching receiver lives on the [`SessionHandle`](crate::session::store::SessionHandle);
     /// the delete path awaits it after detaching the handle from the store map so
     /// [`Self::Drop`] (the canonical key release point, ADR-0035 Decision 3) is
     /// guaranteed to have run before `delete_session`'s single-writer gate fires.
@@ -676,6 +697,10 @@ pub(super) enum TimelineEntry {
     Source(SourceLifecycleEvent),
     /// A skill lifecycle event (ADR-0086): first-class timeline slot, not a turn.
     Skill(SkillLifecycleEvent),
+    /// A workspace shared-dataset attach (ADR-0141 D9): recipe-round-trip slot
+    /// (persist + resume restore); never a turn and never a rendered thread
+    /// row.
+    SharedAttach(crate::model::SharedAttachEvent),
 }
 
 impl TimelineEntry {
@@ -688,6 +713,7 @@ impl TimelineEntry {
             TimelineEntry::Turn { record, .. } => ThreadEntry::Turn(record.clone()),
             TimelineEntry::Source(ev) => ThreadEntry::Source(ev.clone()),
             TimelineEntry::Skill(ev) => ThreadEntry::Skill(ev.clone()),
+            TimelineEntry::SharedAttach(ev) => ThreadEntry::SharedAttach(ev.clone()),
         }
     }
 }
@@ -844,10 +870,20 @@ impl Session {
     /// Tune the result-count ceiling (ADR-0013 M=100, "可调"). When the
     /// registered `result_N` count exceeds `cap`, the oldest stale results are
     /// auto-reclaimed on the next materialization; active results are never
-    /// auto-deleted. Tests lower it for a fast, deterministic GC trigger
-    /// (mirroring [`Self::set_result_row_cap`]).
+    /// auto-deleted. The command layer applies the configured
+    /// `tunables.result_count_cap` through this setter at the session's
+    /// construction point (#1446); tests lower it for a fast, deterministic
+    /// GC trigger (mirroring [`Self::set_result_row_cap`]).
     pub fn set_result_count_cap(&mut self, cap: usize) {
         self.result_count_cap = cap;
+    }
+
+    /// Tune the recent-turn window size (ADR-0023 N=20, "可调"). The command
+    /// layer applies the configured `tunables.window_turns` through this
+    /// setter at the session's construction point (#1445); the turn runner
+    /// reads the field when assembling each turn's provider payload.
+    pub fn set_window_turns(&mut self, turns: usize) {
+        self.window_turns = turns;
     }
 
     /// Set the per-session external-runtime selector (issue #299 slice 9c).
@@ -1005,9 +1041,12 @@ impl Session {
             session_id: None,
             timeline: Vec::new(),
             result_row_cap: engine_defaults.row_cap,
-            result_count_cap: DEFAULT_RESULT_COUNT_CAP,
+            result_count_cap: crate::app_config::model::Tunables::default().result_count_cap
+                as usize,
+            window_turns: crate::app_config::model::Tunables::default().window_turns as usize,
             source_files: HashMap::new(),
             tool_output_refs: HashMap::new(),
+            shared_attaches: shared_datasets::SharedAttaches::default(),
             guidance_retained: None,
             cancel,
             closing: ClosingFlag::new(),
@@ -1358,6 +1397,16 @@ impl Session {
         usage: Option<crate::model::TurnUsage>,
         occupancy: Option<crate::model::OccupancySnapshot>,
     ) -> TurnOutcome {
+        // ADR-0141 D9: mid-turn shared attaches land their timeline entries at
+        // settle (the dispatch path cannot reach the timeline directly). They
+        // precede the turn entry -- the attach happened before the SQL that
+        // consumed it, and rebuild-order is the resume restore's input.
+        for event in self.shared_attaches.take_pending_events() {
+            self.timeline.push(TimelineEntry::SharedAttach(event));
+        }
+        // ADR-0141 D7: the turn boundary thaws the per-turn validation cache
+        // (panel replaces / deletes land on the next turn's first mention).
+        self.shared_attaches.advance_turn();
         // Identical repeats collapse (review Important 3, issue #983): the
         // user channel dedupes at staging, so this catches the agent's
         // identical re-invoke -- one invocation renders, persists, and
@@ -1615,7 +1664,9 @@ impl Session {
             .iter()
             .filter_map(|entry| match entry {
                 TimelineEntry::Turn { record, .. } => Some(record.clone()),
-                TimelineEntry::Source(_) | TimelineEntry::Skill(_) => None,
+                TimelineEntry::Source(_)
+                | TimelineEntry::Skill(_)
+                | TimelineEntry::SharedAttach(_) => None,
             })
             .collect()
     }
@@ -1823,7 +1874,7 @@ mod tests {
 
     use crate::model::{ThreadEntry, TurnFailure, TurnOutcome, TurnRuntime};
     use crate::provider::fake::FakeProvider;
-    use crate::provider::tool_calling::{ToolTurnReply, ToolUse};
+    use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnReply, ToolUse};
     use crate::provider::ProviderError;
     use serde_json::json;
     use tempfile::NamedTempFile;
@@ -2188,6 +2239,90 @@ mod tests {
         assert!(
             turn.trace[1].calls[0].result_excerpt.is_empty(),
             "the success payload never enters the recipe.json (ADR-0036)"
+        );
+    }
+
+    #[test]
+    fn bare_construction_seeds_the_configured_default_count_cap() {
+        // #1446: a bare construction (no command-layer override yet) must
+        // equal the UNCONFIGURED config default, so the only source of M=100
+        // is DEFAULT_RESULT_COUNT_CAP via Tunables -- the create/resume
+        // command layer then snapshots the persisted tunable over this floor
+        // through set_result_count_cap. The expectation anchors the constant
+        // directly: asserting `Tunables::default()` here would travel with a
+        // Default-impl mutation (both sides derive from it), leaving the
+        // impl's tie to DEFAULT_RESULT_COUNT_CAP unanchored.
+        let session = Session::new().expect("bare construction");
+        assert_eq!(
+            session.result_count_cap,
+            crate::workingset::DEFAULT_RESULT_COUNT_CAP
+        );
+    }
+
+    #[test]
+    fn bare_construction_seeds_the_configured_default_window() {
+        // #1445: the window twin of the count-cap pin above -- a bare
+        // construction (no command-layer override yet) must equal the
+        // UNCONFIGURED config default, so the only source of N=20 is
+        // WINDOW_TURNS via Tunables; the create/resume command layer then
+        // snapshots the persisted tunable over this floor through
+        // set_window_turns. The expectation anchors the constant directly
+        // (the count-cap pin's anti-drift rationale above applies verbatim).
+        let session = Session::new().expect("bare construction");
+        assert_eq!(session.window_turns, crate::turn_window::WINDOW_TURNS);
+    }
+
+    #[test]
+    fn ask_windows_the_conversation_on_the_session_snapshot() {
+        // #1445: the window seam -- the runner must thread the session's
+        // `window_turns` into the assembly, and the bare-construction pin
+        // above cannot catch a dropped construction-point setter call or a
+        // runner-site revert to the constant (both compile clean and keep
+        // every suite green -- the failure mode the #741 engine seam test
+        // pins for the caps, here for the window). Drive four live asks at
+        // N=2 and read the assembled conversation off the fake's capture
+        // handle: the oldest turn folds to a summary (its response text
+        // never rides the window), the two recent turns ship full.
+        let provider = FakeProvider::new()
+            .scripted_tool_turn("第一问", ToolTurnReply::Text("第一答".into()))
+            .scripted_tool_turn("第二问", ToolTurnReply::Text("第二答".into()))
+            .scripted_tool_turn("第三问", ToolTurnReply::Text("第三答".into()))
+            .scripted_tool_turn("第四问", ToolTurnReply::Text("第四答".into()));
+        let handle = provider.captured_tool_turns();
+        let (mut session, _dir) = session_with_people(provider);
+        session.set_window_turns(2);
+        for question in ["第一问", "第二问", "第三问", "第四问"] {
+            let _ = session.ask(question);
+        }
+        let captured = handle.lock().unwrap();
+        assert_eq!(captured.len(), 4, "one assembled request per ask");
+        let last = captured.last().unwrap();
+        // Three history turns x two entries + the asking question.
+        assert_eq!(last.messages.len(), 7);
+        let content = |i: usize| match &last.messages[i] {
+            ToolTurnMessage::User { content } => content.clone(),
+            ToolTurnMessage::Assistant { text, .. } => text.clone().unwrap_or_default(),
+            ToolTurnMessage::ToolResult { content, .. } => content.clone(),
+        };
+        // The folded oldest turn ships its verbatim question plus the
+        // no-result summary note -- never its response text.
+        assert_eq!(content(0), "第一问");
+        assert!(content(1).contains("未生成结果"));
+        // The two in-window turns ship question + response verbatim.
+        assert_eq!(content(2), "第二问");
+        assert!(content(3).contains("第二答"));
+        assert_eq!(content(4), "第三问");
+        assert!(content(5).contains("第三答"));
+        assert_eq!(content(6), "第四问");
+        assert!(
+            !last.messages.iter().any(|m| match m {
+                ToolTurnMessage::User { content } | ToolTurnMessage::ToolResult { content, .. } =>
+                    content.contains("第一答"),
+                ToolTurnMessage::Assistant { text, .. } => {
+                    text.as_deref().is_some_and(|t| t.contains("第一答"))
+                }
+            }),
+            "the folded turn's response text never rides the window"
         );
     }
 
@@ -2718,60 +2853,51 @@ mod tests {
         );
     }
 
-    // M1 regression: a turn whose shape derivation fails must roll back the
-    // already-created result_N. Here the derivation's fingerprint dump cannot be
-    // written -- temp_path points at a file, so its "child" dump path has a file
-    // as parent and the COPY ... TO fails, but only AFTER CREATE TABLE result_1
-    // has succeeded. Without the DROP rollback the orphan table lingers
-    // unregistered; the next materialize attempt's next_result_number reuses N
-    // and clashes on CREATE, wedging every later turn (ADR-0022 never-reused).
-    // Under the agent contract (ADR-0077) the derive failure routes back to the
-    // model as a tool error; this scripted model never self-corrects (the
-    // single call clamps, re-issued every round-trip). The loop runtime's
-    // loop detection (ADR-0107 Decision 4, inherited by ADR-0116) stops the
-    // non-converging trajectory -- steer at 3 identical calls, abort on the
-    // repeat after the nudge -- long before the 24-step cap, failing
-    // honestly with the loop's own reason; EVERY failed attempt must still
-    // roll back result_1.
+    // Issue #1507: the fingerprint is the copy-in source hash, so the
+    // ingest + materialize paths no longer export any table to a
+    // `.fingerprint.csv` dump (the retired derivation's dominant cost and a
+    // transient disk footprint equal to the table). Walk the whole temp tree
+    // after one source ingest AND one materialized turn -- neither face may
+    // leave a dump behind. (The derive step's rollback guard stays for
+    // genuine DB-level failures; the dump-failure injection seam it used to
+    // be tested through is retired with the export itself.)
     #[test]
-    fn ask_drops_the_result_table_when_shape_derivation_fails() {
-        let provider =
-            FakeProvider::new().scripted_tool_turn("建表", materialize_call("SELECT 1 AS n"));
+    fn ingest_and_turn_leave_no_fingerprint_dump() {
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "建表",
+            vec![
+                Ok(materialize_call("SELECT 1 AS n")),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
         let mut session = Session::with_provider(Box::new(provider)).expect("session");
-        // Derivation work dir whose parent is a file -> the fingerprint
-        // COPY ... TO '<path>/result_1.fingerprint.csv' fails after CREATE.
-        let file = NamedTempFile::new().expect("temp file");
-        session.temp_path = file.path().to_path_buf();
+        let csv_path = session.temp_path.join("people.csv");
+        std::fs::write(&csv_path, "name,score\nAda,9\n").expect("write source");
+        match session.ingest(&csv_path) {
+            crate::model::LoadOutcome::Loaded(_) => {}
+            other => panic!("expected load, got {other:?}"),
+        }
+        match session.ask("建表") {
+            TurnOutcome::Materialized { .. } => {}
+            other => panic!("expected materialized turn, got {other:?}"),
+        }
 
-        // The non-self-correcting trajectory is stopped by loop detection and
-        // surfaces as a typed Execute failure carrying the honest repetition
-        // reason (the per-attempt engine errors rode back to the model as tool
-        // results, ADR-0077 -- they are not the turn-level detail).
-        let detail = match session.ask("建表") {
-            TurnOutcome::Failed(TurnFailure::Execute { detail }) => detail,
-            other => panic!("expected Execute failure after derive failure, got {other:?}"),
-        };
-        assert!(
-            detail.contains("identical arguments"),
-            "loop-detection stop carries the honest repetition detail: {detail:?}"
-        );
-
-        // result_1 was rolled back on every attempt: it is no longer a table in
-        // the session DB. (A broken rollback would leave it lingering -> the
-        // retry's next CREATE clashes and the probe below is non-zero.)
-        let remaining: i64 = session
-            .admin_engine
-            .conn()
-            .query_row(
-                "SELECT count(*) FROM information_schema.tables WHERE table_name = 'result_1'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("information_schema probe");
-        assert_eq!(
-            remaining, 0,
-            "result_1 must be dropped after the derive failure (M1)"
-        );
+        let mut stack = vec![session.temp_path.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read temp dir") {
+                let entry = entry.expect("dir entry");
+                if entry.file_type().expect("file type").is_dir() {
+                    stack.push(entry.path());
+                } else {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    assert!(
+                        !name.contains(".fingerprint.csv"),
+                        "no fingerprint dump may remain, found {name:?} under {}",
+                        entry.path().display()
+                    );
+                }
+            }
+        }
     }
 
     // The bridged fault vocabulary (issue #669): a bridged provider's error
@@ -3775,6 +3901,98 @@ mod tests {
         assert!(!any_failed, "no Failed turn after reopen");
     }
 
+    /// ADR-0141 D9, the full wiring chain with a REAL turn: a bound session's
+    /// SQL first mention lazily attaches a workspace shared dataset, settle
+    /// drains the pending event onto the timeline (before the turn entry),
+    /// the persister carries the event in history while keeping the shared
+    /// source OUT of recipe.sources, and a reopen restores the attach by its
+    /// triple before replay -- no Failed turn, the name stays live.
+    #[test]
+    fn a_shared_attach_rides_the_full_session_cycle() {
+        use super::TimelineEntry;
+        let ws_dir = tempfile::tempdir().expect("workspace");
+        let csv = ws_dir.path().join("people.csv");
+        std::fs::write(&csv, "name,score\nAda,9\n").expect("write csv");
+        crate::workspace::datasets::add(ws_dir.path(), &csv).expect("add shared");
+
+        let duck_dir = tempfile::tempdir().expect("session dir");
+        let duck = duck_dir.path().join("recipe.json");
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "多少人",
+            vec![
+                Ok(materialize_call(
+                    "SELECT COUNT(*) AS n FROM \"people\".data",
+                )),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        session.set_workspace(std::fs::canonicalize(ws_dir.path()).expect("canonical"));
+        session
+            .bind_recipe(duck.clone(), "shared".into())
+            .expect("bind");
+        let outcome = session.ask("多少人");
+        assert!(
+            matches!(outcome, TurnOutcome::Materialized { .. }),
+            "the shared reference resolves and materializes, got {outcome:?}"
+        );
+
+        // Settle drained the pending attach event onto the timeline.
+        assert!(
+            session.timeline.iter().any(
+                |e| matches!(e, TimelineEntry::SharedAttach(ev) if ev.reference_name == "people")
+            ),
+            "the attach lands a timeline entry at settle"
+        );
+
+        // The recipe carries the event in history and keeps the shared
+        // source out of recipe.sources (resume re-attaches from the store,
+        // it never re-reads the original CSV path).
+        let recipe = session.build_recipe();
+        assert!(
+            recipe.history.iter().any(|e| matches!(
+                e,
+                crate::persistence::recipe::RecipeEntry::SharedAttach(ev)
+                    if ev.reference_name == "people"
+            )),
+            "the event rides the persisted history"
+        );
+        assert!(
+            recipe.sources.iter().all(|s| s.reference_name != "people"),
+            "the shared attach is not persisted as a recipe source"
+        );
+
+        drop(session);
+
+        // Reopen: the companion probe runs BEFORE the shared restore (the
+        // attach would activate the engine's RW handle on the companion
+        // file and force a false miss -- see resume.rs), the restore
+        // re-attaches by the triple, and no turn renders Failed.
+        let resumed = Session::open_recipe(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(crate::provider::UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |_| panic!("no source issues expected"),
+            |_| panic!("no active-abandoned callback expected"),
+        )
+        .expect("resume");
+        let people = resumed.get("people").expect("the attach restored");
+        assert!(people.stale.is_none(), "the restored name is live");
+        assert!(
+            resumed.get("result_1").is_some(),
+            "the companion hit restores result_1 whole"
+        );
+        assert!(
+            !resumed.conversation().iter().any(|e| matches!(
+                e,
+                ThreadEntry::Turn(t) if matches!(t.outcome, TurnOutcome::Failed(_))
+            )),
+            "no Failed turn after reopen"
+        );
+    }
+
     /// A legacy recipe whose recorded SQL points into the per-session
     /// `assets/` tree (a pre-#1383 settle's materialized copy) still
     /// replays green on reopen while the copy is on disk: the absolute
@@ -3939,6 +4157,7 @@ mod tests {
                 fingerprint: "abc".into(),
                 rectify: crate::model::RectifyProvenance::NotApplicable,
                 privacy: crate::model::DatasetPrivacy::default(),
+                size_bytes: 0,
                 stale: None,
             });
 
@@ -4010,6 +4229,7 @@ mod tests {
                 fingerprint: "abc".into(),
                 rectify: crate::model::RectifyProvenance::NotApplicable,
                 privacy: crate::model::DatasetPrivacy::default(),
+                size_bytes: 0,
                 stale: None,
             });
         session.persist_if_bound();

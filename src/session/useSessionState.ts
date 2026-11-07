@@ -4,11 +4,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { conversation, takePersistError, takeSourceNotices } from "../api";
 import { toAppError } from "../lib/error-presentation";
 import { sessionKeys } from "./queryKeys";
-import { useIngestFlow } from "./useIngestFlow";
+import { useIngestFlow, type IngestProgress } from "./useIngestFlow";
 import {
   invalidateSessionData,
   useWorkingSetData,
-  type UseWorkingSetSurfaces,
+  type UseWorkingSetSurfacesBase,
 } from "./useWorkingSet";
 import { useTurnFlow, type LiveTurn } from "./useTurnFlow";
 import { useArtifactAutoOpen } from "./useArtifactAutoOpen";
@@ -123,11 +123,18 @@ export interface UseSessionState {
    *  (cancel-halt / Error-halt), rendered as a workspace notice; null
    *  otherwise and cleared at the start of the next ingest. */
   haltedRemaining: number | null;
+  /** The in-flight ingest's progress block (issue #1485), or null -- the
+   *  rail's transient "Loading <file> (i of n)" line with the batch clock.
+   *  Client UI state only; set/cleared by useIngestFlow. */
+  ingestProgress: IngestProgress | null;
   // Actions.
   // Mirrors UseTurnFlow (async -> Promise<void>, honest + awaitable); the
   // QuestionBar consumer accepts it via void-return covariance.
   handleAsk: (question: string, invocations?: string[]) => Promise<void>;
   handleCancel: () => Promise<void>;
+  /** The synchronous live-turn probe (mirrors UseTurnFlow.hasLiveTurn,
+   *  issue #1503). */
+  hasLiveTurn: () => boolean;
   handleIngest: (path: string) => void;
   /** Multi-file ingest from the composer "+" file section (ADR-0083, issue
    *  #351; #748 auto-resume). Sequential with park-on-guidance: a
@@ -170,7 +177,7 @@ export interface UseSessionState {
    *  reports into (the same sinks useIngestFlow takes as deps). The error
    *  banner / busy union / persist poll stay pane-level so a working-set
    *  mutation stays visible from both tabs (issue #1060). */
-  mutationSurfaces: UseWorkingSetSurfaces;
+  mutationSurfaces: UseWorkingSetSurfacesBase;
 }
 
 export function useSessionState(
@@ -366,17 +373,25 @@ export function useSessionState(
     },
     [markProduced, notePromotion],
   );
-  const { phase, liveTurn, waitStartedAt, turnStartedAt, turnPausedSince, handleAsk, handleCancel } =
-    useTurnFlow(sessionId, {
-      queryClient,
-      intl,
-      setTurnLoading,
-      setError,
-      pollPersistError,
-      viewed: { markProduced: markProducedWithExpand, suppressInit },
-      approvals,
-      onApprovalsSettled,
-    });
+  const {
+    phase,
+    liveTurn,
+    waitStartedAt,
+    turnStartedAt,
+    turnPausedSince,
+    handleAsk,
+    handleCancel,
+    hasLiveTurn,
+  } = useTurnFlow(sessionId, {
+    queryClient,
+    intl,
+    setTurnLoading,
+    setError,
+    pollPersistError,
+    viewed: { markProduced: markProducedWithExpand, suppressInit },
+    approvals,
+    onApprovalsSettled,
+  });
 
   // ADR-0089 Decision 4: wrap handleAsk so the first terminal turn triggers a
   // sidebar + header name sync. Reading the query cache directly (not the
@@ -422,6 +437,7 @@ export function useSessionState(
     guidance,
     guidanceError,
     haltedRemaining,
+    ingestProgress,
     handleIngest,
     handleIngestMany,
     handleGuidedSubmit,
@@ -512,8 +528,10 @@ export function useSessionState(
     guidance,
     guidanceError,
     haltedRemaining,
+    ingestProgress,
     handleAsk: handleAskWithAutoName,
     handleCancel,
+    hasLiveTurn,
     handleIngest,
     handleIngestMany,
     handleGuidedSubmit,
