@@ -171,6 +171,8 @@ jobs:
           fi
           cp latest.json updater-assets/
           gh release upload "$RELEASE_TAG" updater-assets/* --clobber
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
 
       # The mirror manifest: same bytes except every payload URL points at
       # the R2 origin. minisign signs content, not URLs — the rewrite keeps
