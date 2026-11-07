@@ -70,6 +70,7 @@ function makeSurfaces(): UseWorkingSetSurfaces {
     setError: vi.fn(),
     setMutationLoading: vi.fn(),
     pollPersistError: vi.fn(async () => {}),
+    trackReplace: vi.fn(),
   };
 }
 
@@ -358,6 +359,77 @@ describe("useWorkingSet", () => {
       expect(vi.mocked(failed.surfaces.setError).mock.calls.at(-1)?.[0]?.kind).toBe("replace");
       // An Error outcome changed nothing server-side: no cascade fires.
       expect(failed.invalidateSpy).not.toHaveBeenCalled();
+    });
+
+    it("hands the queue sink the flight verdict and flight info at entry (#1512)", async () => {
+      vi.mocked(replaceSource).mockResolvedValueOnce({ kind: "Loaded", data: PEOPLE });
+      const view = setup();
+      await waitFor(() => expect(view.result.current.datasets).toHaveLength(2));
+      await act(async () => {
+        view.result.current.handleReplace("people", "/x/new.csv");
+      });
+      const calls = vi.mocked(view.surfaces.trackReplace).mock.calls;
+      expect(calls).toHaveLength(1);
+      // The flight info names the swap target for the rail's progress line.
+      expect(calls[0][1]).toEqual({ referenceName: "people", path: "/x/new.csv" });
+      // Loaded resolves the verdict true (the queue's auto-send exit).
+      await expect(calls[0][0]).resolves.toBe(true);
+    });
+
+    it("arms the queue window in the handler's entry tick (#1512)", () => {
+      // The same-tick arming is the load-bearing invariant (a submit racing
+      // the click's tick must find the gate closed): a never-settling IPC
+      // plus a SYNCHRONOUS act pins the report before any microtask runs --
+      // an awaited act cannot tell a truthful entry report from one that
+      // slipped past the first await.
+      vi.mocked(replaceSource).mockImplementationOnce(() => new Promise(() => {}));
+      const view = setup();
+      act(() => {
+        view.result.current.handleReplace("people", "/x/new.csv");
+      });
+      expect(vi.mocked(view.surfaces.trackReplace)).toHaveBeenCalledTimes(1);
+    });
+
+    it("resolves the flight false on every failure route (#1512)", async () => {
+      // Error outcome.
+      vi.mocked(replaceSource).mockResolvedValueOnce({
+        kind: "Error",
+        data: { kind: "Parse", data: { detail: "bad" } },
+      });
+      const failed = setup();
+      await waitFor(() => expect(failed.result.current.datasets).toHaveLength(2));
+      await act(async () => {
+        failed.result.current.handleReplace("people", "/x/bad.csv");
+      });
+      await expect(vi.mocked(failed.surfaces.trackReplace).mock.calls[0][0]).resolves.toBe(
+        false,
+      );
+
+      // NeedsGuidance (the defensive route -- structured replace refuses).
+      vi.mocked(replaceSource).mockResolvedValueOnce({
+        kind: "NeedsGuidance",
+        data: { source_path: "/x/bad.xlsx", workbook_name: "bad", sheets: [] },
+      });
+      const guided = setup();
+      await waitFor(() => expect(guided.result.current.datasets).toHaveLength(2));
+      await act(async () => {
+        guided.result.current.handleReplace("people", "/x/bad.xlsx");
+      });
+      await expect(vi.mocked(guided.surfaces.trackReplace).mock.calls[0][0]).resolves.toBe(
+        false,
+      );
+
+      // IPC reject (the flight never throws -- resolve-only contract).
+      vi.mocked(replaceSource).mockRejectedValueOnce(new Error("ipc blew up"));
+      const rejected = setup();
+      await waitFor(() => expect(rejected.result.current.datasets).toHaveLength(2));
+      await act(async () => {
+        rejected.result.current.handleReplace("people", "/x/bad.csv");
+      });
+      await expect(vi.mocked(rejected.surfaces.trackReplace).mock.calls[0][0]).resolves.toBe(
+        false,
+      );
+      await waitFor(() => expect(rejected.surfaces.setError).toHaveBeenCalled());
     });
   });
 

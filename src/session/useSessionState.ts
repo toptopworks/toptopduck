@@ -8,7 +8,7 @@ import { useIngestFlow, type IngestProgress } from "./useIngestFlow";
 import {
   invalidateSessionData,
   useWorkingSetData,
-  type UseWorkingSetSurfaces,
+  type UseWorkingSetSurfacesBase,
 } from "./useWorkingSet";
 import { useTurnFlow, type LiveTurn } from "./useTurnFlow";
 import { useArtifactAutoOpen } from "./useArtifactAutoOpen";
@@ -177,7 +177,7 @@ export interface UseSessionState {
    *  reports into (the same sinks useIngestFlow takes as deps). The error
    *  banner / busy union / persist poll stay pane-level so a working-set
    *  mutation stays visible from both tabs (issue #1060). */
-  mutationSurfaces: UseWorkingSetSurfaces;
+  mutationSurfaces: UseWorkingSetSurfacesBase;
 }
 
 export function useSessionState(

@@ -548,3 +548,153 @@ describe("useComposerQueue (#1500 queued ask behind an in-flight ingest batch)",
     expect(deps.hasLiveTurn).not.toHaveBeenCalled();
   });
 });
+
+// The replace window (#1512): a source replace is the other long IPC that
+// holds the backend session lock, so its verdict joins the SAME queue
+// window -- armed imperatively (the flight promise already started inside
+// the seam), not through a tracked wrapper.
+describe("useComposerQueue trackWindow (#1512 replace joins the queue window)", () => {
+  it("queues the submit behind a tracked flight and auto-sends on its Loaded verdict", async () => {
+    // Arrange
+    const deps = makeDeps();
+    const { result } = renderHook(() => useComposerQueue(deps));
+    const flight = deferredBoolean();
+
+    // Act
+    act(() => {
+      result.current.trackWindow(flight.promise);
+    });
+    await act(async () => {
+      await result.current.handleAsk("几行", ["skill-a"]);
+    });
+
+    // Assert: held, not fired.
+    expect(deps.ask).not.toHaveBeenCalled();
+    expect(result.current.queued).toBe(true);
+
+    // The Loaded verdict releases the slot into an auto-send.
+    await act(async () => {
+      flight.resolve(true);
+      await flight.promise;
+    });
+
+    expect(deps.ask).toHaveBeenCalledOnce();
+    expect(deps.ask).toHaveBeenCalledWith("几行", ["skill-a"]);
+    expect(result.current.queued).toBe(false);
+  });
+
+  it("seeds the question and invocations back when the tracked flight resolves false", async () => {
+    // Arrange
+    const deps = makeDeps();
+    const { result } = renderHook(() => useComposerQueue(deps));
+    const flight = deferredBoolean();
+
+    act(() => {
+      result.current.trackWindow(flight.promise);
+    });
+    await act(async () => {
+      await result.current.handleAsk("几行", ["skill-a"]);
+    });
+
+    // Act: the Error verdict -- never an auto-send.
+    await act(async () => {
+      flight.resolve(false);
+      await flight.promise;
+    });
+
+    // Assert
+    expect(deps.ask).not.toHaveBeenCalled();
+    expect(deps.onSeedDraft).toHaveBeenCalledOnce();
+    expect(deps.onSeedDraft).toHaveBeenCalledWith("sess-1", "几行");
+    expect(deps.onSeedInvocations).toHaveBeenCalledWith("sess-1", ["skill-a"]);
+    expect(result.current.queued).toBe(false);
+  });
+
+  it("seeds the draft back when a tracked flight rejects unexpectedly", async () => {
+    // Arrange
+    const deps = makeDeps();
+    const { result } = renderHook(() => useComposerQueue(deps));
+    const flight = deferredBoolean();
+
+    act(() => {
+      result.current.trackWindow(flight.promise);
+    });
+    await act(async () => {
+      await result.current.handleAsk("几行");
+    });
+
+    // Act
+    await act(async () => {
+      flight.reject(new Error("ipc blew up"));
+      await flight.promise.catch(() => {});
+    });
+
+    // Assert
+    expect(deps.ask).not.toHaveBeenCalled();
+    expect(deps.onSeedDraft).toHaveBeenCalledOnce();
+    expect(result.current.queued).toBe(false);
+  });
+
+  it("keeps the slot waiting when an older flight settles under a newer one (identity gate)", async () => {
+    // Arrange
+    const deps = makeDeps();
+    const { result } = renderHook(() => useComposerQueue(deps));
+    const older = deferredBoolean();
+    const newer = deferredBoolean();
+
+    // Act: two flights arm in sequence (busy-gate overlap is not expected,
+    // but a stale settle must still not exit the slot on its own verdict).
+    act(() => {
+      result.current.trackWindow(older.promise);
+    });
+    act(() => {
+      result.current.trackWindow(newer.promise);
+    });
+    await act(async () => {
+      await result.current.handleAsk("几行");
+    });
+
+    await act(async () => {
+      older.resolve(true);
+      await older.promise;
+    });
+
+    // Assert: the older verdict is ignored; the slot waits behind the newer.
+    expect(deps.ask).not.toHaveBeenCalled();
+    expect(result.current.queued).toBe(true);
+
+    await act(async () => {
+      newer.resolve(true);
+      await newer.promise;
+    });
+
+    expect(deps.ask).toHaveBeenCalledOnce();
+    expect(result.current.queued).toBe(false);
+  });
+
+  it("holds the chain slot while only a tracked flight is armed (no batch)", async () => {
+    // Arrange
+    const deps = makeDeps();
+    const { result } = renderHook(() => useComposerQueue(deps));
+    const flight = deferredBoolean();
+
+    act(() => {
+      result.current.trackWindow(flight.promise);
+    });
+
+    // Act: the pendingPayload chain's hold -- the window ref is the gate,
+    // whichever arming point closed it.
+    act(() => {
+      result.current.hold("链上问题", ["skill-a"]);
+    });
+    expect(result.current.queued).toBe(true);
+
+    await act(async () => {
+      flight.resolve(true);
+      await flight.promise;
+    });
+
+    // Assert
+    expect(deps.ask).toHaveBeenCalledWith("链上问题", ["skill-a"]);
+  });
+});

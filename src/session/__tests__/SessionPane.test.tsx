@@ -14,10 +14,13 @@ import {
   ingestFile,
   listSkills,
   listWorkingSet,
+  readRows,
+  replaceSource,
   takeSourceNotices,
 } from "../../api";
 import { TooltipProvider } from "../../components/ui/tooltip";
 import { pickDataFiles } from "../../components/dataset/pickDataFiles";
+import { open } from "@tauri-apps/plugin-dialog";
 import { artifactTurn, failed } from "./fixtures";
 import type { ComposerSessionFields } from "../useComposerState";
 import type { ApprovalEntry } from "../useApprovalEvents";
@@ -48,6 +51,8 @@ vi.mock("../../api", async (importOriginal) => {
   return {
     ...actual,
     askQuestion: vi.fn(),
+    replaceSource: vi.fn(),
+    readRows: vi.fn(),
     // The runtime read defaults to the failed-read degrade (no marker
     // stamped) -- the same default the useTurnFlow suite pins against.
     getSessionRuntime: vi.fn(async () => undefined),
@@ -70,6 +75,10 @@ vi.mock("../../api", async (importOriginal) => {
 vi.mock("../../components/dataset/pickDataFiles", () => ({
   pickDataFiles: vi.fn(),
 }));
+
+// The row's replace path opens the plugin dialog directly (it never rides
+// pickDataFiles), so the same stubbing applies to it (#1512).
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
 // Hoisted so the ArtifactView mock factory below can read it at import time.
 // The probe's recovered flag lets a test flip the crash off, so the
@@ -595,6 +604,147 @@ describe("SessionPane composer queue behind an in-flight ingest (#1500)", () => 
     });
     await waitFor(() => expect(askQuestion).toHaveBeenCalledWith(SID, heldQuestion, []));
     expect(view.getComposerFields()!.queued).toBe(false);
+  });
+});
+
+// Issue #1512: a source replace is the other long IPC that holds the backend
+// session lock, so its verdict flight arms the SAME queue window -- armed
+// through the pane's trackReplace composition when the working-set seam
+// fires. The rail's replace progress line rides the same flight.
+describe("SessionPane composer queue behind an in-flight replace (#1512)", () => {
+  const heldQuestion = "queued while replacing";
+  const replaceDataset: DatasetDescriptor = {
+    reference_name: "people",
+    display_name: "people",
+    source_path: "/x/big.csv",
+    row_count: 1,
+    fingerprint: "ff".repeat(32),
+    size_bytes: 0,
+    columns: [{ name: "id", canonical_type: "BIGINT" }],
+    sample: [["1"]],
+    rectify: { kind: "NotApplicable" },
+    privacy: { send_samples: true, type_only_columns: [] },
+  };
+  const EMPTY_PAGE = {
+    columns: [{ name: "id", canonical_type: "BIGINT" }],
+    rows: [],
+    total: 0,
+    offset: 0,
+    limit: 20,
+  };
+  // The rail's empty-thread hint text: the tests below pin that the replace
+  // line's conjunct hides it (the #297 contradiction, replace half of the
+  // ingest twin's pin above). Same string as the ingest describe.
+  const RAIL_EMPTY =
+    "No conversations yet. Ask a question below or load data to begin.";
+
+  beforeEach(() => {
+    stubSessionApis();
+    vi.mocked(askQuestion).mockClear();
+    // The replace targets an EXISTING row, so the panel renders the working
+    // set with it (and its preview query must answer instead of crashing on
+    // the un-stubbed read).
+    vi.mocked(listWorkingSet).mockResolvedValue([replaceDataset]);
+    vi.mocked(activeDataset).mockResolvedValue(replaceDataset);
+    vi.mocked(readRows).mockResolvedValue(EMPTY_PAGE);
+  });
+
+  it("queues the submit behind the replace flight, shows the rail line, and auto-sends on Loaded", async () => {
+    let resolveReplace!: (outcome: LoadOutcome) => void;
+    vi.mocked(replaceSource).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveReplace = resolve;
+        }),
+    );
+    vi.mocked(open).mockResolvedValue("/x/new.csv");
+    const view = renderPane();
+
+    // Positive control for the empty-rail assert below: the thread starts
+    // empty, so the hint IS rendering before the replace arms.
+    expect(await screen.findByText(RAIL_EMPTY)).toBeInTheDocument();
+
+    // Arm through the real row path: switch to the working-set tab and fire
+    // the row's replace action through the dialog stub.
+    fireEvent.click(screen.getByRole("tab", { name: "Working set" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Replace source people" })),
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Replace source people" }));
+    });
+
+    // The rail names the swap and the clock while the flight holds.
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Replacing people with new.csv…",
+    );
+    // The replace line's conjunct keeps the empty-thread hint hidden for its
+    // whole flight (the #297 contradiction, pinned for the other long IPC at
+    // the ingest describe above).
+    expect(screen.queryByText(RAIL_EMPTY)).not.toBeInTheDocument();
+
+    await act(async () => {
+      void view.getComposerFields()!.handleAsk(heldQuestion);
+    });
+    expect(view.getComposerFields()!.queued).toBe(true);
+    expect(askQuestion).not.toHaveBeenCalled();
+
+    // The swap lands -> the flight verdict true -> auto-send, and the rail
+    // line clears with the settle (asserted by text: the auto-sent turn's
+    // own wait-status line is a second role="status" element, so the role
+    // query never returns to null).
+    await act(async () => {
+      resolveReplace({ kind: "Loaded", data: replaceDataset });
+    });
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith(SID, heldQuestion, []));
+    expect(view.getComposerFields()!.queued).toBe(false);
+    await waitFor(() =>
+      expect(screen.queryByText("Replacing people with new.csv…")).toBeNull(),
+    );
+  });
+
+  it("seeds the held question back when the replace errors", async () => {
+    let resolveReplace!: (outcome: LoadOutcome) => void;
+    const onSeedDraft = vi.fn();
+    const onSeedInvocations = vi.fn();
+    vi.mocked(replaceSource).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveReplace = resolve;
+        }),
+    );
+    vi.mocked(open).mockResolvedValue("/x/new.csv");
+    const view = renderPane({ onSeedDraft, onSeedInvocations });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Working set" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Replace source people" })),
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Replace source people" }));
+    });
+    await act(async () => {
+      void view.getComposerFields()!.handleAsk(heldQuestion, ["skill-a"]);
+    });
+    expect(view.getComposerFields()!.queued).toBe(true);
+
+    // The swap errors -> the verdict false -> the halt exit returns the
+    // question AND the staged invocations; nothing auto-sends.
+    await act(async () => {
+      resolveReplace({ kind: "Error", data: { kind: "Parse", data: { detail: "bad csv" } } });
+    });
+    await waitFor(() => expect(onSeedDraft).toHaveBeenCalledWith(SID, heldQuestion));
+    expect(onSeedInvocations).toHaveBeenCalledWith(SID, ["skill-a"]);
+    expect(askQuestion).not.toHaveBeenCalled();
+    expect(view.getComposerFields()!.queued).toBe(false);
+    // The failure settle clears the rail line too (the failure-clear half of
+    // the brief's settle-clear acceptance).
+    await waitFor(() =>
+      expect(screen.queryByText("Replacing people with new.csv…")).toBeNull(),
+    );
+    // And with the line cleared and the thread still empty, the hint
+    // legitimately returns (the settle half of the empty-rail gate).
+    expect(await screen.findByText(RAIL_EMPTY)).toBeInTheDocument();
   });
 });
 
