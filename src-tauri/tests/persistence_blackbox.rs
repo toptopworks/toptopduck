@@ -2756,8 +2756,9 @@ fn resume_falls_back_to_extension_dispatch_for_an_unrecognized_reader() {
 /// the source through without a Drift issue (any Drift aborts here) and pins
 /// the working set to the recorded value so every later recipe projection
 /// keeps it verbatim (rewriting to v2 would change chain_digest and force a
-/// watermark miss on the next resume). Natural convergence = a genuine
-/// replace / re-upload writes v2.
+/// watermark miss on the next resume). Convergence is in-app only (a
+/// re-upload / replace writes v2); an on-disk replacement or a resume
+/// re-link never converges.
 #[test]
 fn resume_allows_a_pre_v2_fingerprint_as_an_algorithm_upgrade() {
     use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef};
@@ -2768,8 +2769,12 @@ fn resume_allows_a_pre_v2_fingerprint_as_an_algorithm_upgrade() {
     let csv = dir.path().join("people.csv");
     fs::copy(fixture("people.csv"), &csv).expect("copy source");
 
-    // Capture the live v2 fingerprint, then hand-write the recipe with the
-    // pre-v2 posture: a bare hex hash (no `v2:` prefix, no reader suffix).
+    // The live read must be v2 (the allow keys on the prefix). The recorded
+    // value is any bare hex that does NOT match the source digest: a real
+    // pre-v2 recipe's bare hash is a post-load table hash, never the source
+    // SHA256 -- a value that happens to match here would keep a future
+    // content-equality guard green while every genuine legacy recipe
+    // falsely drifts.
     let v2_fp = {
         let mut probe = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
         load_source(&mut probe, &csv);
@@ -2779,12 +2784,7 @@ fn resume_allows_a_pre_v2_fingerprint_as_an_algorithm_upgrade() {
         v2_fp.starts_with("v2:"),
         "precondition: live fingerprint is v2"
     );
-    let bare_fp = v2_fp
-        .trim_start_matches("v2:")
-        .split(':')
-        .next()
-        .expect("hex digest")
-        .to_string();
+    let bare_fp = "0".repeat(64);
 
     let recipe = Recipe::build(
         "legacy".into(),
@@ -2823,6 +2823,67 @@ fn resume_allows_a_pre_v2_fingerprint_as_an_algorithm_upgrade() {
     assert_eq!(
         people_ref.fingerprint, bare_fp,
         "the recipe keeps the recorded value across a post-resume persist"
+    );
+}
+
+/// Issue #1507 review: an empty recorded fingerprint is corruption (the
+/// shared manifest rejects an empty store key as corrupt), not a pre-v2
+/// posture -- it must NOT ride the algorithm-upgrade allow. It surfaces as
+/// Drift so the user decides, keeping the two empty-value postures aligned.
+#[test]
+fn resume_surfaces_drift_for_an_empty_fingerprint_recipe() {
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef};
+    use toptopduck_lib::RectifyProvenance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    let csv = dir.path().join("people.csv");
+    fs::copy(fixture("people.csv"), &csv).expect("copy source");
+
+    let recipe = Recipe::build(
+        "corrupt".into(),
+        vec![SourceRef {
+            reference_name: "people".into(),
+            display_name: "people".into(),
+            source_path: csv.to_string_lossy().to_string(),
+            relative_path: None,
+            rectify: RectifyProvenance::NotApplicable,
+            fingerprint: String::new(),
+            reader: None,
+        }],
+        vec![],
+        None,
+    )
+    .expect("build recipe");
+    save_atomic(&duck, &recipe).expect("save");
+
+    let drift_seen = Rc::new(RefCell::new(false));
+    let drift_for_cb = Rc::clone(&drift_seen);
+    let resumed = Session::open_recipe(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(UnwiredProvider),
+        Default::default(),
+        |_| {},
+        move |issue| match issue {
+            SourceIssue::Drift { reference_name, .. } => {
+                assert_eq!(reference_name, "people");
+                *drift_for_cb.borrow_mut() = true;
+                SourceResolution::Rebuild
+            }
+            other => panic!("expected Drift for an empty fingerprint, got {other:?}"),
+        },
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume");
+
+    assert!(
+        *drift_seen.borrow(),
+        "an empty fingerprint is Drift, not an upgrade allow"
+    );
+    assert!(
+        resumed.get("people").is_none(),
+        "the empty-fingerprint source was not restored"
     );
 }
 

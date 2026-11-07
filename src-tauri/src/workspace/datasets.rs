@@ -197,12 +197,6 @@ fn manifest_path(workspace: &Path) -> PathBuf {
     state_dir(workspace).join(MANIFEST_FILE_NAME)
 }
 
-/// Stream-hash a file's bytes (the store key, ADR-0141 D2). Delegates to the
-/// crate-shared streaming helper (issue #1507: one file-hash implementation).
-fn sha256_file(path: &Path) -> Result<String, StoreError> {
-    crate::util::sha256_file(path).map_err(StoreError::io)
-}
-
 /// Read the manifest (ADR-0141 D8): missing = empty (fresh workspace); a
 /// parse failure copies the file aside as `datasets.json.corrupt` and refuses
 /// -- mutations load first, so a corrupt manifest can never be overwritten.
@@ -283,14 +277,15 @@ fn reopen_read_only(dest: PathBuf) -> Result<Snapshot, StoreError> {
     })
 }
 
-/// Materialize `src` into the store under its content key: a hit opens the
-/// existing snapshot READ_ONLY and re-derives its shape (zero conversion); a
-/// miss copies in through the shared loader under a temp name and atomically
-/// renames (single physical file, no parallel writers -- ADR-0141 D2).
-/// Both paths derive shape only -- no table-content fingerprint pass; the
-/// identity is the store key itself (issue #1506).
+/// Materialize `src` into the store under its content key (the streaming
+/// SHA-256 of the file's bytes, ADR-0141 D2): a hit opens the existing
+/// snapshot READ_ONLY and re-derives its shape (zero conversion); a miss
+/// copies in through the shared loader under a temp name and atomically
+/// renames (single physical file, no parallel writers). Both paths derive
+/// shape only -- no table-content fingerprint pass; the identity is the
+/// store key itself (issue #1506).
 pub fn materialize(workspace: &Path, src: &Path, reader: &str) -> Result<Snapshot, StoreError> {
-    let key = sha256_file(src)?;
+    let key = crate::util::sha256_file(src).map_err(StoreError::io)?;
     let dest = store_file(workspace, &key);
     if dest.exists() {
         return reopen_read_only(dest);

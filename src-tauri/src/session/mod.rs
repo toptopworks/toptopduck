@@ -298,9 +298,9 @@ pub enum SourceIssue {
         /// The underlying read failure detail (LoadError display string).
         reason: String,
     },
-    /// The source is present at its path but the post-rectify fingerprint
-    /// differs from the recipe's record (ADR-0035 "drift") -- the data
-    /// changed since the recipe was written. The engine must NEVER silently
+    /// The source is present at its path but the fingerprint differs from
+    /// the recipe's record (ADR-0035 "drift") -- the data changed since the
+    /// recipe was written. The engine must NEVER silently
     /// replay with the new data; the user decides to rebuild (the data is
     /// genuinely different) or abort. A re-link to a backup whose fingerprint
     /// matches the recipe is also accepted (the verify loop re-checks).
@@ -308,7 +308,8 @@ pub enum SourceIssue {
         reference_name: String,
         /// The path actually read (post resolve, after any prior re-link).
         path: String,
-        /// The fingerprint the recipe recorded (the canonical-content hash).
+        /// The fingerprint the recipe recorded (a v2 source hash, or a
+        /// pre-v2 bare post-load hash on a legacy recipe).
         expected: String,
         /// The fingerprint computed from the file currently at `path`.
         found: String,
@@ -389,7 +390,7 @@ pub use self::recipe_persister::PendingConflict;
 /// deterministic progress bar.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResumeEvent {
-    /// Verifying source `index` of `total` (post-rectify fingerprint check).
+    /// Verifying source `index` of `total` (fingerprint check).
     Source {
         index: usize,
         total: usize,

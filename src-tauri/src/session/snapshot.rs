@@ -25,6 +25,11 @@ pub struct Snapshot {
     pub columns: Vec<ColumnSchema>,
     pub row_count: u64,
     pub sample: Vec<Vec<String>>,
+    /// Identity, backfilled by the caller after the shape derivation: the
+    /// private copy-in face's v2 source hash or the shared store's content
+    /// key. Empty on a materialized result_N (its identity is the reference
+    /// name) -- never persist or compare an empty fingerprint as if it were
+    /// identity.
     pub fingerprint: String,
 }
 
@@ -46,12 +51,6 @@ pub struct TableShape {
     pub columns: Vec<ColumnSchema>,
     pub row_count: u64,
     pub sample: Vec<Vec<String>>,
-    /// Always empty from the derivation: identity is external to the shape
-    /// and the caller backfills it (the private copy-in face's v2 source
-    /// hash, the shared store's content key) or leaves it empty (a
-    /// materialized result_N, whose identity is its reference name) -- never
-    /// persist or compare an empty fingerprint as if it were identity.
-    pub fingerprint: String,
 }
 
 impl Snapshot {
@@ -61,7 +60,8 @@ impl Snapshot {
             columns: shape.columns,
             row_count: shape.row_count,
             sample: shape.sample,
-            fingerprint: shape.fingerprint,
+            // The derivation is shape-only; the caller backfills identity.
+            fingerprint: String::new(),
         }
     }
 
@@ -77,12 +77,12 @@ impl Snapshot {
 }
 
 /// Derive the shape of table on conn: canonical schema, row count, frozen
-/// first-3-row sample -- NO content fingerprint (`fingerprint` stays empty
-/// for the caller to backfill or leave empty, see [`TableShape::fingerprint`]).
-/// Used for both source snapshots (data) and materialized turn results
-/// (result_N) -- the only caller-controlled value is the table identifier,
-/// which is tool-generated and passed through quote_ident, so the
-/// interpolation is safe.
+/// first-3-row sample -- the SHAPE only, no content fingerprint (identity is
+/// external; the caller backfills the descriptor's fingerprint field or
+/// leaves it empty, see [`Snapshot::fingerprint`]). Used for both source
+/// snapshots (data) and materialized turn results (result_N) -- the only
+/// caller-controlled value is the table identifier, which is tool-generated
+/// and passed through quote_ident, so the interpolation is safe.
 pub fn derive_shape(conn: &Connection, table: &str) -> Result<TableShape, LoadError> {
     let columns = describe_table(conn, table)?;
     let row_count = count_rows(conn, table)?;
@@ -91,7 +91,6 @@ pub fn derive_shape(conn: &Connection, table: &str) -> Result<TableShape, LoadEr
         columns,
         row_count,
         sample,
-        fingerprint: String::new(),
     })
 }
 

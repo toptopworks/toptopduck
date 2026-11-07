@@ -1124,8 +1124,10 @@ impl super::Session {
     /// ([`Self::resolve_source_path`]); the source is ingested under the
     /// recipe's reference name via [`Self::resume_ingest_at`] (no name derive
     /// / de-conflict / Added-event -- resume replays the recipe's own events
-    /// in phase 4, not new ones); the resulting post-rectify fingerprint must
-    /// match the recipe (ADR-0035/0042). On Missing (path gone / unreadable)
+    /// in phase 4, not new ones); the resulting v2 source-hash fingerprint
+    /// must match the recipe, with a pre-v2 bare hash allowed through as an
+    /// algorithm upgrade without rewriting (ADR-0035/0042). On Missing (path
+    /// gone / unreadable)
     /// or Drift (present but fingerprint differs) the caller's `on_source_issue`
     /// callback decides: Relink (re-ingest a new path + re-verify, looping),
     /// Abort (stop resume, on-disk recipe untouched), or Rebuild (drop this one
@@ -1180,8 +1182,15 @@ impl super::Session {
                         // value so the post-resume persist keeps the recipe
                         // verbatim (rewriting to v2 would change
                         // chain_digest and force a watermark miss / full
-                        // replay on the next resume). Natural convergence: a
-                        // genuinely replaced or re-uploaded source writes v2.
+                        // replay on the next resume). The allow is a prefix
+                        // check that cannot compare content (a bare hash is
+                        // a post-load table hash, the fresh read a source
+                        // hash -- disjoint domains), so drift detection stays
+                        // disarmed for this source until it converges, and
+                        // convergence is in-app only: a re-uploaded or
+                        // in-app-replaced source writes v2; an on-disk
+                        // replacement or a resume re-link (which updates the
+                        // path but not the fingerprint) never does.
                         let upgraded =
                             Self::is_fingerprint_upgrade(&src.fingerprint, &descriptor.fingerprint);
                         if descriptor.fingerprint == src.fingerprint || upgraded {
@@ -1294,10 +1303,12 @@ impl super::Session {
     /// #1507): the recipe recorded a bare post-load hash (no `v2:` prefix)
     /// while the fresh read produced a source-hash fingerprint. Algorithm
     /// upgrade != data drift -- the caller allows the source through and
-    /// pins the recorded value.
+    /// pins the recorded value. An EMPTY recorded fingerprint is corruption
+    /// (the shared manifest rejects an empty store key as corrupt), not a
+    /// pre-v2 posture -- it falls through to the Drift face instead.
     fn is_fingerprint_upgrade(recorded: &str, found: &str) -> bool {
         let prefix = crate::ingest::loader::FINGERPRINT_V2_PREFIX;
-        !recorded.starts_with(prefix) && found.starts_with(prefix)
+        !recorded.is_empty() && !recorded.starts_with(prefix) && found.starts_with(prefix)
     }
 
     /// Ingest a source for resume under an explicit reference name + display

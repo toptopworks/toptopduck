@@ -402,7 +402,7 @@ impl Materializer for RealMaterializer {
             columns: shape.columns,
             row_count: shape.row_count,
             sample: shape.sample,
-            fingerprint: shape.fingerprint,
+            fingerprint: String::new(), // no identity: a result IS its name
             // A result lives in the session DB, no snapshot file (ADR-0024).
             size_bytes: 0,
             rectify: RectifyProvenance::NotApplicable,
