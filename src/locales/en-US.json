@@ -792,6 +792,7 @@
   "workspace.datasets.listHeading": "Datasets · {count}",
   "workspace.datasets.missingBadge": "Missing",
   "workspace.datasets.replaceDone": "Replaced {name}",
+  "workspace.datasets.replaceFailedToast": "Dataset replace in {workspace} failed",
   "workspace.datasets.replacing": "Replacing {name}…",
   "workspace.datasets.title": "Datasets — {workspace}",
   "workspace.datasets.uploadFailedToast": "Upload to {workspace} failed",

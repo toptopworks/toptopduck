@@ -418,4 +418,191 @@ describe("useWorkspaceDatasets contract", () => {
     expect(result.current.shown?.reference_name).toBe("orders");
     expect(result.current.missingNames).toEqual(new Set(["orders"]));
   });
+
+  it("picks the freshly added dataset on settle, only while the panel still shows the batch's workspace", async () => {
+    // The settle-time pick gate (#1492): the last landed file becomes the
+    // detail pick -- but a rebind would park the pick on another workspace's
+    // panel, so the write only lands when the live panel is the origin.
+    seed([]);
+    vi.mocked(open).mockResolvedValue("/src/new.csv");
+    const resolveAdd = gateAdd();
+    const { result, rerender } = setup();
+    launch(result);
+    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(1));
+    rerender(OTHER);
+    await act(async () => {
+      resolveAdd(0, entry({ reference_name: "new", display_name: "new", source_path: "/src/new.csv" }));
+    });
+    // Settled while the panel showed /other: no pick write on the foreign
+    // panel.
+    expect(result.current.selectedName).toBeNull();
+  });
+
+  it("a mid-batch rebind never retargets the files that have not fired yet", async () => {
+    // #1491: the batch's target freezes in the flight closure at fire time,
+    // so opening another workspace's panel mid-batch must not land the
+    // remaining files in the wrong manifest.
+    seed([]);
+    vi.mocked(open).mockResolvedValue(["/src/a.csv", "/src/b.csv"]);
+    const resolveFirst = gateAdd();
+    const { result, rerender } = setup();
+    launch(result);
+    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(1));
+    rerender(null);
+    rerender(OTHER);
+    await act(async () => {
+      resolveFirst(0, entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" }));
+    });
+    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(2));
+    expect(
+      vi.mocked(addWorkspaceDataset).mock.calls.map((call) => call[0]),
+    ).toEqual(["/ws", "/ws"]);
+    // The second gate stays parked: the batch promise is dropped at cleanup
+    // (never settled -- nothing to flush), the dialog test's precedent.
+  });
+
+  it("concurrent replaces on two workspaces keep both RUNNING faces alive", async () => {
+    // The keyed-badge map: two replaces may fly at once, and a single slot
+    // would let the second fire erase the first's RUNNING face. Each flight
+    // narrates on its own workspace's read.
+    seed([entry({})]);
+    const resolvers: Array<(e: ListedWorkspaceDataset) => void> = [];
+    vi.mocked(replaceWorkspaceDataset).mockImplementation(
+      () => new Promise<ListedWorkspaceDataset>((resolve) => { resolvers.push(resolve); }),
+    );
+    const { result, rerender } = setup();
+    await waitFor(() => expect(result.current.rows).toHaveLength(1));
+    act(() => {
+      result.current.replace("people", "/src/people_v2.csv");
+    });
+    await waitFor(() => expect(replaceWorkspaceDataset).toHaveBeenCalledTimes(1));
+    rerender(OTHER);
+    act(() => {
+      result.current.replace("orders", "/src/orders_v2.csv");
+    });
+    await waitFor(() => expect(replaceWorkspaceDataset).toHaveBeenCalledTimes(2));
+    // The foreign fire holds its own face...
+    expect(result.current.badge).toEqual({
+      phase: "running",
+      mode: "replace",
+      name: "orders",
+      startedAt: expect.any(Number),
+    });
+    // ...and the origin's survives it.
+    rerender(WS);
+    expect(result.current.badge).toEqual({
+      phase: "running",
+      mode: "replace",
+      name: "people",
+      startedAt: expect.any(Number),
+    });
+    await act(async () => {
+      resolvers.forEach((resolve) => resolve(entry({})));
+    });
+  });
+
+  it("the privacy spinner follows the firing workspace, not the live panel", async () => {
+    seed([entry({})]);
+    vi.mocked(setWorkspaceDatasetPrivacy).mockImplementation(
+      () => new Promise<ListedWorkspaceDataset>(() => {}),
+    );
+    const { result, rerender } = setup();
+    await waitFor(() => expect(result.current.rows).toHaveLength(1));
+    act(() => {
+      result.current.setPrivacy("people", { send_samples: false, type_only_columns: [] });
+    });
+    expect(result.current.privacyBusy).toBe(true);
+    rerender(OTHER);
+    expect(result.current.privacyBusy).toBe(false);
+    rerender(WS);
+    expect(result.current.privacyBusy).toBe(true);
+  });
+
+  it("clears the error banner the moment a retry fires, before the IPC settles", async () => {
+    // Clear-on-fire: a stale refusal must not contradict a retry's visible
+    // outcome.
+    seed([entry({})]);
+    vi.mocked(renameWorkspaceDataset)
+      .mockRejectedValueOnce({ kind: "DisplayTaken", data: "orders" })
+      .mockResolvedValue(entry({ display_name: "Folks" }));
+    const { result } = setup();
+    await waitFor(() => expect(result.current.rows).toHaveLength(1));
+    act(() => {
+      result.current.rename("people", "orders");
+    });
+    await waitFor(() => expect(result.current.error).toBe("显示名 orders 已被占用"));
+    act(() => {
+      result.current.rename("people", "Folks");
+    });
+    expect(result.current.error).toBeNull();
+  });
+
+  it("a replace failing offsite fires the destructive toast -- the banner would render nowhere", async () => {
+    // The live hole (#1519): a replace is a minute-scale copy-in, and a
+    // failure landing after the panel closed had no face -- the banner
+    // renders nowhere while closed, and the reopen edge destroyed the
+    // error state unread. Offsite (closed or rebound), the failure changes
+    // faces: the destructive toast, attributed to the origin workspace;
+    // on site, the banner stays the face.
+    seed([entry({})]);
+    vi.mocked(toast).mockClear();
+    let rejectReplace!: (e: unknown) => void;
+    vi.mocked(replaceWorkspaceDataset).mockImplementation(
+      () => new Promise<ListedWorkspaceDataset>((_r, reject) => { rejectReplace = reject; }),
+    );
+    const { result, rerender } = setup();
+    await waitFor(() => expect(result.current.rows).toHaveLength(1));
+    act(() => {
+      result.current.replace("people", "/src/people_v2.csv");
+    });
+    await waitFor(() => expect(replaceWorkspaceDataset).toHaveBeenCalledTimes(1));
+    // Closed at settle: the toast carries the failure, the badge cleared
+    // with its flight, and the error state stays clean (the reopen edge
+    // has nothing to destroy unread).
+    rerender(null);
+    await act(async () => {
+      rejectReplace({ kind: "Io", data: "disk full" });
+    });
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+    expect(toast).toHaveBeenCalledWith({
+      variant: "destructive",
+      title: "在 Demo 中替换数据集失败",
+      description: "disk full",
+    });
+    expect(result.current.badge).toBeNull();
+    expect(result.current.error).toBeNull();
+    // Rebound at settle: the same routing, the foreign panel stays clean.
+    vi.mocked(replaceWorkspaceDataset).mockClear();
+    let rejectReplace2!: (e: unknown) => void;
+    vi.mocked(replaceWorkspaceDataset).mockImplementation(
+      () => new Promise<ListedWorkspaceDataset>((_r, reject) => { rejectReplace2 = reject; }),
+    );
+    rerender(WS);
+    act(() => {
+      result.current.replace("people", "/src/people_v2.csv");
+    });
+    await waitFor(() => expect(replaceWorkspaceDataset).toHaveBeenCalledTimes(1));
+    rerender(OTHER);
+    await act(async () => {
+      rejectReplace2({ kind: "Io", data: "disk full" });
+    });
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(2));
+    expect(result.current.error).toBeNull();
+    // On site: the banner stays the face, no toast -- one failure, one face.
+    vi.mocked(replaceWorkspaceDataset).mockClear();
+    let rejectReplace3!: (e: unknown) => void;
+    vi.mocked(replaceWorkspaceDataset).mockImplementation(
+      () => new Promise<ListedWorkspaceDataset>((_r, reject) => { rejectReplace3 = reject; }),
+    );
+    rerender(WS);
+    act(() => {
+      result.current.replace("people", "/src/people_v2.csv");
+    });
+    await waitFor(() => expect(replaceWorkspaceDataset).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      rejectReplace3({ kind: "Io", data: "disk full" });
+    });
+    await waitFor(() => expect(result.current.error).toBe("disk full"));
+    expect(toast).toHaveBeenCalledTimes(2);
+  });
 });

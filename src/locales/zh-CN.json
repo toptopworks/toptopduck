@@ -792,6 +792,7 @@
   "workspace.datasets.listHeading": "数据集 · {count}",
   "workspace.datasets.missingBadge": "缺文件",
   "workspace.datasets.replaceDone": "已替换 {name}",
+  "workspace.datasets.replaceFailedToast": "在 {workspace} 中替换数据集失败",
   "workspace.datasets.replacing": "正在替换 {name}…",
   "workspace.datasets.title": "数据集 — {workspace}",
   "workspace.datasets.uploadFailedToast": "上传到 {workspace} 失败",

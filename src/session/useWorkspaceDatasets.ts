@@ -403,7 +403,30 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
       })
       .catch((e: unknown) => {
         setUploadStatuses((prev) => omitKey(prev, ws));
-        setError(describeError(e, intl));
+        // The failure routes by where the panel stands at SETTLE time (the
+        // add batch's #1490 posture, closing the live hole #1519 names): a
+        // replace is a minute-scale copy-in, and a failure landing after
+        // the panel closed had no face -- the banner renders nowhere while
+        // closed, and the reopen edge destroyed the error state unread.
+        // Offsite (closed or rebound) the destructive toast carries it,
+        // attributed to the origin workspace; on site the banner stays the
+        // face. One failure, one face.
+        const live = workspaceRef.current;
+        if (live === null || live.path !== ws) {
+          toast({
+            variant: "destructive",
+            title: intl.formatMessage(
+              {
+                id: "workspace.datasets.replaceFailedToast",
+                defaultMessage: "Dataset replace in {workspace} failed",
+              },
+              { workspace: panel?.label ?? "" },
+            ),
+            description: describeError(e, intl),
+          });
+        } else {
+          setError(describeError(e, intl));
+        }
       })
       .finally(() => bumpRow(ws, -1));
   };
