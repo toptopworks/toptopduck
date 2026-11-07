@@ -80,6 +80,24 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
 
+      # Phantom-update guard (issue #1511, Advisory B from PR #1510): a tag
+      # on a commit that was never version-bumped would ship a manifest whose
+      # version differs from the artifacts' embedded version, and clients
+      # would rediscover and reinstall the same build on every startup. The
+      # tag and the tauri.conf.json at the tagged commit must agree. Runs
+      # before any downloads so a bad dispatch fails fast.
+      - name: Gate the tag against tauri.conf.json
+        run: |
+          set -euo pipefail
+          CONF_VERSION="$(gh api "repos/${GH_REPO}/contents/src-tauri/tauri.conf.json?ref=${COMMIT_SHA}" --jq '.content' | tr -d '\n' | base64 -d | jq -r '.version')"
+          if [ "$CONF_VERSION" != "${RELEASE_TAG#v}" ]; then
+            echo "::error::Tag ${RELEASE_TAG} does not match tauri.conf.json version ${CONF_VERSION} at ${COMMIT_SHA}; bump the version before tagging." >&2
+            exit 1
+          fi
+          echo "tag/version match: ${RELEASE_TAG} == v${CONF_VERSION}"
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+
       # Both artifact families land in one flat assets dir: the installers
       # (deb/rpm/AppImage carry their .sig in the updater family) and the
       # signed updater faces (nsis exe + msi + their .sigs, the universal
