@@ -303,10 +303,21 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
           )}
           {queued && !loading && (
             // The queued posture's feedback slot (issue #1500), seated where
-            // the wait-feedback slot sits: the held question waits behind an
-            // in-flight ingest batch, and the copy names the exit (auto-send
-            // on full load) so the disabled bar reads as intent, not a
-            // freeze. role="status" + aria-live like the phase slot.
+            // the wait-feedback slot sits: the held question waits behind
+            // the queue window -- an ingest batch or a source replace
+            // flight (#1512) -- and the copy describes the wait so the
+            // disabled bar reads as intent, not a freeze. role="status" +
+            // aria-live like the phase slot.
+            //
+            // One neutral tier for every window kind is the #1516 ruling,
+            // not an oversight: the slot's exit contract is kind-agnostic
+            // (auto-send on success, draft seed-back on failure); naming
+            // the running task belongs to the progress surfaces (the rail
+            // live region), not the bar; windows can overlap (a batch
+            // alongside a replace flight) where a per-kind tier could not
+            // say which is running; and per-kind copy would need a kind
+            // mirror lifecycle-paired to the window host -- drift-prone
+            // for zero copy gain.
             <span
               className="flex min-w-0 items-baseline text-[0.82rem] text-muted-foreground @max-[340px]:hidden"
               role="status"
@@ -315,7 +326,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
               <span className="truncate">
                 {intl.formatMessage({
                   id: "questionBar.queued",
-                  defaultMessage: "Queued until the import finishes…",
+                  defaultMessage: "Queued until the current task finishes…",
                 })}
               </span>
             </span>

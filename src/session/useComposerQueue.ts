@@ -62,7 +62,9 @@ export interface ComposerQueue {
   /** True while the held question waits behind the in-flight window (an
    *  ingest batch or a replace flight): the bar disables the input and shows
    *  the queued copy. A NEW axis -- never folds into the turn-domain
-   *  `loading` (ADR-0021). */
+   *  `loading` (ADR-0021). The window kind stays erased here (a bare verdict
+   *  Promise) and the queued copy stays one neutral tier -- the #1516
+   *  ruling; see the bar's queued-slot comment for the full grounds. */
   queued: boolean;
   /** The tracked handleIngestMany: pass-through verdict, arms the settle. */
   ingestMany: (paths: string[]) => Promise<boolean>;
