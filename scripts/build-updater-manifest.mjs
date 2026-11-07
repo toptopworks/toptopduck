@@ -46,7 +46,7 @@ if (!assetsDir || !tag || !version || !githubBase || !notesFile || !pubDate) {
 // payload matching the locally installed package type; the one universal
 // macOS artifact serves both darwin keys.
 const FILE_RULES = [
-  { suffix: '_universal.app.tar.gz', keys: ['darwin-aarch64', 'darwin-x86_64'] },
+  { suffix: '.app.tar.gz', keys: ['darwin-aarch64', 'darwin-x86_64'] },
   { suffix: '-setup.exe', keys: ['windows-x86_64', 'windows-x86_64-nsis'] },
   { suffix: '.msi', keys: ['windows-x86_64-msi'] },
   { suffix: '.AppImage', keys: ['linux-x86_64'] },
