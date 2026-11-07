@@ -37,12 +37,11 @@ import { describeError } from "../lib/error-presentation";
 import { WorkingSetList } from "../components/dataset/WorkingSetList";
 import type { DatasetDescriptor } from "../types/dataset";
 import { useWorkspaceDatasets } from "./useWorkspaceDatasets";
+import type { WorkspaceTarget } from "./useWorkspaceDatasets";
 import type { ListedWorkspaceDataset } from "../types/workspace-datasets";
 
-// The panel's target workspace: the listing projection's canonical path +
-// label (the dialog is mounted per open, never re-targeted while open).
 interface WorkspaceDatasetsDialogProps {
-  workspace: { path: string; label: string } | null;
+  workspace: WorkspaceTarget | null;
   onOpenChange: (open: boolean) => void;
 }
 

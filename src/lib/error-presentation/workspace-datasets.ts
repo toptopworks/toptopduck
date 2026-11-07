@@ -1,8 +1,9 @@
 // One workspace-dataset refusal's agent-free rendering (ADR-0141): the
 // catalog owns the wording, the technical detail rides the same string.
-// Moved verbatim from WorkspaceDatasetsDialog (#1519) -- the panel is its
-// only consumer today, but the catalog is presentation knowledge, not
-// component state, so it lives with the other error presenters.
+// Moved verbatim from WorkspaceDatasetsDialog (#1519) -- the dialog and its
+// seam are its only consumers today, but the catalog is presentation
+// knowledge, not component state, so it lives with the other error
+// presenters.
 
 import type { IntlShape } from "react-intl";
 

@@ -34,6 +34,7 @@ vi.mock("../../api", async (importOriginal) => {
 import {
   addWorkspaceDataset,
   listWorkspaceDatasets,
+  removeWorkspaceDataset,
   renameWorkspaceDataset,
   replaceWorkspaceDataset,
   setWorkspaceDatasetPrivacy,
@@ -177,6 +178,8 @@ describe("useWorkspaceDatasets contract", () => {
     });
     expect(result.current.badge).toBeNull();
     expect(result.current.error).toContain("无法解析该数据文件");
+    // The engine string rides along for triage -- #1483's second half.
+    expect(result.current.error).toContain("Error when sniffing");
     // A trailing failure after a landed file: the done face names the
     // LANDED file (the banner owns the failure face).
     vi.mocked(open).mockResolvedValue(["/src/good.csv", "/src/bad.csv"]);
@@ -270,6 +273,13 @@ describe("useWorkspaceDatasets contract", () => {
       result.current.rename("people", "orders");
     });
     await waitFor(() => expect(result.current.error).toBe("显示名 orders 已被占用"));
+    // The same plain-banner posture for remove: a row failure takes no
+    // router (the scope cut the module header records).
+    vi.mocked(removeWorkspaceDataset).mockRejectedValue({ kind: "Io", data: "disk gone" });
+    act(() => {
+      result.current.remove("people");
+    });
+    await waitFor(() => expect(result.current.error).toBe("disk gone"));
   });
 
   it("the row lock counts per workspace: a foreign fire neither locks nor unlocks the home rows", async () => {
@@ -421,6 +431,37 @@ describe("useWorkspaceDatasets contract", () => {
     expect(result.current.missingNames).toEqual(new Set(["orders"]));
   });
 
+  it("remove runs end to end: the invalidation targets the minted workspace, the refetch drops the row, and the deleted pick falls back", async () => {
+    const people = entry({});
+    const orders = entry({ reference_name: "orders", display_name: "orders", source_path: "/src/orders.csv" });
+    // Two listing generations: the mount load sees both rows, the
+    // post-invalidation refetch sees the picked row gone (staleTime
+    // Infinity makes the mutation's invalidation the ONLY refetch trigger,
+    // so the second call IS the remove's refetch -- dropping it would
+    // leave the row rendered forever).
+    vi.mocked(listWorkspaceDatasets)
+      .mockResolvedValueOnce([people, orders])
+      .mockResolvedValueOnce([people]);
+    vi.mocked(removeWorkspaceDataset).mockResolvedValue(undefined);
+    const { result, invalidateSpy } = setup();
+    await waitFor(() => expect(result.current.rows).toHaveLength(2));
+    act(() => {
+      result.current.select("orders");
+    });
+    expect(result.current.resolvedName).toBe("orders");
+    act(() => {
+      result.current.remove("orders");
+    });
+    await waitFor(() => expect(result.current.rows).toHaveLength(1));
+    // The deleted pick falls back to the remaining first row -- the
+    // existence predicate in resolvedName (a bare selectedName read would
+    // point at no row and blank the pane).
+    expect(result.current.resolvedName).toBe("people");
+    expect(result.current.shown?.reference_name).toBe("people");
+    // The invalidation targeted the minted workspace's listing key.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["workspace-datasets", "/ws"] });
+  });
+
   it("picks the freshly added dataset on settle, only while the panel still shows the batch's workspace", async () => {
     // The settle-time pick gate (#1492): the last landed file becomes the
     // detail pick -- but a rebind would park the pick on another workspace's
@@ -428,7 +469,7 @@ describe("useWorkspaceDatasets contract", () => {
     seed([]);
     vi.mocked(open).mockResolvedValue("/src/new.csv");
     const resolveAdd = gateAdd();
-    const { result, rerender } = setup();
+    const { result, rerender, invalidateSpy } = setup();
     launch(result);
     await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(1));
     rerender(OTHER);
@@ -436,8 +477,10 @@ describe("useWorkspaceDatasets contract", () => {
       resolveAdd(0, entry({ reference_name: "new", display_name: "new", source_path: "/src/new.csv" }));
     });
     // Settled while the panel showed /other: no pick write on the foreign
-    // panel.
+    // panel, and the invalidation still targeted the MINTED workspace's
+    // listing (the add leg of the replace pin above).
     expect(result.current.selectedName).toBeNull();
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["workspace-datasets", "/ws"] });
   });
 
   it("a mid-batch rebind never retargets the files that have not fired yet", async () => {

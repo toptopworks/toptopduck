@@ -1,7 +1,9 @@
 // The workspace datasets seam (#1519, ADR-0123's mirror on the shared face):
-// ONE owner for the mutation family + the batch feedback machine that four
-// hand-written copies previously dispersed (the dialog's pickAndAdd loop and
-// onReplace, SessionPane.trackReplace, useIngestFlow.runBatchSegment). The
+// ONE owner for the mutation family + the batch feedback machine the PANEL
+// previously carried (its pickAndAdd loop and onReplace), plus the one
+// exported BatchProgress union the two private-face copies (SessionPane's
+// trackReplace, useIngestFlow's runBatchSegment) now share as a content
+// model while keeping their machines. The
 // drift bugs that motivated it (#1488/#1490/#1491/#1492) all landed on the
 // shared face; the private face stopped its bug flow once useWorkingSet took
 // ownership (ADR-0123), and this module applies the same shape here: the
@@ -31,7 +33,11 @@
 //   routes by where the panel stands at SETTLE time (#1490) -- on-site the
 //   banner owns the face, offsite (closed or rebound) a destructive toast
 //   carries it attributed to the origin workspace, so the reopen edge has
-//   nothing to destroy unread.
+//   nothing to destroy unread. The settle-time routing is the two batch
+//   faces' contract (add and replace); the row actions keep the plain
+//   banner write -- routing a row failure across panels is deliberately
+//   out of scope (second-scale round trips; the cut develop's dialog
+//   carried).
 // - The pending counts are module-internal facts, not cache archaeology
 //   (#1492): each flight bumps a per-workspace counter at fire time and
 //   decrements in its own finally, so a superseding fire on a rebind can
@@ -54,7 +60,7 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { open as openPicker } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 
 import {
@@ -106,8 +112,9 @@ export type BatchProgress =
   | { phase: "running"; mode: "replace"; name: string; startedAt: number }
   // The settled face: the operation's label, the last landed file's
   // basename, and the FROZEN total duration -- parks until dismissed, a new
-  // upload begins, or the reopen edge clears it. A failed upload never
-  // reaches `done` -- the error face owns that route.
+  // upload begins, or the reopen edge clears it. A whole-failed batch parks
+  // no badge at all; a trailing failure after a landed file still parks this
+  // face naming the LANDED file (the failure rides its own face).
   | { phase: "done"; mode: "add" | "replace"; name: string; seconds: number }
   // The working-set rail's replace line (useWorkingSet / SessionPane): the
   // flight's swap target (#1512).
@@ -133,8 +140,11 @@ export interface UseWorkspaceDatasets {
   /** The rows whose store file is gone (ADR-0141 D8: flagged, not hidden). */
   missingNames: ReadonlySet<string>;
   // Panel-local state.
-  /** The on-site error banner's message; the module routes failures into
-   *  it only while the origin panel stands. */
+  /** The on-site error banner's message; the batch faces route their
+   *  failures into it only while the origin panel stands (offsite they ride
+   *  the destructive toast), while the row actions write it unconditionally
+   *  -- a row failure's cross-panel routing is out of scope (header,
+   *  bullet 3). */
   error: string | null;
   setError: (message: string | null) => void;
   /** The detail pick; re-resolves via `resolvedName` when the row leaves. */
@@ -378,11 +388,16 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
       }));
     } else {
       // A whole-failed batch parks nothing: the running badge must not
-      // outlive its batch, and the error face owns the failure face.
+      // outlive its batch -- each failure already rode its face through the
+      // per-file router above (banner on-site, toast off).
       setUploadStatuses((prev) => omitKey(prev, path));
     }
   };
 
+  // The row actions' failure face is the plain banner write, no router: a
+  // row round trip is second-scale and the panel stands in practice, and
+  // routing a row failure across panels is #1490's add-batch face,
+  // deliberately not this seam's scope (the cut the dialog carried).
   const rename = (name: string, newDisplay: string) => {
     setError(null);
     bumpRow(path, 1);
@@ -396,9 +411,10 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
     setError(null);
     // The same badge as the add batch (issue #1485): a replace is one long
     // IPC, the running badge names the row until it settles; success flips
-    // to the done badge (the frozen duration), a failure clears it -- the
-    // error face owns the failure face. The row flight rides the same
-    // counter as the rest of the family (the lock is symmetric).
+    // to the done badge (the frozen duration), a failure clears it and the
+    // router below owns the failure (banner on-site, toast off). The row
+    // flight rides the same counter as the rest of the family (the lock is
+    // symmetric).
     const ws = path;
     const startedAt = Date.now();
     setUploadStatuses((prev) => ({
@@ -460,11 +476,11 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
       });
   };
 
-  const dismissBadge = useCallback(() => {
+  const dismissBadge = () => {
     setUploadStatuses((prev) => omitKey(prev, path));
-  }, [path]);
+  };
 
-  const select = useCallback((name: string) => setSelectedName(name), []);
+  const select = (name: string) => setSelectedName(name);
 
   const rows = listing.data ?? [];
   const missingNames = new Set(rows.filter((d) => d.file_missing).map((d) => d.reference_name));
