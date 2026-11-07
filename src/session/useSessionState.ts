@@ -8,7 +8,6 @@ import { useIngestFlow, type IngestProgress } from "./useIngestFlow";
 import {
   invalidateSessionData,
   useWorkingSetData,
-  type ReplaceProgress,
   type UseWorkingSetSurfacesBase,
 } from "./useWorkingSet";
 import { useTurnFlow, type LiveTurn } from "./useTurnFlow";
@@ -128,14 +127,6 @@ export interface UseSessionState {
    *  rail's transient "Loading <file> (i of n)" line with the batch clock.
    *  Client UI state only; set/cleared by useIngestFlow. */
   ingestProgress: IngestProgress | null;
-  /** The in-flight replace's progress block (#1512), or null -- the rail's
-   *  transient "Replacing <ref> with <file>" line with the flight clock.
-   *  Client UI state only; set by SessionPane's trackReplace composition,
-   *  cleared on the flight's settle. */
-  replaceProgress: ReplaceProgress | null;
-  /** The replace progress sink (#1512): SessionPane's trackReplace sets it
-   *  at the flight's entry and clears it at the settle. */
-  setReplaceProgress: (progress: ReplaceProgress | null) => void;
   // Actions.
   // Mirrors UseTurnFlow (async -> Promise<void>, honest + awaitable); the
   // QuestionBar consumer accepts it via void-return covariance.
@@ -289,11 +280,6 @@ export function useSessionState(
   //   disables).
   const [turnLoading, setTurnLoading] = useState(false);
   const [mutationLoading, setMutationLoading] = useState(false);
-  // The rail's in-flight replace line (#1512): set by SessionPane's
-  // trackReplace at the flight's entry (the stamp is minted HERE, one clock
-  // per flight), cleared at the settle. Pure presentation -- the busy union
-  // above stays the only gate.
-  const [replaceProgress, setReplaceProgress] = useState<ReplaceProgress | null>(null);
   const loading = turnLoading || mutationLoading;
   const [error, setError] = useState<AppError | null>(null);
   const [persistError, setPersistError] = useState<SaveError | null>(null);
@@ -543,8 +529,6 @@ export function useSessionState(
     guidanceError,
     haltedRemaining,
     ingestProgress,
-    replaceProgress,
-    setReplaceProgress,
     handleAsk: handleAskWithAutoName,
     handleCancel,
     hasLiveTurn,

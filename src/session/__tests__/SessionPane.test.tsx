@@ -632,6 +632,11 @@ describe("SessionPane composer queue behind an in-flight replace (#1512)", () =>
     offset: 0,
     limit: 20,
   };
+  // The rail's empty-thread hint text: the tests below pin that the replace
+  // line's conjunct hides it (the #297 contradiction, replace half of the
+  // ingest twin's pin above). Same string as the ingest describe.
+  const RAIL_EMPTY =
+    "No conversations yet. Ask a question below or load data to begin.";
 
   beforeEach(() => {
     stubSessionApis();
@@ -655,6 +660,10 @@ describe("SessionPane composer queue behind an in-flight replace (#1512)", () =>
     vi.mocked(open).mockResolvedValue("/x/new.csv");
     const view = renderPane();
 
+    // Positive control for the empty-rail assert below: the thread starts
+    // empty, so the hint IS rendering before the replace arms.
+    expect(await screen.findByText(RAIL_EMPTY)).toBeInTheDocument();
+
     // Arm through the real row path: switch to the working-set tab and fire
     // the row's replace action through the dialog stub.
     fireEvent.click(screen.getByRole("tab", { name: "Working set" }));
@@ -669,6 +678,10 @@ describe("SessionPane composer queue behind an in-flight replace (#1512)", () =>
     expect(screen.getByRole("status")).toHaveTextContent(
       "Replacing people with new.csv…",
     );
+    // The replace line's conjunct keeps the empty-thread hint hidden for its
+    // whole flight (the #297 contradiction, pinned for the other long IPC at
+    // the ingest describe above).
+    expect(screen.queryByText(RAIL_EMPTY)).not.toBeInTheDocument();
 
     await act(async () => {
       void view.getComposerFields()!.handleAsk(heldQuestion);
@@ -729,6 +742,9 @@ describe("SessionPane composer queue behind an in-flight replace (#1512)", () =>
     await waitFor(() =>
       expect(screen.queryByText("Replacing people with new.csv…")).toBeNull(),
     );
+    // And with the line cleared and the thread still empty, the hint
+    // legitimately returns (the settle half of the empty-rail gate).
+    expect(await screen.findByText(RAIL_EMPTY)).toBeInTheDocument();
   });
 });
 

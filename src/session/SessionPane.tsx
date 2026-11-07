@@ -25,7 +25,11 @@ import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { WorkspaceWorkingSet } from "../components/dataset/WorkspaceWorkingSet";
-import { type ReplaceFlightInfo, type UseWorkingSetSurfaces } from "./useWorkingSet";
+import {
+  type ReplaceFlightInfo,
+  type ReplaceProgress,
+  type UseWorkingSetSurfaces,
+} from "./useWorkingSet";
 import { cn } from "@/lib/utils";
 import type { ThreadEntry } from "../types/thread";
 import type { WorkspaceContent } from "./workspace";
@@ -195,10 +199,12 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     onFirstTurnSettled,
   );
   // Issue #1500: the composer question's queue behind an in-flight ingest
-  // batch. The tracked ingestMany is the ONE arming point -- both the
-  // shell-reported handleIngestFiles (the manual "+" section) and the
-  // pendingPayload consumption below route through it, so a cold-start
-  // batch gates the bar exactly like a manual one. The pendingPayload
+  // batch. The tracked ingestMany is the ingest arming point -- one of two
+  // (#1512): the manual "+" section (the shell-reported handleIngestFiles),
+  // the working-set tab's add entry (issue #792), and the pendingPayload
+  // consumption below all route through it, so a cold-start batch gates the
+  // bar exactly like a manual one; the replace flight arms the same window
+  // separately, through trackWindow below. The pendingPayload
   // chain's held question occupies the SAME slot (hold below), so the
   // session can never carry two pending questions and the bar honestly
   // shows the queued posture during the chain window. The wrapped
@@ -217,14 +223,18 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   });
   // The replace window's arming + the rail's progress line (#1512): the
   // working-set seam hands the verdict flight here at entry; the pane mints
-  // the progress stamp (ONE clock per flight -- the state owner), arms the
-  // queue window (the replace holds the backend session lock, so a question
-  // submitted mid-replace must queue, not silently block on it), and clears
-  // the line at the settle. The flight ref is the identity gate: a stale
-  // settle must not clear a newer flight's line (the queue's own gate
-  // already ignores stale verdicts by the same rule).
+  // the progress stamp (ONE clock per flight, minted at this single call
+  // site), arms the queue window (the replace holds the backend session
+  // lock, so a question submitted mid-replace must queue, not silently
+  // block on it), and clears the line at the settle. The flight ref is the
+  // identity gate: a stale settle must not clear a newer flight's line (the
+  // queue's own gate already ignores stale verdicts by the same rule).
   const progressFlightRef = useRef<Promise<boolean> | null>(null);
-  const { setReplaceProgress } = s;
+  // The line's content state, pane-local beside its identity gate: every
+  // writer and reader of this value is this pane (the Thread prop and the
+  // empty-rail gate below), so -- unlike ingestProgress, which a state hook
+  // produces -- it never crosses a hook interface.
+  const [replaceProgress, setReplaceProgress] = useState<ReplaceProgress | null>(null);
   const trackReplace = useCallback(
     (flight: Promise<boolean>, info: ReplaceFlightInfo) => {
       progressFlightRef.current = flight;
@@ -618,7 +628,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   liveTurn={s.liveTurn}
                   waitStartedAt={s.waitStartedAt}
                   ingestProgress={s.ingestProgress}
-                  replaceProgress={s.replaceProgress}
+                  replaceProgress={replaceProgress}
                   onRespondApproval={handleRespondApproval}
                   onLoadApprovalAttachments={handleLoadApprovalAttachments}
                   onRetryTurn={handleAskAgain}
@@ -628,7 +638,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               {s.thread.length === 0 &&
                 s.liveTurn === null &&
                 s.ingestProgress === null &&
-                s.replaceProgress === null && (
+                replaceProgress === null && (
               // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
               // padding) + the .muted color rule retired onto utility; the class
               // hooks had no selector / test dependents and are dropped. Gated on
@@ -637,7 +647,9 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               // hint would contradict it. Gated on the ingest block too (#1485's
               // pane-level follow-up): an in-flight import renders its progress
               // card in the same rail -- "load data to begin" under a running
-              // load is the same contradiction.
+              // load is the same contradiction. And gated on the replace block
+              // (#1512): an in-flight replace renders its progress line in the
+              // same rail -- the identical contradiction for the other long IPC.
                 <p className="text-[0.85rem] p-2 text-muted-foreground">
                   <FormattedMessage
                     id="session.rail.empty"

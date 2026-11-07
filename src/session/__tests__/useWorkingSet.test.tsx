@@ -376,6 +376,20 @@ describe("useWorkingSet", () => {
       await expect(calls[0][0]).resolves.toBe(true);
     });
 
+    it("arms the queue window in the handler's entry tick (#1512)", () => {
+      // The same-tick arming is the load-bearing invariant (a submit racing
+      // the click's tick must find the gate closed): a never-settling IPC
+      // plus a SYNCHRONOUS act pins the report before any microtask runs --
+      // an awaited act cannot tell a truthful entry report from one that
+      // slipped past the first await.
+      vi.mocked(replaceSource).mockImplementationOnce(() => new Promise(() => {}));
+      const view = setup();
+      act(() => {
+        view.result.current.handleReplace("people", "/x/new.csv");
+      });
+      expect(vi.mocked(view.surfaces.trackReplace)).toHaveBeenCalledTimes(1);
+    });
+
     it("resolves the flight false on every failure route (#1512)", async () => {
       // Error outcome.
       vi.mocked(replaceSource).mockResolvedValueOnce({

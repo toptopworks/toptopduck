@@ -196,10 +196,10 @@ export interface ReplaceFlightInfo {
 }
 
 /** The rail's in-flight replace line's content model (#1512): the flight's
- *  swap target plus its start stamp (ONE clock, minted by the state owner
- *  at report time). Rendered by the rail's live region beside the ingest
- *  block; cleared on every settle. Client UI state only -- never enters any
- *  cache. */
+ *  swap target plus its start stamp (ONE clock, minted at the single report
+ *  site -- SessionPane's trackReplace). Rendered by the rail's live region
+ *  beside the ingest block; cleared on every settle. Client UI state only --
+ *  never enters any cache. */
 export interface ReplaceProgress extends ReplaceFlightInfo {
   startedAt: number;
 }

@@ -2943,4 +2943,23 @@ describe("Thread replace progress block (issue #1512)", () => {
     );
     expect(screen.getByRole("status")).toBeInTheDocument();
   });
+
+  it("wires the flight clock into the elapsed suffix (the minute tier shows)", () => {
+    // startedAt 65s back: the initial render already derives 65s from the
+    // stamp, so the tiered face shows the minute tier without waiting on
+    // the 1s ticker -- the clock's wiring, not just the message text.
+    renderThread(
+      <Thread
+        entries={[]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        replaceProgress={{
+          referenceName: "orders",
+          path: "/x/新订单表.csv",
+          startedAt: Date.now() - 65_000,
+        }}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("1分05秒");
+  });
 });
