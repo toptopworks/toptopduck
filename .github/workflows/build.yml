@@ -50,7 +50,11 @@ jobs:
             libsoup-3.0-dev \
             libdbus-1-dev
 
+      # The mac leg builds universal (ADR-0143), which needs BOTH darwin
+      # targets; dtolnay's action installs only the host (aarch64) by default.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       # Same cache setup as the CI rust job (keys are per job + OS, so legs warm
       # their own slice) — duckdb "bundled" compiles DuckDB from C++ source
