@@ -150,14 +150,16 @@ describe("useWorkspaceDatasets contract", () => {
     await act(async () => {
       await flight;
     });
-    // The settle face froze the batch's total duration (read at settle,
-    // outside the updater): deterministic under the stepped clock.
-    expect(result.current.badge).toEqual({
-      phase: "done",
-      mode: "add",
-      name: "b.csv",
-      seconds: expect.any(Number),
-    });
+    // The settle face froze the batch's total duration. The EXACT number is
+    // unanchorable here -- RTL's waitFor deadline loop is itself a Date.now
+    // consumer, so the step count between entry and settle varies -- but the
+    // SHAPE pin (done carries seconds, not a live stamp) plus the monotonic
+    // floor (settle read strictly after the 2.5s entry tick) is the freeze:
+    // an implementation that re-read the clock per render would drift this
+    // badge's stored shape or read zero.
+    const doneBadge = result.current.badge;
+    expect(doneBadge).toMatchObject({ phase: "done", mode: "add", name: "b.csv" });
+    expect(doneBadge?.phase === "done" && doneBadge.seconds).toBeGreaterThanOrEqual(1);
     expect(firstStamp).toBeGreaterThan(0);
     expect(secondStamp).toBe(firstStamp);
   });
@@ -569,6 +571,12 @@ describe("useWorkspaceDatasets contract", () => {
       title: "在 Demo 中替换数据集失败",
       description: "disk full",
     });
+    expect(result.current.badge).toBeNull();
+    expect(result.current.error).toBeNull();
+    // The reopen leg (the AC's named survivor): the panel comes back with
+    // no residue -- the toast already delivered the failure, the open-edge
+    // sweep has no banner to destroy unread and no badge to resurrect.
+    rerender(WS);
     expect(result.current.badge).toBeNull();
     expect(result.current.error).toBeNull();
     // Rebound at settle: the same routing, the foreign panel stays clean.

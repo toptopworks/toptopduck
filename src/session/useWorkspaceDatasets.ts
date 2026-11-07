@@ -8,7 +8,11 @@
 // mutations, the batch clock, the flight identity gate, the settle machine,
 // the failure routing, the upload badge map, and the row pending counts all
 // live inside this module; the panel (WorkspaceDatasetsDialog) is a consumer
-// shell -- actions, a read snapshot, rendering.
+// shell -- actions, a read snapshot, rendering. One deliberate deviation from
+// ADR-0123 Decision 2: the detail pick lives here too, not in the consumer --
+// that ruling kept a TAB-level seam pick with its tab (the pick survives the
+// tab remounts there); the panel is a per-open modal whose pick has no reader
+// outside it, so the consumer-shell posture wins here.
 //
 // The invariants the copies previously synced by long comments are now
 // structural:
@@ -61,8 +65,8 @@ import {
   replaceWorkspaceDataset,
   setWorkspaceDatasetPrivacy,
 } from "../api";
-import { describeError } from "../lib/error-presentation";
 import { fileBasename } from "../lib/basename";
+import { describeError } from "../lib/error-presentation";
 import { toast } from "../components/ui/use-toast";
 import { workspaceDatasetKeys } from "./queryKeys";
 import type { DatasetPrivacy } from "../types/dataset";
@@ -235,6 +239,32 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
     void queryClient.invalidateQueries({ queryKey: workspaceDatasetKeys.listing(ws) });
   };
 
+  // The two batch faces' shared failure router (the add loop and replace,
+  // #1490/#1519): the failure routes by where the panel stands at SETTLE
+  // time -- on the origin workspace the banner stays the face; off it
+  // (closed = null, or rebound to another workspace) the banner cannot
+  // carry the failure -- closed, it renders nowhere and the reopen edge
+  // destroys it unread; rebound, it would narrate the origin's failure on
+  // another workspace's panel. The destructive toast carries the message,
+  // attributed to the origin workspace by the label frozen at fire time.
+  // One failure, one face: the toast branch never touches the error state.
+  // The title arrives as a RENDER CLOSURE, not a descriptor: the i18n
+  // catalog guard recovers ids from `formatMessage` LITERAL calls, so each
+  // call site keeps its literal (describeError's precedent) and only the
+  // routing decision is shared.
+  const routeOffsiteFailure = (e: unknown, origin: string, toastTitle: () => string) => {
+    const live = workspaceRef.current;
+    if (live === null || live.path !== origin) {
+      toast({
+        variant: "destructive",
+        title: toastTitle(),
+        description: describeError(e, intl),
+      });
+    } else {
+      setError(describeError(e, intl));
+    }
+  };
+
   // The per-workspace flight counters: bumped at fire time, decremented in
   // the flight's own finally. Keyed by the workspace the flight was minted
   // for, so the lock reads only the flights fired on THIS panel's workspace
@@ -320,31 +350,15 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
           lastLanded = fileBasename(file);
         })
         .catch((e: unknown) => {
-          // The failure routes by where the panel stands at SETTLE time
-          // (#1490): on the origin workspace the banner stays the face;
-          // off it (closed = null, or rebound to another workspace) the
-          // banner cannot carry the failure -- closed, it renders nowhere
-          // and the reopen edge destroys it unread; rebound, it would
-          // narrate the origin's failure on another workspace's panel. The
-          // destructive toast carries the message, attributed to the origin
-          // workspace by the label frozen at fire time. One failure, one
-          // face: the toast branch never touches the error state.
-          const live = workspaceRef.current;
-          if (live === null || live.path !== path) {
-            toast({
-              variant: "destructive",
-              title: intl.formatMessage(
-                {
-                  id: "workspace.datasets.uploadFailedToast",
-                  defaultMessage: "Upload to {workspace} failed",
-                },
-                { workspace: panel?.label ?? "" },
-              ),
-              description: describeError(e, intl),
-            });
-          } else {
-            setError(describeError(e, intl));
-          }
+          routeOffsiteFailure(e, path, () =>
+            intl.formatMessage(
+              {
+                id: "workspace.datasets.uploadFailedToast",
+                defaultMessage: "Upload to {workspace} failed",
+              },
+              { workspace: panel?.label ?? "" },
+            ),
+          );
         })
         .finally(() => bumpRow(path, -1));
     }
@@ -403,30 +417,20 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
       })
       .catch((e: unknown) => {
         setUploadStatuses((prev) => omitKey(prev, ws));
-        // The failure routes by where the panel stands at SETTLE time (the
-        // add batch's #1490 posture, closing the live hole #1519 names): a
-        // replace is a minute-scale copy-in, and a failure landing after
-        // the panel closed had no face -- the banner renders nowhere while
-        // closed, and the reopen edge destroyed the error state unread.
-        // Offsite (closed or rebound) the destructive toast carries it,
-        // attributed to the origin workspace; on site the banner stays the
-        // face. One failure, one face.
-        const live = workspaceRef.current;
-        if (live === null || live.path !== ws) {
-          toast({
-            variant: "destructive",
-            title: intl.formatMessage(
-              {
-                id: "workspace.datasets.replaceFailedToast",
-                defaultMessage: "Dataset replace in {workspace} failed",
-              },
-              { workspace: panel?.label ?? "" },
-            ),
-            description: describeError(e, intl),
-          });
-        } else {
-          setError(describeError(e, intl));
-        }
+        // The shared router (the add batch's #1490 posture), closing the
+        // live hole #1519 names: a replace is a minute-scale copy-in, and a
+        // failure landing after the panel closed had no face -- the banner
+        // renders nowhere while closed, and the reopen edge destroyed the
+        // error state unread.
+        routeOffsiteFailure(e, ws, () =>
+          intl.formatMessage(
+            {
+              id: "workspace.datasets.replaceFailedToast",
+              defaultMessage: "Dataset replace in {workspace} failed",
+            },
+            { workspace: panel?.label ?? "" },
+          ),
+        );
       })
       .finally(() => bumpRow(ws, -1));
   };
