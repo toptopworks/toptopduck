@@ -150,7 +150,7 @@ describe("QuestionBar queued posture (#1500)", () => {
     // false, so the submit button still renders (not the stop button), but
     // the input is disabled and the status slot carries the queued copy.
     expect(screen.getByLabelText("提问")).toBeDisabled();
-    expect(screen.getByRole("status")).toHaveTextContent("已排队，导入完成后自动发送…");
+    expect(screen.getByRole("status")).toHaveTextContent("已排队，当前任务完成后自动发送…");
     expect(screen.queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "提问" })).toBeDisabled();
     expect(onSubmit).not.toHaveBeenCalled();

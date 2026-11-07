@@ -222,7 +222,7 @@
   "questionBar.phase.running": "Running…",
   "questionBar.phase.thinkingRetry": "Thinking (attempt {attempt})…",
   "questionBar.placeholder": "Ask in natural language…",
-  "questionBar.queued": "Queued until the import finishes…",
+  "questionBar.queued": "Queued until the current task finishes…",
   "result.action.confirmLarge.body": "This result has {rowCount, number} rows. Pulling all of them can take a while, and other actions on this session queue until it finishes. Continue?",
   "result.action.confirmLarge.title": "Large result",
   "result.action.copyAll": "Copy all",
