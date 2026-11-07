@@ -12,3 +12,4 @@ export { errorDetail, fmtError } from "./format";
 export { classifyFullPullRejection } from "./guards";
 export { formatTurnFailure, turnFailureDetail } from "./turn-failure";
 export { flowFailedMessage, toAppError } from "./app-error";
+export { describeError } from "./workspace-datasets";
