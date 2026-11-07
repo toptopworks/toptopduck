@@ -174,6 +174,34 @@ export interface UseWorkingSetSurfaces {
   setError: (error: AppError | null) => void;
   setMutationLoading: (loading: boolean) => void;
   pollPersistError: () => Promise<void>;
+  /** Arm the replace flight with the queue (#1512): the verdict Promise
+   *  (Loaded -> true, every failure route -> false) plus the swap target
+   *  the rail's progress line names. Called synchronously at the handler's
+   *  entry, before the IPC's first microtask, so the queue gate closes in
+   *  the same tick as the click. */
+  trackReplace: (flight: Promise<boolean>, info: ReplaceFlightInfo) => void;
+}
+
+/** The session-state slice of the surfaces (#1512): the sinks
+ *  useSessionState owns directly. SessionPane composes `trackReplace` on
+ *  top (the composer queue lives there, not in the state hook), so the
+ *  state hook's `mutationSurfaces` return carries this base only. */
+export type UseWorkingSetSurfacesBase = Omit<UseWorkingSetSurfaces, "trackReplace">;
+
+/** The replace flight's swap target (#1512): the reference being taken
+ *  over and the incoming file -- the progress line's two names. */
+export interface ReplaceFlightInfo {
+  referenceName: string;
+  path: string;
+}
+
+/** The rail's in-flight replace line's content model (#1512): the flight's
+ *  swap target plus its start stamp (ONE clock, minted by the state owner
+ *  at report time). Rendered by the rail's live region beside the ingest
+ *  block; cleared on every settle. Client UI state only -- never enters any
+ *  cache. */
+export interface ReplaceProgress extends ReplaceFlightInfo {
+  startedAt: number;
 }
 
 export interface UseWorkingSet {
@@ -216,7 +244,7 @@ export function useWorkingSet(
   // sinks are dispatch- or useCallback-stable inside useSessionState, while
   // the surfaces object itself is rebuilt per render -- depending on the
   // methods keeps the handler identities below stable across renders.
-  const { setError, setMutationLoading, pollPersistError } = surfaces;
+  const { setError, setMutationLoading, pollPersistError, trackReplace } = surfaces;
 
   const { datasets, activeName } = useWorkingSetData(sessionId);
 
@@ -298,32 +326,53 @@ export function useWorkingSet(
     async (referenceName: string, path: string) => {
       setMutationLoading(true);
       setError(null);
-      try {
-        const result = await replaceSource(sessionId, referenceName, path);
-        if (result.kind === "Loaded") {
-          await refreshServerState("replace");
-        } else if (result.kind === "NeedsGuidance") {
-          // Structured replace never yields NeedsGuidance; defensive guard.
-          setError({
-            message: intl.formatMessage({
-              id: "error.flow.replaceNeedsGuidanceUnsupported",
-              defaultMessage:
-                "Replace source doesn't support files that need header guidance; use a regular spreadsheet file (e.g. .csv / .xlsx) instead",
-            }),
-            kind: "replace",
-            detail: null,
-          });
-        } else {
-          setError({ ...loadErrorDisplay(result.data, intl), kind: "replace" });
+      // The verdict flight (#1512): resolve-only (Loaded -> true, every
+      // failure route -> false), so the queue's window exit is total. The
+      // IIFE runs synchronously up to the replaceSource await, and the
+      // trackReplace report below lands in the same tick -- the queue gate
+      // closes before the IPC's first microtask, never racing a fast
+      // submit.
+      const flight = (async () => {
+        try {
+          const result = await replaceSource(sessionId, referenceName, path);
+          if (result.kind === "Loaded") {
+            await refreshServerState("replace");
+            return true;
+          } else if (result.kind === "NeedsGuidance") {
+            // Structured replace never yields NeedsGuidance; defensive guard.
+            setError({
+              message: intl.formatMessage({
+                id: "error.flow.replaceNeedsGuidanceUnsupported",
+                defaultMessage:
+                  "Replace source doesn't support files that need header guidance; use a regular spreadsheet file (e.g. .csv / .xlsx) instead",
+              }),
+              kind: "replace",
+              detail: null,
+            });
+            return false;
+          } else {
+            setError({ ...loadErrorDisplay(result.data, intl), kind: "replace" });
+            return false;
+          }
+        } catch (e) {
+          setError(toAppError(e, intl, "replace"));
+          return false;
+        } finally {
+          setMutationLoading(false);
+          void pollPersistError();
         }
-      } catch (e) {
-        setError(toAppError(e, intl, "replace"));
-      } finally {
-        setMutationLoading(false);
-        void pollPersistError();
-      }
+      })();
+      trackReplace(flight, { referenceName, path });
     },
-    [sessionId, refreshServerState, pollPersistError, intl, setError, setMutationLoading],
+    [
+      sessionId,
+      refreshServerState,
+      pollPersistError,
+      intl,
+      setError,
+      setMutationLoading,
+      trackReplace,
+    ],
   );
 
   const handleRemoveSource = useCallback(

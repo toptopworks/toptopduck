@@ -25,6 +25,7 @@ import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { WorkspaceWorkingSet } from "../components/dataset/WorkspaceWorkingSet";
+import { type ReplaceFlightInfo, type UseWorkingSetSurfaces } from "./useWorkingSet";
 import { cn } from "@/lib/utils";
 import type { ThreadEntry } from "../types/thread";
 import type { WorkspaceContent } from "./workspace";
@@ -206,7 +207,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // instead of silently parking on the backend session lock). onSeedDraft /
   // onSeedInvocations are useCallback-stable in the shell (the #991
   // atomic-rollback channels).
-  const { queued, ingestMany, handleAsk: queuedHandleAsk, hold } = useComposerQueue({
+  const { queued, ingestMany, trackWindow, handleAsk: queuedHandleAsk, hold } = useComposerQueue({
     sessionId,
     ingestMany: s.handleIngestMany,
     ask: s.handleAsk,
@@ -214,6 +215,33 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     onSeedInvocations,
     hasLiveTurn: s.hasLiveTurn,
   });
+  // The replace window's arming + the rail's progress line (#1512): the
+  // working-set seam hands the verdict flight here at entry; the pane mints
+  // the progress stamp (ONE clock per flight -- the state owner), arms the
+  // queue window (the replace holds the backend session lock, so a question
+  // submitted mid-replace must queue, not silently block on it), and clears
+  // the line at the settle. The flight ref is the identity gate: a stale
+  // settle must not clear a newer flight's line (the queue's own gate
+  // already ignores stale verdicts by the same rule).
+  const progressFlightRef = useRef<Promise<boolean> | null>(null);
+  const { setReplaceProgress } = s;
+  const trackReplace = useCallback(
+    (flight: Promise<boolean>, info: ReplaceFlightInfo) => {
+      progressFlightRef.current = flight;
+      setReplaceProgress({ ...info, startedAt: Date.now() });
+      trackWindow(flight);
+      void flight.then(
+        () => {
+          if (progressFlightRef.current === flight) setReplaceProgress(null);
+        },
+        () => {
+          if (progressFlightRef.current === flight) setReplaceProgress(null);
+        },
+      );
+    },
+    [trackWindow, setReplaceProgress],
+  );
+  const workingSetSurfaces: UseWorkingSetSurfaces = { ...s.mutationSurfaces, trackReplace };
   // Issue #829: the rail's stick-to-bottom posture. Signals only -- the
   // settled count grows on appends, liveTurn's identity changes per streaming
   // event and per approval-channel update (and its null -> live transition
@@ -590,13 +618,17 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   liveTurn={s.liveTurn}
                   waitStartedAt={s.waitStartedAt}
                   ingestProgress={s.ingestProgress}
+                  replaceProgress={s.replaceProgress}
                   onRespondApproval={handleRespondApproval}
                   onLoadApprovalAttachments={handleLoadApprovalAttachments}
                   onRetryTurn={handleAskAgain}
                   busy={s.loading}
                 />
               </ErrorBoundary>
-              {s.thread.length === 0 && s.liveTurn === null && s.ingestProgress === null && (
+              {s.thread.length === 0 &&
+                s.liveTurn === null &&
+                s.ingestProgress === null &&
+                s.replaceProgress === null && (
               // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
               // padding) + the .muted color rule retired onto utility; the class
               // hooks had no selector / test dependents and are dropped. Gated on
@@ -809,7 +841,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 sessionId={sessionId}
                 busy={s.loading}
                 onAddFiles={ingestMany}
-                surfaces={s.mutationSurfaces}
+                surfaces={workingSetSurfaces}
               />
             </div>
           </div>

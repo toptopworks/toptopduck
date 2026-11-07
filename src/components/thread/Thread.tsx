@@ -19,6 +19,7 @@ import {
   type LifecycleRunMark,
 } from "./turn-visual";
 import type { IngestProgress } from "../../session/useIngestFlow";
+import type { ReplaceProgress } from "../../session/useWorkingSet";
 import { fileBasename } from "../../lib/basename";
 import type { LiveTurn } from "../../session/useTurnFlow";
 import { isLatestTurnFailed } from "../../session/useTurnFailureSids";
@@ -98,6 +99,11 @@ interface ThreadProps {
    *  materializes (the long IPC has no other surface). Optional; defaults to
    *  null (no block). */
   ingestProgress?: IngestProgress | null;
+  /** The in-flight replace's progress block (#1512): rendered as a transient
+   *  status line beside the ingest block while a source replace runs (the
+   *  other long IPC -- same zero-feedback problem, same posture). Optional;
+   *  defaults to null (no block). */
+  replaceProgress?: ReplaceProgress | null;
   /** Answers a pending approval request (the live card's three buttons,
    * ADR-0083). Wired to the app-level approval hook; defaults to a no-op so
    * tests that render a pending card without the hook do not crash. */
@@ -160,6 +166,7 @@ export function Thread({
   liveTurn = null,
   waitStartedAt = null,
   ingestProgress = null,
+  replaceProgress = null,
   onRespondApproval = NOOP_RESPOND,
   onLoadApprovalAttachments,
   onRetryTurn,
@@ -352,7 +359,12 @@ export function Thread({
   // An in-flight ingest names the wait the same way (issue #1485): a fresh
   // session importing its first dataset would otherwise render a blank rail
   // for the whole (long) materialize.
-  if (entries.length === 0 && liveTurn === null && ingestProgress === null) {
+  if (
+    entries.length === 0 &&
+    liveTurn === null &&
+    ingestProgress === null &&
+    replaceProgress === null
+  ) {
     return null;
   }
   // ADR-0067 (issue #184): the Thread rail section does not carry a `.panel`
@@ -515,6 +527,30 @@ export function Thread({
             />
           </span>
           <WaitElapsedSuffix startedAt={ingestProgress.startedAt} />
+        </p>
+      )}
+      {/* The in-flight replace's transient block (#1512): a source replace is
+          the other long IPC that holds the backend session lock -- same
+          zero-feedback problem as the ingest block above, same posture (a
+          distinct block, not an <li>; it never enters the timeline; cleared
+          at the settle when the refreshed working set lands). */}
+      {replaceProgress !== null && (
+        <p
+          role="status"
+          className="m-0 mb-2 flex items-center gap-1 text-xs text-muted-foreground"
+        >
+          <Loader2 aria-hidden="true" className="w-3.5 h-3.5 shrink-0 animate-spin" />
+          <span className="min-w-0 truncate">
+            <FormattedMessage
+              id="thread.replace.progress"
+              defaultMessage="Replacing {reference} with {name}…"
+              values={{
+                reference: replaceProgress.referenceName,
+                name: fileBasename(replaceProgress.path),
+              }}
+            />
+          </span>
+          <WaitElapsedSuffix startedAt={replaceProgress.startedAt} />
         </p>
       )}
       {liveTurn !== null && (

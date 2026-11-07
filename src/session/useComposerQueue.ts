@@ -21,12 +21,14 @@ import { log } from "../lib/log";
 //   #991 atomic rollback uses (onSeedDraft / onSeedInvocations) -- never an
 //   auto-send.
 //
-// The tracked ingestMany is the ONE arming point: SessionPane routes the
+// The tracked ingestMany is the batch arming point: SessionPane routes the
 // manual "+" section (the shell-reported handleIngestFiles), the working-set
 // tab's add entry (issue #792), and the pendingPayload consumption through
 // it, so a cold-start batch gates the bar exactly like a manual one. The
 // wrapper is pass-through: the verdict Promise the caller consumes is the
-// batch's own.
+// batch's own. The replace flight is the second arming point (#1512): the
+// working-set seam fires its own IPC, so SessionPane hands the verdict
+// Promise to trackWindow at entry -- the queue never wraps it.
 //
 // Lifecycle is the keep-alive pane's, for free: the slot survives a session
 // switch (the pane stays mounted) and dies with the pane, whose unmount
@@ -63,6 +65,10 @@ export interface ComposerQueue {
   queued: boolean;
   /** The tracked handleIngestMany: pass-through verdict, arms the settle. */
   ingestMany: (paths: string[]) => Promise<boolean>;
+  /** Arm an already-started flight as the queue window (#1512): the replace
+   *  seam fires its own IPC and hands the verdict Promise here at entry --
+   *  same gate, same identity rule, newest arming owns the exit. */
+  trackWindow: (flight: Promise<boolean>) => void;
   /** The queue-aware ask the bar routes through. Outside a batch it is the
    *  direct fire; inside one it fills the slot and resolves immediately. */
   handleAsk: (question: string, invocations?: string[]) => Promise<void>;
@@ -76,11 +82,14 @@ export interface ComposerQueue {
 
 export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
   const { sessionId, ingestMany, ask, onSeedDraft, onSeedInvocations, hasLiveTurn } = deps;
-  // The in-flight batch's verdict Promise, or null between batches. The
+  // The in-flight window's verdict Promise, or null between windows. The
   // synchronous-read ref (not state) is the queue's gate: the submit path
   // consults it in the same tick the user hits Enter, and the settle
-  // continuation clears it without waiting for a render flush.
-  const batchRef = useRef<Promise<boolean> | null>(null);
+  // continuation clears it without waiting for a render flush. The window
+  // is whichever long IPC holds the backend session lock (#1512): a tracked
+  // ingest batch (the wrapper below) or a source replace flight (armed
+  // imperatively via trackWindow) -- the newest arming owns the exit.
+  const windowRef = useRef<Promise<boolean> | null>(null);
   const [queued, setQueued] = useState<QueuedQuestion | null>(null);
   // The slot's synchronous mirror: the settle continuation reads it without
   // waiting for the render flush (the same refs-first idiom as useTurnFlow's
@@ -102,7 +111,7 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
 
   const settle = useCallback(
     (allLoaded: boolean) => {
-      batchRef.current = null;
+      windowRef.current = null;
       const held = queuedRef.current;
       if (!aliveRef.current || held === null) return;
       queuedRef.current = null;
@@ -136,7 +145,7 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
   const ingestManyTracked = useCallback(
     (paths: string[]) => {
       const batch = ingestMany(paths);
-      batchRef.current = batch;
+      windowRef.current = batch;
       // The contract is resolve-only (an IPC reject resolves false), so the
       // rejection arm is purely defensive: an unexpected throw must not
       // strand the question queued forever -- it takes the halt exit.
@@ -148,11 +157,11 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
       // verdict -- the question keeps waiting behind the newest batch.
       void batch.then(
         (allLoaded) => {
-          if (batchRef.current === batch) settle(allLoaded);
+          if (windowRef.current === batch) settle(allLoaded);
         },
         (e: unknown) => {
           log.error("useComposerQueue", "ingest batch rejected unexpectedly", e);
-          if (batchRef.current === batch) settle(false);
+          if (windowRef.current === batch) settle(false);
         },
       );
       return batch;
@@ -160,9 +169,30 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
     [ingestMany, settle],
   );
 
+  // Arm a flight that already started OUTSIDE this hook (#1512): the seam's
+  // replace handler fires the IPC itself and hands the verdict Promise here
+  // at entry -- the same arming + identity gate as the tracked batch, minus
+  // the wrapper. The flight is resolve-only (Loaded -> true, every failure
+  // route -> false); the rejection arm stays defensive for the same reason.
+  const trackWindow = useCallback(
+    (flight: Promise<boolean>) => {
+      windowRef.current = flight;
+      void flight.then(
+        (allLoaded) => {
+          if (windowRef.current === flight) settle(allLoaded);
+        },
+        (e: unknown) => {
+          log.error("useComposerQueue", "tracked window rejected unexpectedly", e);
+          if (windowRef.current === flight) settle(false);
+        },
+      );
+    },
+    [settle],
+  );
+
   const queuedAsk = useCallback(
     (question: string, invocations?: string[]) => {
-      if (batchRef.current !== null) {
+      if (windowRef.current !== null) {
         // Single slot: the bar disables the input while queued, so a second
         // submit here is the belt-and-suspenders path -- ignored client-side
         // (the same contract as the ADR-0021 loading guard), first wins.
@@ -183,8 +213,8 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
     // arms in the same synchronous task). A no-batch hold would strand the
     // slot forever -- the bar locks with no settle to free it -- so the
     // misuse logs and drops (the idle-handleAsk observability precedent).
-    if (batchRef.current === null) {
-      log.warn("useComposerQueue", "hold with no armed batch; question dropped", {
+    if (windowRef.current === null) {
+      log.warn("useComposerQueue", "hold with no armed window; question dropped", {
         question,
       });
       return;
@@ -195,5 +225,11 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
     setQueued(held);
   }, []);
 
-  return { queued: queued !== null, ingestMany: ingestManyTracked, handleAsk: queuedAsk, hold };
+  return {
+    queued: queued !== null,
+    ingestMany: ingestManyTracked,
+    trackWindow,
+    handleAsk: queuedAsk,
+    hold,
+  };
 }

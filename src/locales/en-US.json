@@ -686,6 +686,7 @@
   "thread.preview.aria": "Preview of {name} (first rows), open it in the right sidebar",
   "thread.preview.empty": "No rows",
   "thread.preview.footer": "First {shown} of {total} rows",
+  "thread.replace.progress": "Replacing {reference} with {name}…",
   "thread.skill.modifiedSuffix": " · modified since this answer",
   "thread.usage.cache": "cache {n} · {pct}%",
   "thread.usage.cacheWrite": "cache write {n}",
