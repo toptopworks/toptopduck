@@ -112,12 +112,19 @@ pub(crate) struct SubagentCtx {
     /// bridged face's assembled default is not a #1001 cap, and its
     /// EOF-family faults keep the verbatim detail (#669).
     pub(crate) cap_stamped: bool,
-    /// The subtracted face (ADR-0117 Decision 4, calibrated by ADR-0119
-    /// Decision 4), precomputed once per turn: the turn's tool table minus
-    /// every delegation tool minus `invoke_skill` (subagents stay excluded
-    /// from the invocation channel; their skill path is the definition's
-    /// skill-name marker injection).
+    /// The subtracted face (ADR-0117 Decision 4, calibrated by ADR-0145),
+    /// precomputed once per turn: the turn's tool table minus every
+    /// delegation tool. `invoke_skill` and `read_skill_file` survive with
+    /// it (issue #985) -- a sub-agent self-serves skills under the same
+    /// machine-level enable axis as the main face, its `invoke_skill`
+    /// dispatches landing on the parent turn's pending invocation records.
     pub(crate) sub_face: Vec<ToolDefinition>,
+    /// The discovery-snapshot index block (issue #985), rendered once per
+    /// turn from the same fragments the main face's system prompt carries:
+    /// appended to every sub-agent's preamble at assembly, so a sub-agent
+    /// knows which skills it can invoke. Empty for a zero-skill session --
+    /// nothing appends, no standing cost.
+    pub(crate) skill_index: String,
 }
 
 /// Build one named delegation tool (ADR-0117 Decision 1): tool name =
@@ -531,7 +538,7 @@ async fn run_subagent(
         })
         .collect::<Vec<_>>();
     let agent = AgentBuilder::new(ctx.model.clone())
-        .preamble(subagent_preamble(spec).as_str())
+        .preamble(subagent_preamble(spec, &ctx.skill_index).as_str())
         .max_tokens(ctx.max_tokens)
         .dynamic_tools(tools)
         .build();
@@ -737,6 +744,7 @@ pub(crate) fn subagent_ctx(
     cap_stamped: bool,
     tools: &[ToolDefinition],
     delegation_names: &std::collections::BTreeSet<&str>,
+    skill_index: String,
 ) -> Arc<SubagentCtx> {
     Arc::new(SubagentCtx {
         model,
@@ -750,6 +758,7 @@ pub(crate) fn subagent_ctx(
         max_tokens,
         cap_stamped,
         sub_face: subagent_tool_face(tools, delegation_names),
+        skill_index,
     })
 }
 

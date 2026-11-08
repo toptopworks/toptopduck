@@ -355,6 +355,15 @@ pub struct SkillInvocation {
     /// materialization, ADR-0112 channel) or the agent (the `invoke_skill`
     /// meta-tool).
     pub actor: crate::model::SkillLifecycleActor,
+    /// The delegating sub-agent's name when the `invoke_skill` call rode a
+    /// sub-agent's tool face (issue #985): the actor stays two-valued (the
+    /// invocation semantics are the main face's), the name carries the
+    /// attribution -- the parent window renders these records as name-only
+    /// strips (never the body; the body entered the SUB-agent's context via
+    /// its own tool result). `None` for user and main-agent invocations.
+    /// Optional with serde default + skip: additive, no format_version bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_subagent: Option<String>,
     /// SHA-256 hex of the WHOLE `SKILL.md` bytes (frontmatter + body) at
     /// invocation time. Empty string when no baseline exists (unreadable at
     /// invocation).

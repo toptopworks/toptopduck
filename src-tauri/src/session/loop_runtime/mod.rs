@@ -187,6 +187,7 @@ impl LoopRuntime {
         mcp: &mut McpAggregator,
         cli: &[crate::cli_tools::config::CliToolConfig],
         delegations: &[crate::agents::DelegationSpec],
+        skills: &[crate::skills::SkillPromptFragment],
         invocations: &mut crate::skills::invocation::SkillInvocationCtx<'_>,
         presented: &mut Vec<String>,
         read: &crate::skills::read::SkillReadGate<'_>,
@@ -199,6 +200,11 @@ impl LoopRuntime {
         // In-flight + stale-request reset (ADR-0021): every exit drops the
         // guard, which invalidates the watchdog.
         let guard = cancel.begin_turn();
+        // The discovery index block (issue #985): rendered ONCE per turn
+        // from the same fragments the main face's system prompt carries, and
+        // appended to every sub-agent's preamble at assembly -- an empty
+        // snapshot renders empty, so a zero-skill session pays nothing.
+        let skill_index = crate::provider::prompt::render_skill_block(skills);
         let phases: PhaseSink = Arc::new(Mutex::new(on_phase));
         let state = Arc::new(SharedTurnState::new());
         let (req_tx, req_rx) = mpsc::channel::<DispatchRequest>();
@@ -299,6 +305,7 @@ impl LoopRuntime {
                         clock: clock.clone(),
                         token,
                         delegations,
+                        skill_index,
                     }))
                 })
             };
@@ -656,6 +663,11 @@ struct DriveInputs {
     /// sub-agent context, built on the driver, derives its names from the
     /// keys).
     delegations: std::collections::BTreeMap<String, crate::agents::DelegationSpec>,
+    /// The turn's discovery-index block (issue #985), pre-rendered on the
+    /// caller thread: appended once to every sub-agent's preamble at
+    /// assembly, so a sub-agent knows which skills its `invoke_skill` tool
+    /// can serve.
+    skill_index: String,
 }
 
 /// How the driver's consumption loop ended.
@@ -698,6 +710,7 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         clock,
         token,
         delegations,
+        skill_index,
     } = inputs;
     // The dispatch seam's cap stamp (issue #1001), the thought-level
     // stamp's #614 shape: the window assembled a model-blind default, and
@@ -789,6 +802,7 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
             output_cap.is_some(),
             &request.tools,
             &delegation_names,
+            skill_index,
         );
         request
             .tools

@@ -153,6 +153,7 @@ pub(crate) fn test_ctx(pending: &mut Vec<crate::model::SkillInvocation>) -> Skil
 pub(crate) fn resolve_skill_invocation(
     call: &ToolUse,
     ctx: &mut SkillInvocationCtx<'_>,
+    origin: Option<&str>,
 ) -> SkillInvocationOutcome {
     let Some(name) = call
         .input
@@ -169,10 +170,15 @@ pub(crate) fn resolve_skill_invocation(
         return SkillInvocationOutcome::Refused(unknown_skill_failure(name, ctx.snapshot));
     }
     let fragment = resolve_one(ctx.root, name);
+    // The dispatch core's originator annotation (issue #934's channel): a
+    // call from a sub-agent's face names its delegating agent, and the
+    // record carries that attribution on `via_subagent` (issue #985) -- the
+    // actor stays Agent either way; the invocation semantics never fork.
     ctx.pending
         .push(crate::model::SkillInvocation::from_fragment(
             &fragment,
             crate::model::SkillLifecycleActor::Agent,
+            origin.map(str::to_string),
         ));
     let payload = if fragment.body.is_empty() {
         degraded_body_note(name)
@@ -254,7 +260,7 @@ mod tests {
         let mut pending = Vec::new();
         let snapshot = vec!["sql-coach".to_string()];
         let mut ctx = fx.ctx(&mut pending, &snapshot, &[]);
-        match resolve_skill_invocation(&Fixture::call("sql-coach"), &mut ctx) {
+        match resolve_skill_invocation(&Fixture::call("sql-coach"), &mut ctx, None) {
             SkillInvocationOutcome::Local { summary, payload } => {
                 assert_eq!(summary, "sql-coach");
                 assert_eq!(payload, Value::String("Coach the SQL.\n".to_string()));
@@ -274,7 +280,7 @@ mod tests {
         let mut pending = Vec::new();
         let snapshot = vec!["sql-coach".to_string()];
         let mut ctx = fx.ctx(&mut pending, &snapshot, &[]);
-        match resolve_skill_invocation(&Fixture::call("sql-coach"), &mut ctx) {
+        match resolve_skill_invocation(&Fixture::call("sql-coach"), &mut ctx, None) {
             SkillInvocationOutcome::Local { summary, payload } => {
                 assert_eq!(summary, "sql-coach");
                 assert_eq!(payload, Value::String("Coach the SQL.\n".to_string()));
@@ -288,6 +294,71 @@ mod tests {
         assert!(!pending[0].content_hash.is_empty());
     }
 
+    /// A sub-agent's call (issue #985): the dispatch core passes the
+    /// delegating sub-agent's name as the call's origin -- the landed record
+    /// keeps the two-valued actor (the invocation semantics are identical to
+    /// the main face's) and carries the name on `via_subagent` instead. A
+    /// main-face call (origin `None`) lands `via_subagent: None`.
+    #[test]
+    fn a_subagent_origin_lands_on_the_record_not_the_actor() {
+        let fx = Fixture::new();
+        let mut pending = Vec::new();
+        let snapshot = vec!["sql-coach".to_string()];
+        let mut ctx = fx.ctx(&mut pending, &snapshot, &[]);
+        let _ = resolve_skill_invocation(&Fixture::call("sql-coach"), &mut ctx, Some("analyst"));
+        let _ = resolve_skill_invocation(&Fixture::call("sql-coach"), &mut ctx, None);
+        assert_eq!(pending.len(), 2);
+        for record in &pending {
+            assert_eq!(record.actor, SkillLifecycleActor::Agent);
+        }
+        assert_eq!(
+            pending[0].via_subagent.as_deref(),
+            Some("analyst"),
+            "the sub-agent's call carries its delegating name"
+        );
+        assert_eq!(
+            pending[1].via_subagent, None,
+            "a main-face call carries no sub-agent attribution"
+        );
+    }
+
+    /// The attribution field's persistence shape (issue #985): `via_subagent`
+    /// serializes only when present and defaults on read -- a v7 recipe file
+    /// written before the field round-trips to `None` (no format_version
+    /// bump), and a record carrying the name round-trips it verbatim.
+    #[test]
+    fn via_subagent_round_trips_and_stays_absent_when_none() {
+        let unattributed = crate::model::SkillInvocation {
+            name: "sql-coach".to_string(),
+            body: "Coach the SQL.\n".to_string(),
+            actor: crate::model::SkillLifecycleActor::Agent,
+            via_subagent: None,
+            content_hash: "deadbeef".to_string(),
+        };
+        let plain = serde_json::to_value(&unattributed).unwrap();
+        assert!(
+            plain.get("via_subagent").is_none(),
+            "a None attribution serializes to nothing: {plain}"
+        );
+        let legacy = serde_json::json!({
+            "name": "sql-coach",
+            "body": "Coach the SQL.\n",
+            "actor": "Agent",
+            "content_hash": "deadbeef",
+        });
+        let record: crate::model::SkillInvocation = serde_json::from_value(legacy).unwrap();
+        assert_eq!(record.via_subagent, None);
+        let attributed = serde_json::json!({
+            "name": "sql-coach",
+            "body": "Coach the SQL.\n",
+            "actor": "Agent",
+            "content_hash": "deadbeef",
+            "via_subagent": "analyst",
+        });
+        let record: crate::model::SkillInvocation = serde_json::from_value(attributed).unwrap();
+        assert_eq!(record.via_subagent.as_deref(), Some("analyst"));
+    }
+
     /// A snapshot-OUTSIDE name the registry serves still invokes (ADR-0119
     /// Decision 3): the gate is the enable axis, never the snapshot.
     #[test]
@@ -295,7 +366,7 @@ mod tests {
         let fx = Fixture::new();
         let mut pending = Vec::new();
         let mut ctx = fx.ctx(&mut pending, &[], &[]);
-        match resolve_skill_invocation(&Fixture::call("sql-coach"), &mut ctx) {
+        match resolve_skill_invocation(&Fixture::call("sql-coach"), &mut ctx, None) {
             SkillInvocationOutcome::Local { .. } => {}
             other => panic!("expected Local, got {other:?}"),
         }
@@ -310,7 +381,7 @@ mod tests {
         let disabled = vec!["sql-coach".to_string()];
         let snapshot = vec!["sql-coach".to_string()];
         let mut ctx = fx.ctx(&mut pending, &snapshot, &disabled);
-        match resolve_skill_invocation(&Fixture::call("sql-coach"), &mut ctx) {
+        match resolve_skill_invocation(&Fixture::call("sql-coach"), &mut ctx, None) {
             SkillInvocationOutcome::Refused(message) => {
                 assert!(message.contains("disabled"), "{message}");
                 assert!(message.contains("settings"), "{message}");
@@ -328,7 +399,7 @@ mod tests {
         let mut pending = Vec::new();
         let snapshot = vec!["alpha".to_string(), "beta".to_string()];
         let mut ctx = fx.ctx(&mut pending, &snapshot, &[]);
-        match resolve_skill_invocation(&Fixture::call("ghost"), &mut ctx) {
+        match resolve_skill_invocation(&Fixture::call("ghost"), &mut ctx, None) {
             SkillInvocationOutcome::Refused(message) => {
                 assert!(message.contains("alpha"), "{message}");
                 assert!(message.contains("beta"), "{message}");
@@ -355,7 +426,7 @@ mod tests {
                 name: INVOKE_SKILL.to_string(),
                 input,
             };
-            match resolve_skill_invocation(&call, &mut ctx) {
+            match resolve_skill_invocation(&call, &mut ctx, None) {
                 SkillInvocationOutcome::Refused(message) => assert_eq!(
                     message,
                     "invoke_skill failed: parameter `name`: expected a non-empty string"
@@ -375,7 +446,7 @@ mod tests {
         let mut pending = Vec::new();
         let empty: Vec<String> = Vec::new();
         let mut ctx = fx.ctx(&mut pending, &empty, &[]);
-        match resolve_skill_invocation(&Fixture::call("ghost"), &mut ctx) {
+        match resolve_skill_invocation(&Fixture::call("ghost"), &mut ctx, None) {
             SkillInvocationOutcome::Refused(message) => {
                 assert!(message.contains("not an available skill"), "{message}");
                 assert!(
@@ -398,7 +469,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut pending = Vec::new();
         let mut ctx = fx.ctx(&mut pending, &[], &[]);
-        match resolve_skill_invocation(&Fixture::call("empty-skill"), &mut ctx) {
+        match resolve_skill_invocation(&Fixture::call("empty-skill"), &mut ctx, None) {
             SkillInvocationOutcome::Local { summary, payload } => {
                 assert_eq!(summary, "empty-skill");
                 let Value::String(text) = payload else {
