@@ -18,10 +18,11 @@ import { formatLastModifiedText } from "./lastModifiedText";
 import { resolveDisplayName } from "./displayName";
 import type { SessionMetadata } from "../types/session";
 
-// The Ctrl/⌘+K session-search modal (ADR-0072, issue #252). The shell
-// owns a single open state; both the global keydown (App.tsx) and the sidebar's
-// search magnifier (ADR-0072, wired in this slice -- issue #252) route here. The body
-// reuses `buildSearchEntries` (pure filter + sort + cap over `list_sessions`) so the
+// The Ctrl/⌘+K session-search modal (ADR-0072, issue #252; archived
+// partition issue #1403). The shell owns a single open state; both the global
+// keydown (App.tsx) and the sidebar's search magnifier (ADR-0072, wired in
+// this slice -- issue #252) route here. The body reuses `buildSearchEntries`
+// (pure filter + sort + cap over `list_sessions`, two partitions) so the
 // merge / filter / sort contract is unit-tested in sidebarModel.test.ts; this
 // component stays a thin caller over input state + keyboard navigation.
 //
@@ -30,7 +31,11 @@ import type { SessionMetadata } from "../types/session";
 // announce it without moving DOM focus off the input); Enter activates the
 // highlighted row; ESC closes (Radix Dialog). The title + description are
 // sr-only -- the placeholder is the visible affordance, matching the Linear /
-// Raycast ⌘K convention.
+// Raycast ⌘K convention. The archived partition (#1403) renders in the SAME
+// listbox as a bottom section: its header is a presentational li (non-option),
+// its rows keep role="option", and the option ids are per-FLAT-index, so
+// keyboard navigation stays one continuous index space across the partition
+// boundary.
 //
 // Visual chrome (overlay + ESC + scroll-lock + the top-right X close) comes from
 // the shared Dialog primitive (issue #105); p-0 on the content lets the input
@@ -39,7 +44,12 @@ import type { SessionMetadata } from "../types/session";
 interface SessionSearchDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** The unarchived rows (list_sessions minus the archived tail). */
   sessions: SessionMetadata[];
+  /** The archived rows (#1403): matched with the same predicate, rendered as
+   *  the bottom grayed section; activating a row rides the persisted-open
+   *  path, whose open_duck contract unarchives on open (ADR-0127 Decision 4). */
+  archivedSessions: SessionMetadata[];
   openSessions: OpenSession[];
   activeSessionId: string | null;
   onActivate: (sid: string) => void;
@@ -50,6 +60,7 @@ export function SessionSearchDialog({
   open,
   onOpenChange,
   sessions,
+  archivedSessions,
   openSessions,
   activeSessionId,
   onActivate,
@@ -70,9 +81,19 @@ export function SessionSearchDialog({
   // assert aria-selected instead -- same pattern as Thread.tsx chip jumps).
   const optionRefs = useRef<(HTMLLIElement | null)[]>([]);
 
+  const partition = useMemo(
+    () =>
+      buildSearchEntries(sessions, archivedSessions, openSessions, activeSessionId, query),
+    [sessions, archivedSessions, openSessions, activeSessionId, query],
+  );
+  // One flat index space spanning both partitions (issue #1403): keyboard
+  // navigation + aria-activedescendant index into this array; the render
+  // below maps partition indices back onto it (the archived rows start at
+  // main.length). The archived section header is NOT an entry -- it carries
+  // no index and Enter never lands on it.
   const entries = useMemo(
-    () => buildSearchEntries(sessions, openSessions, activeSessionId, query),
-    [sessions, openSessions, activeSessionId, query],
+    () => [...partition.main, ...partition.archived],
+    [partition],
   );
 
   // Adjusting state during render (the React-recommended pattern, NOT effects --
@@ -183,7 +204,7 @@ export function SessionSearchDialog({
           })}
           className="session-search-results max-h-80 overflow-y-auto p-1"
         >
-          {entries.map((entry, i) => (
+          {partition.main.map((entry, i) => (
             <SearchRow
               key={entry.key}
               ref={(el: HTMLLIElement | null) => {
@@ -196,6 +217,34 @@ export function SessionSearchDialog({
               now={now}
               onClick={() => choose(entry)}
               onMouseEnter={() => setSelected(i)}
+            />
+          ))}
+          {partition.archived.length > 0 && (
+            // The bottom partition's header (issue #1403): presentational --
+            // a listbox's options are the interactive surface, and the header
+            // is chrome reusing the sidebar's archived heading (zero new i18n
+            // keys). Enter never lands here: it carries no flat index.
+            <li
+              role="presentation"
+              className="session-search-archived-header px-2 pb-1 pt-2 text-xs uppercase tracking-wider text-muted-foreground"
+            >
+              <FormattedMessage id="sidebar.group.archived" defaultMessage="Archived" />
+            </li>
+          )}
+          {partition.archived.map((entry, j) => (
+            <SearchRow
+              key={entry.key}
+              ref={(el: HTMLLIElement | null) => {
+                optionRefs.current[partition.main.length + j] = el;
+              }}
+              id={`session-search-option-${partition.main.length + j}`}
+              entry={entry}
+              displayName={resolveDisplayName(entry.name, intl)}
+              selected={partition.main.length + j === selected}
+              now={now}
+              archived
+              onClick={() => choose(entry)}
+              onMouseEnter={() => setSelected(partition.main.length + j)}
             />
           ))}
         </ul>
@@ -222,7 +271,9 @@ export function SessionSearchDialog({
 // sidebar rows carry neither the glyph nor a sub-line since ADR-0093
 // (conditional status dot, metadata in a HoverCard). React 19 ref-as-prop:
 // the parent attaches a per-index callback ref so it can scrollIntoView the
-// highlighted row.
+// highlighted row. `archived` (#1403) dims the row face (the sidebar's
+// archived gray) WITHOUT deactivating it -- activating an archived row
+// resumes + unarchives it, so the row stays a first-class option.
 function SearchRow({
   ref,
   id,
@@ -230,6 +281,7 @@ function SearchRow({
   displayName,
   selected,
   now,
+  archived = false,
   onClick,
   onMouseEnter,
 }: {
@@ -239,6 +291,7 @@ function SearchRow({
   displayName: string;
   selected: boolean;
   now: number;
+  archived?: boolean;
   onClick: () => void;
   onMouseEnter: () => void;
 }) {
@@ -264,7 +317,12 @@ function SearchRow({
       )}
     >
       <MessageSquare className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-      <span className="session-search-option-name min-w-0 flex-1 truncate text-foreground">
+      <span
+        className={cn(
+          "session-search-option-name min-w-0 flex-1 truncate",
+          archived ? "text-muted-foreground" : "text-foreground",
+        )}
+      >
         {displayName}
       </span>
       <span className="session-search-option-time shrink-0 whitespace-nowrap text-xs text-muted-foreground">

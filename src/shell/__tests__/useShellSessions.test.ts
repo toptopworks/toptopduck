@@ -614,6 +614,40 @@ describe("useShellSessions", () => {
     expect(vi.mocked(openRecipe).mock.calls.length).toBe(resumesBefore);
   });
 
+  it("openPersisted refreshes the persisted list on success (open-is-unarchive lands, #1403)", async () => {
+    // open_duck is the open-is-unarchive path (ADR-0127 Decision 4): resuming
+    // an archived recipe removes its sidecar key server-side -- a DISK-side
+    // metadata change no open-set merge mirrors -- so only a re-scan lands
+    // the row back in the sidebar's main list (the search dialog's archived
+    // row -> unarchived return, issue #1403 AC). The success path bumps
+    // sessionsEpoch exactly once, mirroring the failure path's refresh.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("r1"));
+    vi.mocked(openRecipe).mockResolvedValueOnce();
+    const { result, refreshSessions } = renderSessions();
+    await act(async () => {
+      await result.current.openPersisted("/x/a.json", "a");
+    });
+    expect(result.current.activeSessionId).toBe("r1");
+    expect(refreshSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it("openPersisted's already-open activate branch does not refresh the list", async () => {
+    // Activating an already-open path changes no disk state (keep-alive
+    // switch), so no re-scan: only a genuinely minted open pays the refresh.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("p1"));
+    vi.mocked(openRecipe).mockResolvedValueOnce();
+    const { result, refreshSessions } = renderSessions();
+    await act(async () => {
+      await result.current.openPersisted("/x/a.json", "a");
+    });
+    refreshSessions.mockClear();
+    await act(async () => {
+      await result.current.openPersisted("/x/a.json", "a");
+    });
+    expect(result.current.activeSessionId).toBe("p1");
+    expect(refreshSessions).not.toHaveBeenCalled();
+  });
+
   // --- Issue #204: hook-level coverage gaps --------------------------------
   // These pin the concurrency + branch contracts a regression would silently
   // break (no black-box signal): the busy-gated drop listener, the in-flight

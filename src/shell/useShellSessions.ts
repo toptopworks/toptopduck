@@ -753,6 +753,11 @@ export function useShellSessions({
           pendingQuestion: null,
           pendingSkillInvocations: [],
         });
+        // Open-is-unarchive (ADR-0127 Decision 4): resuming an archived recipe
+        // removed its sidecar key server-side -- a metadata change no open-set
+        // merge mirrors, so the persisted list re-scans to land the row back
+        // in the main list (#1403). Local IPC, millisecond round trip.
+        refreshSessions();
         setResumeStatus({ kind: "idle" });
       } catch (e) {
         // C2: if createSession succeeded but openRecipe failed, the just-minted

@@ -268,10 +268,12 @@ export default function App() {
   // (shell-layer AppError surface, issue #194).
   // showArchived (ADR-0127 Decision 7, issue #1175): the archived view's
   // visibility. Deliberately NOT persisted -- every startup resets the
-  // archived view to hidden (the peek semantics), so plain useState.
+  // archived view to hidden (the peek semantics), so plain useState. Since
+  // #1403 the scan is unconditional, so this is a pure render-side switch:
+  // flipping it never re-fetches list_sessions.
   const [showArchived, setShowArchived] = useState(false);
   const { sessions, archivedSessions, sessionsError, sessionsLoaded, refreshSessions } =
-    usePersistedSessions({ intl, includeArchived: showArchived });
+    usePersistedSessions({ intl });
   const {
     openSessions,
     activeSessionId,
@@ -1282,15 +1284,17 @@ export default function App() {
                 )}
 
                 {/* Ctrl/⌘+K session-search modal (ADR-0072, issue
-                  #252). Rendered unconditionally (Radix mounts the content
-                  lazily on open); shares the shell-owned searchOpen state with
-                  the global keydown + the sidebar search button. Reuses the
-                  sessions / openSessions / activate handlers already in App --
-                  zero new IPC, zero new persistence (ADR-0072 slice scope). */}
+                  #252; archived partition #1403). Rendered unconditionally
+                  (Radix mounts the content lazily on open); shares the
+                  shell-owned searchOpen state with the global keydown + the
+                  sidebar search button. Reuses the sessions / archivedSessions
+                  / openSessions / activate handlers already in App -- zero new
+                  IPC, zero new persistence. */}
                 <SessionSearchDialog
                   open={searchOpen}
                   onOpenChange={setSearchOpen}
                   sessions={sessions}
+                  archivedSessions={archivedSessions}
                   openSessions={openSessions}
                   activeSessionId={activeSessionId}
                   onActivate={activateSession}

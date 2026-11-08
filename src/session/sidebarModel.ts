@@ -86,6 +86,17 @@ export interface SidebarEntry {
  *  type alias stays for intent documentation and future divergence. */
 export type SearchEntry = SidebarEntry;
 
+/** The two-partition search result (issue #1403): `main` carries the
+ *  unarchived matches, `archived` the archived matches — the dialog renders
+ *  `archived` as a bottom, grayed-out section under its own header. Both
+ *  partitions share the match predicate, the mtime-desc sort, and the cap;
+ *  the archived rows are metadata-only (open-is-unarchive, ADR-0127 Decision
+ *  4, means an archived row never carries a runtime sid). */
+export interface SearchPartition {
+  main: SearchEntry[];
+  archived: SearchEntry[];
+}
+
 const MS_PER_DAY = 86_400_000;
 
 /** The jump dialog's result cap: the viewport holds roughly this many
@@ -176,27 +187,60 @@ export function buildArchivedEntries(archived: SessionMetadata[]): SidebarEntry[
 const BY_MTIME_DESC = (a: SidebarEntry, b: SidebarEntry): number =>
   b.lastModifiedAt - a.lastModifiedAt || a.name.localeCompare(b.name);
 
-/** Build the flat, filtered, mtime-descending entry list for the Ctrl/⌘+K search
- *  modal (ADR-0072, issue #252). Pure in
- *  (persisted, open, activeSessionId, query): the caller supplies the raw
- *  `list_sessions` result + the open set + the active id + the query string;
- *  this function does the rest. Kept alongside `buildSidebarModel` because the
- *  per-row shape + the persisted/open merge contract are shared with the sidebar
- *  (a row that is open in this shell carries its runtime sid, so the modal can
+/** Build one search partition: filter + sort + cap over one metadata list.
+ *  Shared verbatim by both partitions (issue #1403) so the match predicate,
+ *  the mtime-desc order, and the cap cannot drift between the unarchived and
+ *  the archived side. `openByPath` is null for the archived partition — an
+ *  archived row never carries a runtime sid (ADR-0127 Decision 4), so the
+ *  open-set merge is statically null there. */
+function searchPartition(
+  list: SessionMetadata[],
+  openByPath: Map<string, OpenSession> | null,
+  activeSessionId: string | null,
+  matches: (hay: string) => boolean,
+): SearchEntry[] {
+  const entries: SearchEntry[] = [];
+  for (const m of list) {
+    // Compose a single haystack so the substring test runs once per row; the
+    // space keeps a name that ends with the source's prefix from bridging into
+    // a false positive at the boundary.
+    const hay = `${m.display_name} ${m.source_summary.first_source_name ?? ""}`;
+    if (!matches(hay)) continue;
+    entries.push(persistedEntry(m, openByPath?.get(m.recipe_path) ?? null, activeSessionId));
+  }
+  entries.sort(BY_MTIME_DESC);
+  return entries.slice(0, MAX_SEARCH_RESULTS);
+}
+
+/** Build the two-partition search result for the Ctrl/⌘+K search modal
+ *  (ADR-0072, issue #252; archived partition issue #1403). Pure in (persisted,
+ *  archived, open, activeSessionId, query): the caller supplies the raw
+ *  `list_sessions` partition (unarchived + archived — the includeArchived
+ *  scan, partitioned client-side by `usePersistedSessions`) + the open set +
+ *  the active id + the query string; this function does the rest. Kept
+ *  alongside `buildSidebarModel` because the per-row shape + the
+ *  persisted/open merge contract are shared with the sidebar (a row that is
+ *  open in this shell carries its runtime sid, so the modal can
  *  activate-by-sid instead of re-resuming).
  *
  *  Scope (ADR-0072): only PERSISTED sessions are searchable -- the
  *  `list_sessions` result. An unsaved new session (no recipe.json) is NOT in
  *  list_sessions and never appears here, even when it is the active session
  *  (the sidebar still lists it; the modal is a persisted-session jump surface).
- *  Every emitted row therefore has a non-null path, so the return type is
- *  `SearchEntry[]`.
+ *  Every emitted row therefore has a non-null path.
  *
- *  Filter: case-insensitive substring over `display_name` + the first source's
- *  name (via searchMatcher). An empty / whitespace-only query matches
- *  everything, truncated to the newest MAX_SEARCH_RESULTS -- the modal is a
- *  jump surface, not a browser. Sorted mtime desc with a name tiebreaker for
- *  deterministic rendering, matching `buildSidebarModel`.
+ *  Partitions (#1403): the unarchived matches land in `main`, the archived
+ *  matches in `archived` — the dialog renders the latter as a bottom grayed
+ *  section. Both sides run the same filter: case-insensitive substring over
+ *  `display_name` + the first source's name (via searchMatcher). An empty /
+ *  whitespace-only query matches everything IN `main`, but the archived
+ *  partition stays EMPTY on it — the empty-query face is the browse/jump
+ *  surface over recent activity, and archived rows enter only once the user
+ *  is actually searching (a non-empty query), the recall face. Each
+ *  partition is truncated INDEPENDENTLY to the newest MAX_SEARCH_RESULTS
+ *  (the bottom section can neither crowd the main window out nor borrow its
+ *  budget) and sorted mtime desc with a name tiebreaker for deterministic
+ *  rendering.
  *
  *  Unlike `buildSidebarModel`, no `now` parameter: the modal is a single flat
  *  list (no time buckets) and each row's dynamic time label is resolved in
@@ -204,23 +248,22 @@ const BY_MTIME_DESC = (a: SidebarEntry, b: SidebarEntry): number =>
  *  the localized heading text). */
 export function buildSearchEntries(
   persisted: SessionMetadata[],
+  archived: SessionMetadata[],
   open: OpenSession[],
   activeSessionId: string | null,
   query: string,
-): SearchEntry[] {
+): SearchPartition {
   const openByPath = indexOpenByPath(open);
   const matches = searchMatcher(query);
-  const entries: SearchEntry[] = [];
-  for (const m of persisted) {
-    // Compose a single haystack so the substring test runs once per row; the
-    // space keeps a name that ends with the source's prefix from bridging into
-    // a false positive at the boundary.
-    const hay = `${m.display_name} ${m.source_summary.first_source_name ?? ""}`;
-    if (!matches(hay)) continue;
-    entries.push(persistedEntry(m, openByPath.get(m.recipe_path) ?? null, activeSessionId));
-  }
-  entries.sort(BY_MTIME_DESC);
-  return entries.slice(0, MAX_SEARCH_RESULTS);
+  // The archived partition enters only on a non-empty query (issue #1403,
+  // browse-vs-recall ruling): the empty-query face lists recent unarchived
+  // activity only, so a bare Ctrl/⌘+K never surfaces the grayed section.
+  const archivedMatches =
+    query.trim() === "" ? [] : searchPartition(archived, null, activeSessionId, matches);
+  return {
+    main: searchPartition(persisted, openByPath, activeSessionId, matches),
+    archived: archivedMatches,
+  };
 }
 
 /** The sidebar's renderable model (ADR-0127, issue #1175; #1401 retired the

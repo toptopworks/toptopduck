@@ -51,3 +51,4 @@ ADR-0054 的 `ShellPrefs` 已持久化 `sidebar_collapsed` / `rail_collapsed`;�
 - **视觉一致性**:active 态不再整条实心 + New 按钮不再实心 + 品牌标题 + 聊气泡行首,整体 sidebar 视觉语言从 ADR-0060 的「teal 实心强调」转向「muted/accent」;ADR-0050 的 teal `--primary` 仍用于左 2px 条 + 搜索按钮图标等次级强调(不变更 token,仅调整使用密度)。
 - **被 ADR-0127 校准**:搜索结果集合的外延收窄——归档是侧栏组织态(ADR-0127 侧车裁剪),`list_sessions` 默认不返回归档行,「空查询显示全部」中的集合随之不含归档会话;搜索字段与截断窗口机制不变,归档会话不可经搜索到达,恢复入口为侧栏归档开关。
 - **校准（分组模式退役）**:会话栏恒按 `flat` 渲染——单一「Recent」段、`last_modified_at` 倒序;`SidebarGrouping` 类型(TS union 与 Rust enum)与 `AppConfig.shell.sidebar_grouping` 字段删除,旧配置文件中的遗留值解析时忽略、下次写盘自然丢弃。搜索结果行的「今天/昨天」词条(`formatLastModified` 域)不受影响。
+- **校准（搜索含归档匹配）**:搜索结果集含归档匹配——未归档匹配呈现在主段,归档匹配呈现在底部独立灰显分区,空查询(跳转面)的归档分区恒空、归档匹配仅在查询非空时入列,两段同匹配谓词、同 `last_modified_at` 降序、各自独立截断至 `MAX_SEARCH_RESULTS`;「被 ADR-0127 校准」条的「归档会话不可经搜索到达,恢复入口为侧栏归档开关」读作已放宽——恢复入口为侧栏归档开关与搜索双入口,归档行激活走打开即解档(ADR-0127 Decision 4),搜索字段不变,截断仍为窗口式且两段各自窗口。
