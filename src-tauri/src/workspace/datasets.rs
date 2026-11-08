@@ -182,14 +182,23 @@ fn state_dir(workspace: &Path) -> PathBuf {
 }
 
 /// The snapshot store directory for a workspace root.
-pub fn store_dir(workspace: &Path) -> PathBuf {
+pub(crate) fn store_dir(workspace: &Path) -> PathBuf {
     state_dir(workspace).join(SNAPSHOTS_DIR_NAME)
 }
 
 /// The store file for a content fingerprint (the session-side lazy attach
 /// resolves through this, ADR-0141 D3).
-pub fn store_file(workspace: &Path, fingerprint: &str) -> PathBuf {
+pub(crate) fn store_file(workspace: &Path, fingerprint: &str) -> PathBuf {
     store_dir(workspace).join(format!("{fingerprint}.duckdb"))
+}
+
+/// The landed store file behind a manifest entry, if it still exists: the
+/// single resolution point for the missing-file question -- the panel's
+/// list flag and the session attach's missing-entry error both read this
+/// (one answer, two consumer postures).
+pub fn entry_file(workspace: &Path, entry: &DatasetEntry) -> Option<PathBuf> {
+    let path = store_file(workspace, &entry.fingerprint);
+    path.exists().then_some(path)
 }
 
 /// The manifest path for a workspace root.
@@ -284,7 +293,11 @@ fn reopen_read_only(dest: PathBuf) -> Result<Snapshot, StoreError> {
 /// renames (single physical file, no parallel writers). Both paths derive
 /// shape only -- no table-content fingerprint pass; the identity is the
 /// store key itself (issue #1506).
-pub fn materialize(workspace: &Path, src: &Path, reader: &str) -> Result<Snapshot, StoreError> {
+pub(crate) fn materialize(
+    workspace: &Path,
+    src: &Path,
+    reader: &str,
+) -> Result<Snapshot, StoreError> {
     let key = crate::util::sha256_file(src).map_err(StoreError::io)?;
     let dest = store_file(workspace, &key);
     if dest.exists() {
@@ -322,31 +335,18 @@ pub fn materialize(workspace: &Path, src: &Path, reader: &str) -> Result<Snapsho
 fn deconflict(base: &str, entries: &[DatasetEntry]) -> String {
     let taken: std::collections::HashSet<&str> =
         entries.iter().map(|e| e.reference_name.as_str()).collect();
-    unique_against(base, &taken)
+    crate::workingset::deconflict_loop(base, |n| taken.contains(n), |c, n| format!("{c}_{n}"))
 }
 
 /// De-conflict a candidate DISPLAY name against the manifest's taken display
 /// names: the display-layer uniqueness rename enforces (DisplayTaken) must
 /// hold for entries the add path creates too, so a fresh default label never
-/// lands on a label a rename already took.
+/// lands on a label a rename already took. Same ` (2)` suffix as the
+/// session's display layer (ADR-0037) -- one human-readable format.
 fn deconflict_display(base: &str, entries: &[DatasetEntry]) -> String {
     let taken: std::collections::HashSet<&str> =
         entries.iter().map(|e| e.display_name.as_str()).collect();
-    unique_against(base, &taken)
-}
-
-/// The shared suffix walk: the first free name among base, base_2, base_3...
-fn unique_against(base: &str, taken: &std::collections::HashSet<&str>) -> String {
-    if !taken.contains(base) {
-        return base.to_string();
-    }
-    for n in 2.. {
-        let candidate = format!("{base}_{n}");
-        if !taken.contains(&candidate.as_str()) {
-            return candidate;
-        }
-    }
-    unreachable!("the loop saturates the usize range before exhausting names")
+    crate::workingset::deconflict_loop(base, |n| taken.contains(n), |c, n| format!("{c} ({n})"))
 }
 
 /// Add a source file as a new shared dataset (dispatch + materialize +
@@ -534,7 +534,7 @@ pub fn list(workspace: &Path) -> Result<Vec<ListedDataset>, StoreError> {
     Ok(load_entries(workspace)?
         .into_iter()
         .map(|entry| {
-            let file_missing = !store_file(workspace, &entry.fingerprint).exists();
+            let file_missing = entry_file(workspace, &entry).is_none();
             ListedDataset {
                 entry,
                 file_missing,
@@ -681,7 +681,7 @@ mod tests {
         let folks = csv(sources.path(), "Folks.csv", "name,score\nAda,9\n");
         let entry = add(workspace.path(), &folks).expect("add");
         assert_eq!(entry.reference_name, "Folks");
-        assert_eq!(entry.display_name, "Folks_2");
+        assert_eq!(entry.display_name, "Folks (2)");
     }
 
     /// The store file lands at <sha256>.duckdb and a second materialization
@@ -937,6 +937,24 @@ mod tests {
         let after = list(workspace.path()).expect("list");
         assert_eq!(after.len(), 1, "entry stays visible");
         assert!(after[0].file_missing, "missing file is flagged");
+    }
+
+    /// entry_file is the single missing-file resolution: the landed store
+    /// path for a live entry, None for a gone one (the list flag above and
+    /// the session attach's missing-entry error both read this).
+    #[test]
+    fn entry_file_resolves_the_landed_store_and_none_for_a_gone_one() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = csv(sources.path(), "people.csv", PEOPLE);
+        let entry = add(workspace.path(), &src).expect("add");
+        assert_eq!(
+            entry_file(workspace.path(), &entry),
+            Some(store_file(workspace.path(), &entry.fingerprint))
+        );
+        let mut gone = entry.clone();
+        gone.fingerprint = "deadbeef".to_string();
+        assert_eq!(entry_file(workspace.path(), &gone), None);
     }
 
     /// add pins the fresh entry's display label to the reference name

@@ -508,7 +508,7 @@ pub fn create_workspace(
         // the registry cannot show. The minted directory stays; retrying
         // the same name takes the existing-directory branch.
         registry
-            .record_titled(&canonical, name.trim())
+            .record_explicit(&canonical, Some(name.trim()))
             .map_err(|detail| format!("workspace created but the record failed: {detail}"))?;
         name.trim().to_string()
     } else {

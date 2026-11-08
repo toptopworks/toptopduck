@@ -125,29 +125,18 @@ impl WorkspaceRegistry {
         }
     }
 
-    /// The named-workspace creation mount point (issue #1393): a fresh mint
-    /// records with the user's name as the `title`. On an existing record the
-    /// call takes the LRU bump plus the one-way explicit upgrade -- this
-    /// mount registers explicitly -- never rewriting the title (identity is
-    /// immutable, ADR-0138 Decision 3). Unlike
-    /// [`Self::record`] this mount FAILS the caller: it serves the explicit
-    /// create command, whose essence is the record itself -- not bookkeeping
-    /// riding a session event, which is the reach of ADR-0138's best-effort
-    /// stance. A record that never lands must not report a successful create.
-    /// The untitled-registration mount [`Self::record_explicit`] (issue
-    /// #1477) is this mount's general shape; the titled call is its
-    /// always-titled special case.
-    pub fn record_titled(&self, canonical: &Path, title: &str) -> Result<(), String> {
-        self.record_explicit(canonical, Some(title)).map(|_| ())
-    }
-
-    /// The existing-directory registration mount (issue #1477): the
-    /// register-without-a-session command's essence -- [`Self::record_at`]
+    /// The explicit-registration mount: the register-without-a-session
+    /// command's essence (issue #1477) and the named-workspace create
+    /// command's always-titled shape (issue #1393) -- [`Self::record_at`]
     /// with `explicit=true` and the registry's own clock, FAILING the
-    /// caller like [`Self::record_titled`] (the record IS the command the
-    /// user asked for). Returns whether the record already existed (the
-    /// bump + one-way upgrade path) so the command layer can project an
-    /// honest idempotency marker.
+    /// caller (the record IS the command the user asked for, not
+    /// bookkeeping riding a session event -- the reach of ADR-0138's
+    /// best-effort stance; a record that never lands must not report a
+    /// successful create). On an existing record the call takes the LRU
+    /// bump plus the one-way explicit upgrade, never rewriting the title
+    /// (identity is immutable, ADR-0138 Decision 3). Returns whether the
+    /// record already existed (the bump + one-way upgrade path) so the
+    /// command layer can project an honest idempotency marker.
     pub fn record_explicit(&self, canonical: &Path, title: Option<&str>) -> Result<bool, String> {
         self.record_at(canonical, title, true, now_millis())
     }
@@ -621,7 +610,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let reg = registry(&root);
         let named = dir_under(root.path(), "alpha");
-        reg.record_titled(&named, "Alpha").expect("record");
+        reg.record_explicit(&named, Some("Alpha")).expect("record");
         let selected = dir_under(root.path(), "my-project");
         reg.record_selected(&selected);
         assert_eq!(reg.explicit_label_of(&named), Some("Alpha".into()));
@@ -717,33 +706,6 @@ mod tests {
             recent.len(),
             1,
             "the titled call does not fork a second record"
-        );
-    }
-
-    #[test]
-    fn record_titled_seats_a_fresh_titled_record() {
-        // The create command's mount: the user's name lands as the title on
-        // a fresh record.
-        let root = tempfile::tempdir().expect("tempdir");
-        let reg = registry(&root);
-        let dir = dir_under(root.path(), "alpha");
-        reg.record_titled(&dir, "Alpha").expect("record");
-        let recent = reg.recent();
-        assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].title.as_deref(), Some("Alpha"));
-    }
-
-    #[test]
-    fn record_titled_fails_the_caller_when_the_write_refuses() {
-        // Unlike the session-event mounts, the explicit create must hear a
-        // refused write: a record that never lands cannot report success.
-        let root = tempfile::tempdir().expect("tempdir");
-        std::fs::write(root.path().join(WORKSPACES_FILE_NAME), "{ not json").expect("corrupt");
-        let reg = registry(&root);
-        let dir = dir_under(root.path(), "alpha");
-        assert!(
-            reg.record_titled(&dir, "Alpha").is_err(),
-            "a refused write surfaces as Err, not a warn"
         );
     }
 

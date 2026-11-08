@@ -50,7 +50,7 @@ impl WorkingSet {
     /// De-conflict a candidate reference name: name, name_2, name_3, ...
     /// returns the first unused (ADR-0022 tool-side de-conflict).
     pub fn deconflict(&self, candidate: &str) -> String {
-        self.deconflict_with(candidate, &HashSet::new())
+        deconflict_loop(candidate, |n| self.taken(n), |c, n| format!("{c}_{n}"))
     }
 
     /// De-conflict a candidate against both the working set and an extra reserved
@@ -59,7 +59,7 @@ impl WorkingSet {
     /// to the same name don't collide at ATTACH time.
     pub fn deconflict_with(&self, candidate: &str, reserved: &HashSet<String>) -> String {
         let taken = |n: &str| self.taken(n) || reserved.contains(n);
-        self.deconflict_loop(candidate, taken, |c, n| format!("{c}_{n}"))
+        deconflict_loop(candidate, taken, |c, n| format!("{c}_{n}"))
     }
 
     /// Whether a reference name is currently held by any member (source or
@@ -84,7 +84,11 @@ impl WorkingSet {
     /// the SQL-safe `_2` suffix used for reference names (which the user never
     /// sees in SQL-free flows). Keeps the UI free of two identical labels.
     pub fn deconflict_display(&self, candidate: &str) -> String {
-        self.deconflict_display_with(candidate, &HashSet::new())
+        deconflict_loop(
+            candidate,
+            |n| self.display_taken(n),
+            |c, n| format!("{c} ({n})"),
+        )
     }
 
     /// De-conflict a candidate display label against both the working set and an
@@ -94,35 +98,11 @@ impl WorkingSet {
     /// show the same label.
     pub fn deconflict_display_with(&self, candidate: &str, reserved: &HashSet<String>) -> String {
         let taken = |n: &str| self.display_taken(n) || reserved.contains(n);
-        self.deconflict_loop(candidate, taken, |c, n| format!("{c} ({n})"))
+        deconflict_loop(candidate, taken, |c, n| format!("{c} ({n})"))
     }
 
     fn display_taken(&self, display: &str) -> bool {
         self.datasets.iter().any(|d| d.display_name == display)
-    }
-
-    /// Shared de-conflict walk for both reference names (`_2` suffix) and display
-    /// labels (` (2)` suffix). The two layers differ only in the taken-test and
-    /// the suffix format, so the candidate walk is identical -- extracted here to
-    /// keep the twins from drifting (DRY). Tries the candidate as-is, then appends
-    /// successive suffixes from 2 until `is_taken` is satisfied.
-    fn deconflict_loop(
-        &self,
-        candidate: &str,
-        is_taken: impl Fn(&str) -> bool,
-        suffix: impl Fn(&str, usize) -> String,
-    ) -> String {
-        if !is_taken(candidate) {
-            return candidate.to_string();
-        }
-        let mut n = 2;
-        loop {
-            let candidate = suffix(candidate, n);
-            if !is_taken(&candidate) {
-                return candidate;
-            }
-            n += 1;
-        }
     }
 
     /// Register a dataset and point active at it (ADR-0022: active = most recent).
@@ -637,6 +617,33 @@ impl WorkingSet {
 fn quote_reference(name: &str) -> String {
     let escaped = name.replace('"', "\"\"");
     format!("\"{escaped}\"")
+}
+
+/// The one suffix walk behind every name de-conflict in the crate: working-set
+/// reference names and display labels, the workspace manifest's two layers,
+/// and the session's attach reservations all ride this. The layers differ
+/// only in the taken-test and the suffix format -- `_2` for SQL-safe
+/// reference names, ` (2)` for human-readable display labels (ADR-0037) --
+/// so the candidate walk is identical. Lives on the private face because the
+/// shared store's schemes are references to the private ingest's scheme
+/// (ADR-0141 D6), not a parallel vocabulary. Tries the candidate as-is, then
+/// appends successive suffixes from 2 until `is_taken` is satisfied.
+pub(crate) fn deconflict_loop(
+    candidate: &str,
+    is_taken: impl Fn(&str) -> bool,
+    suffix: impl Fn(&str, usize) -> String,
+) -> String {
+    if !is_taken(candidate) {
+        return candidate.to_string();
+    }
+    let mut n = 2;
+    loop {
+        let candidate = suffix(candidate, n);
+        if !is_taken(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 #[cfg(test)]
