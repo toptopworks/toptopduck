@@ -344,6 +344,13 @@ http = "1"
 # already unifies in (reqwest turns the same features on), so this
 # declaration adds zero new compilation.
 hyper-util = { version = "0.1", default-features = false, features = ["client-proxy", "client-proxy-system"] }
+# Decodes the env proxy's Basic credentials back into the returned proxy
+# URL's userinfo for the egress overlay (issue #1521): hyper-util splits
+# the credentials into its intercept auth when parsing the env URI, and
+# the custom-matcher contract's only auth channel is the userinfo of the
+# URL the closure returns. Already in the graph at this version via
+# hyper-util's own encoding side.
+base64 = "0.22"
 
 # Desktop-only Tauri plugins (issue #100, ADR-0008 cross-platform). Gated to
 # non-mobile targets to mirror lib.rs `#[cfg(desktop)]` -- these plugins have

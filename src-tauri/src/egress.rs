@@ -12,10 +12,13 @@
 //! - Proxy resolution rides reqwest's `system-proxy` (env vars first, OS
 //!   configuration fallback), the one converged posture across every face
 //!   (the retired ureq face's implicit env-only split is what ADR-0139
-//!   closed). The OS-fallback leg of that resolution ignores the user's
-//!   proxy-bypass list (WinINET `ProxyOverride`, macOS `ExceptionsList`)
-//!   and never exempts loopback, so every face overlays its own exemption
-//!   judgment on top (issue #1521): the [`proxy_with_bypass_overlay`]
+//!   closed). The OS-fallback leg honors the user's proxy-bypass list only
+//!   lossily: on Windows hyper-util folds WinINET `ProxyOverride` into its
+//!   internal no-list with the wildcard shapes stripped (loopback IPs,
+//!   `<local>`, and trailing `prefix.*` die in the fold; a bare `localhost`
+//!   entry survives), on macOS `ExceptionsList` is never read, and neither
+//!   leg exempts a loopback IP literal -- so every face overlays its own
+//!   exemption judgment on top (issue #1521): the [`proxy_with_bypass_overlay`]
 //!   matcher checks the parsed bypass rules first and otherwise delegates
 //!   the proxy choice to the crate's own frozen system resolution. TLS
 //!   rides the crate's rustls-only feature graph (see the Cargo.toml
@@ -43,13 +46,15 @@ struct BypassRules {
 impl BypassRules {
     /// Parse a raw bypass list. Windows `ProxyOverride` is `;`-separated,
     /// macOS `ExceptionsList` is `,`-separated; both dialects are accepted
-    /// in one string (entries are trimmed, lowercased, empties dropped).
+    /// in one string (entries are trimmed, bracketed IPv6 literals
+    /// unbracketed, lowercased, empties dropped).
     fn parse(raw: &str) -> Self {
         Self {
             entries: raw
                 .split([';', ','])
                 .map(str::trim)
                 .filter(|entry| !entry.is_empty())
+                .map(|entry| entry.trim_matches(['[', ']']))
                 .map(str::to_ascii_lowercase)
                 .collect(),
         }
@@ -66,9 +71,13 @@ impl BypassRules {
     }
 
     /// The exemption judgment: `true` means the egress faces must dial
-    /// `host` (a `Url::host_str` shape: lowercase, no port, no IPv6
-    /// brackets) directly, proxy or no proxy.
+    /// `host` directly, proxy or no proxy. The input is a `Url::host_str`
+    /// shape -- no port, and IPv6 literals carry their brackets; the
+    /// normalization below strips them (a bracketed `"[::1]"` would fail
+    /// both the loopback parse and every entry comparison) alongside a
+    /// defensive lowercase.
     fn exempts(&self, host: &str) -> bool {
+        let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
         // Loopback is exempt unconditionally -- the OS-fallback leg of the
         // crate's resolution never exempts it (issue #1521's core report).
         if host == "localhost"
@@ -78,28 +87,29 @@ impl BypassRules {
         {
             return true;
         }
-        let host = host.to_ascii_lowercase();
         self.entries.iter().any(|entry| entry_matches(entry, &host))
     }
 }
 
-/// One bypass-list entry against one lowercased host. All comparisons are
-/// dot-boundary aware: `cache.corp` must not match `xcache.corp`.
+/// One bypass-list entry against one lowercased, unbracketed host. All
+/// comparisons are dot-boundary aware: `cache.corp` must not match
+/// `xcache.corp`.
 fn entry_matches(entry: &str, host: &str) -> bool {
     match entry {
         "*" => return true,
         "<local>" => return !host.contains('.'),
         _ => {}
     }
-    if let Some(domain) = entry.strip_prefix("*.") {
-        return host == domain || host.strip_suffix(domain).is_some_and(|r| r.ends_with('.'));
-    }
     if let Some(prefix) = entry.strip_suffix(".*") {
         return host
             .strip_prefix(prefix)
             .is_some_and(|r| r.is_empty() || r.starts_with('.'));
     }
-    host == entry || host.strip_suffix(entry).is_some_and(|r| r.ends_with('.'))
+    // `*.domain` and a bare `domain` share the suffix judgment; the strip
+    // order above keeps double wildcards (`*.*`) false rather than
+    // recursing -- a host never contains `*`.
+    let domain = entry.strip_prefix("*.").unwrap_or(entry);
+    host == domain || host.strip_suffix(domain).is_some_and(|r| r.ends_with('.'))
 }
 
 /// The raw OS bypass list, unconverted -- the OS dialect split and the
@@ -164,7 +174,10 @@ fn os_bypass_list() -> Option<String> {
 /// return `None`; everything else delegates the proxy choice to a frozen
 /// `hyper_util` system matcher -- the same env-vars-first,
 /// OS-configuration-fallback resolution reqwest itself rides, snapshot
-/// included.
+/// included. The intercept's resolved credentials round-trip through the
+/// returned URL's userinfo: reqwest re-parses the returned URL through the
+/// same builder, and that userinfo is the custom-matcher contract's only
+/// auth channel (issue #1521's review).
 fn proxy_with_bypass_overlay() -> reqwest::Proxy {
     let system = hyper_util::client::proxy::matcher::Matcher::from_system();
     let rules = BypassRules::from_os();
@@ -174,8 +187,42 @@ fn proxy_with_bypass_overlay() -> reqwest::Proxy {
         }
         let uri = http::Uri::try_from(url.as_str()).ok()?;
         let intercepted = system.intercept(&uri)?;
-        reqwest::Url::parse(&intercepted.uri().to_string()).ok()
+        let mut proxy = reqwest::Url::parse(&intercepted.uri().to_string()).ok()?;
+        // hyper-util's env parsing splits the proxy URI's credentials into
+        // the intercept's auth field and leaves `uri()` a bare authority;
+        // re-embed them or they evaporate at reqwest's re-parse and an
+        // authenticated proxy answers 407. A decode failure keeps the
+        // credential-less proxy URL -- proxied without auth, never a
+        // silent direct dial.
+        if let Some((user, pass)) = proxy_credentials(&intercepted) {
+            let _ = proxy.set_username(&user);
+            let _ = proxy.set_password(Some(&pass));
+        }
+        Some(proxy)
     })
+}
+
+/// The credentials an [`hyper_util`] intercept resolved, as the (user,
+/// password) pair the returned proxy URL's userinfo carries: the raw pair
+/// for socks handshakes, the Basic header decoded back for the http/https
+/// legs (hyper-util encoded it from the userinfo verbatim, so the UTF-8
+/// decode cannot fail for values it produced).
+fn proxy_credentials(
+    intercepted: &hyper_util::client::proxy::matcher::Intercept,
+) -> Option<(String, String)> {
+    if let Some((user, pass)) = intercepted.raw_auth() {
+        return Some((user.to_owned(), pass.to_owned()));
+    }
+    use base64::Engine as _;
+    let header = intercepted.basic_auth()?;
+    let encoded = header.to_str().ok()?.strip_prefix("Basic ")?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let mut parts = decoded.splitn(2, |byte| *byte == b':');
+    let user = std::str::from_utf8(parts.next()?).ok()?;
+    let pass = std::str::from_utf8(parts.next().unwrap_or_default()).unwrap_or("");
+    Some((user.to_owned(), pass.to_owned()))
 }
 
 /// Test-only construction counter for the async face: proves a completed
@@ -255,11 +302,52 @@ mod tests {
     #[test]
     fn bypass_rules_exempt_loopback_unconditionally() {
         // The whole 127/8 range rides `is_loopback`, not a literal
-        // `127.0.0.1`: every address in it is loopback.
-        let rules = BypassRules::parse("");
-        for host in ["localhost", "127.0.0.1", "::1", "127.203.1.9"] {
+        // `127.0.0.1`: every address in it is loopback. The bracketed
+        // `"[::1]"` is the shape the production caller feeds (`host_str`
+        // serializes IPv6 literals with brackets); a bracketed list entry
+        // matches the same host through the parse-side unbracketing.
+        let rules = BypassRules::parse("[::1]");
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "127.203.1.9",
+        ] {
             assert!(rules.exempts(host), "loopback host {host} is always exempt");
         }
+    }
+
+    #[test]
+    fn bypass_rules_exempt_the_url_host_str_shapes() {
+        // Ride the real boundary: `host_str` on a parsed URL is the exact
+        // input the matcher closure hands `exempts` -- IPv6 bracketed, per
+        // the url crate's serialization.
+        for url in [
+            "http://[::1]:1/",
+            "http://localhost:1/",
+            "http://127.0.0.1:1/",
+        ] {
+            let parsed = reqwest::Url::parse(url).expect("the probe URL parses");
+            let host = parsed.host_str().expect("each probe URL carries a host");
+            assert!(
+                BypassRules::parse("").exempts(host),
+                "the host_str shape of {url} is exempt"
+            );
+        }
+    }
+
+    #[test]
+    fn bypass_rules_do_not_match_cidr_entries() {
+        // ADR-0144 Decision 2: CIDR entries are documented as not matched
+        // (neither OS default list carries a hittable one); the ceiling is
+        // deliberate, and this pins it as such.
+        let rules = BypassRules::parse("10.0.0.0/8");
+        assert!(
+            !rules.exempts("10.4.5.6"),
+            "a CIDR entry is not an address matcher"
+        );
     }
 
     #[test]
@@ -314,6 +402,11 @@ mod tests {
         assert!(
             !rules.exempts("100.24.0.1"),
             "the prefix wildcard requires a dot boundary"
+        );
+        let double = BypassRules::parse("*.*");
+        assert!(
+            !double.exempts("a.b"),
+            "a double wildcard is not an everything pass"
         );
     }
 
