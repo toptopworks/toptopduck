@@ -588,9 +588,11 @@ export async function onSessionNamed(
 // (ADR-0060/0061, issue #76). The backend scans the managed sessions directory
 // (ADR-0089) and derives each entry from its recipe + mtime; unreadable paths
 // are skipped. recipe_path is the recipe.json path -- pass it back to openRecipe to
-// resume. `includeArchived` (ADR-0127) appends the archived rows (mtime desc)
-// after the pinned block + unarchived mtime-desc block -- the archived view's
-// fetch; the default response excludes them so tray / search never see them.
+// resume. `includeArchived` (ADR-0127; #1403) appends the archived rows
+// (mtime desc) after the pinned block + unarchived mtime-desc block. The
+// shell's only caller always passes it since #1403 (the search modal's
+// archived partition); the default response still excludes them, and the
+// tray consumes only the unarchived partition.
 export async function listSessions(
   opts?: { includeArchived?: boolean },
 ): Promise<SessionMetadata[]> {

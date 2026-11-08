@@ -99,7 +99,8 @@ export interface UseShellSessionsDeps {
   intl: IntlShape;
   queryClient: QueryClient;
   /** From usePersistedSessions: bumps sessionsEpoch to re-fetch list_sessions
-   *  after a save / delete / rename lands on disk. */
+   *  after a save / delete / rename lands on disk, and after openPersisted
+   *  succeeds (#1403: open-is-unarchive is a disk-side metadata change). */
   refreshSessions: () => void;
   /** From useShellError: surfaces a shell-layer AppError (kind "shell") for a
    *  createSession / openRecipe / save / delete / rename reject. */

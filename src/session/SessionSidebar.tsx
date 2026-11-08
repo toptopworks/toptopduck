@@ -92,12 +92,12 @@ interface SessionSidebarProps {
    *  landing non-Failed, a close, or a pane-level cache reset. Keyed by
    *  runtime sid, so only OPEN entries match. */
   turnFailedSids?: ReadonlySet<string>;
-  /** The archived rows (ADR-0127 Decision 7, issue #1175): the caller's
-   *  usePersistedSessions partitions the includeArchived scan into this
-   *  while the view is visible; the hidden scan carries no archived rows,
-   *  so this is [] whenever the view is hidden. The component additionally
-   *  gates rendering on `showArchived` -- the props contract does not
-   *  depend on the caller keeping the two in sync. */
+  /** The archived rows (ADR-0127 Decision 7, issue #1175; #1403): the
+   *  caller's usePersistedSessions partitions the unconditional
+   *  includeArchived scan into this, so the list is populated whether or
+   *  not the view is visible. The component gates rendering on
+   *  `showArchived` -- the props contract does not depend on the caller
+   *  keeping the two in sync. */
   archivedSessions: SessionMetadata[];
   /** The archived view's visibility. NOT persisted (Decision 7: the peek
    *  semantics reset it to hidden on every startup). */

@@ -264,8 +264,8 @@ export default function App() {
   // every mutating action (open / close / drop / rename / save / delete) + the
   // resume + persistence-busy gates + the single webview drop router (#81).
   // useShellSessions also takes the QueryClient seam (ADR-0051/0055 cache drop
-  // on unmount) + refreshSessions (save/delete/rename re-fetch) + setShellError
-  // (shell-layer AppError surface, issue #194).
+  // on unmount) + refreshSessions (save/delete/rename/openPersisted
+  // re-fetch) + setShellError (shell-layer AppError surface, issue #194).
   // showArchived (ADR-0127 Decision 7, issue #1175): the archived view's
   // visibility. Deliberately NOT persisted -- every startup resets the
   // archived view to hidden (the peek semantics), so plain useState. Since
