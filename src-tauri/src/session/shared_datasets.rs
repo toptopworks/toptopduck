@@ -89,14 +89,7 @@ impl SharedAttaches {
             return name;
         }
         let taken = |n: &str| ws.taken(n) || self.attaches.contains_key(n);
-        let name = if !taken(entry_name) {
-            entry_name.to_string()
-        } else {
-            (2..)
-                .map(|n| format!("{entry_name}_{n}"))
-                .find(|candidate| !taken(candidate))
-                .expect("the numeric suffix space cannot exhaust")
-        };
+        let name = crate::workingset::deconflict_loop(entry_name, taken, |c, n| format!("{c}_{n}"));
         self.attaches.insert(
             name.clone(),
             AttachRecord {
@@ -168,13 +161,12 @@ fn attach_shared(
     name: &str,
     entry: &DatasetEntry,
 ) -> Result<(), String> {
-    let store = datasets::store_file(workspace, &entry.fingerprint);
-    if !store.exists() {
+    let Some(store) = datasets::entry_file(workspace, entry) else {
         return Err(format!(
             "共享数据集「{name}」的存储文件缺失（工作区清单条目 {entry}）；请在工作区管理面板重新添加该数据集",
             entry = entry.reference_name
         ));
-    }
+    };
     let dest = snapshot_dir.join(format!("{name}.duckdb"));
     link_into_tree(&store, &dest)?;
     if let Err(e) = engine.execute_batch(&attach_sql(&dest.to_string_lossy(), name)) {

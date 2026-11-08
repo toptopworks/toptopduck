@@ -47,19 +47,13 @@ pub struct WorkingSet {
 }
 
 impl WorkingSet {
-    /// De-conflict a candidate reference name: name, name_2, name_3, ...
-    /// returns the first unused (ADR-0022 tool-side de-conflict).
-    pub fn deconflict(&self, candidate: &str) -> String {
-        self.deconflict_with(candidate, &HashSet::new())
-    }
-
     /// De-conflict a candidate against both the working set and an extra reserved
     /// set -- used when reserving several names in one batch (e.g. an Excel
     /// workbook's sheets) before any are registered, so two sheets that sanitize
     /// to the same name don't collide at ATTACH time.
     pub fn deconflict_with(&self, candidate: &str, reserved: &HashSet<String>) -> String {
         let taken = |n: &str| self.taken(n) || reserved.contains(n);
-        self.deconflict_loop(candidate, taken, |c, n| format!("{c}_{n}"))
+        deconflict_loop(candidate, taken, |c, n| format!("{c}_{n}"))
     }
 
     /// Whether a reference name is currently held by any member (source or
@@ -94,35 +88,11 @@ impl WorkingSet {
     /// show the same label.
     pub fn deconflict_display_with(&self, candidate: &str, reserved: &HashSet<String>) -> String {
         let taken = |n: &str| self.display_taken(n) || reserved.contains(n);
-        self.deconflict_loop(candidate, taken, |c, n| format!("{c} ({n})"))
+        deconflict_loop(candidate, taken, |c, n| format!("{c} ({n})"))
     }
 
     fn display_taken(&self, display: &str) -> bool {
         self.datasets.iter().any(|d| d.display_name == display)
-    }
-
-    /// Shared de-conflict walk for both reference names (`_2` suffix) and display
-    /// labels (` (2)` suffix). The two layers differ only in the taken-test and
-    /// the suffix format, so the candidate walk is identical -- extracted here to
-    /// keep the twins from drifting (DRY). Tries the candidate as-is, then appends
-    /// successive suffixes from 2 until `is_taken` is satisfied.
-    fn deconflict_loop(
-        &self,
-        candidate: &str,
-        is_taken: impl Fn(&str) -> bool,
-        suffix: impl Fn(&str, usize) -> String,
-    ) -> String {
-        if !is_taken(candidate) {
-            return candidate.to_string();
-        }
-        let mut n = 2;
-        loop {
-            let candidate = suffix(candidate, n);
-            if !is_taken(&candidate) {
-                return candidate;
-            }
-            n += 1;
-        }
     }
 
     /// Register a dataset and point active at it (ADR-0022: active = most recent).
@@ -639,6 +609,34 @@ fn quote_reference(name: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// The one suffix walk behind every name de-conflict in the crate: working-set
+/// reference names and display labels, the workspace manifest's two layers,
+/// the session's attach reservations, and the MCP aggregator's server slugs
+/// all ride this. The layers differ only in the taken-test and the suffix
+/// format -- `_2` for SQL-safe reference names, ` (2)` for human-readable
+/// display labels (ADR-0037's display-layer de-conflict) --
+/// so the candidate walk is identical. Lives on the private face because the
+/// shared store's schemes are references to the private ingest's scheme
+/// (ADR-0141 D6), not a parallel vocabulary. Tries the candidate as-is, then
+/// appends successive suffixes from 2 until `is_taken` is satisfied.
+pub(crate) fn deconflict_loop(
+    candidate: &str,
+    is_taken: impl Fn(&str) -> bool,
+    suffix: impl Fn(&str, usize) -> String,
+) -> String {
+    if !is_taken(candidate) {
+        return candidate.to_string();
+    }
+    let mut n = 2;
+    loop {
+        let candidate = suffix(candidate, n);
+        if !is_taken(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,18 +669,20 @@ mod tests {
     }
 
     #[test]
-    fn deconflict_keeps_first_unused_name() {
+    fn deconflict_with_keeps_first_unused_name() {
         let ws = WorkingSet::default();
-        assert_eq!(ws.deconflict("orders"), "orders");
+        assert_eq!(ws.deconflict_with("orders", &HashSet::new()), "orders");
     }
 
     #[test]
-    fn deconflict_appends_suffix_on_collision() {
+    fn deconflict_with_appends_suffix_on_collision() {
+        // The working-set occupancy leg (the reserved-set leg is pinned below):
+        // an empty reserved set leaves the walk against registered names only.
         let mut ws = WorkingSet::default();
         ws.register(descriptor("orders"));
-        assert_eq!(ws.deconflict("orders"), "orders_2");
+        assert_eq!(ws.deconflict_with("orders", &HashSet::new()), "orders_2");
         ws.register(descriptor("orders_2"));
-        assert_eq!(ws.deconflict("orders"), "orders_3");
+        assert_eq!(ws.deconflict_with("orders", &HashSet::new()), "orders_3");
     }
 
     #[test]
