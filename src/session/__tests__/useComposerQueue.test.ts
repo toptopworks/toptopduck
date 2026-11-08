@@ -737,6 +737,9 @@ describe("useComposerQueue armWindow (#1512/#1523 replace joins the queue window
 
     // Assert: the older handle's settled fired...
     expect(olderSettled).toBe(true);
+    // The handle's stamp is minted at arming and feeds the rail line's
+    // elapsed-seconds suffix -- a zeroed mint must not pass silently.
+    expect(olderHandle.startedAt).toBeGreaterThan(0);
 
     // ...and the settle did not clear the NEWER window's gate: a question
     // held now still waits behind the newer flight.

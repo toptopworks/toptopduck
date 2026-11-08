@@ -381,6 +381,14 @@ describe("useWorkingSet", () => {
       await expect(vi.mocked(view.surfaces.armReplace).mock.results[0].value).resolves.toBe(
         true,
       );
+      // The handover is lazy (#1523): the IPC starts INSIDE the arming call,
+      // so replaceSource's invocation of this flight lands after the
+      // armReplace report -- a build-then-forget regression flips the order.
+      const ipcOrder = vi.mocked(replaceSource).mock.invocationCallOrder.at(-1);
+      expect(ipcOrder).toBeDefined();
+      expect(vi.mocked(view.surfaces.armReplace).mock.invocationCallOrder[0]).toBeLessThan(
+        ipcOrder!,
+      );
     });
 
     it("arms the queue window in the handler's entry tick (#1512)", () => {
