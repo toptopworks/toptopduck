@@ -182,13 +182,13 @@ fn state_dir(workspace: &Path) -> PathBuf {
 }
 
 /// The snapshot store directory for a workspace root.
-pub(crate) fn store_dir(workspace: &Path) -> PathBuf {
+fn store_dir(workspace: &Path) -> PathBuf {
     state_dir(workspace).join(SNAPSHOTS_DIR_NAME)
 }
 
 /// The store file for a content fingerprint (the session-side lazy attach
 /// resolves through this, ADR-0141 D3).
-pub(crate) fn store_file(workspace: &Path, fingerprint: &str) -> PathBuf {
+fn store_file(workspace: &Path, fingerprint: &str) -> PathBuf {
     store_dir(workspace).join(format!("{fingerprint}.duckdb"))
 }
 
@@ -196,7 +196,7 @@ pub(crate) fn store_file(workspace: &Path, fingerprint: &str) -> PathBuf {
 /// single resolution point for the missing-file question -- the panel's
 /// list flag and the session attach's missing-entry error both read this
 /// (one answer, two consumer postures).
-pub fn entry_file(workspace: &Path, entry: &DatasetEntry) -> Option<PathBuf> {
+pub(crate) fn entry_file(workspace: &Path, entry: &DatasetEntry) -> Option<PathBuf> {
     let path = store_file(workspace, &entry.fingerprint);
     path.exists().then_some(path)
 }
@@ -293,11 +293,7 @@ fn reopen_read_only(dest: PathBuf) -> Result<Snapshot, StoreError> {
 /// renames (single physical file, no parallel writers). Both paths derive
 /// shape only -- no table-content fingerprint pass; the identity is the
 /// store key itself (issue #1506).
-pub(crate) fn materialize(
-    workspace: &Path,
-    src: &Path,
-    reader: &str,
-) -> Result<Snapshot, StoreError> {
+fn materialize(workspace: &Path, src: &Path, reader: &str) -> Result<Snapshot, StoreError> {
     let key = crate::util::sha256_file(src).map_err(StoreError::io)?;
     let dest = store_file(workspace, &key);
     if dest.exists() {
@@ -342,7 +338,8 @@ fn deconflict(base: &str, entries: &[DatasetEntry]) -> String {
 /// names: the display-layer uniqueness rename enforces (DisplayTaken) must
 /// hold for entries the add path creates too, so a fresh default label never
 /// lands on a label a rename already took. Same ` (2)` suffix as the
-/// session's display layer (ADR-0037) -- one human-readable format.
+/// session's display layer (ADR-0037 display-layer de-conflict) -- one
+/// human-readable format.
 fn deconflict_display(base: &str, entries: &[DatasetEntry]) -> String {
     let taken: std::collections::HashSet<&str> =
         entries.iter().map(|e| e.display_name.as_str()).collect();

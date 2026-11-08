@@ -904,17 +904,11 @@ impl McpAggregator {
     /// share a display-name slug; the second gets the suffix so both stay
     /// routable. The first occurrence keeps the bare slug.
     fn unique_slug(&self, base: &str) -> String {
-        if !self.servers.iter().any(|s| s.slug == base) {
-            return base.to_string();
-        }
-        let mut n = 2;
-        loop {
-            let candidate = format!("{base}_{n}");
-            if !self.servers.iter().any(|s| s.slug == candidate) {
-                return candidate;
-            }
-            n += 1;
-        }
+        crate::workingset::deconflict_loop(
+            base,
+            |n| self.servers.iter().any(|s| s.slug == n),
+            |c, n| format!("{c}_{n}"),
+        )
     }
 }
 
@@ -1344,6 +1338,32 @@ mod tests {
         assert_eq!(slugify("BUILTIN", &id), "builtin_reserved");
         assert_eq!(slugify("builtIn", &id), "builtin_reserved");
         assert_eq!(slugify("Built.in", &id), "builtin_reserved");
+    }
+
+    #[test]
+    fn unique_slug_appends_suffix_when_two_servers_share_a_slug() {
+        // Two catalog servers already slugged "alpha": the next claim on the
+        // same base takes "_2" so every server stays routable under its own
+        // slug (the collision de-dup behind connect's catalog entry).
+        let mut agg = McpAggregator::empty();
+        for _ in 0..2 {
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("bind ephemeral port")
+                .local_addr()
+                .expect("local addr")
+                .port();
+            let client = crate::mcp::client::HttpClient::unreachable_for_test(&format!(
+                "http://127.0.0.1:{port}"
+            ));
+            agg.servers.push(AggregatedServer::new(
+                "alpha".to_string(),
+                "Alpha".to_string(),
+                TransportClient::Http(client),
+                Vec::new(),
+                Duration::from_millis(DEFAULT_MCP_TIMEOUT_MS as u64),
+            ));
+        }
+        assert_eq!(agg.unique_slug("alpha"), "alpha_2");
     }
 
     #[test]
