@@ -33,7 +33,7 @@ ADR-0119 Decision 4 维持子智能体对调用元工具的排除，其理由链
 
 ## Consequences
 
-- **校准 ADR-0117**：Decision 4 的「减全部委派工具减 `activate_skill`」读作「减全部委派工具」——`activate_skill` 的继任者 `invoke_skill` 不再在减集；Decision 2 的标记注入降格为作者确知快路径（装配语义、交集提取、失效跳过警示全部不变）。
+- **校准 ADR-0117**：Decision 4 的「减全部委派工具减 `activate_skill`」读作「减全部委派工具」——`activate_skill` 的继任者 `invoke_skill` 不再在减集；Decision 2 的标记注入降格为作者确知快路径（装配语义、交集提取、失效跳过警示全部不变）；Consequences「边界不变」条与 Why 3 的「激活通道仍仅用户与主 agent 可为」括注退役——调用通道对子智能体开放即 Decision 4 重读的推论。
 - **校准 ADR-0119**：Decision 4 末句「子智能体维持排除（其技能路径 = agent 定义的技能名标记注入，ADR-0117 不变）」退役；其 Why 6 与 Considered「子智能体同步开放调用」的否决理由（能力增益无现实场景）被漏挂死路与活体不协调翻案，免审批、快照条件挂载、自纠信号语义全部维持。
 - **CONTEXT.md 校准**：「子智能体」词条（工具面减集、技能调用归属）与「agent 定义」词条（标记通道定位）改义。
 - **委派工具描述随改**：「no skill activation」措辞随开闸失效退役。
