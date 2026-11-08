@@ -12,13 +12,14 @@
 //! the spec's [`subagent_preamble`] / [`subagent_tool_face`] when the main
 //! agent calls the tool (ADR-0117 Decisions 1/2/4).
 //!
-//! Face vocabulary (ADR-0117 Decision 4): the sub-agent's tool face is the
-//! full gateway face MINUS every delegation tool (depth-1 physical
-//! exclusion -- the sub-agent is constructed with no delegation tool
-//! mounted, so recursion is structurally impossible, not merely refused)
-//! MINUS `invoke_skill` (the invocation channel stays
-//! user + main-agent only); `read_skill_file` and the discovery trio
-//! survive untouched, and every call the sub-agent makes dispatches
+//! Face vocabulary (ADR-0117 Decision 4, calibrated by ADR-0145): the
+//! sub-agent's tool face is the full gateway face MINUS every delegation
+//! tool (depth-1 physical exclusion -- the sub-agent is constructed with
+//! no delegation tool mounted, so recursion is structurally impossible,
+//! not merely refused) -- and nothing else: `invoke_skill` and
+//! `read_skill_file` ride the main table's own mounting condition (issue
+//! #985; a zero-skill session's sub-face carries neither), the discovery
+//! trio survives untouched, and every call the sub-agent makes dispatches
 //! through the SAME shared core -- approval, audit, `result_N` promotion
 //! -- as the main agent's.
 
@@ -156,11 +157,12 @@ impl DelegationSpec {
 /// The sub-agent's system prompt (ADR-0117 Decision 2, calibrated by
 /// ADR-0145): the definition's preamble with each bound skill's body
 /// injected ONCE, here at assembly time, then the turn's discovery-snapshot
-/// index block appended once (issue #985 -- the same bytes the main face's
-/// system prompt carries, so a sub-agent knows what it can invoke through
-/// the `invoke_skill` tool its face now carries). The marker channel's
-/// construction-time injection remains the deterministic fast path; an
-/// unbound preamble with an empty index passes through verbatim.
+/// index block appended once (issue #985 -- blank line + index, the same
+/// bytes the main face's system prompt embeds, so a sub-agent knows what it
+/// can invoke through the `invoke_skill` tool its face now carries). The
+/// marker channel's construction-time injection remains the deterministic
+/// fast path; an unbound preamble with an empty index passes through
+/// verbatim.
 pub fn subagent_preamble(spec: &DelegationSpec, skill_index: &str) -> String {
     let mut prompt = if spec.skill_injections.is_empty() {
         spec.preamble.clone()
@@ -178,9 +180,13 @@ pub fn subagent_preamble(spec: &DelegationSpec, skill_index: &str) -> String {
         }
         prompt
     };
-    // The index block already carries its own leading blank-line separation
-    // (the renderer opens with "\n\n"); an empty snapshot renders empty and
-    // appends nothing.
+    // The index block arrives trimmed: its renderer strips the leading blank
+    // line because that separator belongs to the main face's system-prompt
+    // embedding, so the seam supplies the blank line itself. An empty
+    // snapshot renders empty and appends nothing.
+    if !skill_index.is_empty() {
+        prompt.push_str("\n\n");
+    }
     prompt.push_str(skill_index);
     prompt
 }
@@ -491,6 +497,11 @@ mod tests {
         assert!(
             body_pos < index_pos,
             "the index follows the bound bodies (a trailing catalog)"
+        );
+        assert!(
+            rendered.contains("Prefer CTEs.\n\n【可用技能】"),
+            "the seam is one blank line -- the same separation the main face's \
+             embedding carries"
         );
         assert!(rendered.contains("- `pdf-tools` — Extract tables first."));
         assert_eq!(
