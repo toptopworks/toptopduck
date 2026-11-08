@@ -119,6 +119,9 @@ fn os_bypass_list() -> Option<String> {
 #[cfg(target_os = "macos")]
 fn os_bypass_list() -> Option<String> {
     use system_configuration::core_foundation::array::CFArray;
+    // `wrap_under_create_rule` and `as_concrete_TypeRef` are TCFType trait
+    // methods -- the trait must be in scope for the typed-view wrap below.
+    use system_configuration::core_foundation::base::TCFType;
     use system_configuration::core_foundation::string::CFString;
     use system_configuration::dynamic_store::SCDynamicStoreBuilder;
 
