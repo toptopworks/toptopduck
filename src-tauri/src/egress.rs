@@ -119,7 +119,6 @@ fn os_bypass_list() -> Option<String> {
 #[cfg(target_os = "macos")]
 fn os_bypass_list() -> Option<String> {
     use system_configuration::core_foundation::array::CFArray;
-    use system_configuration::core_foundation::base::CFType;
     use system_configuration::core_foundation::string::CFString;
     use system_configuration::dynamic_store::SCDynamicStoreBuilder;
 
