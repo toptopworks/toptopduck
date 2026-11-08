@@ -9,7 +9,7 @@ import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useRailFollow } from "./useRailFollow";
 import { useSessionState } from "./useSessionState";
-import { useComposerQueue } from "./useComposerQueue";
+import { useComposerQueue, type VerdictThunk } from "./useComposerQueue";
 import { consumePendingPayload } from "./pendingPayload";
 import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
@@ -204,7 +204,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // the working-set tab's add entry (issue #792), and the pendingPayload
   // consumption below all route through it, so a cold-start batch gates the
   // bar exactly like a manual one; the replace flight arms the same window
-  // separately, through trackWindow below. The pendingPayload
+  // separately, through armReplace below. The pendingPayload
   // chain's held question occupies the SAME slot (hold below), so the
   // session can never carry two pending questions and the bar honestly
   // shows the queued posture during the chain window. The wrapped
@@ -213,7 +213,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // instead of silently parking on the backend session lock). onSeedDraft /
   // onSeedInvocations are useCallback-stable in the shell (the #991
   // atomic-rollback channels).
-  const { queued, ingestMany, trackWindow, handleAsk: queuedHandleAsk, hold } = useComposerQueue({
+  const { queued, ingestMany, armWindow, handleAsk: queuedHandleAsk, hold } = useComposerQueue({
     sessionId,
     ingestMany: s.handleIngestMany,
     ask: s.handleAsk,
@@ -222,36 +222,24 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     hasLiveTurn: s.hasLiveTurn,
   });
   // The replace window's arming + the rail's progress line (#1512): the
-  // working-set seam hands the verdict flight here at entry; the pane mints
-  // the progress stamp (ONE clock per flight, minted at this single call
-  // site), arms the queue window (the replace holds the backend session
-  // lock, so a question submitted mid-replace must queue, not silently
-  // block on it), and clears the line at the settle. The flight ref is the
-  // identity gate: a stale settle must not clear a newer flight's line (the
-  // queue's own gate already ignores stale verdicts by the same rule).
-  const progressFlightRef = useRef<Promise<boolean> | null>(null);
-  // The line's content state, pane-local beside its identity gate: every
-  // writer and reader of this value is this pane (the Thread prop and the
-  // empty-rail gate below), so -- unlike ingestProgress, which a state hook
-  // produces -- it never crosses a hook interface.
+  // working-set seam hands the verdict thunk here at entry; armWindow mints
+  // the progress stamp (ONE clock per flight, minted in the arming tick),
+  // starts the flight, and arms the queue window (the replace holds the
+  // backend session lock, so a question submitted mid-replace must queue,
+  // not silently block on it). The handle's settled belongs to THIS flight
+  // -- a newer window arming leaves it alone -- so the line clears at its
+  // own settle with no identity gate; the queue's slot exit keeps the
+  // newest-owner rule for itself.
   const [replaceProgress, setReplaceProgress] = useState<ReplaceProgress | null>(null);
-  const trackReplace = useCallback(
-    (flight: Promise<boolean>, info: ReplaceFlightInfo) => {
-      progressFlightRef.current = flight;
-      setReplaceProgress({ ...info, startedAt: Date.now() });
-      trackWindow(flight);
-      void flight.then(
-        () => {
-          if (progressFlightRef.current === flight) setReplaceProgress(null);
-        },
-        () => {
-          if (progressFlightRef.current === flight) setReplaceProgress(null);
-        },
-      );
+  const armReplace = useCallback(
+    (verdict: VerdictThunk, info: ReplaceFlightInfo) => {
+      const handle = armWindow(verdict);
+      setReplaceProgress({ ...info, startedAt: handle.startedAt });
+      void handle.settled.then(() => setReplaceProgress(null));
     },
-    [trackWindow, setReplaceProgress],
+    [armWindow, setReplaceProgress],
   );
-  const workingSetSurfaces: UseWorkingSetSurfaces = { ...s.mutationSurfaces, trackReplace };
+  const workingSetSurfaces: UseWorkingSetSurfaces = { ...s.mutationSurfaces, armReplace };
   // Issue #829: the rail's stick-to-bottom posture. Signals only -- the
   // settled count grows on appends, liveTurn's identity changes per streaming
   // event and per approval-channel update (and its null -> live transition

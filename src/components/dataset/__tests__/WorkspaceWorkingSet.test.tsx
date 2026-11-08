@@ -60,7 +60,7 @@ function makeSurfaces(): UseWorkingSetSurfaces {
     setError: vi.fn(),
     setMutationLoading: vi.fn(),
     pollPersistError: vi.fn(async () => {}),
-    trackReplace: vi.fn(),
+    armReplace: vi.fn(),
   };
 }
 

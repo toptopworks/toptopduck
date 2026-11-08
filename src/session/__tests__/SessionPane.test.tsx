@@ -609,7 +609,7 @@ describe("SessionPane composer queue behind an in-flight ingest (#1500)", () => 
 
 // Issue #1512: a source replace is the other long IPC that holds the backend
 // session lock, so its verdict flight arms the SAME queue window -- armed
-// through the pane's trackReplace composition when the working-set seam
+// through the pane's armReplace composition when the working-set seam
 // fires. The rail's replace progress line rides the same flight.
 describe("SessionPane composer queue behind an in-flight replace (#1512)", () => {
   const heldQuestion = "queued while replacing";
