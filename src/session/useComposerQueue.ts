@@ -28,7 +28,9 @@ import { log } from "../lib/log";
 // wrapper is pass-through: the verdict Promise the caller consumes is the
 // batch's own. The replace flight is the second arming point (#1512): the
 // working-set seam fires its own IPC, so SessionPane hands the verdict
-// Promise to trackWindow at entry -- the queue never wraps it.
+// thunk to armWindow at entry (#1523's single arming entry) -- the queue
+// mints the window clock, invokes the thunk in the same tick, and wires
+// the identity.
 //
 // Lifecycle is the keep-alive pane's, for free: the slot survives a session
 // switch (the pane stays mounted) and dies with the pane, whose unmount
@@ -45,6 +47,27 @@ import { log } from "../lib/log";
 interface QueuedQuestion {
   question: string;
   invocations: string[];
+}
+
+/** The queue window's verdict contract, resolve-only -- the single home of
+ *  the wording (#1523): resolve true = every file/route Loaded (including
+ *  the post-guidance drain); resolve false = every failure route (cancel /
+ *  Error / superseded / IPC reject), so the window's exit is total. The
+ *  thunk is invoked synchronously by armWindow: hand it over lazy (an
+ *  async arrow) so the flight starts inside the invocation, never as an
+ *  already-started promise -- the queue's own tracked-ingest wrapper is
+ *  the one exception (it starts the batch and arms it in adjacent
+ *  synchronous statements). */
+export type VerdictThunk = () => Promise<boolean>;
+
+/** armWindow's per-flight handle (#1523): the window's start stamp plus the
+ *  settle promise belonging to THIS flight. A newer window arming neither
+ *  suppresses nor replaces it -- a rail progress line rides it to its own
+ *  settle -- while the slot's exit stays with the newest arming (the
+ *  windowRef identity rule). */
+export interface WindowHandle {
+  startedAt: number;
+  settled: Promise<void>;
 }
 
 export interface ComposerQueueDeps {
@@ -68,10 +91,14 @@ export interface ComposerQueue {
   queued: boolean;
   /** The tracked handleIngestMany: pass-through verdict, arms the settle. */
   ingestMany: (paths: string[]) => Promise<boolean>;
-  /** Arm an already-started flight as the queue window (#1512): the replace
-   *  seam fires its own IPC and hands the verdict Promise here at entry --
-   *  same gate, same identity rule, newest arming owns the exit. */
-  trackWindow: (flight: Promise<boolean>) => void;
+  /** Arm the queue window (#1512): the ONE arming entry (#1523). Mints the
+   *  window's start stamp and invokes the thunk in the same synchronous
+   *  tick -- the gate closes before the IPC's first microtask, so a flight
+   *  that starts but never arms (build-then-forget) is structurally
+   *  impossible -- then wires the window identity: newest arming owns the
+   *  slot exit. Returns the per-flight handle for the caller's own clock
+   *  needs (the pane's progress line). */
+  armWindow: (verdict: VerdictThunk) => WindowHandle;
   /** The queue-aware ask the bar routes through. Outside a window it is the
    *  direct fire; inside one it fills the slot and resolves immediately. */
   handleAsk: (question: string, invocations?: string[]) => Promise<void>;
@@ -91,7 +118,7 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
   // continuation clears it without waiting for a render flush. The window
   // is whichever long IPC holds the backend session lock (#1512): a tracked
   // ingest batch (the wrapper below) or a source replace flight (armed
-  // imperatively via trackWindow) -- the newest arming owns the exit.
+  // through armWindow) -- the newest arming owns the exit.
   const windowRef = useRef<Promise<boolean> | null>(null);
   const [queued, setQueued] = useState<QueuedQuestion | null>(null);
   // The slot's synchronous mirror: the settle continuation reads it without
@@ -145,23 +172,35 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
     [ask, hasLiveTurn, onSeedDraft, onSeedInvocations, sessionId],
   );
 
-  // Arm a flight as the queue window -- the ONE arming body, shared by both
-  // flight sources (#1512): the tracked ingest batch below (started through
-  // the wrapper) and the seam's replace flight (handed in by SessionPane at
-  // the handler's entry, the IPC already started). The contract is
-  // resolve-only (an IPC reject resolves false), so the rejection arm is
-  // purely defensive: an unexpected throw must not strand the question
-  // queued forever -- it takes the halt exit. Identity gate: only the
-  // CURRENTLY armed window's settle owns the exit. Windows can overlap (a
-  // mid-batch "+" pick, an OS-level window drop, the #748
-  // drop-under-dialog supersede resolving the parked batch synchronously
-  // under the newer arming, or a replace flight alongside a batch), and a
-  // stale settle must neither clear the newer window's gate nor exit the
-  // slot on its own verdict -- the question keeps waiting behind the newest
-  // window.
-  const trackWindow = useCallback(
-    (flight: Promise<boolean>) => {
+  // Arm the queue window -- the ONE arming body (#1523): the tracked ingest
+  // batch below (started through the wrapper) and the seam's replace flight
+  // (SessionPane hands the verdict thunk in at the handler's entry) both
+  // land here. The clock mints and the thunk runs in the caller's
+  // synchronous tick, so the gate closes before the IPC's first microtask.
+  // The verdict contract is resolve-only (see VerdictThunk -- an IPC reject
+  // resolves false), so the rejection arm is purely defensive: an
+  // unexpected throw must not strand the question queued forever -- it
+  // takes the halt exit. Identity gate: only the CURRENTLY armed window's
+  // settle owns the exit. Windows can overlap (a mid-batch "+" pick, an
+  // OS-level window drop, the #748 drop-under-dialog supersede resolving
+  // the parked batch synchronously under the newer arming, or a replace
+  // flight alongside a batch), and a stale settle must neither clear the
+  // newer window's gate nor exit the slot on its own verdict -- the
+  // question keeps waiting behind the newest window. The handle's settled
+  // is per-flight by construction (it chains this flight, not the window):
+  // a newer arming leaves an older handle's settled alone.
+  const armWindow = useCallback(
+    (verdict: VerdictThunk): WindowHandle => {
+      const startedAt = Date.now();
+      const flight = verdict();
       windowRef.current = flight;
+      // Per-flight settle: swallows the verdict (and the defensive
+      // rejection arm) so a handle consumer's `.then(clear)` never sees a
+      // rejection the contract says cannot happen.
+      const settled = flight.then(
+        () => undefined,
+        () => undefined,
+      );
       void flight.then(
         (allLoaded) => {
           if (windowRef.current === flight) settle(allLoaded);
@@ -171,20 +210,21 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
           if (windowRef.current === flight) settle(false);
         },
       );
+      return { startedAt, settled };
     },
     [settle],
   );
 
   // The batch arming point: start the batch through the passed-in
-  // ingestMany and hand the verdict to trackWindow above. Pass-through --
-  // the verdict Promise the caller consumes is the batch's own.
+  // ingestMany and arm it through armWindow above. Pass-through -- the
+  // verdict Promise the caller consumes is the batch's own.
   const ingestManyTracked = useCallback(
     (paths: string[]) => {
       const batch = ingestMany(paths);
-      trackWindow(batch);
+      armWindow(() => batch);
       return batch;
     },
-    [ingestMany, trackWindow],
+    [armWindow, ingestMany],
   );
 
   const queuedAsk = useCallback(
@@ -225,7 +265,7 @@ export function useComposerQueue(deps: ComposerQueueDeps): ComposerQueue {
   return {
     queued: queued !== null,
     ingestMany: ingestManyTracked,
-    trackWindow,
+    armWindow,
     handleAsk: queuedAsk,
     hold,
   };

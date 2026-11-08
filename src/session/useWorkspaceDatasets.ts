@@ -2,7 +2,7 @@
 // ONE owner for the mutation family + the batch feedback machine the PANEL
 // previously carried (its pickAndAdd loop and onReplace), plus the one
 // exported BatchProgress union the two private-face copies (SessionPane's
-// trackReplace, useIngestFlow's runBatchSegment) now share as a content
+// armReplace, useIngestFlow's runBatchSegment) now share as a content
 // model while keeping their machines. The
 // drift bugs that motivated it (#1488/#1490/#1491/#1492) all landed on the
 // shared face; the private face stopped its bug flow once useWorkingSet took
@@ -88,7 +88,7 @@ export interface WorkspaceTarget {
 /** The ONE in-flight batch progress content model (#1519): every batch face
  *  renders from a member of this union. The members keep each face's exact
  *  field set, so the private-face machines (useIngestFlow's segment loop,
- *  SessionPane's trackReplace) swap type references without touching their
+ *  SessionPane's armReplace) swap type references without touching their
  *  construction sites. The badge members carry the panel's own identity
  *  fields (`phase`/`mode`); the two private-face members are recognized by
  *  their face-unique fields (`currentPath` / `referenceName`). Client UI

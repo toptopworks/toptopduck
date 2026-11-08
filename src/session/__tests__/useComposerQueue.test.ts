@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 
-import { useComposerQueue } from "../useComposerQueue";
+import { useComposerQueue, type WindowHandle } from "../useComposerQueue";
 
 // The queue machine rides the batch's boolean Promise (handleIngestMany's
 // contract), so every scenario drives it through a deferred: arm the batch,
@@ -551,19 +551,28 @@ describe("useComposerQueue (#1500 queued ask behind an in-flight ingest batch)",
 
 // The replace window (#1512): a source replace is the other long IPC that
 // holds the backend session lock, so its verdict joins the SAME queue
-// window -- armed imperatively (the flight promise already started inside
-// the seam), not through a tracked wrapper.
-describe("useComposerQueue trackWindow (#1512 replace joins the queue window)", () => {
-  it("queues the submit behind a tracked flight and auto-sends on its Loaded verdict", async () => {
+// window -- armed through armWindow, whose thunk the queue invokes in the
+// arming tick itself (the flight starts inside the invocation, never
+// before it).
+describe("useComposerQueue armWindow (#1512/#1523 replace joins the queue window)", () => {
+  it("queues the submit behind an armed flight and auto-sends on its Loaded verdict", async () => {
     // Arrange
     const deps = makeDeps();
     const { result } = renderHook(() => useComposerQueue(deps));
     const flight = deferredBoolean();
+    let invoked = false;
 
-    // Act
+    // Act: the thunk must run inside the arming call itself -- a flight
+    // that starts but never arms (build-then-forget) is structurally
+    // impossible, so the invocation is pinned synchronously, before any
+    // await.
     act(() => {
-      result.current.trackWindow(flight.promise);
+      result.current.armWindow(() => {
+        invoked = true;
+        return flight.promise;
+      });
     });
+    expect(invoked).toBe(true);
     await act(async () => {
       await result.current.handleAsk("几行", ["skill-a"]);
     });
@@ -590,7 +599,7 @@ describe("useComposerQueue trackWindow (#1512 replace joins the queue window)", 
     const flight = deferredBoolean();
 
     act(() => {
-      result.current.trackWindow(flight.promise);
+      result.current.armWindow(() => flight.promise);
     });
     await act(async () => {
       await result.current.handleAsk("几行", ["skill-a"]);
@@ -617,7 +626,7 @@ describe("useComposerQueue trackWindow (#1512 replace joins the queue window)", 
     const flight = deferredBoolean();
 
     act(() => {
-      result.current.trackWindow(flight.promise);
+      result.current.armWindow(() => flight.promise);
     });
     await act(async () => {
       await result.current.handleAsk("几行");
@@ -645,10 +654,10 @@ describe("useComposerQueue trackWindow (#1512 replace joins the queue window)", 
     // Act: two flights arm in sequence (busy-gate overlap is not expected,
     // but a stale settle must still not exit the slot on its own verdict).
     act(() => {
-      result.current.trackWindow(older.promise);
+      result.current.armWindow(() => older.promise);
     });
     act(() => {
-      result.current.trackWindow(newer.promise);
+      result.current.armWindow(() => newer.promise);
     });
     await act(async () => {
       await result.current.handleAsk("几行");
@@ -679,7 +688,7 @@ describe("useComposerQueue trackWindow (#1512 replace joins the queue window)", 
     const flight = deferredBoolean();
 
     act(() => {
-      result.current.trackWindow(flight.promise);
+      result.current.armWindow(() => flight.promise);
     });
 
     // Act: the pendingPayload chain's hold -- the window ref is the gate,
@@ -696,5 +705,51 @@ describe("useComposerQueue trackWindow (#1512 replace joins the queue window)", 
 
     // Assert
     expect(deps.ask).toHaveBeenCalledWith("链上问题", ["skill-a"]);
+  });
+
+  it("fires an older handle's settled even after a newer window arms (per-flight)", async () => {
+    // The slot exit stays newest-owner-only (pinned above); the handle's
+    // settled is per-flight (#1523) -- a newer arming must not suppress an
+    // older flight's settled, or a replace progress line would strand
+    // under an overlapping ingest batch.
+    const deps = makeDeps();
+    const { result } = renderHook(() => useComposerQueue(deps));
+    const older = deferredBoolean();
+    const newer = deferredBoolean();
+
+    let olderHandle!: WindowHandle;
+    let olderSettled = false;
+    act(() => {
+      olderHandle = result.current.armWindow(() => older.promise);
+      void olderHandle.settled.then(() => {
+        olderSettled = true;
+      });
+    });
+    act(() => {
+      result.current.armWindow(() => newer.promise);
+    });
+
+    // Act: the older flight settles under the newer window.
+    await act(async () => {
+      older.resolve(false);
+      await olderHandle.settled;
+    });
+
+    // Assert: the older handle's settled fired...
+    expect(olderSettled).toBe(true);
+
+    // ...and the settle did not clear the NEWER window's gate: a question
+    // held now still waits behind the newer flight.
+    act(() => {
+      result.current.hold("仍等新窗", []);
+    });
+    expect(result.current.queued).toBe(true);
+
+    await act(async () => {
+      newer.resolve(true);
+      await newer.promise;
+    });
+    expect(deps.ask).toHaveBeenCalledWith("仍等新窗", []);
+    expect(result.current.queued).toBe(false);
   });
 });

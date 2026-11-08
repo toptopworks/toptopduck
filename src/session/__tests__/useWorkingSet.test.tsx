@@ -47,6 +47,7 @@ import {
   type UseWorkingSetSurfaces,
 } from "../useWorkingSet";
 import { sessionKeys } from "../queryKeys";
+import type { VerdictThunk } from "../useComposerQueue";
 import { src } from "./fixtures";
 import type { DatasetDescriptor, RowPage } from "../../types/dataset";
 
@@ -70,7 +71,10 @@ function makeSurfaces(): UseWorkingSetSurfaces {
     setError: vi.fn(),
     setMutationLoading: vi.fn(),
     pollPersistError: vi.fn(async () => {}),
-    trackReplace: vi.fn(),
+    // Invokes the verdict like the pane's armWindow does on arming (the
+    // IPC starts inside the call) and returns it, so tests read the
+    // verdict off mock.results.
+    armReplace: vi.fn((verdict: VerdictThunk) => verdict()),
   };
 }
 
@@ -361,19 +365,22 @@ describe("useWorkingSet", () => {
       expect(failed.invalidateSpy).not.toHaveBeenCalled();
     });
 
-    it("hands the queue sink the flight verdict and flight info at entry (#1512)", async () => {
+    it("hands the queue sink the verdict thunk and flight info at entry (#1512)", async () => {
       vi.mocked(replaceSource).mockResolvedValueOnce({ kind: "Loaded", data: PEOPLE });
       const view = setup();
       await waitFor(() => expect(view.result.current.datasets).toHaveLength(2));
       await act(async () => {
         view.result.current.handleReplace("people", "/x/new.csv");
       });
-      const calls = vi.mocked(view.surfaces.trackReplace).mock.calls;
+      const calls = vi.mocked(view.surfaces.armReplace).mock.calls;
       expect(calls).toHaveLength(1);
       // The flight info names the swap target for the rail's progress line.
       expect(calls[0][1]).toEqual({ referenceName: "people", path: "/x/new.csv" });
-      // Loaded resolves the verdict true (the queue's auto-send exit).
-      await expect(calls[0][0]).resolves.toBe(true);
+      // Loaded resolves the verdict true (the queue's auto-send exit); the
+      // spy already invoked the thunk, so its return carries the verdict.
+      await expect(vi.mocked(view.surfaces.armReplace).mock.results[0].value).resolves.toBe(
+        true,
+      );
     });
 
     it("arms the queue window in the handler's entry tick (#1512)", () => {
@@ -387,7 +394,7 @@ describe("useWorkingSet", () => {
       act(() => {
         view.result.current.handleReplace("people", "/x/new.csv");
       });
-      expect(vi.mocked(view.surfaces.trackReplace)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(view.surfaces.armReplace)).toHaveBeenCalledTimes(1);
     });
 
     it("resolves the flight false on every failure route (#1512)", async () => {
@@ -401,7 +408,7 @@ describe("useWorkingSet", () => {
       await act(async () => {
         failed.result.current.handleReplace("people", "/x/bad.csv");
       });
-      await expect(vi.mocked(failed.surfaces.trackReplace).mock.calls[0][0]).resolves.toBe(
+      await expect(vi.mocked(failed.surfaces.armReplace).mock.results[0].value).resolves.toBe(
         false,
       );
 
@@ -415,7 +422,7 @@ describe("useWorkingSet", () => {
       await act(async () => {
         guided.result.current.handleReplace("people", "/x/bad.xlsx");
       });
-      await expect(vi.mocked(guided.surfaces.trackReplace).mock.calls[0][0]).resolves.toBe(
+      await expect(vi.mocked(guided.surfaces.armReplace).mock.results[0].value).resolves.toBe(
         false,
       );
 
@@ -426,7 +433,7 @@ describe("useWorkingSet", () => {
       await act(async () => {
         rejected.result.current.handleReplace("people", "/x/bad.csv");
       });
-      await expect(vi.mocked(rejected.surfaces.trackReplace).mock.calls[0][0]).resolves.toBe(
+      await expect(vi.mocked(rejected.surfaces.armReplace).mock.results[0].value).resolves.toBe(
         false,
       );
       await waitFor(() => expect(rejected.surfaces.setError).toHaveBeenCalled());
