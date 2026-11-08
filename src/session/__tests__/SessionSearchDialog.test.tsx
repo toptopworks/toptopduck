@@ -48,6 +48,7 @@ function renderDialog(ui: ReactElement) {
 const baseProps = {
   open: true,
   onOpenChange: vi.fn(),
+  archivedSessions: [] as SessionMetadata[],
   openSessions: [] as OpenSession[],
   activeSessionId: null,
   onActivate: vi.fn(),
@@ -520,5 +521,143 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     } finally {
       dateNowSpy.mockRestore();
     }
+  });
+
+  // --- The archived partition (issue #1403) ---------------------------------
+
+  it("renders archived matches as a bottom grayed section headed Archived", () => {
+    // The archived rows ride the same scan and render after the main rows
+    // under a section header reusing the sidebar's archived heading (zero new
+    // i18n keys). The row face is the archived gray (text-muted-foreground on
+    // the name), and the rows stay activatable (open-is-unarchive). A
+    // non-empty query arms the partition ("a" hits both rows here).
+    const onOpenPersisted = vi.fn();
+    renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        onOpenPersisted={onOpenPersisted}
+        sessions={[meta("/a.json", "alpha")]}
+        archivedSessions={[meta("/c.json", "gamma", { archived: true })]}
+      />,
+    );
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "a" } });
+    // Header text (the empty test catalog surfaces the en defaultMessage).
+    expect(screen.getByText("Archived")).toBeInTheDocument();
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(2);
+    expect(options[0]).toHaveTextContent("alpha");
+    expect(options[1]).toHaveTextContent("gamma");
+    // The archived row carries the gray face; the main row keeps the default.
+    expect(options[1].querySelector(".session-search-option-name")?.className).toContain(
+      "text-muted-foreground",
+    );
+    expect(options[0].querySelector(".session-search-option-name")?.className).not.toContain(
+      "text-muted-foreground",
+    );
+  });
+
+  it("shows no archived section on an empty query (browse face)", () => {
+    // The empty-query face is the browse/jump surface over recent activity:
+    // a bare Ctrl/⌘+K lists the newest unarchived sessions, no grayed section.
+    renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        sessions={[meta("/a.json", "alpha")]}
+        archivedSessions={[meta("/c.json", "gamma", { archived: true })]}
+      />,
+    );
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(1);
+    expect(options[0]).toHaveTextContent("alpha");
+    expect(screen.queryByText("Archived")).toBeNull();
+  });
+
+  it("omits the archived header when no archived row matches", () => {
+    renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        sessions={[meta("/a.json", "alpha")]}
+        archivedSessions={[meta("/c.json", "gamma", { archived: true })]}
+      />,
+    );
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "alp" } });
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    expect(screen.queryByText("Archived")).toBeNull();
+  });
+
+  it("keyboard navigation crosses into the archived partition continuously", () => {
+    // One flat index space spans both partitions: ArrowDown from the last
+    // main row lands on the first archived row, and aria-activedescendant
+    // stays valid across the boundary (the option ids are per-flat-index).
+    renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        sessions={[meta("/a.json", "alpha")]}
+        archivedSessions={[meta("/c.json", "gamma", { archived: true })]}
+      />,
+    );
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "a" } });
+    const options = screen.getAllByRole("option");
+    expect(options[0]).toHaveAttribute("aria-selected", "true");
+    expect(options[0]).toHaveAttribute("id", "session-search-option-0");
+    // Into the archived row: selection + activedescendant move together.
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(options[1]).toHaveAttribute("aria-selected", "true");
+    expect(options[1]).toHaveAttribute("id", "session-search-option-1");
+    expect(input).toHaveAttribute("aria-activedescendant", "session-search-option-1");
+    // ArrowUp wraps back through the boundary to the first main row.
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(options[0]).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(options[1]).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("Enter on an archived row resumes via onOpenPersisted (open-is-unarchive), never onActivate", () => {
+    // An archived row is metadata-only (no sid), so activation rides the
+    // persisted-open path, whose open_duck contract unarchives on open
+    // (ADR-0127 Decision 4) -- the row then re-lands in the main list on the
+    // post-open refresh.
+    const onActivate = vi.fn();
+    const onOpenPersisted = vi.fn();
+    const onOpenChange = vi.fn();
+    renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        sessions={[]}
+        onOpenChange={onOpenChange}
+        onActivate={onActivate}
+        onOpenPersisted={onOpenPersisted}
+        archivedSessions={[meta("/c.json", "gamma", { archived: true })]}
+      />,
+    );
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "gam" } });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onOpenPersisted).toHaveBeenCalledWith("/c.json", "gamma");
+    expect(onActivate).not.toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("applies the query filter to both partitions; the empty state covers both", () => {
+    renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        sessions={[meta("/a.json", "alpha")]}
+        archivedSessions={[meta("/c.json", "gamma", { archived: true })]}
+      />,
+    );
+    // The query hits only the archived side: main section empties, archived
+    // section survives under its header.
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "gam" } });
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(1);
+    expect(options[0]).toHaveTextContent("gamma");
+    expect(screen.getByText("Archived")).toBeInTheDocument();
+    // No hit anywhere: the shared empty state (role="status") shows.
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "zzz" } });
+    expect(screen.queryByRole("option")).toBeNull();
+    expect(screen.getByRole("status")).toBeInTheDocument();
   });
 });

@@ -99,7 +99,8 @@ export interface UseShellSessionsDeps {
   intl: IntlShape;
   queryClient: QueryClient;
   /** From usePersistedSessions: bumps sessionsEpoch to re-fetch list_sessions
-   *  after a save / delete / rename lands on disk. */
+   *  after a save / delete / rename lands on disk, and after openPersisted
+   *  succeeds (#1403: open-is-unarchive is a disk-side metadata change). */
   refreshSessions: () => void;
   /** From useShellError: surfaces a shell-layer AppError (kind "shell") for a
    *  createSession / openRecipe / save / delete / rename reject. */
@@ -753,6 +754,11 @@ export function useShellSessions({
           pendingQuestion: null,
           pendingSkillInvocations: [],
         });
+        // Open-is-unarchive (ADR-0127 Decision 4): resuming an archived recipe
+        // removed its sidecar key server-side -- a metadata change no open-set
+        // merge mirrors, so the persisted list re-scans to land the row back
+        // in the main list (#1403). Local IPC, millisecond round trip.
+        refreshSessions();
         setResumeStatus({ kind: "idle" });
       } catch (e) {
         // C2: if createSession succeeded but openRecipe failed, the just-minted
