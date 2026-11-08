@@ -115,6 +115,7 @@ impl super::Session {
                     name: name.clone(),
                     body: String::new(),
                     actor: SkillLifecycleActor::User,
+                    via_subagent: None,
                     content_hash: String::new(),
                 });
                 continue;
@@ -123,6 +124,8 @@ impl super::Session {
             records.push(crate::model::SkillInvocation::from_fragment(
                 &fragment,
                 SkillLifecycleActor::User,
+                // The user channel never carries a sub-agent attribution.
+                None,
             ));
         }
         records
@@ -243,6 +246,7 @@ mod tests {
             name: "sql-coach".to_string(),
             body: String::new(),
             actor: crate::model::SkillLifecycleActor::Agent,
+            via_subagent: None,
             content_hash: String::new(),
         });
         assert_eq!(pending.len(), 1, "the pending vec is the caller's own");

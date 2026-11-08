@@ -537,6 +537,7 @@ impl super::Session {
                                 &mut mcp,
                                 inputs.cli_tools,
                                 inputs.delegations,
+                                inputs.skills,
                                 &mut invocation_channel,
                                 &mut presented_files,
                                 &read_gate,

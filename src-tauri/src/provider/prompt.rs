@@ -76,8 +76,13 @@ pub(crate) const INVOCATION_FRAME_MARKER: &str = "【技能调用】";
 /// separation -- the ADR-0086 framing discipline, now attached to the turn
 /// input instead of a standing disclosure). An empty-body record still lands
 /// its framed header + name so the model knows the skill is present even
-/// when its prose is unavailable. Blocks separated by one blank line; the
-/// whole carries no leading/trailing decoration -- the caller positions it.
+/// when its prose is unavailable. A sub-agent-sourced record (issue #985)
+/// renders its frame as a NAME-ONLY strip -- the body entered the
+/// sub-agent's own context through its tool result, never the parent's, so
+/// the parent window carries the name + attribution and never the body (the
+/// parent agent needing the body invokes the skill itself, approval-free).
+/// Blocks separated by one blank line; the whole carries no leading/trailing
+/// decoration -- the caller positions it.
 pub fn render_invocation_preamble(invocations: &[crate::model::SkillInvocation]) -> String {
     let mut out = String::new();
     for (i, invocation) in invocations.iter().enumerate() {
@@ -89,9 +94,17 @@ pub fn render_invocation_preamble(invocations: &[crate::model::SkillInvocation])
         out.push_str(INVOCATION_FRAME_MARKER);
         out.push_str("技能 `");
         out.push_str(&invocation.name);
-        out.push_str("`：\n");
-        out.push_str(invocation.body.trim_end());
-        out.push('\n');
+        out.push('`');
+        match &invocation.via_subagent {
+            Some(subagent) => {
+                out.push_str(&format!("（子智能体 `{subagent}` 调用）：\n"));
+            }
+            None => {
+                out.push_str("：\n");
+                out.push_str(invocation.body.trim_end());
+                out.push('\n');
+            }
+        }
     }
     out
 }
@@ -856,8 +869,39 @@ mod tests {
             name: name.into(),
             body: body.into(),
             actor: crate::model::SkillLifecycleActor::Agent,
+            via_subagent: None,
             content_hash: "deadbeef".into(),
         }
+    }
+
+    /// The sub-agent-sourced variant (issue #985): same record shape, the
+    /// attribution filled.
+    fn subagent_invocation(name: &str, body: &str, via: &str) -> crate::model::SkillInvocation {
+        crate::model::SkillInvocation {
+            via_subagent: Some(via.into()),
+            ..invocation(name, body)
+        }
+    }
+
+    /// A sub-agent's invocation renders as a NAME-ONLY strip (issue #985):
+    /// the body entered the sub-agent's own context through its tool result,
+    /// never the parent's -- re-rendering it into the parent window would
+    /// duplicate bytes the parent model never saw. The strip keeps the frame
+    /// marker + name + the delegating agent's attribution, and drops the
+    /// body line entirely (not even an empty body line).
+    #[test]
+    fn subagent_invocation_renders_a_name_only_strip_without_the_body() {
+        let invocations = [
+            invocation("sql-coach", "Name the method.\n"),
+            subagent_invocation("pdf-tools", "Extract tables first.\n", "analyst"),
+        ];
+        let preamble = render_invocation_preamble(&invocations);
+        assert_eq!(
+            preamble,
+            "【技能调用】技能 `sql-coach`：\nName the method.\n\
+             \n【技能调用】技能 `pdf-tools`（子智能体 `analyst` 调用）：\n",
+            "the sub-sourced record renders its framed name + attribution, no body"
+        );
     }
 
     #[test]

@@ -3336,7 +3336,7 @@ mod tests {
             "the capped body stays near the cap"
         );
         assert!(
-            crate::agents::delegation::subagent_preamble(&specs[0]).contains("[Truncated:"),
+            crate::agents::delegation::subagent_preamble(&specs[0], "").contains("[Truncated:"),
             "the sub-agent's preamble rides the capped injection"
         );
     }

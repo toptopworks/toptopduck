@@ -334,6 +334,11 @@ export interface SkillInvocation {
   // would compile silently while the runtime filter in userInvocationNames
   // classed the new actor as non-user.
   actor: SkillLifecycleActor;
+  // The delegating sub-agent's name when the `invoke_skill` call rode a
+  // sub-agent's tool face (#985): the body entered the SUB-agent's context,
+  // so the parent window renders these records as name-only strips.
+  // Optional with serde skip on the Rust side -- absent on old records.
+  via_subagent?: string;
   content_hash: string;
 }
 

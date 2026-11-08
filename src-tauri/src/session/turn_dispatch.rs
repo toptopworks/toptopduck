@@ -358,11 +358,14 @@ fn dispatch_gated_call_inner(
     // machine-level enable axis). The resolver appends the
     // agent-actor record to the turn's pending invocations (persistence
     // rides `record_turn`, never a session transition); the body rides the
-    // tool result back into the turn's own context -- the record is for
-    // provenance, not injection.
+    // tool result back into the CALLING context -- the main loop's or a
+    // sub-agent's own (issue #985: the sub-face carries the tool, its calls
+    // land on the parent turn's pending with the originator name on
+    // `via_subagent`, and the parent window renders those records
+    // name-only).
     if call.name == crate::skills::invocation::INVOKE_SKILL {
         return Ok(
-            match crate::skills::invocation::resolve_skill_invocation(call, invocations) {
+            match crate::skills::invocation::resolve_skill_invocation(call, invocations, origin) {
                 crate::skills::invocation::SkillInvocationOutcome::Local { summary, payload } => {
                     let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
                     (result, Some(entry), None, None)

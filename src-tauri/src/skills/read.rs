@@ -762,6 +762,7 @@ mod tests {
             name: "sql-coach".to_string(),
             body: String::new(),
             actor: crate::model::SkillLifecycleActor::Agent,
+            via_subagent: None,
             content_hash: String::new(),
         }];
         match resolve_skill_read(&call, &fx.gate(&[]), &pending) {
@@ -790,6 +791,7 @@ mod tests {
                 name: "pdf-tools".to_string(),
                 body: String::new(),
                 actor: crate::model::SkillLifecycleActor::Agent,
+                via_subagent: None,
                 content_hash: String::new(),
             },
             // A name already in the turn-start snapshot rides once.
@@ -797,6 +799,7 @@ mod tests {
                 name: "sql-coach".to_string(),
                 body: String::new(),
                 actor: crate::model::SkillLifecycleActor::Agent,
+                via_subagent: None,
                 content_hash: String::new(),
             },
         ];

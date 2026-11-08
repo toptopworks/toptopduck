@@ -12,13 +12,14 @@
 //! the spec's [`subagent_preamble`] / [`subagent_tool_face`] when the main
 //! agent calls the tool (ADR-0117 Decisions 1/2/4).
 //!
-//! Face vocabulary (ADR-0117 Decision 4): the sub-agent's tool face is the
-//! full gateway face MINUS every delegation tool (depth-1 physical
-//! exclusion -- the sub-agent is constructed with no delegation tool
-//! mounted, so recursion is structurally impossible, not merely refused)
-//! MINUS `invoke_skill` (the invocation channel stays
-//! user + main-agent only); `read_skill_file` and the discovery trio
-//! survive untouched, and every call the sub-agent makes dispatches
+//! Face vocabulary (ADR-0117 Decision 4, calibrated by ADR-0145): the
+//! sub-agent's tool face is the full gateway face MINUS every delegation
+//! tool (depth-1 physical exclusion -- the sub-agent is constructed with
+//! no delegation tool mounted, so recursion is structurally impossible,
+//! not merely refused) -- and nothing else: `invoke_skill` and
+//! `read_skill_file` ride the main table's own mounting condition (issue
+//! #985; a zero-skill session's sub-face carries neither), the discovery
+//! trio survives untouched, and every call the sub-agent makes dispatches
 //! through the SAME shared core -- approval, audit, `result_N` promotion
 //! -- as the main agent's.
 
@@ -134,9 +135,8 @@ impl DelegationSpec {
             description: format!(
                 "Delegate a task to the `{}` sub-agent. {} The sub-agent runs \
                  with its own context window over the shared tool face (no \
-                 delegation, no skill activation) and reports back a final \
-                 answer; any table it materializes joins the shared working \
-                 set.",
+                 delegation) and reports back a final answer; any table it \
+                 materializes joins the shared working set.",
                 self.name, self.description
             ),
             input_schema: json!({
@@ -154,45 +154,58 @@ impl DelegationSpec {
     }
 }
 
-/// The sub-agent's system prompt (ADR-0117 Decision 2): the definition's
-/// preamble with each bound skill's body injected ONCE, here at assembly
-/// time -- the bodies enter the sub-agent's context through construction
-/// alone (the sub-face has no activation channel by design, which makes
-/// this injection the only path a skill body reaches a sub-agent). An
-/// unbound preamble passes through verbatim.
-pub fn subagent_preamble(spec: &DelegationSpec) -> String {
-    if spec.skill_injections.is_empty() {
-        return spec.preamble.clone();
+/// The sub-agent's system prompt (ADR-0117 Decision 2, calibrated by
+/// ADR-0145): the definition's preamble with each bound skill's body
+/// injected ONCE, here at assembly time, then the turn's discovery-snapshot
+/// index block appended once (issue #985 -- blank line + index, the same
+/// bytes the main face's system prompt embeds, so a sub-agent knows what it
+/// can invoke through the `invoke_skill` tool its face now carries). The
+/// marker channel's construction-time injection remains the deterministic
+/// fast path; an unbound preamble with an empty index passes through
+/// verbatim.
+pub fn subagent_preamble(spec: &DelegationSpec, skill_index: &str) -> String {
+    let mut prompt = if spec.skill_injections.is_empty() {
+        spec.preamble.clone()
+    } else {
+        let mut prompt = format!(
+            "{}\n\n--- Bound skills (injected at assembly; the full skill \
+             instructions follow) ---",
+            spec.preamble
+        );
+        for injection in &spec.skill_injections {
+            prompt.push_str(&format!(
+                "\n\n# Skill: {}\n\n{}",
+                injection.name, injection.body
+            ));
+        }
+        prompt
+    };
+    // The index block arrives trimmed: its renderer strips the leading blank
+    // line because that separator belongs to the main face's system-prompt
+    // embedding, so the seam supplies the blank line itself. An empty
+    // snapshot renders empty and appends nothing.
+    if !skill_index.is_empty() {
+        prompt.push_str("\n\n");
     }
-    let mut prompt = format!(
-        "{}\n\n--- Bound skills (injected at assembly; the full skill \
-         instructions follow) ---",
-        spec.preamble
-    );
-    for injection in &spec.skill_injections {
-        prompt.push_str(&format!(
-            "\n\n# Skill: {}\n\n{}",
-            injection.name, injection.body
-        ));
-    }
+    prompt.push_str(skill_index);
     prompt
 }
 
-/// The sub-agent's tool face (ADR-0117 Decision 4): the turn's tool table
-/// minus every delegation tool minus `invoke_skill`. Depth-1 physical
+/// The sub-agent's tool face (ADR-0117 Decision 4, calibrated by ADR-0145):
+/// the turn's tool table minus every delegation tool. Depth-1 physical
 /// exclusion: the returned face cannot contain a delegation tool,
 /// so a sub-agent has nothing to recurse through even if its model tried.
-/// `read_skill_file` and everything else survive verbatim.
+/// `invoke_skill` survives like everything else (issue #985): its mounting
+/// condition mirrors the main face by construction -- the subtraction
+/// inherits whatever the turn's table assembled, so a zero-skill session's
+/// sub-face carries no invocation tool either.
 pub fn subagent_tool_face(
     tools: &[ToolDefinition],
     delegation_names: &BTreeSet<&str>,
 ) -> Vec<ToolDefinition> {
     tools
         .iter()
-        .filter(|tool| {
-            !delegation_names.contains(tool.name.as_str())
-                && tool.name != crate::skills::invocation::INVOKE_SKILL
-        })
+        .filter(|tool| !delegation_names.contains(tool.name.as_str()))
         .cloned()
         .collect()
 }
@@ -231,13 +244,15 @@ mod tests {
             .collect()
     }
 
-    /// AC #1 (face subtraction; ADR-0119 Decision 4): the sub-face strips
-    /// every delegation tool and `invoke_skill` while `read_skill_file` and
-    /// the built-in table survive verbatim -- the depth-1 exclusion is a
-    /// subtraction over the assembled table, so what survives is exactly the
-    /// shared gateway face.
+    /// AC #1 (face subtraction; ADR-0117 Decision 4 calibrated by ADR-0145):
+    /// the sub-face strips ONLY the delegation tools -- `invoke_skill` and
+    /// `read_skill_file` survive verbatim beside the built-in table, so a
+    /// sub-agent self-serves skills on the same mounting condition as the
+    /// main face (the subtraction inherits whatever the turn's table
+    /// assembled). The description no longer claims the sub-agent runs
+    /// without skill activation.
     #[test]
-    fn subagent_face_strips_delegation_and_invocation_keeps_read() {
+    fn subagent_face_strips_delegation_keeps_invocation_and_read() {
         let tools = vec![
             definition("explore"),
             definition("materialize"),
@@ -249,7 +264,31 @@ mod tests {
         let names: BTreeSet<&str> = ["general-purpose", "data-cleaner"].into_iter().collect();
         let face = subagent_tool_face(&tools, &names);
         let surviving: Vec<&str> = face.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(surviving, vec!["explore", "materialize", "read_skill_file"]);
+        assert_eq!(
+            surviving,
+            vec!["explore", "materialize", "read_skill_file", "invoke_skill"]
+        );
+        let (spec, _) = DelegationSpec::from_entry(&entry("analyst", &[]), &bodies(&[]));
+        let delegation_description = spec.tool_definition().description;
+        assert!(
+            !delegation_description.contains("no skill activation"),
+            "the routing description drops the retired exclusion claim: {delegation_description}"
+        );
+        // The zero-skill session's complement (issue #985's zero-cost AC):
+        // a turn table that never mounted `invoke_skill` (empty discovery
+        // snapshot) yields a sub-face without it -- the subtraction adds
+        // nothing, it only removes delegation names.
+        let bare_tools = vec![definition("explore"), definition("general-purpose")];
+        let bare_names: BTreeSet<&str> = ["general-purpose"].into_iter().collect();
+        let bare_face = subagent_tool_face(&bare_tools, &bare_names);
+        assert_eq!(
+            bare_face
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["explore"],
+            "a zero-skill session's sub-face carries no invocation tool"
+        );
     }
 
     /// AC #1 (depth-1 physical exclusion): the face the subtraction returns
@@ -408,23 +447,67 @@ mod tests {
     }
 
     /// The preamble render: an unbound spec passes through verbatim; a
-    /// bound spec appends each body once under the skill's name.
+    /// bound spec appends each body once under the skill's name. An empty
+    /// discovery index appends nothing (byte-identical to the pre-#985
+    /// shape -- a zero-skill session's sub-agent pays no index cost).
     #[test]
     fn preamble_passes_through_unbound_and_appends_bound_bodies() {
         let (mut spec, _) = DelegationSpec::from_entry(&entry("analyst", &[]), &bodies(&[]));
-        assert_eq!(subagent_preamble(&spec), "You are a focused analyst.");
+        assert_eq!(subagent_preamble(&spec, ""), "You are a focused analyst.");
 
         spec.skill_injections = vec![SkillInjection {
             name: "sql".to_string(),
             body: "Prefer CTEs.".to_string(),
         }];
-        let rendered = subagent_preamble(&spec);
+        let rendered = subagent_preamble(&spec, "");
         assert!(rendered.starts_with("You are a focused analyst.\n\n---"));
         assert!(rendered.contains("# Skill: sql\n\nPrefer CTEs."));
         assert_eq!(
             rendered.matches("Prefer CTEs.").count(),
             1,
             "each body injects exactly once"
+        );
+    }
+
+    /// The discovery-index render (issue #985): the turn's discovery
+    /// snapshot index block -- the SAME bytes the main face's system prompt
+    /// carries -- appends ONCE at preamble assembly, after the bound-skill
+    /// bodies. The sub-agent learns what it can invoke; the index's own
+    /// wording already teaches the `invoke_skill` channel, which now rides
+    /// the sub-face.
+    #[test]
+    fn preamble_appends_the_discovery_index_after_the_bound_bodies() {
+        let (mut spec, _) = DelegationSpec::from_entry(&entry("analyst", &[]), &bodies(&[]));
+        spec.skill_injections = vec![SkillInjection {
+            name: "sql".to_string(),
+            body: "Prefer CTEs.".to_string(),
+        }];
+        let index =
+            crate::provider::prompt::render_skill_block(&[crate::skills::SkillPromptFragment {
+                name: "pdf-tools".to_string(),
+                description: "Extract tables first.".to_string(),
+                body: String::new(),
+                content_hash: String::new(),
+            }]);
+        let rendered = subagent_preamble(&spec, &index);
+        let body_pos = rendered
+            .find("Prefer CTEs.")
+            .expect("the bound body renders");
+        let index_pos = rendered.find("【可用技能】").expect("the index renders");
+        assert!(
+            body_pos < index_pos,
+            "the index follows the bound bodies (a trailing catalog)"
+        );
+        assert!(
+            rendered.contains("Prefer CTEs.\n\n【可用技能】"),
+            "the seam is one blank line -- the same separation the main face's \
+             embedding carries"
+        );
+        assert!(rendered.contains("- `pdf-tools` — Extract tables first."));
+        assert_eq!(
+            rendered.matches("【可用技能】").count(),
+            1,
+            "the index injects exactly once"
         );
     }
 
