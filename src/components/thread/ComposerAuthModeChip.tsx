@@ -27,8 +27,8 @@ import { LABEL_HIDE_NARROW } from "./composer-visual";
 //   - top half: the authorization posture radio group (confirm-each-call <->
 //     no-confirmation), unchanged semantics from the former Radix Select but
 //     re-homed on a RadioGroup so arrows switch postures and Tab can keep
-//     walking into the panel (Select dismisses on Tab, which would strand any
-//     control seated after the options);
+//     walking into the panel (the Select trapped focus and swallowed Tab,
+//     stranding any control seated after the options);
 //   - bottom half (issue #1369): the session's always-allow trust set, listed
 //     only while non-empty (zero-noise empty state -- no badge, no section),
 //     with a per-row revoke button. Revoking is the safety-direction action:
@@ -89,10 +89,10 @@ export function ComposerAuthModeChip({ sessionId, pendingMode, onPendingModeChan
   // flight is dropped instead of re-firing (the disabled attr is the visual
   // half of the same gate).
   const [switching, setSwitching] = useState(false);
-  // The panel is controlled so a posture selection can close it (the former
-  // Select's set-and-forget flow, kept verbatim).
+  // The panel is controlled so an item click can close it (the former
+  // Select's set-and-forget flow).
   const [open, setOpen] = useState(false);
-  // The trust row currently revoking (its `server::tool` key), so only that
+  // The trust row currently revoking (its trustKeyOf identity), so only that
   // row's button spins/disables while its IPC is in flight.
   const [revokingKey, setRevokingKey] = useState<string | null>(null);
 
@@ -123,14 +123,18 @@ export function ComposerAuthModeChip({ sessionId, pendingMode, onPendingModeChan
   // The session's always-allow trust set (ADR-0080 Decision 3), keyed the
   // same way: session-prefixed, cold-start disabled (an empty set). The
   // default [] keeps the empty-state faces honest while the read settles.
-  const { data: trustKeys } = useQuery({
+  const {
+    data: trustKeys,
+    isError: trustIsError,
+    error: trustError,
+  } = useQuery({
     queryKey: sessionId !== null
       ? sessionKeys.sessionTrust(sessionId)
       : sessionKeys.coldStartSessionTrust(),
     queryFn: () => listSessionTrust(sessionId as string),
     enabled: sessionId !== null,
   });
-  const trustedTools: ToolKey[] = sessionId !== null ? (trustKeys ?? []) : [];
+  const trustedTools: ToolKey[] = trustKeys ?? [];
   const trustCount = trustedTools.length;
 
   // always_allow is the only approval response that grows the trust set:
@@ -172,6 +176,21 @@ export function ComposerAuthModeChip({ sessionId, pendingMode, onPendingModeChan
       );
     }
   }, [isError, error, intl]);
+
+  // Mirror of the posture read's failure signal, on the trust side: a
+  // persistently failing read would otherwise leave the chip silently
+  // asserting "nothing is trusted" (no badge, no section) while the
+  // backend's always-allow entries keep auto-passing -- under-reporting
+  // trust is the dangerous direction on the revoke surface.
+  useEffect(() => {
+    if (trustIsError) {
+      log.warn(
+        "ComposerAuthModeChip",
+        "session-trust read failed; showing empty set",
+        fmtError(trustError, intl),
+      );
+    }
+  }, [trustIsError, trustError, intl]);
 
   async function handleChange(next: AuthMode) {
     if (switching || next === mode) return;
@@ -321,18 +340,15 @@ export function ComposerAuthModeChip({ sessionId, pendingMode, onPendingModeChan
         {/* Posture radio group: Radix gives the arrow-key walk + roving
             tabindex + radio semantics; the visual stays the former AuthModeItem
             layout (icon + label row, description below, indicator at the
-            right edge). */}
+            right edge). Closing rides each item's onClick -- the former
+            Select's click-anywhere-to-dismiss feel, kept for the
+            already-selected posture too (it fires no onValueChange, and the
+            arrow-key walk's synthetic click passes through onClick as well). */}
         <RadioGroupPrimitive.Root
           value={mode}
           onValueChange={(v) => {
             if (!isAuthMode(v)) return;
             void handleChange(v);
-            // The former Select closed on every selection -- the composer
-            // posture is a set-and-forget switch, and the trust section below
-            // is a separate stop (re-open to reach it). Clicking the already
-            // -selected posture closes too (no onValueChange fires), matching
-            // the Select's click-anywhere-to-dismiss feel.
-            setOpen(false);
           }}
           // The former Select disabled its whole content while the write was
           // in flight; the radio items carry the same gate (the handleChange
@@ -345,12 +361,14 @@ export function ComposerAuthModeChip({ sessionId, pendingMode, onPendingModeChan
             icon={<Hand className="size-4 shrink-0" aria-hidden />}
             label={perCallLabel}
             description={perCallDesc}
+            onItemClick={() => setOpen(false)}
           />
           <PostureRadioItem
             value="no_confirmation"
             icon={<ShieldAlert className="size-4 shrink-0 text-warning" aria-hidden />}
             label={noConfirmationLabel}
             description={fullAccessDesc}
+            onItemClick={() => setOpen(false)}
             warning
           />
         </RadioGroupPrimitive.Root>
@@ -359,7 +377,7 @@ export function ComposerAuthModeChip({ sessionId, pendingMode, onPendingModeChan
             posture picker it always was. */}
         {trustCount > 0 && (
           <>
-            <div role="none" className="my-1 h-px bg-border" />
+            <div className="my-1 h-px bg-border" />
             <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
               {intl.formatMessage(
                 { id: "composer.authMode.trust.title", defaultMessage: "Trusted tools ({count})" },
@@ -411,11 +429,15 @@ export function ComposerAuthModeChip({ sessionId, pendingMode, onPendingModeChan
   );
 }
 
-// The trust row's identity (`server::tool`, the backend trust-set key shape,
-// ADR-0080 Decision 3) -- the list key, the revoking gate's token, and the
-// display string all ride it.
+// The trust row's identity -- the list key, the revoking gate's token, and
+// the revoke cache filter all ride it. Encoded as a JSON pair, NOT a `::`
+// join: the backend keys trust on the ToolKey STRUCT (never a joined
+// string), and the dispatch lane derives server names from model-emitted
+// tool names with no alphabet validation (the issue #312 spoof class), so a
+// plain `::` join could collide two distinct pairs. JSON of the pair is
+// injective for any string inputs.
 function trustKeyOf(toolKey: ToolKey): string {
-  return `${toolKey.server}::${toolKey.tool}`;
+  return JSON.stringify([toolKey.server, toolKey.tool]);
 }
 
 // A posture radio variant whose icon + title ride one row while the
@@ -428,6 +450,9 @@ type PostureRadioItemProps = {
   icon: React.ReactNode;
   label: string;
   description: string;
+  /** Fires on every item click, including the already-selected one (which
+   *  emits no onValueChange) -- the panel-close carrier. */
+  onItemClick: () => void;
   /** Marks the item with the --warning token (no_confirmation posture). */
   warning?: boolean;
 };
@@ -437,11 +462,13 @@ function PostureRadioItem({
   icon,
   label,
   description,
+  onItemClick,
   warning = false,
 }: PostureRadioItemProps) {
   return (
     <RadioGroupPrimitive.Item
       value={value}
+      onClick={onItemClick}
       className={cn(
         // text-left: the RadioGroup item renders a <button>, whose UA default
         // centers inline content -- the former Select item rendered a <div>

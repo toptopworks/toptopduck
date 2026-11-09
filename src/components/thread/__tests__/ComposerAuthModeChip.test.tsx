@@ -12,6 +12,7 @@ import {
   revokeSessionTrust,
   setAuthorizationMode,
 } from "../../../api";
+import { log } from "../../../lib/log";
 import type { ApprovalResolvedPayload } from "../../../types/approval";
 
 // ComposerAuthModeChip is the composer's session-approval composite face
@@ -184,6 +185,42 @@ describe("ComposerAuthModeChip (ADR-0080, issue #482)", () => {
       await screen.findByRole("button", { name: PER_CALL_NAME }),
     ).toBeInTheDocument();
   });
+
+  it("closes the panel on a posture selection", async () => {
+    renderChip();
+    const trigger = await screen.findByRole("button", { name: PER_CALL_NAME });
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("radio", { name: /Full access/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio", { name: /Full access/ }));
+    // Set-and-forget: the selection closes the panel, radios unmount.
+    await waitFor(() => expect(screen.queryByRole("radio")).not.toBeInTheDocument());
+    expect(setAuthorizationMode).toHaveBeenCalledWith("sess-1", "no_confirmation");
+  });
+
+  it("closes the panel on clicking the already-selected posture", async () => {
+    renderChip();
+    const trigger = await screen.findByRole("button", { name: PER_CALL_NAME });
+    fireEvent.click(trigger);
+    const current = await screen.findByRole("radio", { name: /Request approval/ });
+    // Already selected: no onValueChange fires -- the item's own click must
+    // still close (the former Select's click-anywhere-to-dismiss feel).
+    fireEvent.click(current);
+    await waitFor(() => expect(screen.queryByRole("radio")).not.toBeInTheDocument());
+    expect(setAuthorizationMode).not.toHaveBeenCalled();
+  });
+
+  it("switches the posture with ArrowDown and closes the panel", async () => {
+    renderChip();
+    const trigger = await screen.findByRole("button", { name: PER_CALL_NAME });
+    fireEvent.click(trigger);
+    const radio = await screen.findByRole("radio", { name: /Request approval/ });
+    fireEvent.keyDown(radio, { key: "ArrowDown" });
+    await waitFor(() =>
+      expect(setAuthorizationMode).toHaveBeenCalledWith("sess-1", "no_confirmation"),
+    );
+    // The arrow-key selection is a set-and-forget close too.
+    await waitFor(() => expect(screen.queryByRole("radio")).not.toBeInTheDocument());
+  });
 });
 
 describe("ComposerAuthModeChip trust surface (issue #1369)", () => {
@@ -210,6 +247,9 @@ describe("ComposerAuthModeChip trust surface (issue #1369)", () => {
     // The trigger's aria-label extends with the count; the badge shows it.
     const trigger = await screen.findByRole("button", { name: TRUSTED_NAME_2 });
     expect(within(trigger).getByText("2")).toBeInTheDocument();
+    // The badge itself is presentational: the count rides the accessible
+    // name only, never announced twice.
+    expect(within(trigger).getByText("2")).toHaveAttribute("aria-hidden", "true");
 
     // The panel lists each trusted pair in display shape (muted server,
     // spaced dot, tool subject); the row's title carries the full pair.
@@ -316,5 +356,69 @@ describe("ComposerAuthModeChip trust surface (issue #1369)", () => {
     expect(getAuthorizationMode).not.toHaveBeenCalled();
     expect(listSessionTrust).not.toHaveBeenCalled();
     expect(onApprovalResolved).not.toHaveBeenCalled();
+  });
+
+  it("keeps the panel open on Tab and leaves the revoke buttons reachable", async () => {
+    vi.mocked(listSessionTrust).mockResolvedValue([{ server: "fs", tool: "read" }]);
+    renderChip();
+    const trigger = await screen.findByRole("button", { name: TRUSTED_NAME_1 });
+    fireEvent.click(trigger);
+    const radio = await screen.findByRole("radio", { name: /Request approval/ });
+    fireEvent.keyDown(radio, { key: "Tab" });
+    // The panel stays open (the former Select swallowed Tab)...
+    expect(screen.getByRole("radio", { name: /Request approval/ })).toBeInTheDocument();
+    // ...and the trust rows sit after the radios, focusable -- Tab walks in.
+    const revoke = screen.getByRole("button", { name: "Revoke" });
+    expect(revoke.tabIndex).toBeGreaterThanOrEqual(0);
+    revoke.focus();
+    expect(document.activeElement).toBe(revoke);
+  });
+
+  it("logs a warning when the trust read rejects", async () => {
+    vi.mocked(listSessionTrust).mockRejectedValue(new Error("ipc gone"));
+    const warnSpy = vi.spyOn(log, "warn");
+    renderChip();
+    // The chip settles on the empty-set face (no badge, no section)...
+    await screen.findByRole("button", { name: PER_CALL_NAME });
+    // ...but the operator can tell a failed read from a real empty set.
+    await waitFor(() =>
+      expect(warnSpy).toHaveBeenCalledWith(
+        "ComposerAuthModeChip",
+        "session-trust read failed; showing empty set",
+        expect.any(String),
+      ),
+    );
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the row and resyncs when the revoke rejects", async () => {
+    vi.mocked(listSessionTrust).mockResolvedValue([
+      { server: "fs", tool: "read" },
+      { server: "db", tool: "query" },
+    ]);
+    let rejectRevoke: (e: Error) => void = () => {};
+    vi.mocked(revokeSessionTrust).mockImplementation(
+      () =>
+        new Promise<void>((_, reject) => {
+          rejectRevoke = reject;
+        }),
+    );
+    renderChip();
+    const trigger = await screen.findByRole("button", { name: TRUSTED_NAME_2 });
+    fireEvent.click(trigger);
+    const revokeBtn = screen.getAllByRole("button", { name: "Revoke" })[0];
+    fireEvent.click(revokeBtn);
+    await waitFor(() =>
+      expect(revokeSessionTrust).toHaveBeenCalledWith("sess-1", "fs", "read"),
+    );
+    // In flight: only that row's button gates.
+    await waitFor(() => expect(revokeBtn).toBeDisabled());
+    expect(screen.getAllByRole("button", { name: "Revoke" })[1]).toBeEnabled();
+    rejectRevoke(new Error("revoke refused"));
+    // The row REMAINS (the backend still trusts it) and the chip resyncs:
+    // the mount read plus the catch-path refetch.
+    await waitFor(() => expect(listSessionTrust).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(revokeBtn).toBeEnabled());
+    expect(screen.getByTitle("fs · read")).toBeInTheDocument();
   });
 });

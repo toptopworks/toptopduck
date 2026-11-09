@@ -4,14 +4,6 @@
 // and so refetch/ invalidate targets a precise slice. Session-AGNOSTIC queries
 // (provider config / app config) use a different prefix and are NOT here.
 
-/** The per-session row tuple (ADR-0051 row pages), read through the
- * useRowPage seam (issue #1079) -- a SNAPSHOT read that never joins an
- * invalidation cascade (narrative: the useRowPage module header). The
- * offset is part of the key so each page caches independently and
- * `placeholderData: keepPreviousData` can show the prior page while the
- * next loads; the limit is keyed too -- the page size is caller-variable,
- * and a differently-sized fetch must never be served from the same
- * window's cache. */
 /** The cold-start key sentinel (ADR-0092): cannot collide with a real UUID
  *  session id; inert -- never fetched, never cleaned up. */
 const COLD_START_SESSION_ID = "__cold_start__";
@@ -40,6 +32,14 @@ export const sessionKeys = {
     ["session", sessionId, "workingSet", "deleteImpact", referenceName] as const,
   active: (sessionId: string) => ["session", sessionId, "active"] as const,
   thread: (sessionId: string) => ["session", sessionId, "thread"] as const,
+  /** The per-session row tuple (ADR-0051 row pages), read through the
+   * useRowPage seam (issue #1079) -- a SNAPSHOT read that never joins an
+   * invalidation cascade (narrative: the useRowPage module header). The
+   * offset is part of the key so each page caches independently and
+   * `placeholderData: keepPreviousData` can show the prior page while the
+   * next loads; the limit is keyed too -- the page size is caller-variable,
+   * and a differently-sized fetch must never be served from the same
+   * window's cache. */
   rows: (
     sessionId: string,
     referenceName: string,
@@ -56,8 +56,9 @@ export const sessionKeys = {
    *  -- the auth chip's trust-management read. Session-prefixed like
    *  `authMode`: a close's removeQueries drops it with the rest, and a resume
    *  (a NEW session id) starts from an empty set via the fresh mount's read.
-   *  Refetched on revoke-success (cache-filtered in place) and on each
-   *  always_allow `approval-resolved` event. */
+   *  Cache-filtered in place on revoke-success (the write is the truth
+   *  source -- no refetch); refetched on each always_allow
+   *  `approval-resolved` event. */
   sessionTrust: (sessionId: string) =>
     ["session", sessionId, "sessionTrust"] as const,
   /** Cold-start placeholder (ADR-0092), paired with `coldStartAuthMode`: the
