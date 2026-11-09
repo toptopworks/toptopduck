@@ -1235,11 +1235,12 @@ pub(crate) struct ResolvedClassification<'a> {
 
 /// Classify one call with the CLI-registration lookup folded in: a
 /// registered name classifies under its own reserved server (`classify_cli_tool`,
-/// ADR-0108 Decision 7 -- the approver signs exactly what will run); anything
-/// else falls through to the shared builtin/external classification, where
-/// the external arm mounts its on-cut args attachment (ADR-0146) and the
-/// builtin arm carries none (it never gates). Registration validation
-/// refuses builtin / meta / namespaced names, so the two arms are disjoint.
+/// ADR-0108 Decision 7 -- the approver signs exactly what will run, with that
+/// arm's file-delivery and argv attachments); anything else falls through to
+/// the shared builtin/external classification, where the external arm mounts
+/// its on-cut args attachment (ADR-0146) and the builtin arm carries none (it
+/// never gates). Registration validation refuses builtin / meta / namespaced
+/// names, so the two arms are disjoint.
 pub(crate) fn classify_with_cli_tool<'a>(
     cli: &'a [crate::cli_tools::config::CliToolConfig],
     call: &ToolUse,
@@ -2034,10 +2035,11 @@ mod tests {
     }
 
     /// The framing prefix eats card budget too: the args JSON fits the
-    /// preview cap on its own, but frame + args exceed the card budget, so
-    /// the outer trim cuts into the arguments -- the attachment must still
-    /// mount. Pins the two-cap predicate (comparing the summary's own length
-    /// against the full JSON's would miss this case).
+    /// preview cap on its own, but frame + args exceed the card budget and
+    /// the outer trim lands inside the tool name -- the arguments never
+    /// reach the summary at all, so the attachment must still mount. Pins
+    /// the two-cap predicate (comparing the summary's own length against
+    /// the full JSON's would miss this case).
     #[test]
     fn classify_mounts_full_args_attachment_when_the_frame_eats_the_budget() {
         let call = ToolUse {
@@ -3657,7 +3659,7 @@ mod tests {
 
     #[test]
     fn classify_call_pins_builtin_and_external_arms() {
-        // explore: builtin server, Read badge, sql summary.
+        // explore: builtin server, Read badge, sql summary, no attachments.
         let explore = classify_call(&ToolUse {
             id: "1".into(),
             name: "explore".into(),
@@ -3667,6 +3669,7 @@ mod tests {
         assert_eq!(explore.0.tool, "explore");
         assert_eq!(explore.1, OperationKind::Read);
         assert_eq!(explore.2, "SELECT 1");
+        assert!(explore.3.is_empty());
 
         // materialize: builtin server, Write badge, sql summary.
         let materialize = classify_call(&ToolUse {
