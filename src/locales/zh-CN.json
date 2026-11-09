@@ -637,6 +637,7 @@
   "sidebar.workspace.expandAllAria": "展开全部工作区",
   "sidebar.workspace.localFolder": "本地文件夹（可选）",
   "sidebar.workspace.manageDatasets": "数据集",
+  "sidebar.workspace.memory": "记忆",
   "sidebar.workspace.menu.ariaLabel": "工作区操作",
   "sidebar.workspace.missing": "（文件夹不存在）",
   "sidebar.workspace.newSessionAria": "在此工作区新建会话",
@@ -800,5 +801,16 @@
   "workspace.datasets.replacing": "正在替换 {name}…",
   "workspace.datasets.title": "数据集 — {workspace}",
   "workspace.datasets.uploadFailedToast": "上传到 {workspace} 失败",
-  "workspace.expand": "展开右侧栏"
+  "workspace.expand": "展开右侧栏",
+  "workspace.memory.description": "你的偏好与项目背景会自动带入每次对话，可用任意编辑器修改。",
+  "workspace.memory.empty": "还没有记忆。每条记忆是一个 Markdown 文件——写一个，之后的对话就会记得。",
+  "workspace.memory.listHeading": "记忆 · {count}",
+  "workspace.memory.off": "记忆已关闭——对话不再带入任何记忆。",
+  "workspace.memory.reveal": "在文件夹中显示",
+  "workspace.memory.title": "记忆 — {workspace}",
+  "workspace.memory.toggle": "启用记忆",
+  "workspace.memory.type.feedback": "反馈",
+  "workspace.memory.type.project": "项目",
+  "workspace.memory.type.reference": "参考",
+  "workspace.memory.type.user": "用户"
 }

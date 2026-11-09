@@ -830,6 +830,47 @@ pub async fn set_workspace_dataset_privacy(
     .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
 }
 
+/// The memory panel's list face (issue #1529): the workspace's memory rows
+/// (title, category, hook) with each file's absolute path as the
+/// reveal-in-folder target. A missing memory directory lists empty -- the
+/// zero-footprint fresh workspace.
+#[tauri::command]
+pub fn list_workspace_memory(
+    workspace: String,
+) -> Result<Vec<crate::workspace::memory::ListedMemory>, String> {
+    Ok(crate::workspace::memory::list(std::path::Path::new(
+        &workspace,
+    )))
+}
+
+/// Read a workspace's memory toggle (issue #1529): `true` unless the record
+/// opted out. A missing record reads the default-on posture.
+#[tauri::command]
+pub fn get_workspace_memory_enabled(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    workspace: String,
+) -> bool {
+    registry.memory_enabled(&resolve_registry_key(&workspace))
+}
+
+/// Write a workspace's memory toggle (issue #1529): gates the built-in
+/// engine's memory injection and deactivates the panel. Strict -- a missing
+/// record or refused write surfaces; the dual-spelling retry mirrors the
+/// rename face's echoed-path rule.
+#[tauri::command]
+pub fn set_workspace_memory_enabled(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    workspace: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let key = resolve_registry_key(&workspace);
+    let attempt = registry.set_memory_enabled(&key, enabled);
+    if attempt.is_err() && key != std::path::Path::new(&workspace) {
+        return registry.set_memory_enabled(std::path::Path::new(&workspace), enabled);
+    }
+    attempt
+}
+
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
 /// from the store. Returns immediately -- it does NOT wait for an in-flight
 /// ask. If a turn is in flight, cancel fires (HTTP still runs to completion

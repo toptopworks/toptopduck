@@ -1,0 +1,723 @@
+//! Workspace memory store (issue #1529): the workspace's persistent memory
+//! layer under `.toptopduck/memory/` -- one `<type>-<slug>.md` file per fact
+//! (flat `key: value` frontmatter + free-text body) plus the derived
+//! `MEMORY.md` index. The FILES are the source of truth; the index is a
+//! projection reconciled on every read (a hand-edited or drifted index is
+//! rewritten from the files, never the other way around).
+//!
+//! Posture mirrors the dataset store's neighbors: reads are tolerant (a
+//! missing directory reads as empty -- the zero-footprint fresh workspace;
+//! a corrupt file is skipped + logged, never fatal), writes are honest
+//! (the index cap REFUSES a new entry instead of silently truncating), and
+//! the directory family is created lazily on the first write only.
+
+use std::path::{Path, PathBuf};
+
+use crate::persistence::io::{write_str_atomic, WritePerms};
+
+/// The memory subdirectory inside the workspace state directory.
+const MEMORY_DIR_NAME: &str = "memory";
+/// The derived index file inside the memory directory.
+const MEMORY_INDEX_NAME: &str = "MEMORY.md";
+/// The frontmatter fence line.
+const FENCE: &str = "---";
+
+/// Index capacity (issue #1529): at most 200 rows ...
+const INDEX_MAX_ROWS: usize = 200;
+/// ... and 25,000 bytes. Over either cap a write REFUSES the new entry
+/// (never a silent truncation, never a head cut that would drop old rows).
+const INDEX_MAX_BYTES: usize = 25_000;
+/// Slug ceiling in chars (the cleaned slug is ASCII, so chars == bytes).
+const SLUG_MAX_CHARS: usize = 48;
+/// One index row's hook clamp, in CHARS -- every truncation path walks char
+/// boundaries so a CJK glyph is never split at its midpoint.
+const HOOK_MAX_CHARS: usize = 120;
+
+/// The four memory categories (issue #1529 storage protocol). Serialized
+/// lowercase in frontmatter and on the IPC face; an unknown frontmatter
+/// value degrades to [`MemoryType::Reference`] (tolerant parse -- a
+/// hand-edited file never crashes the read).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryType {
+    User,
+    Feedback,
+    Project,
+    Reference,
+}
+
+impl MemoryType {
+    /// The filename segment (the `<type>-<slug>.md` convention).
+    fn as_segment(self) -> &'static str {
+        match self {
+            MemoryType::User => "user",
+            MemoryType::Feedback => "feedback",
+            MemoryType::Project => "project",
+            MemoryType::Reference => "reference",
+        }
+    }
+}
+
+/// How a memory landed (the frontmatter `source` field): extracted from a
+/// session by the host (#1530) or hand-written. Default `Manual` -- a
+/// hand-edited file without the field reads as hand-written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemorySource {
+    Extract,
+    #[default]
+    Manual,
+}
+
+/// One memory's frontmatter (issue #1529): the full protocol field set.
+/// `name` doubles as the index title and the slug source; `description` is
+/// the index hook; `saved_at` is an absolute date (the host stamps it --
+/// a memory must not float on relative dates).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MemoryEntry {
+    pub name: String,
+    pub description: String,
+    pub r#type: MemoryType,
+    #[serde(default)]
+    pub origin_session: Option<String>,
+    pub saved_at: String,
+    #[serde(default)]
+    pub source: MemorySource,
+}
+
+/// One index row -- the injection + panel face. `title` and `hook` are
+/// already sanitized + clamped for single-line rendering.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct MemoryIndexRow {
+    pub title: String,
+    pub file: String,
+    pub hook: String,
+}
+
+/// The panel's IPC face: the index row plus the typed category and the
+/// ABSOLUTE file path (the reveal-in-folder target).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ListedMemory {
+    #[serde(flatten)]
+    pub row: MemoryIndexRow,
+    pub r#type: MemoryType,
+    /// The absolute path of the memory file (reveal target).
+    pub file_path: String,
+}
+
+/// Why a memory operation failed. `IndexFull` carries the actionable cap
+/// detail (the panel's own sentence); `Io` is the infrastructure echo.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MemoryError {
+    /// The write would push the index past its row or byte cap: refused,
+    /// nothing landed (never a silent truncation).
+    IndexFull {
+        detail: String,
+    },
+    Io {
+        detail: String,
+    },
+}
+
+impl MemoryError {
+    fn io(e: impl std::fmt::Display) -> Self {
+        MemoryError::Io {
+            detail: e.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for MemoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryError::IndexFull { detail } => {
+                write!(f, "workspace memory index is at its cap: {detail}")
+            }
+            MemoryError::Io { detail } => write!(f, "{detail}"),
+        }
+    }
+}
+
+/// The memory directory for a workspace root (sibling of the datasets
+/// manifest inside `.toptopduck/`).
+fn memory_dir(workspace: &Path) -> PathBuf {
+    workspace.join(".toptopduck").join(MEMORY_DIR_NAME)
+}
+
+/// The derived index path.
+fn index_path(workspace: &Path) -> PathBuf {
+    memory_dir(workspace).join(MEMORY_INDEX_NAME)
+}
+
+/// FNV-1a 32-bit (the pure-CJK slug fallback): tiny, dependency-free, and
+/// collision-far-enough for human-scale title sets -- two distinct pure
+/// Chinese titles land distinct file names.
+fn fnv1a32(text: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in text.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// The slug for a title: lowercase ASCII alphanumerics + hyphens, runs of
+/// anything else collapsing to one hyphen, trimmed, capped at
+/// [`SLUG_MAX_CHARS`]. A title that cleans to nothing (pure CJK, pure
+/// punctuation) falls back to the title's FNV-1a hash as `n<hash>` so two
+/// pure-Chinese titles never collide on the same file.
+fn slug_for(title: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_hyphen = false;
+    for ch in title.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_hyphen && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_hyphen = false;
+            slug.push(ch.to_ascii_lowercase());
+        } else {
+            pending_hyphen = true;
+        }
+    }
+    if slug.chars().count() > SLUG_MAX_CHARS {
+        slug = slug.chars().take(SLUG_MAX_CHARS).collect();
+        // A cap landing mid-word keeps no trailing hyphen.
+        while slug.ends_with('-') {
+            slug.pop();
+        }
+    }
+    if slug.is_empty() {
+        format!("n{:x}", fnv1a32(title))
+    } else {
+        slug
+    }
+}
+
+/// Clamp a single-line text for an index row: fold `\r`/`\n`/`\t` to one
+/// space (a hostile or hand-edited hook cannot forge extra rows or a fake
+/// section header inside the injected block), then clamp at
+/// [`HOOK_MAX_CHARS`] CHARS with an ellipsis tail -- char boundaries only,
+/// a CJK glyph is never split. Shared with the injection renderer (the
+/// prompt side distrusts stored text the same way, #1019's posture).
+pub(crate) fn clamp_single_line(text: &str) -> String {
+    let folded: String = text
+        .chars()
+        .map(|c| match c {
+            '\r' | '\n' | '\t' => ' ',
+            c => c,
+        })
+        .collect();
+    if folded.chars().count() <= HOOK_MAX_CHARS {
+        return folded;
+    }
+    let mut clamped: String = folded.chars().take(HOOK_MAX_CHARS - 1).collect();
+    clamped.push('…');
+    clamped
+}
+
+/// Render the index document from rows: the header + one
+/// `- [title](file) — hook` line per row.
+fn render_index(rows: &[MemoryIndexRow]) -> String {
+    let mut out = String::from("# Memory Index\n\n");
+    for row in rows {
+        out.push_str(&format!(
+            "- [{}]({}) — {}\n",
+            clamp_single_line(&row.title),
+            row.file,
+            clamp_single_line(&row.hook)
+        ));
+    }
+    out
+}
+
+/// Parse one memory file's frontmatter. Tolerant (issue #1529): a missing
+/// field falls back (name <- file stem, description <- empty, type <-
+/// reference, source <- manual, stamps <- empty) and extra fields are
+/// ignored; `None` only when the text has no frontmatter fence at all (not
+/// a memory file -- the caller skips it).
+fn parse_frontmatter(text: &str, file_stem: &str) -> Option<MemoryEntry> {
+    let mut lines = text.lines();
+    if lines.next()?.trim() != FENCE {
+        return None;
+    }
+    let mut name: Option<String> = None;
+    let mut description: Option<String> = None;
+    let mut kind: Option<MemoryType> = None;
+    let mut origin_session: Option<String> = None;
+    let mut saved_at: Option<String> = None;
+    let mut source: Option<MemorySource> = None;
+    for line in lines.by_ref() {
+        if line.trim() == FENCE {
+            return Some(MemoryEntry {
+                name: name.unwrap_or_else(|| file_stem.to_string()),
+                description: description.unwrap_or_default(),
+                r#type: kind.unwrap_or(MemoryType::Reference),
+                origin_session,
+                saved_at: saved_at.unwrap_or_default(),
+                source: source.unwrap_or(MemorySource::Manual),
+            });
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "name" => name = Some(value.to_string()),
+            "description" => description = Some(value.to_string()),
+            "type" => {
+                kind = match value {
+                    "user" => Some(MemoryType::User),
+                    "feedback" => Some(MemoryType::Feedback),
+                    "project" => Some(MemoryType::Project),
+                    "reference" => Some(MemoryType::Reference),
+                    _ => None,
+                };
+            }
+            "origin_session" if !value.is_empty() => origin_session = Some(value.to_string()),
+            "saved_at" => saved_at = Some(value.to_string()),
+            "source" => {
+                source = match value {
+                    "extract" => Some(MemorySource::Extract),
+                    _ => Some(MemorySource::Manual),
+                };
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The memory file name's type segment, parsed back (`user-foo.md` ->
+/// `user`). Tolerant: anything unparsable yields `None` (the row then
+/// carries the frontmatter's own type).
+fn type_from_file_name(name: &str) -> Option<MemoryType> {
+    let stem = name.strip_suffix(".md")?;
+    let head = stem.split('-').next()?;
+    match head {
+        "user" => Some(MemoryType::User),
+        "feedback" => Some(MemoryType::Feedback),
+        "project" => Some(MemoryType::Project),
+        "reference" => Some(MemoryType::Reference),
+        _ => None,
+    }
+}
+
+/// Read the memory index rows (issue #1529 read path): scan the memory
+/// directory's `.md` files (the source of truth), derive one row per
+/// parseable file, then reconcile `MEMORY.md` -- rewritten when missing or
+/// drifted. NEVER fails and NEVER creates anything: a missing directory is
+/// the empty set (zero footprint), a corrupt file is skipped + logged.
+pub fn load_rows(workspace: &Path) -> Vec<MemoryIndexRow> {
+    let dir = memory_dir(workspace);
+    let Ok(read_dir) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name == MEMORY_INDEX_NAME || !name.ends_with(".md") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            log::warn!(
+                target: "toptopduck::workspace_memory",
+                "unreadable memory file skipped: {}",
+                path.display()
+            );
+            continue;
+        };
+        let stem = name.strip_suffix(".md").unwrap_or(name);
+        let Some(parsed) = parse_frontmatter(&text, stem) else {
+            log::warn!(
+                target: "toptopduck::workspace_memory",
+                "memory file without frontmatter skipped: {}",
+                path.display()
+            );
+            continue;
+        };
+        rows.push(MemoryIndexRow {
+            title: parsed.name,
+            file: name.to_string(),
+            hook: parsed.description,
+        });
+    }
+    rows.sort_by(|a, b| a.file.cmp(&b.file));
+    reconcile_index(workspace, &rows);
+    rows
+}
+
+/// The panel's list face: rows plus typed category + absolute path.
+pub fn list(workspace: &Path) -> Vec<ListedMemory> {
+    load_rows(workspace)
+        .into_iter()
+        .map(|row| {
+            let kind = type_from_file_name(&row.file).unwrap_or(MemoryType::Reference);
+            let file_path = memory_dir(workspace)
+                .join(&row.file)
+                .to_string_lossy()
+                .into_owned();
+            ListedMemory {
+                r#type: kind,
+                file_path,
+                row,
+            }
+        })
+        .collect()
+}
+
+/// Rewrite the derived index when it has drifted from the files (the files
+/// win, issue #1529). Best-effort + logged: a failed reconcile leaves the
+/// stale index on disk -- the in-memory rows are already the truth the
+/// callers use, and the next successful read retries the rewrite.
+fn reconcile_index(workspace: &Path, rows: &[MemoryIndexRow]) {
+    let rendered = render_index(rows);
+    let path = index_path(workspace);
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    if current == rendered {
+        return;
+    }
+    if let Err(e) = write_str_atomic(&path, &rendered, WritePerms::Default) {
+        log::warn!(
+            target: "toptopduck::workspace_memory",
+            "memory index reconcile failed for {}: {e}",
+            path.display()
+        );
+    }
+}
+
+/// Serialize one entry's frontmatter block + body (the storage protocol's
+/// write shape; the field order is the canonical on-disk order).
+fn render_memory_file(entry: &MemoryEntry, body: &str) -> String {
+    let mut out = String::new();
+    out.push_str(FENCE);
+    out.push('\n');
+    out.push_str(&format!("name: {}\n", entry.name));
+    out.push_str(&format!("description: {}\n", entry.description));
+    out.push_str(&format!("type: {}\n", entry.r#type.as_segment()));
+    if let Some(session) = &entry.origin_session {
+        out.push_str(&format!("origin_session: {session}\n"));
+    }
+    out.push_str(&format!("saved_at: {}\n", entry.saved_at));
+    out.push_str(&format!(
+        "source: {}\n",
+        match entry.source {
+            MemorySource::Extract => "extract",
+            MemorySource::Manual => "manual",
+        }
+    ));
+    out.push_str(FENCE);
+    out.push('\n');
+    out.push_str(body);
+    if !body.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// The unique file name for a new entry: `<type>-<slug>.md`, de-conflicted
+/// against the taken names with a `-2`, `-3`, ... suffix.
+fn unique_file_name(taken: &std::collections::HashSet<String>, entry: &MemoryEntry) -> String {
+    let base = format!("{}-{}", entry.r#type.as_segment(), slug_for(&entry.name));
+    let mut candidate = format!("{base}.md");
+    let mut counter = 2;
+    while taken.contains(&candidate) {
+        candidate = format!("{base}-{counter}.md");
+        counter += 1;
+    }
+    candidate
+}
+
+/// The index-full refusal's warning face (issue #1529: refuse AND warn --
+/// never a silent refusal). Every `IndexFull` return logs the cap it hit.
+fn warn_index_full(workspace: &Path, detail: String) {
+    log::warn!(
+        target: "toptopduck::workspace_memory",
+        "memory index at its cap for {} -- entry refused ({detail})",
+        workspace.display()
+    );
+}
+
+/// Save a new memory entry (the write primitive; the host extraction path
+/// (#1530) and tests are the callers): creates the memory directory family
+/// lazily on this FIRST write only, lands the file atomically, and rewrites
+/// the derived index. The capacity caps REFUSE the entry before anything
+/// lands -- never a silent truncation, never a head cut.
+pub fn save_entry(
+    workspace: &Path,
+    entry: &MemoryEntry,
+    body: &str,
+) -> Result<MemoryIndexRow, MemoryError> {
+    let rows = load_rows(workspace);
+    if rows.len() >= INDEX_MAX_ROWS {
+        warn_index_full(workspace, format!("{INDEX_MAX_ROWS} rows"));
+        return Err(MemoryError::IndexFull {
+            detail: format!("{INDEX_MAX_ROWS} rows"),
+        });
+    }
+    let taken: std::collections::HashSet<String> = rows.iter().map(|r| r.file.clone()).collect();
+    let file = unique_file_name(&taken, entry);
+    let row = MemoryIndexRow {
+        title: entry.name.clone(),
+        hook: entry.description.clone(),
+        file: file.clone(),
+    };
+    let mut next_rows = rows;
+    next_rows.push(row.clone());
+    next_rows.sort_by(|a, b| a.file.cmp(&b.file));
+    let rendered = render_index(&next_rows);
+    if rendered.len() > INDEX_MAX_BYTES {
+        warn_index_full(workspace, format!("{INDEX_MAX_BYTES} bytes"));
+        return Err(MemoryError::IndexFull {
+            detail: format!("{INDEX_MAX_BYTES} bytes"),
+        });
+    }
+    std::fs::create_dir_all(memory_dir(workspace)).map_err(MemoryError::io)?;
+    let file_path = memory_dir(workspace).join(&file);
+    write_str_atomic(
+        &file_path,
+        &render_memory_file(entry, body),
+        WritePerms::Default,
+    )
+    .map_err(MemoryError::io)?;
+    write_str_atomic(&index_path(workspace), &rendered, WritePerms::Default)
+        .map_err(MemoryError::io)?;
+    Ok(row)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ws() -> tempfile::TempDir {
+        tempfile::tempdir().expect("workspace dir")
+    }
+
+    fn entry(name: &str) -> MemoryEntry {
+        MemoryEntry {
+            name: name.to_string(),
+            description: "one-line hook".to_string(),
+            r#type: MemoryType::Feedback,
+            origin_session: Some("s-1".to_string()),
+            saved_at: "2026-11-09".to_string(),
+            source: MemorySource::Manual,
+        }
+    }
+
+    /// The full round trip: save lands file + index, and the read path
+    /// recovers the row from the FILE side (frontmatter is the truth).
+    #[test]
+    fn save_then_load_round_trips_the_row() {
+        let workspace = ws();
+        let row = save_entry(workspace.path(), &entry("reply in chinese"), "body\n").expect("save");
+        assert_eq!(row.file, "feedback-reply-in-chinese.md");
+        let rows = load_rows(workspace.path());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "reply in chinese");
+        assert_eq!(rows[0].hook, "one-line hook");
+        assert_eq!(rows[0].file, "feedback-reply-in-chinese.md");
+        // The index landed on disk in the protocol's line shape.
+        let index = std::fs::read_to_string(index_path(workspace.path())).unwrap();
+        assert!(
+            index.contains("- [reply in chinese](feedback-reply-in-chinese.md) — one-line hook\n")
+        );
+    }
+
+    /// The frontmatter serializer + parser round-trip every field.
+    #[test]
+    fn frontmatter_round_trips_all_fields() {
+        let e = entry("full fields");
+        let text = render_memory_file(&e, "why + how\n");
+        let parsed = parse_frontmatter(&text, "ignored-stem").expect("parses");
+        assert_eq!(parsed, e);
+    }
+
+    /// Tolerant parse: a missing field never crashes -- name falls back to
+    /// the file stem, the type to reference, source to manual; an unknown
+    /// type value degrades to reference; extra fields are ignored.
+    #[test]
+    fn missing_and_extra_fields_parse_tolerantly() {
+        let minimal = "---\nname: keeps\nunknown: junk\n---\nbody\n";
+        let parsed = parse_frontmatter(minimal, "stem-fallback").expect("parses");
+        assert_eq!(parsed.name, "keeps");
+        assert_eq!(parsed.description, "");
+        assert_eq!(parsed.r#type, MemoryType::Reference);
+        assert_eq!(parsed.source, MemorySource::Manual);
+        assert_eq!(parsed.saved_at, "");
+        let no_name = "---\ntype: project\n---\n";
+        let parsed = parse_frontmatter(no_name, "stem-fallback").expect("parses");
+        assert_eq!(parsed.name, "stem-fallback");
+        assert_eq!(parsed.r#type, MemoryType::Project);
+        let unknown_type = "---\nname: x\ntype: diary\n---\n";
+        let parsed = parse_frontmatter(unknown_type, "s").expect("parses");
+        assert_eq!(parsed.r#type, MemoryType::Reference);
+        // No fence at all: not a memory file.
+        assert!(parse_frontmatter("plain prose\n", "s").is_none());
+    }
+
+    /// Two pure-Chinese titles never collide: each cleans to the empty
+    /// slug, so each lands its FNV-1a hash file name (the 中文必走路径).
+    #[test]
+    fn pure_cjk_titles_do_not_collide() {
+        let a = slug_for("偏好中文回复");
+        let b = slug_for("季度数据用中文列名");
+        assert_ne!(a, b, "distinct titles hash to distinct slugs");
+        assert!(
+            a.starts_with('n') && b.starts_with('n'),
+            "hash fallback shape"
+        );
+        let workspace = ws();
+        let row_a = save_entry(workspace.path(), &entry("偏好中文回复"), "a\n").expect("a");
+        let row_b = save_entry(workspace.path(), &entry("季度数据用中文列名"), "b\n").expect("b");
+        assert_ne!(row_a.file, row_b.file);
+        assert_eq!(load_rows(workspace.path()).len(), 2);
+    }
+
+    /// The slug rules: lowercase, collapse separators, trim, cap at 48.
+    #[test]
+    fn slug_cleans_and_caps() {
+        assert_eq!(slug_for("  Hello -- World!  "), "hello-world");
+        assert_eq!(slug_for("A"), "a");
+        let long = "a".repeat(80);
+        assert_eq!(slug_for(&long).chars().count(), SLUG_MAX_CHARS);
+        let mixed = "Data 集分析 Report";
+        assert_eq!(slug_for(mixed), "data-report");
+    }
+
+    /// Two same-title saves de-conflict with a -2 suffix (no overwrite).
+    #[test]
+    fn same_title_saves_deconflict() {
+        let workspace = ws();
+        let first = save_entry(workspace.path(), &entry("dup"), "1\n").expect("first");
+        let second = save_entry(workspace.path(), &entry("dup"), "2\n").expect("second");
+        assert_eq!(first.file, "feedback-dup.md");
+        assert_eq!(second.file, "feedback-dup-2.md");
+        assert_eq!(load_rows(workspace.path()).len(), 2);
+    }
+
+    /// The row cap refuses BEFORE anything lands: 200 rows is the ceiling,
+    /// the 201st save is an IndexFull and the disk state is untouched.
+    #[test]
+    fn row_cap_refuses_the_201st_entry() {
+        let workspace = ws();
+        for i in 0..INDEX_MAX_ROWS {
+            save_entry(workspace.path(), &entry(&format!("fact {i}")), "b\n").expect("save");
+        }
+        let before = load_rows(workspace.path());
+        let err = save_entry(workspace.path(), &entry("one too many"), "b\n").expect_err("refused");
+        assert!(matches!(err, MemoryError::IndexFull { .. }), "{err:?}");
+        assert_eq!(load_rows(workspace.path()).len(), before.len());
+    }
+
+    /// The byte cap refuses too: the cap reads the RENDERED index (hooks and
+    /// titles already at their clamp), so it trips on row COUNT x line size
+    /// -- long-title entries accumulate until the next save would pass
+    /// 25,000 bytes, and that save is refused whole: never a silent
+    /// truncation, never a head cut of old rows, the on-disk index stays
+    /// under the cap.
+    #[test]
+    fn byte_cap_refuses_without_truncation() {
+        let workspace = ws();
+        // A title at the clamp ceiling: each rendered line is ~360 bytes of
+        // CJK, so the cap trips well before the 200-row ceiling.
+        let long_title = "题".repeat(HOOK_MAX_CHARS);
+        let mut landed = 0;
+        let mut refused = None;
+        for i in 0..80 {
+            let mut e = entry(&format!("{long_title}{i}"));
+            e.description = String::new();
+            match save_entry(workspace.path(), &e, "b\n") {
+                Ok(_) => landed += 1,
+                Err(err) => {
+                    refused = Some(err);
+                    break;
+                }
+            }
+        }
+        let err = refused.expect("the byte cap trips inside 80 long rows");
+        assert!(matches!(err, MemoryError::IndexFull { .. }), "{err:?}");
+        // The refused entry landed nothing: the rows on disk are exactly the
+        // successful saves, and the index never crossed the cap.
+        assert_eq!(load_rows(workspace.path()).len(), landed);
+        let index = std::fs::read_to_string(index_path(workspace.path())).unwrap();
+        assert!(index.len() <= INDEX_MAX_BYTES, "{}", index.len());
+        assert!(landed < 80, "the cap actually tripped");
+    }
+
+    /// Every truncation path walks char boundaries: a CJK-heavy hook
+    /// clamps at HOOK_MAX_CHARS visible chars, never splitting a glyph.
+    #[test]
+    fn hook_clamp_never_splits_a_cjk_glyph() {
+        let clamped = clamp_single_line(&"汉".repeat(HOOK_MAX_CHARS + 10));
+        assert_eq!(clamped.chars().count(), HOOK_MAX_CHARS);
+        assert!(clamped.ends_with('…'));
+        assert!(clamped.chars().all(|c| c == '汉' || c == '…'));
+        // Layout folding: no \r \n \t survives into an index line (each
+        // control char folds to its own space -- the #1019 precedent).
+        let folded = clamp_single_line("a\r\nb\tc");
+        assert_eq!(folded, "a  b c");
+        // Under the cap: verbatim.
+        assert_eq!(clamp_single_line("short"), "short");
+    }
+
+    /// Zero footprint: a read on a fresh workspace creates NOTHING, and
+    /// the first save creates the directory family + index.
+    #[test]
+    fn read_creates_nothing_and_first_save_creates_the_family() {
+        let workspace = ws();
+        assert!(load_rows(workspace.path()).is_empty());
+        assert!(
+            !memory_dir(workspace.path()).exists(),
+            "no directory minted"
+        );
+        save_entry(workspace.path(), &entry("first"), "b\n").expect("save");
+        assert!(memory_dir(workspace.path()).is_dir());
+        assert!(index_path(workspace.path()).is_file());
+    }
+
+    /// The index is derived: a hand-edited (or deleted) MEMORY.md is
+    /// rewritten from the files on the next read -- the files win.
+    #[test]
+    fn drifted_index_is_rewritten_from_the_files() {
+        let workspace = ws();
+        save_entry(workspace.path(), &entry("fact a"), "b\n").expect("save");
+        // Hand-vandalize the index.
+        std::fs::write(index_path(workspace.path()), "garbage").unwrap();
+        let rows = load_rows(workspace.path());
+        assert_eq!(rows.len(), 1, "rows come from the files, not the index");
+        let index = std::fs::read_to_string(index_path(workspace.path())).unwrap();
+        assert!(index.contains("- [fact a]"), "index reconciled: {index}");
+        // A deleted index is also rebuilt.
+        std::fs::remove_file(index_path(workspace.path())).unwrap();
+        load_rows(workspace.path());
+        assert!(index_path(workspace.path()).is_file());
+    }
+
+    /// A corrupt file (unreadable UTF-8 / no frontmatter) is skipped +
+    /// never crashes the read; healthy siblings still surface.
+    #[test]
+    fn corrupt_file_is_skipped_and_siblings_survive() {
+        let workspace = ws();
+        save_entry(workspace.path(), &entry("healthy"), "b\n").expect("save");
+        std::fs::write(memory_dir(workspace.path()).join("broken.md"), "no fence\n").unwrap();
+        let rows = load_rows(workspace.path());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "healthy");
+    }
+
+    /// The panel face: typed category off the file name, absolute path for
+    /// the reveal target.
+    #[test]
+    fn list_face_carries_type_and_absolute_path() {
+        let workspace = ws();
+        save_entry(workspace.path(), &entry("fact a"), "b\n").expect("save");
+        let listed = list(workspace.path());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].r#type, MemoryType::Feedback);
+        assert!(listed[0].file_path.contains("feedback-fact-a.md"));
+        assert!(Path::new(&listed[0].file_path).is_absolute());
+    }
+}

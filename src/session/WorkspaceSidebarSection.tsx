@@ -19,6 +19,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
   ChevronRight,
+  FileClock,
   FolderClosed,
   FolderOpen,
   FolderX,
@@ -73,6 +74,7 @@ import {
   renameWorkspace,
 } from "../api";
 import { WorkspaceDatasetsDialog } from "./WorkspaceDatasetsDialog";
+import { WorkspaceMemoryDialog } from "./WorkspaceMemoryDialog";
 import { readSidebarExpansion, saveSidebarExpansion } from "./sidebarExpansion";
 import { workspaceKeys } from "./queryKeys";
 import { SIDEBAR_PREVIEW_CAP as PREVIEW_CAP } from "./sidebarModel";
@@ -177,6 +179,11 @@ export function WorkspaceSidebarSection({
   // The shared-dataset panel's target (ADR-0141 D4): the workspace the modal
   // manages; null keeps it closed.
   const [managing, setManaging] = useState<{ path: string; label: string } | null>(null);
+  // The memory panel's target (issue #1529): same modal-off-the-menu shape.
+  const [viewingMemory, setViewingMemory] = useState<{
+    path: string;
+    label: string;
+  } | null>(null);
 
   function toggleGroup(path: string) {
     const next = new Set(expanded);
@@ -530,6 +537,7 @@ export function WorkspaceSidebarSection({
                       onRename={() => openRename(g)}
                       onRemove={() => setRemoving(g)}
                       onManageDatasets={() => setManaging({ path: g.path, label: g.label })}
+                      onViewMemory={() => setViewingMemory({ path: g.path, label: g.label })}
                     />
                   </div>
                 </div>
@@ -644,6 +652,14 @@ export function WorkspaceSidebarSection({
         workspace={managing}
         onOpenChange={(next) => {
           if (!next) setManaging(null);
+        }}
+      />
+
+      {/* Issue #1529: the workspace memory panel (read-only list + toggle). */}
+      <WorkspaceMemoryDialog
+        workspace={viewingMemory}
+        onOpenChange={(next) => {
+          if (!next) setViewingMemory(null);
         }}
       />
 
@@ -796,12 +812,14 @@ function WorkspaceGroupMenu({
   onRename,
   onRemove,
   onManageDatasets,
+  onViewMemory,
 }: {
   group: WorkspaceGroup;
   disabled: boolean;
   onRename: () => void;
   onRemove: () => void;
   onManageDatasets: () => void;
+  onViewMemory: () => void;
 }) {
   const intl = useIntl();
   const menuLabel = intl.formatMessage({
@@ -858,6 +876,12 @@ function WorkspaceGroupMenu({
             id="sidebar.workspace.manageDatasets"
             defaultMessage="Datasets"
           />
+        </DropdownMenuItem>
+        {/* Issue #1529: the workspace memory panel's entry. A missing
+            directory has no memories to list (and no toggle target). */}
+        <DropdownMenuItem disabled={group.missing} onSelect={onViewMemory}>
+          <FileClock aria-hidden />
+          <FormattedMessage id="sidebar.workspace.memory" defaultMessage="Memory" />
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem variant="destructive" onSelect={onRemove}>
