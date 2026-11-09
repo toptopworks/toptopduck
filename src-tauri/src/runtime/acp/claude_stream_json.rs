@@ -851,7 +851,7 @@ impl ClaudePump {
                     .find_map(|prefix| name.strip_prefix(prefix))
                     .filter(|bare| !bare.is_empty());
                 let bare = gateway_bare.unwrap_or(name.as_str());
-                let (_, operation_kind, summary) = classify_call(&ToolUse {
+                let (_, operation_kind, summary, _) = classify_call(&ToolUse {
                     id: id.clone(),
                     name: bare.to_string(),
                     input,

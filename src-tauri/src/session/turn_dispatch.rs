@@ -1236,9 +1236,10 @@ pub(crate) struct ResolvedClassification<'a> {
 /// Classify one call with the CLI-registration lookup folded in: a
 /// registered name classifies under its own reserved server (`classify_cli_tool`,
 /// ADR-0108 Decision 7 -- the approver signs exactly what will run); anything
-/// else falls through to the shared builtin/external classification with no
-/// file attachments. Registration validation refuses builtin / meta /
-/// namespaced names, so the two arms are disjoint.
+/// else falls through to the shared builtin/external classification, where
+/// the external arm mounts its on-cut args attachment (ADR-0146) and the
+/// builtin arm carries none (it never gates). Registration validation
+/// refuses builtin / meta / namespaced names, so the two arms are disjoint.
 pub(crate) fn classify_with_cli_tool<'a>(
     cli: &'a [crate::cli_tools::config::CliToolConfig],
     call: &ToolUse,
@@ -1258,24 +1259,34 @@ pub(crate) fn classify_with_cli_tool<'a>(
             }
         }
         None => {
-            let (key, operation_kind, summary) = classify_call(call);
+            let (key, operation_kind, summary, file_attachments) = classify_call(call);
             ResolvedClassification {
                 key,
                 operation_kind,
                 summary,
-                file_attachments: Vec::new(),
+                file_attachments,
                 cli_tool: None,
             }
         }
     }
 }
 
-pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) {
+pub(crate) fn classify_call(
+    call: &ToolUse,
+) -> (
+    ToolKey,
+    OperationKind,
+    String,
+    Vec<crate::approval::FileAttachment>,
+) {
     match definitions::builtin_metadata(&call.name) {
         Some(spec) => (
             ToolKey::builtin(spec.definition.name.as_str()),
             spec.operation_kind,
             summarize_field(&call.input, spec.summary_field, spec.summary_fallback),
+            // The builtin arm never gates (ADR-0080 Decision 1 pass-through),
+            // so it has no approval surface to mount attachments for.
+            Vec::new(),
         ),
         None => {
             // External arm (issue #301 slice C-loop): a namespaced
@@ -1315,17 +1326,33 @@ pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) 
             // event, and the trace entry, so the frontend's exact-match merge
             // holds (an emit-side-only re-trim would re-trim just the
             // broadcast channel and fork the two).
-            let summary = crate::approval::truncate_summary(
-                &format!(
-                    "external tool `{other}` with {}",
-                    crate::approval::truncate_summary(
-                        &call.input.to_string(),
-                        ARGS_PREVIEW_MAX_CHARS,
-                    ),
-                ),
-                crate::approval::SUMMARY_MAX_CHARS,
-            );
-            (key, OperationKind::Network, summary)
+            let full_args = call.input.to_string();
+            let args_preview =
+                crate::approval::truncate_summary(&full_args, ARGS_PREVIEW_MAX_CHARS);
+            let framed = format!("external tool `{other}` with {args_preview}");
+            let summary =
+                crate::approval::truncate_summary(&framed, crate::approval::SUMMARY_MAX_CHARS);
+            // When either cap cut into the arguments (ADR-0146, issue
+            // #1370), the tail
+            // is invisible everywhere -- the trace keeps this same capped
+            // summary. The full JSON rides the gate as an expandable
+            // "arguments" attachment (the "argv" attachment's channel, issue
+            // #1195): the broadcast caps it at FILE_ATTACHMENT_MAX_CHARS
+            // while the pending slot keeps the uncut original for the
+            // pending window's on-demand pull. Mounted only when a cap
+            // actually cut -- the predicate mirrors both cut decisions, so a
+            // long tool name that eats the frame budget mounts even when the
+            // args alone fit the preview cap.
+            let mut attachments = Vec::new();
+            if args_preview.chars().count() < full_args.chars().count()
+                || summary.chars().count() < framed.chars().count()
+            {
+                attachments.push(crate::approval::FileAttachment {
+                    param: "arguments".into(),
+                    content: full_args,
+                });
+            }
+            (key, OperationKind::Network, summary, attachments)
         }
     }
 }
@@ -1929,7 +1956,7 @@ mod tests {
             name: "mcp__github__search".into(),
             input: serde_json::json!({}),
         };
-        let (key, kind, summary) = classify_call(&namespaced);
+        let (key, kind, summary, _) = classify_call(&namespaced);
         assert_eq!(key, ToolKey::external("github", "mcp__github__search"));
         assert_eq!(kind, OperationKind::Network);
         assert!(summary.contains("mcp__github__search"));
@@ -1939,7 +1966,7 @@ mod tests {
             name: "stray_tool".into(),
             input: serde_json::json!({}),
         };
-        let (key, _, _) = classify_call(&bare);
+        let (key, _, _, _) = classify_call(&bare);
         assert_eq!(key, ToolKey::external("unknown", "stray_tool"));
     }
 
@@ -1959,13 +1986,73 @@ mod tests {
             name: "mcp__github__search".into(),
             input: serde_json::json!({ "q": "z".repeat(600) }),
         };
-        let (_, _, summary) = classify_call(&tool);
+        let (_, _, summary, _) = classify_call(&tool);
         assert!(
             summary.starts_with("external tool `mcp__github__search` with "),
             "frame survives the construction-site trim"
         );
         assert_eq!(summary.chars().count(), 512);
         assert!(summary.ends_with("..."), "cut with the approval ellipsis");
+    }
+
+    /// Issue #1370: when either truncation cap cuts into the external call's
+    /// arguments, the full compact JSON rides the gate as an expandable
+    /// "arguments" attachment (the "argv" attachment's channel, issue #1195)
+    /// so the approver can pull the uncut value in the pending window -- the
+    /// tail is otherwise invisible everywhere, trace included. Within budget
+    /// there is no attachment (zero noise).
+    #[test]
+    fn classify_mounts_full_args_attachment_when_the_args_preview_cuts() {
+        let call = ToolUse {
+            id: "tu_1".into(),
+            name: "mcp__github__search".into(),
+            input: serde_json::json!({ "q": "z".repeat(600) }),
+        };
+        let full_args = call.input.to_string();
+        assert!(
+            full_args.chars().count() > ARGS_PREVIEW_MAX_CHARS,
+            "fixture must exceed the args-preview cap"
+        );
+        let resolved = classify_with_cli_tool(&[], &call, std::path::Path::new(""));
+        assert_eq!(resolved.file_attachments.len(), 1);
+        let attachment = &resolved.file_attachments[0];
+        assert_eq!(attachment.param, "arguments");
+        assert_eq!(attachment.content, full_args);
+    }
+
+    /// The zero-noise side: an in-budget call mounts nothing -- the summary
+    /// already shows the verbatim arguments.
+    #[test]
+    fn classify_mounts_no_args_attachment_when_within_budget() {
+        let call = ToolUse {
+            id: "tu_1".into(),
+            name: "mcp__github__search".into(),
+            input: serde_json::json!({ "q": "tiny" }),
+        };
+        let resolved = classify_with_cli_tool(&[], &call, std::path::Path::new(""));
+        assert!(resolved.file_attachments.is_empty());
+    }
+
+    /// The framing prefix eats card budget too: the args JSON fits the
+    /// preview cap on its own, but frame + args exceed the card budget, so
+    /// the outer trim cuts into the arguments -- the attachment must still
+    /// mount. Pins the two-cap predicate (comparing the summary's own length
+    /// against the full JSON's would miss this case).
+    #[test]
+    fn classify_mounts_full_args_attachment_when_the_frame_eats_the_budget() {
+        let call = ToolUse {
+            id: "tu_1".into(),
+            name: format!("mcp__{}__search", "x".repeat(600)),
+            input: serde_json::json!({ "q": "tiny" }),
+        };
+        let full_args = call.input.to_string();
+        assert!(
+            full_args.chars().count() <= ARGS_PREVIEW_MAX_CHARS,
+            "fixture args must fit the preview cap on their own"
+        );
+        let resolved = classify_with_cli_tool(&[], &call, std::path::Path::new(""));
+        assert_eq!(resolved.file_attachments.len(), 1);
+        assert_eq!(resolved.file_attachments[0].content, full_args);
     }
 
     /// The ADR-0078 (issue #297) event stream: a dispatch emits the
@@ -3647,7 +3734,7 @@ mod tests {
     /// gracefully (no panic on untrusted input).
     #[test]
     fn classify_call_routes_builtin_spoof_to_reserved_sentinel() {
-        let (key, _, _) = classify_call(&ToolUse {
+        let (key, _, _, _) = classify_call(&ToolUse {
             id: "x".into(),
             name: "mcp__builtin__foo".into(),
             input: json!({}),

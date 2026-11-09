@@ -363,7 +363,7 @@ impl LoopRuntime {
                     if let Some(termination) = abort {
                         *state.aborted.lock().expect("aborted lock poisoned") = Some(termination);
                     }
-                    let (_, operation_kind, summary) = classify_call(&call);
+                    let (_, operation_kind, summary, _) = classify_call(&call);
                     channel
                         .completed
                         .lock()
