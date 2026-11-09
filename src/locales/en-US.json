@@ -647,6 +647,7 @@
   "thread.antecedents": "Derived from {names}",
   "thread.approval.allowOnce": "Allow once",
   "thread.approval.alwaysAllow": "Always allow",
+  "thread.approval.alwaysAllowScope": "After Always allow, calls to this tool no longer ask for the rest of the session.",
   "thread.approval.deny": "Deny",
   "thread.approval.fileValuesLoadFailed": "Full contents unavailable — showing the capped preview.",
   "thread.approval.hideFiles": "Hide file values",

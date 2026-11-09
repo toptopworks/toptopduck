@@ -647,6 +647,7 @@
   "thread.antecedents": "由 {names} 派生",
   "thread.approval.allowOnce": "允许一次",
   "thread.approval.alwaysAllow": "始终允许",
+  "thread.approval.alwaysAllowScope": "始终允许后，本会话内调用此工具不再询问",
   "thread.approval.deny": "拒绝",
   "thread.approval.fileValuesLoadFailed": "完整内容暂不可用，已回退为截断预览。",
   "thread.approval.hideFiles": "收起传入的文件",
