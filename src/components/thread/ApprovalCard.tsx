@@ -110,22 +110,52 @@ export function ApprovalCard({
         >
           <FormattedMessage id="thread.approval.alwaysAllow" defaultMessage="Always allow" />
         </Button>
+        {/* ml-3: deny is the safety-side action, not part of the allow
+            pair -- the wider interval groups it visually apart from the
+            release path (issue #1368). The outline variant stays: deny is
+            harmless to press, destructive marks a destructive consequence.
+            A deny that wraps alone keeps its ml-3 as a line-start indent
+            (the #862 wrap stays reachable, never cropped) -- a known
+            artifact, cheaper than a spacer element. */}
         <Button
           type="button"
           size="sm"
           variant="outline"
-          className="approval-deny h-6 px-2 text-xs"
+          className="approval-deny ml-3 h-6 px-2 text-xs"
           onClick={() => onRespond(requestId, "deny")}
         >
           <FormattedMessage id="thread.approval.deny" defaultMessage="Deny" />
         </Button>
-        <span className="approval-pending-hint ml-auto text-xs text-muted-foreground">
+        {/* role="status": while the gate suspends the turn the round-trip
+            wait line is gone (isRoundTripWait judges false on the undecided
+            row), so this hint is the only announcement to assistive
+            technology that a decision is being asked for -- polite, the
+            SessionPane alert convention (issue #1368). The "only" rides two
+            facts outside this card's tree -- the isRoundTripWait predicate
+            and the wait line it gates away; if the gate ever keeps a live
+            region up during suspension, this comment and the LiveRow pin
+            move together. */}
+        <span
+          role="status"
+          className="approval-pending-hint ml-auto text-xs text-muted-foreground"
+        >
           <FormattedMessage
             id="thread.approval.pending"
             defaultMessage="Awaiting approval"
           />
         </span>
       </span>
+      {/* The always-allow trust-scope disclosure (issue #1368): a resident
+          line under the answers, not a hover disclosure -- "Always allow"
+          lifts this one tool to session-wide trust (ADR-0080 Decision 3),
+          and that consequence must be readable at the decision moment with
+          zero interaction. Same caption family as the originator note. */}
+      <p className="approval-scope-note m-0 mt-1 text-xs text-muted-foreground">
+        <FormattedMessage
+          id="thread.approval.alwaysAllowScope"
+          defaultMessage="After Always allow, calls to this tool no longer ask for the rest of the session."
+        />
+      </p>
       {fileValues.length > 0 && (
         <ApprovalFileValues
           preview={fileValues}
