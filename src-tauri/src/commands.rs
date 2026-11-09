@@ -653,6 +653,25 @@ fn remove_registry_record(
     Ok(())
 }
 
+/// Apply the memory-toggle write for an echoed path: the same
+/// dual-spelling rule as the rename -- a strict write whose record is
+/// stored under a spelling the re-canonicalized key misses (a junction
+/// swapped under the path, a record predating the filesystem's final
+/// form) must not strand the toggle: retry the verbatim echo before
+/// surfacing the refusal (issue #1529, on the #1392 review's rule).
+fn set_memory_registry_toggle(
+    registry: &crate::workspace::WorkspaceRegistry,
+    workspace: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let key = resolve_registry_key(workspace);
+    let attempt = registry.set_memory_enabled(&key, enabled);
+    if attempt.is_err() && key != std::path::Path::new(workspace) {
+        return registry.set_memory_enabled(std::path::Path::new(workspace), enabled);
+    }
+    attempt
+}
+
 #[tauri::command]
 pub fn rename_workspace(
     registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
@@ -854,21 +873,16 @@ pub fn get_workspace_memory_enabled(
 }
 
 /// Write a workspace's memory toggle (issue #1529): gates the built-in
-/// engine's memory injection and deactivates the panel. Strict -- a missing
-/// record or refused write surfaces; the dual-spelling retry mirrors the
-/// rename face's echoed-path rule.
+/// engine's memory injection and deactivates the panel. Strict -- a
+/// missing record or refused write surfaces; the dual-spelling retry is
+/// [`set_memory_registry_toggle`], the rename face's echoed-path rule.
 #[tauri::command]
 pub fn set_workspace_memory_enabled(
     registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
     workspace: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let key = resolve_registry_key(&workspace);
-    let attempt = registry.set_memory_enabled(&key, enabled);
-    if attempt.is_err() && key != std::path::Path::new(&workspace) {
-        return registry.set_memory_enabled(std::path::Path::new(&workspace), enabled);
-    }
-    attempt
+    set_memory_registry_toggle(&registry, &workspace, enabled)
 }
 
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
@@ -6455,6 +6469,36 @@ mod tests {
         assert!(
             registry.all().0.is_empty(),
             "the record is gone despite the drift"
+        );
+    }
+
+    #[test]
+    fn echoed_memory_toggles_survive_a_canonical_drift_between_key_and_disk() {
+        // The same echoed-path rule as the rename and remove faces, mounted
+        // for the memory toggle (issue #1529): a record stored under a
+        // spelling the re-canonicalized key misses must not strand the
+        // toggle -- the strict write retries the verbatim echo before
+        // surfacing the refusal.
+        let root = tempfile::tempdir().expect("registry dir");
+        let registry = crate::workspace::WorkspaceRegistry::new(
+            root.path().join(crate::workspace::WORKSPACES_FILE_NAME),
+        );
+        let dir = root.path().join("Real");
+        std::fs::create_dir(&dir).expect("mkdir");
+        registry
+            .record_at(&dir, Some("Seed"), true, 1_000)
+            .expect("record");
+
+        let echo = dir.to_string_lossy().into_owned();
+        set_memory_registry_toggle(&registry, &echo, false).expect("toggle lands");
+        assert!(
+            !registry.memory_enabled(std::path::Path::new(&echo)),
+            "the opt-out landed despite the drift"
+        );
+        set_memory_registry_toggle(&registry, &echo, true).expect("toggle back");
+        assert!(
+            registry.memory_enabled(std::path::Path::new(&echo)),
+            "the opt-in landed despite the drift"
         );
     }
 

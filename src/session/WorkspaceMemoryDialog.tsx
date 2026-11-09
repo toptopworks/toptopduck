@@ -139,14 +139,30 @@ export function WorkspaceMemoryDialog({
     enabled: open && enabled.data === true,
   });
 
+  // A refused toggle write, scoped to the workspace it failed on (the
+  // dialog stays mounted across closes, so a stale banner must never
+  // bleed into another workspace's panel). Cleared the moment a retry
+  // starts.
+  const [toggleFailure, setToggleFailure] = useState<{
+    path: string;
+    message: string;
+  } | null>(null);
+
   const toggle = useMutation({
     mutationFn: (next: boolean) => setWorkspaceMemoryEnabled(path, next),
+    onMutate: () => setToggleFailure(null),
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: workspaceMemoryKeys.enabled(path),
       });
     },
-    onError: (e) => log.warn("WorkspaceMemoryDialog", "set memory toggle failed", e),
+    // Logged AND surfaced: the backend is deliberately strict (a missing
+    // record or refused write errors), so the failure renders as the
+    // alert below -- never a silently unmoved switch.
+    onError: (e) => {
+      log.warn("WorkspaceMemoryDialog", "set memory toggle failed", e);
+      setToggleFailure({ path, message: describeError(e, intl) });
+    },
   });
 
   const rows = listing.data ?? [];
@@ -193,6 +209,15 @@ export function WorkspaceMemoryDialog({
             onCheckedChange={(next) => toggle.mutate(next)}
           />
         </div>
+
+        {toggleFailure?.path === path && (
+          // A refused toggle write (locked ledger, missing record) surfaces
+          // here -- the same alert face as the query failures above, so the
+          // switch never just silently fails to move.
+          <p className="text-destructive pb-2 text-sm" role="alert">
+            {toggleFailure.message}
+          </p>
+        )}
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           {enabled.isError ? (

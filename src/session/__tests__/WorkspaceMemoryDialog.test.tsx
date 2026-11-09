@@ -134,6 +134,18 @@ describe("WorkspaceMemoryDialog", () => {
     await waitFor(() => expect(mockedSet).toHaveBeenCalledWith("/ws", false));
   });
 
+  it("surfaces a refused toggle write as the error banner", async () => {
+    // The backend is strict (a missing record or refused write errors); the
+    // failure must reach the user -- never a silently unmoved switch.
+    mockedEnabled.mockResolvedValue(true);
+    mockedList.mockResolvedValue([]);
+    mockedSet.mockRejectedValue(new Error("no record"));
+    renderPanel();
+    expect(await screen.findByText(/还没有记忆/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: /启用记忆/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("no record");
+  });
+
   it("surfaces a listing failure as the error banner", async () => {
     mockedEnabled.mockResolvedValue(true);
     mockedList.mockRejectedValue(new Error("boom"));

@@ -30,8 +30,9 @@ const INDEX_MAX_BYTES: usize = 25_000;
 /// Slug ceiling in chars (the cleaned slug is ASCII, so chars == bytes).
 const SLUG_MAX_CHARS: usize = 48;
 /// One index row's hook clamp, in CHARS -- every truncation path walks char
-/// boundaries so a CJK glyph is never split at its midpoint.
-const HOOK_MAX_CHARS: usize = 120;
+/// boundaries so a CJK glyph is never split at its midpoint. Also the
+/// memory title's clamp budget (both ride [`clamp_injection_line`]).
+pub(crate) const HOOK_MAX_CHARS: usize = 120;
 
 /// The four memory categories (issue #1529 storage protocol). Serialized
 /// lowercase in frontmatter and on the IPC face; an unknown frontmatter
@@ -61,8 +62,7 @@ impl MemoryType {
 /// How a memory landed (the frontmatter `source` field): extracted from a
 /// session by the host (#1530) or hand-written. Default `Manual` -- a
 /// hand-edited file without the field reads as hand-written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemorySource {
     Extract,
     #[default]
@@ -72,21 +72,23 @@ pub enum MemorySource {
 /// One memory's frontmatter (issue #1529): the full protocol field set.
 /// `name` doubles as the index title and the slug source; `description` is
 /// the index hook; `saved_at` is an absolute date (the host stamps it --
-/// a memory must not float on relative dates).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// a memory must not float on relative dates). Never serialized: the IPC
+/// face is [`ListedMemory`]; the on-disk codec is the hand-written
+/// frontmatter pair below.
+#[derive(Debug, Clone, PartialEq)]
 pub struct MemoryEntry {
     pub name: String,
     pub description: String,
     pub r#type: MemoryType,
-    #[serde(default)]
     pub origin_session: Option<String>,
     pub saved_at: String,
-    #[serde(default)]
     pub source: MemorySource,
 }
 
-/// One index row -- the injection + panel face. `title` and `hook` are
-/// already sanitized + clamped for single-line rendering.
+/// One index row -- the injection + panel face. `title` and `hook` are RAW
+/// stored text: every single-line surface must clamp at render time
+/// ([`clamp_injection_line`] -- `render_index` and the prompt-side memory
+/// block both do; the panel truncates with CSS over the raw text).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct MemoryIndexRow {
     pub title: String,
@@ -194,13 +196,15 @@ fn slug_for(title: &str) -> String {
     }
 }
 
-/// Clamp a single-line text for an index row: fold `\r`/`\n`/`\t` to one
-/// space (a hostile or hand-edited hook cannot forge extra rows or a fake
-/// section header inside the injected block), then clamp at
-/// [`HOOK_MAX_CHARS`] CHARS with an ellipsis tail -- char boundaries only,
-/// a CJK glyph is never split. Shared with the injection renderer (the
-/// prompt side distrusts stored text the same way, #1019's posture).
-pub(crate) fn clamp_single_line(text: &str) -> String {
+/// The injection-side single-line clamp shared by BOTH index surfaces
+/// (#1019's posture: stored text is distrusted at injection): fold
+/// `\r`/`\n`/`\t` to one space first (a hostile or hand-edited entry cannot
+/// forge extra rows or a fake section header inside an injected block),
+/// then clamp at `max_chars` CHARS with an ellipsis tail -- char
+/// boundaries only, a CJK glyph is never split. The memory index calls it
+/// with [`HOOK_MAX_CHARS`] (titles + hooks); the skill index calls it with
+/// its own description budget on the prompt side.
+pub(crate) fn clamp_injection_line(text: &str, max_chars: usize) -> String {
     let folded: String = text
         .chars()
         .map(|c| match c {
@@ -208,10 +212,10 @@ pub(crate) fn clamp_single_line(text: &str) -> String {
             c => c,
         })
         .collect();
-    if folded.chars().count() <= HOOK_MAX_CHARS {
+    if folded.chars().count() <= max_chars {
         return folded;
     }
-    let mut clamped: String = folded.chars().take(HOOK_MAX_CHARS - 1).collect();
+    let mut clamped: String = folded.chars().take(max_chars - 1).collect();
     clamped.push('…');
     clamped
 }
@@ -223,9 +227,9 @@ fn render_index(rows: &[MemoryIndexRow]) -> String {
     for row in rows {
         out.push_str(&format!(
             "- [{}]({}) — {}\n",
-            clamp_single_line(&row.title),
+            clamp_injection_line(&row.title, HOOK_MAX_CHARS),
             row.file,
-            clamp_single_line(&row.hook)
+            clamp_injection_line(&row.hook, HOOK_MAX_CHARS)
         ));
     }
     out
@@ -306,8 +310,10 @@ fn type_from_file_name(name: &str) -> Option<MemoryType> {
 /// Read the memory index rows (issue #1529 read path): scan the memory
 /// directory's `.md` files (the source of truth), derive one row per
 /// parseable file, then reconcile `MEMORY.md` -- rewritten when missing or
-/// drifted. NEVER fails and NEVER creates anything: a missing directory is
-/// the empty set (zero footprint), a corrupt file is skipped + logged.
+/// drifted. NEVER fails and never creates the DIRECTORY family: a missing
+/// directory is the empty set and stays missing (zero footprint), a
+/// corrupt file is skipped + logged. The index reconcile is the one write
+/// a read performs, and only when the memory directory already exists.
 pub fn load_rows(workspace: &Path) -> Vec<MemoryIndexRow> {
     let dir = memory_dir(workspace);
     let Ok(read_dir) = std::fs::read_dir(&dir) else {
@@ -445,7 +451,11 @@ fn warn_index_full(workspace: &Path, detail: String) {
 /// (#1530) and tests are the callers): creates the memory directory family
 /// lazily on this FIRST write only, lands the file atomically, and rewrites
 /// the derived index. The capacity caps REFUSE the entry before anything
-/// lands -- never a silent truncation, never a head cut.
+/// lands -- never a silent truncation, never a head cut. Landing order:
+/// the memory file write precedes the index write, so an index-write
+/// failure returns `Err` with the fact already persisted -- the next read
+/// reconciles the index from the files, and a caller must not read that
+/// error as the entry being absent.
 pub fn save_entry(
     workspace: &Path,
     entry: &MemoryEntry,
@@ -651,16 +661,16 @@ mod tests {
     /// clamps at HOOK_MAX_CHARS visible chars, never splitting a glyph.
     #[test]
     fn hook_clamp_never_splits_a_cjk_glyph() {
-        let clamped = clamp_single_line(&"汉".repeat(HOOK_MAX_CHARS + 10));
+        let clamped = clamp_injection_line(&"汉".repeat(HOOK_MAX_CHARS + 10), HOOK_MAX_CHARS);
         assert_eq!(clamped.chars().count(), HOOK_MAX_CHARS);
         assert!(clamped.ends_with('…'));
         assert!(clamped.chars().all(|c| c == '汉' || c == '…'));
         // Layout folding: no \r \n \t survives into an index line (each
         // control char folds to its own space -- the #1019 precedent).
-        let folded = clamp_single_line("a\r\nb\tc");
+        let folded = clamp_injection_line("a\r\nb\tc", HOOK_MAX_CHARS);
         assert_eq!(folded, "a  b c");
         // Under the cap: verbatim.
-        assert_eq!(clamp_single_line("short"), "short");
+        assert_eq!(clamp_injection_line("short", HOOK_MAX_CHARS), "short");
     }
 
     /// Zero footprint: a read on a fresh workspace creates NOTHING, and

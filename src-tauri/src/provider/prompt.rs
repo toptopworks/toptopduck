@@ -26,6 +26,7 @@
 use super::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload};
 use crate::model::TextKind;
 use crate::skills::SkillPromptFragment;
+use crate::workspace::memory::{clamp_injection_line, HOOK_MAX_CHARS};
 
 /// The resolved response locale (ADR-0052 layer 3). Two-state -- the third
 /// persistence state ("system") is resolved to one of these before reaching
@@ -124,33 +125,14 @@ pub fn render_turn_input(question: &str, invocations: &[crate::model::SkillInvoc
     }
 }
 
-/// The injection-time description clamp (issue #961, ADR-0118 Decision 3):
-/// an index row carries at most 360 chars of the spec description in total,
-/// a truncation ending in `…`. Counts CHARS, not bytes -- a CJK-heavy
-/// description clamps at the same visible length and never splits a code
-/// point. The description is also SINGLE-LINED first (issue #1019): it is
-/// third-party import content, so the injection side must not trust its
-/// layout -- each of `\r`/`\n`/`\t` folds to one space before the budget
-/// is measured, so a hostile description cannot forge extra index rows or
-/// a fake section header inside the system prompt. Injection-side only:
-/// the registry's 1024 spec ceiling and every full-text local consumer
-/// (settings pane) are untouched.
-fn clamp_description(description: &str) -> String {
-    const MAX_CHARS: usize = 360;
-    let single_line: String = description
-        .chars()
-        .map(|c| match c {
-            '\r' | '\n' | '\t' => ' ',
-            c => c,
-        })
-        .collect();
-    if single_line.chars().count() <= MAX_CHARS {
-        return single_line;
-    }
-    let mut clamped: String = single_line.chars().take(MAX_CHARS - 1).collect();
-    clamped.push('…');
-    clamped
-}
+/// The skill index's description clamp budget (issue #961, ADR-0118
+/// Decision 3): at most 360 chars total, a truncation ending in `…`,
+/// counting CHARS not bytes. The fold + clamp mechanics live in the
+/// shared injection-side clamp ([`clamp_injection_line`], the #1019
+/// posture -- both index surfaces distrust stored text identically).
+/// Injection-side only: the registry's 1024 spec ceiling and every
+/// full-text local consumer (settings pane) are untouched.
+const SKILL_INDEX_MAX_CHARS: usize = 360;
 
 /// Render the metadata-index skill section shared by BOTH runtime surfaces
 /// (ADR-0110 Decision 1 calibrated by ADR-0119 Decision 3, issue #983): the
@@ -189,7 +171,7 @@ fn render_skill_disclosure(skills: &[SkillPromptFragment]) -> String {
         out.push_str(&format!(
             "- `{}` — {}\n",
             f.name,
-            clamp_description(&f.description)
+            clamp_injection_line(&f.description, SKILL_INDEX_MAX_CHARS)
         ));
     }
     out
@@ -220,8 +202,8 @@ pub fn render_memory_block(rows: &[crate::workspace::memory::MemoryIndexRow]) ->
     for row in rows {
         out.push_str(&format!(
             "- {} — {}\n",
-            crate::workspace::memory::clamp_single_line(&row.title),
-            crate::workspace::memory::clamp_single_line(&row.hook)
+            clamp_injection_line(&row.title, HOOK_MAX_CHARS),
+            clamp_injection_line(&row.hook, HOOK_MAX_CHARS)
         ));
     }
     out
