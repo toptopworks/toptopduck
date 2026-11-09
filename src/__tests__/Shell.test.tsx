@@ -138,6 +138,11 @@ vi.mock("../api", async (importOriginal) => {
     // posture (issue #352). Default per_call read + no-op write; the chip
     // tests override per scenario.
     getAuthorizationMode: vi.fn(async () => "per_call" as const),
+    // Issue #1369: the auth chip's trust-management read + revoke; no Shell
+    // scenario drives the trust set, so the empty list is the honest answer
+    // (no badge, no panel section) and the revoke is a no-op.
+    listSessionTrust: vi.fn(async () => []),
+    revokeSessionTrust: vi.fn(async () => {}),
     setAuthorizationMode: vi.fn(async () => {}),
     // The composer runtime picker reads / writes the session's runtime choice
     // + the v1 adapter table (issue #353). Default built-in read + empty
@@ -937,7 +942,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       // The "+" file button + the auth-mode chip.
       expect(bar.contains(screen.getByRole("button", { name: "添加文件" }))).toBe(true);
       expect(
-        bar.contains(await screen.findByRole("combobox", { name: /授权模式/ })),
+        bar.contains(await screen.findByRole("button", { name: /授权模式/ })),
       ).toBe(true);
       // The runtime picker trailing slot.
       expect(
@@ -996,15 +1001,13 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       expect(ingestFile).not.toHaveBeenCalled();
 
       // Auth-mode draft: switch to no-confirmation (no IPC yet).
-      const authTrigger = screen.getByRole("combobox", { name: "授权模式：请求批准" });
-      fireEvent.pointerDown(authTrigger, { button: 0, pointerType: "mouse" });
+      const authTrigger = screen.getByRole("button", { name: "授权模式：请求批准" });
       fireEvent.click(authTrigger);
-      const option = await screen.findByRole("option", { name: /完全访问权限/ });
-      fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
-      fireEvent.click(option);
+      const radio = await screen.findByRole("radio", { name: /完全访问权限/ });
+      fireEvent.click(radio);
       await waitFor(() =>
         expect(
-          screen.getByRole("combobox", { name: "授权模式：完全访问权限" }),
+          screen.getByRole("button", { name: "授权模式：完全访问权限" }),
         ).toBeInTheDocument(),
       );
       expect(setAuthorizationMode).not.toHaveBeenCalled();
@@ -2646,11 +2649,11 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     await openSession();
     const bar = document.querySelector(".question-bar");
     expect(bar).toBeInTheDocument();
-    // The unified container holds the trigger (+), auth-mode Select, and the
+    // The unified container holds the trigger (+), auth-mode chip, and the
     // textarea -- all inside .question-bar (ADR-0083 composer row restructured
     // into a single container).
     const trigger = screen.getByRole("button", { name: "添加文件" });
-    const chip = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
+    const chip = await screen.findByRole("button", { name: "授权模式：请求批准" });
     expect(bar?.contains(trigger)).toBe(true);
     expect(bar?.contains(chip)).toBe(true);
     // The textarea sits above the toolbar row in DOM order.
@@ -2672,30 +2675,28 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // system) the trigger is the degraded pure add-files button.
     const trigger = screen.getByRole("button", { name: "添加文件" });
     expect(bar?.contains(trigger)).toBe(true);
-    // Issue #352: the Select reads the session's posture (per_call default)
+    // Issue #352: the chip reads the session's posture (per_call default)
     // and renders INSIDE the question-bar, not as a loose sibling.
-    const authTrigger = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
+    const authTrigger = await screen.findByRole("button", { name: "授权模式：请求批准" });
     expect(bar?.contains(authTrigger)).toBe(true);
   });
 
   it("switches the auth-mode Select to no-confirmation with the warning color (ADR-0080)", async () => {
     render(<App />);
     await openSession();
-    const authTrigger = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
+    const authTrigger = await screen.findByRole("button", { name: "授权模式：请求批准" });
 
-    fireEvent.pointerDown(authTrigger, { button: 0, pointerType: "mouse" });
     fireEvent.click(authTrigger);
 
-    const option = await screen.findByRole("option", { name: /完全访问权限/ });
-    fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
-    fireEvent.click(option);
+    const radio = await screen.findByRole("radio", { name: /完全访问权限/ });
+    fireEvent.click(radio);
 
     await waitFor(() =>
       expect(setAuthorizationMode).toHaveBeenCalledWith("sess-1", "no_confirmation"),
     );
     // The flipped trigger reads 完全访问权限 and rides the --warning token
     // (border / fill / text all consume it).
-    const flipped = await screen.findByRole("combobox", { name: "授权模式：完全访问权限" });
+    const flipped = await screen.findByRole("button", { name: "授权模式：完全访问权限" });
     expect(flipped.className).toContain("border-warning/40");
     expect(flipped.className).toContain("bg-warning/10");
     expect(flipped.className).toContain("text-warning");
@@ -2731,10 +2732,10 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     await waitFor(() =>
       expect(getAuthorizationMode).toHaveBeenCalledWith("sess-resume"),
     );
-    // The Select renders the backend's actual answer for the NEW sid, not a
+    // The chip renders the backend's actual answer for the NEW sid, not a
     // hardcoded per_call default.
     expect(
-      await screen.findByRole("combobox", { name: "授权模式：完全访问权限" }),
+      await screen.findByRole("button", { name: "授权模式：完全访问权限" }),
     ).toBeInTheDocument();
   });
 

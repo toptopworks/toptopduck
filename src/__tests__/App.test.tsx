@@ -109,6 +109,12 @@ vi.mock("../api", async (importOriginal) => {
     // per_call default read + no-op write keep jsdom off the real invoke.
     getAuthorizationMode: vi.fn(async () => "per_call" as const),
     setAuthorizationMode: vi.fn(async () => {}),
+    // Issue #1369: the auth chip's trust-management face. The read stays an
+    // empty list (no badge, no panel section) and the resolution listener is
+    // an inert no-op, keeping jsdom off the real Tauri invoke / listen.
+    listSessionTrust: vi.fn(async () => []),
+    revokeSessionTrust: vi.fn(async () => {}),
+    onApprovalResolved: vi.fn(async () => () => {}),
     // The skill picker reads the registry (issue #365); no App.test flow
     // exercises skills beyond the empty read, keeping jsdom off the real
     // invoke.
