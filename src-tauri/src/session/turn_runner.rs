@@ -296,6 +296,11 @@ impl super::Session {
                 // loop (each predecessor retired, #670 / #919); there is no
                 // runtime switch and no fallback.
                 let shared_cards = self.shared_cards();
+                // Issue #1529 (轨 A): the workspace memory index rows,
+                // resolved under the same immutable borrow family -- the
+                // registry toggle gate + the tolerant file read live in the
+                // helper (a memory problem never blocks the turn).
+                let memory_rows = self.memory_index_rows();
                 let mut request = turn_window::assemble_tool_turn(
                     question,
                     &self.working_set,
@@ -312,6 +317,9 @@ impl super::Session {
                     // assignment + privacy refresh), disjoint from the
                     // immutable borrows the call itself takes.
                     &shared_cards,
+                    // #1529: the standing memory block rides the system
+                    // prompt (empty set = no block).
+                    &memory_rows,
                 );
                 // ADR-0103 (issue #614): the session posture's thought-level
                 // rides the built-in turn's provider request. Read from the

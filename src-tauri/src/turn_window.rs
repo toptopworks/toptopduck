@@ -82,9 +82,16 @@ pub fn assemble(
 /// The agent loop owns the request for the whole turn: each round-trip re-sends
 /// this system + tool table with the conversation extended by the prior tool
 /// batch (the mid-turn tool results never re-window the schema context).
+/// `memory` is the workspace's memory index rows (issue #1529's 轨 A read
+/// path): resolved by the caller (the session reads the workspace store +
+/// the toggle), injected as the standing memory block in the system prompt;
+/// an empty set adds nothing. The ACP twin ([`assemble_acp_turn`])
+/// deliberately takes no memory -- external agents get zero injection in
+/// v1 (轨 B is a deferred ticket).
 // The 8th parameter (the shared card face, ADR-0141 D3) rides the same
 // assembly as the working-set cards; collapsing the signature would re-churn
-// every caller for a lint count.
+// every caller for a lint count. The 9th (memory, #1529) rides the same
+// ruling.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble_tool_turn(
     question: &str,
@@ -95,6 +102,7 @@ pub fn assemble_tool_turn(
     user_invocations: &[crate::model::SkillInvocation],
     window_turns: usize,
     shared: &[DatasetRef],
+    memory: &[crate::workspace::memory::MemoryIndexRow],
 ) -> ToolTurnRequest {
     let request = assemble(
         question,
@@ -105,7 +113,7 @@ pub fn assemble_tool_turn(
         shared,
     );
     ToolTurnRequest {
-        system: build_tool_system_prompt(&request, locale, skills),
+        system: build_tool_system_prompt(&request, locale, skills, memory),
         messages: tool_turn_messages(&request),
         tools: crate::analysis_tools::builtin_table(),
         // The window knows nothing of the serving model either (issue
@@ -604,9 +612,47 @@ mod tests {
             &[],
             WINDOW_TURNS,
             &[],
+            &[],
         );
         assert_eq!(request.max_tokens, OUTPUT_TOKEN_CAP);
         assert_eq!(request.thought_level, None);
+    }
+
+    /// Issue #1529 (轨 A): the resolved memory rows ride the assembled
+    /// system prompt as the standing memory block; an empty set keeps the
+    /// assembly byte-free of the block.
+    #[test]
+    fn assembled_tool_turn_carries_the_memory_block() {
+        let memory = [crate::workspace::memory::MemoryIndexRow {
+            title: "fact".into(),
+            file: "project-fact.md".into(),
+            hook: "hook".into(),
+        }];
+        let request = assemble_tool_turn(
+            "probe",
+            &WorkingSet::default(),
+            &[],
+            ResponseLocale::EnUS,
+            &[],
+            &[],
+            WINDOW_TURNS,
+            &[],
+            &memory,
+        );
+        assert!(request.system.contains("【工作区记忆】"));
+        assert!(request.system.contains("- fact — hook\n"));
+        let empty = assemble_tool_turn(
+            "probe",
+            &WorkingSet::default(),
+            &[],
+            ResponseLocale::EnUS,
+            &[],
+            &[],
+            WINDOW_TURNS,
+            &[],
+            &[],
+        );
+        assert!(!empty.system.contains("【工作区记忆】"));
     }
 
     #[test]

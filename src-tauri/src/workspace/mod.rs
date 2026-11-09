@@ -7,7 +7,9 @@
 //! canonical spelling but never each other's state.
 
 pub mod datasets;
+pub mod memory;
 pub mod registry;
 
 pub use datasets::{DatasetEntry, ListedDataset, StoreError};
+pub use memory::{ListedMemory, MemoryEntry, MemoryError, MemoryIndexRow, MemoryType};
 pub use registry::{WorkspaceRecord, WorkspaceRegistry, WORKSPACES_FILE_NAME};

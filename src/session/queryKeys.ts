@@ -171,6 +171,15 @@ export const workspaceDatasetKeys = {
   listing: (workspace: string) => ["workspace-datasets", workspace] as const,
 } as const;
 
+/** The workspace memory panel's reads (issue #1529): the same filesystem-fact
+ *  posture as the dataset listing -- keyed by the workspace's canonical
+ *  path under ONE root (the sibling's shape), session-agnostic. The toggle
+ *  is its own leaf so its invalidation never cascades into the listing. */
+export const workspaceMemoryKeys = {
+  listing: (workspace: string) => ["workspace-memory", workspace] as const,
+  enabled: (workspace: string) => ["workspace-memory", workspace, "enabled"] as const,
+} as const;
+
 /** The update-check slice (ADR-0143, issue #1509): one process-wide cached
  *  check -- the startup auto-check populates it; the sidebar indicator and
  *  the settings block subscribe (enabled:false reads, no mount refetch) and

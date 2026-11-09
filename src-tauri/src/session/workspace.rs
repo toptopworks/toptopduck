@@ -295,6 +295,27 @@ impl super::Session {
         self.runtime_facts.workspace.as_deref()
     }
 
+    /// The workspace memory index rows for the built-in turn's injection
+    /// (issue #1529's 轨 A read path): the bound workspace's memory files,
+    /// gated by the registry's per-workspace `memory_enabled` toggle (a
+    /// missing registry or record reads the default-on posture). Fail-safe
+    /// by construction -- `load_rows` never fails (a missing directory is
+    /// the empty set, a corrupt file is skipped), so a memory problem can
+    /// never block a turn. Sessions without a bound workspace inject
+    /// nothing; the external-runtime arm never calls this (external agents
+    /// get zero injection in v1).
+    pub(super) fn memory_index_rows(&self) -> Vec<crate::workspace::memory::MemoryIndexRow> {
+        let Some(workspace) = self.workspace() else {
+            return Vec::new();
+        };
+        if let Some(registry) = self.workspace_registry() {
+            if !registry.memory_enabled(workspace) {
+                return Vec::new();
+            }
+        }
+        crate::workspace::memory::load_rows(workspace)
+    }
+
     /// The lazy-mint source, if seated (ADR-0137, issue #1381). Read by
     /// close-time reclaim.
     pub fn workspaces_root(&self) -> Option<&Path> {
@@ -624,6 +645,58 @@ mod tests {
         assert_eq!(session.workspace(), Some(user.path()));
         let recipe = session.build_recipe();
         assert_eq!(recipe.workspace.as_deref(), Some(user.path()));
+    }
+
+    /// Issue #1529 (轨 A): the injection row resolution -- a bound
+    /// workspace with files yields rows; the registry toggle off yields
+    /// empty; no bound workspace or no directory yields empty too (the
+    /// zero-block, zero-blocked posture: a read failure is the empty set,
+    /// never a turn failure).
+    #[test]
+    fn memory_index_rows_follow_the_toggle_and_never_fail() {
+        let dir = tempfile::tempdir().expect("registry dir");
+        let registry = test_registry(dir.path());
+        let user = tempfile::tempdir().expect("user dir");
+        let canonical = std::fs::canonicalize(user.path()).expect("canonicalize");
+
+        let mut session = super::super::Session::new().expect("session");
+        session.set_workspace_registry(Some(std::sync::Arc::clone(&registry)));
+        session.set_workspace(canonical.clone());
+
+        // Fresh workspace: no memory directory at all -- empty, nothing
+        // created, the turn proceeds.
+        assert!(session.memory_index_rows().is_empty());
+        assert!(!user.path().join(".toptopduck").join("memory").exists());
+
+        // A saved memory surfaces as a row.
+        crate::workspace::memory::save_entry(
+            user.path(),
+            &crate::workspace::memory::MemoryEntry {
+                name: "fact".to_string(),
+                description: "hook".to_string(),
+                r#type: crate::workspace::memory::MemoryType::Project,
+                origin_session: None,
+                saved_at: "2026-11-09".to_string(),
+                source: crate::workspace::memory::MemorySource::Manual,
+            },
+            "body\n",
+        )
+        .expect("save");
+        let rows = session.memory_index_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "fact");
+
+        // The toggle off drops the rows to empty (no injection); back on
+        // restores them. A session with NO seated registry reads
+        // default-on (its rows flow, pinned below by the on state).
+        registry.set_memory_enabled(&canonical, false).expect("off");
+        assert!(session.memory_index_rows().is_empty());
+        registry.set_memory_enabled(&canonical, true).expect("on");
+        assert_eq!(session.memory_index_rows().len(), 1);
+
+        // No bound workspace: nothing to read, still no failure.
+        let unbound = super::super::Session::new().expect("session");
+        assert!(unbound.memory_index_rows().is_empty());
     }
 
     fn test_registry(dir: &std::path::Path) -> std::sync::Arc<crate::workspace::WorkspaceRegistry> {

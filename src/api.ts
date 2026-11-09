@@ -29,6 +29,7 @@ import type {
   ListedWorkspaceDataset,
   WorkspaceDatasetEntry,
 } from "./types/workspace-datasets";
+import type { ListedMemory } from "./types/workspace-memory";
 import type {
   ResumeProgress,
   SaveError,
@@ -225,6 +226,32 @@ export async function setWorkspaceDatasetPrivacy(
     referenceName,
     privacy,
   });
+}
+
+// List a workspace's memory entries (issue #1529): the read-only panel's
+// face -- rows carry the reveal target path. A workspace without a memory
+// directory lists empty (the zero-footprint fresh workspace).
+export async function listWorkspaceMemory(
+  workspace: string,
+): Promise<ListedMemory[]> {
+  return invoke<ListedMemory[]>("list_workspace_memory", { workspace });
+}
+
+// Read a workspace's memory toggle (issue #1529): on unless the record
+// opted out (the default-on posture).
+export async function getWorkspaceMemoryEnabled(
+  workspace: string,
+): Promise<boolean> {
+  return invoke<boolean>("get_workspace_memory_enabled", { workspace });
+}
+
+// Write a workspace's memory toggle (issue #1529): off stops the built-in
+// engine's memory injection and deactivates the panel's list.
+export async function setWorkspaceMemoryEnabled(
+  workspace: string,
+  enabled: boolean,
+): Promise<void> {
+  return invoke<void>("set_workspace_memory_enabled", { workspace, enabled });
 }
 
 // Create a new session (ADR-0056/0089): the backend builds an independent

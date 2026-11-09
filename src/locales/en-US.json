@@ -637,6 +637,7 @@
   "sidebar.workspace.expandAllAria": "Expand all workspaces",
   "sidebar.workspace.localFolder": "Local folder (optional)",
   "sidebar.workspace.manageDatasets": "Datasets",
+  "sidebar.workspace.memory": "Memory",
   "sidebar.workspace.menu.ariaLabel": "Workspace actions",
   "sidebar.workspace.missing": "(Folder not found)",
   "sidebar.workspace.newSessionAria": "New session in this workspace",
@@ -800,5 +801,16 @@
   "workspace.datasets.replacing": "Replacing {name}…",
   "workspace.datasets.title": "Datasets — {workspace}",
   "workspace.datasets.uploadFailedToast": "Upload to {workspace} failed",
-  "workspace.expand": "Expand right sidebar"
+  "workspace.expand": "Expand right sidebar",
+  "workspace.memory.description": "Your preferences and project context ride along every conversation automatically. Edit with any editor.",
+  "workspace.memory.empty": "No memories yet. Each memory is a Markdown file — write one and later conversations remember it.",
+  "workspace.memory.listHeading": "Memories · {count}",
+  "workspace.memory.off": "Memory is off — conversations no longer carry any memories.",
+  "workspace.memory.reveal": "Reveal in folder",
+  "workspace.memory.title": "Memory — {workspace}",
+  "workspace.memory.toggle": "Memory enabled",
+  "workspace.memory.type.feedback": "Feedback",
+  "workspace.memory.type.project": "Project",
+  "workspace.memory.type.reference": "Reference",
+  "workspace.memory.type.user": "User"
 }
