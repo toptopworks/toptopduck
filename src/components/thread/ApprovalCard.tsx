@@ -113,7 +113,10 @@ export function ApprovalCard({
         {/* ml-3: deny is the safety-side action, not part of the allow
             pair -- the wider interval groups it visually apart from the
             release path (issue #1368). The outline variant stays: deny is
-            harmless to press, destructive marks a destructive consequence. */}
+            harmless to press, destructive marks a destructive consequence.
+            A deny that wraps alone keeps its ml-3 as a line-start indent
+            (the #862 wrap stays reachable, never cropped) -- a known
+            artifact, cheaper than a spacer element. */}
         <Button
           type="button"
           size="sm"
@@ -127,7 +130,11 @@ export function ApprovalCard({
             wait line is gone (isRoundTripWait judges false on the undecided
             row), so this hint is the only announcement to assistive
             technology that a decision is being asked for -- polite, the
-            SessionPane alert convention (issue #1368). */}
+            SessionPane alert convention (issue #1368). The "only" rides two
+            facts outside this card's tree -- the isRoundTripWait predicate
+            and the wait line it gates away; if the gate ever keeps a live
+            region up during suspension, this comment and the LiveRow pin
+            move together. */}
         <span
           role="status"
           className="approval-pending-hint ml-auto text-xs text-muted-foreground"

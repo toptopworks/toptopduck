@@ -245,13 +245,13 @@ describe("LiveRow approval action row wrap (issue #862)", () => {
 // trust scope was invisible at the decision moment (ADR-0080 Decision 3 lifts
 // this one tool to session-wide trust, the button said none of it), the deny
 // answer sat one 6px gap from the allow pair it must not be mistaken for, and
-// the awaiting hint was invisible to assistive technology while the gate
-// suspension hides the round-trip wait line.
+// the awaiting hint was never announced to assistive technology while the
+// gate suspension hides the round-trip wait line.
 describe("LiveRow approval decision surface (issue #1368)", () => {
   it("renders the always-allow scope note persistently under the action row", () => {
     // Zero interaction: a resident line, not a hover disclosure -- the
     // consequence of "Always allow" must be readable at the decision moment
-    // with no pointer or focus (the rejected tooltip carrier, #1368
+    // with no pointer or focus (the tooltip variant, rejected in #1368's
     // regrilling).
     const { container } = renderWithProviders(
       <LiveRow row={rowWith()} onRespond={vi.fn()} />,
@@ -267,7 +267,9 @@ describe("LiveRow approval decision surface (issue #1368)", () => {
   it("separates the deny answer from the allow pair with a visible group gap", () => {
     // The allow pair rides the row's gap-1.5; deny is the safety-side
     // action and reads as its own group across a wider interval -- one
-    // className, leaving the #862 wrap posture untouched.
+    // className. The #862 wrap posture stands (the tail stays reachable,
+    // never cropped); its one known artifact: a deny that wraps alone
+    // carries the ml-3 as a line-start indent in the narrow band.
     const { container } = renderWithProviders(
       <LiveRow row={rowWith()} onRespond={vi.fn()} />,
     );
