@@ -72,7 +72,7 @@ use cancel::CancelWatcher;
 use fold::EventFold;
 use model::INVALID_CONFIG_PREFIX;
 
-pub(crate) use live::turn_loop_for;
+pub(crate) use live::{one_shot_tool_turn, turn_loop_for};
 
 /// The per-turn loop runner (rig-backed).
 /// Built per turn (cheap): the erased model handle and the

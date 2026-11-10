@@ -72,45 +72,55 @@ pub enum ExtractionStatus {
     Failed { detail: String },
 }
 
-/// Run one extraction to its terminal status. `None` means a guard fired
-/// (fragment user block / in-turn memory write): the LAST real outcome
-/// stays the panel's truth, so the caller must not record anything.
+/// Run one extraction to its terminal status. Guards (fragment user block
+/// / in-turn memory write) are settled at SUBMIT time -- a guard-fired
+/// turn never reaches a thread, so the LAST real outcome stays the
+/// panel's truth untouched.
 ///
 /// The defensive order matters: toggle and red-cap are checked BEFORE any
-/// model call is spent, the guards before the chain resolution.
+/// model call is spent.
 pub(crate) fn perform_extraction(
     job: &ExtractionJob,
     registry: &WorkspaceRegistry,
     live: &LiveProviderConfig,
-) -> Option<ExtractionStatus> {
+) -> ExtractionStatus {
     use ExtractionStatus::Skipped;
     if !registry.auto_extraction(&job.workspace) {
-        return Some(Skipped {
+        return Skipped {
             reason: SkipReason::ToggleOff,
-        });
+        };
     }
     let rows = memory::load_rows(&job.workspace);
     if memory::index_usage_percent(&rows) >= RED_CAP_PERCENT {
-        return Some(Skipped {
+        return Skipped {
             reason: SkipReason::IndexCap,
-        });
-    }
-    if !extract::has_independent_user_block(&job.question)
-        || extract::has_memory_write_segment(&job.turn_tool_names)
-    {
-        return None;
+        };
     }
     let cfg: AppConfig = live.load();
     let Some(profile) = extract::resolve_extraction_profile(&cfg) else {
-        return Some(Skipped {
+        return Skipped {
             reason: SkipReason::NoProvider,
-        });
+        };
     };
-    let key = live.keychain().fetch_key_for(&profile.id).ok().flatten();
-    let Some(key) = key else {
-        return Some(Skipped {
-            reason: SkipReason::NoProvider,
-        });
+    // A keychain READ failure is infrastructure, not configuration: the
+    // not-stored None stays a NoProvider skip, the Err lands as a Failed
+    // the panel can tell apart (issue #1530 review).
+    let key = match live.keychain().fetch_key_for(&profile.id) {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            return Skipped {
+                reason: SkipReason::NoProvider,
+            };
+        }
+        Err(err) => {
+            log::warn!(
+                target: "toptopduck::workspace_memory",
+                "keychain read for the extraction profile failed: {err}"
+            );
+            return ExtractionStatus::Failed {
+                detail: format!("keychain read failed: {err}"),
+            };
+        }
     };
     let static_cfg = StaticConfig {
         key: Some(key),
@@ -132,7 +142,7 @@ fn perform_with_provider(
     provider: &dyn Provider,
     locale: crate::provider::prompt::ResponseLocale,
     rows: &[memory::MemoryIndexRow],
-) -> Option<ExtractionStatus> {
+) -> ExtractionStatus {
     let existing_titles: Vec<String> = rows.iter().map(|r| r.title.clone()).collect();
     let request = ToolTurnRequest {
         system: extract::render_extraction_system_prompt(locale),
@@ -147,24 +157,36 @@ fn perform_with_provider(
         max_tokens: extract::EXTRACTION_MAX_TOKENS,
         thought_level: None,
     };
-    let reply = match provider.generate_tool_turn(&request) {
+    // The wiring seam's dispatch (issue #1530 review): live facts ride the
+    // one-shot upstream round-trip -- the same clients the session loop
+    // constructs; a facts-less provider (the scripted fake) keeps the
+    // completion face, which is the test seam this suite rides.
+    let reply = match provider.turn_model_facts() {
+        Some(facts) => crate::session::loop_runtime::one_shot_tool_turn(facts, &request),
+        None => provider.generate_tool_turn(&request),
+    };
+    let reply = match reply {
         Ok(reply) => reply,
         Err(err) => {
-            return Some(ExtractionStatus::Failed {
+            return ExtractionStatus::Failed {
                 detail: err.to_string(),
-            })
+            };
         }
     };
     let ToolTurnReply::Text(text) = reply.reply else {
-        return Some(ExtractionStatus::Failed {
+        return ExtractionStatus::Failed {
             detail: "extraction reply carried tool calls".to_string(),
-        });
+        };
     };
-    let entries = extract::parse_extraction_reply(&text);
-    if entries.is_empty() {
-        return Some(ExtractionStatus::NoNewFacts);
+    match extract::parse_extraction_reply(&text) {
+        extract::ExtractionReply::Entries(entries) if entries.is_empty() => {
+            ExtractionStatus::NoNewFacts
+        }
+        extract::ExtractionReply::Entries(entries) => persist_entries(job, &entries),
+        extract::ExtractionReply::NotJson => ExtractionStatus::Failed {
+            detail: "the reply was not extraction JSON".to_string(),
+        },
     }
-    Some(persist_entries(job, &entries))
 }
 
 /// Persist the parsed entries via the #1529 write primitive (host-stamped
@@ -206,7 +228,7 @@ fn persist_entries(job: &ExtractionJob, entries: &[ExtractedMemory]) -> Extracti
 
 /// One step of the executor seam (tests inject a gate; production injects
 /// [`perform_extraction`] over the live config).
-type ExecuteFn = Arc<dyn Fn(ExtractionJob) -> Option<ExtractionStatus> + Send + Sync>;
+type ExecuteFn = Arc<dyn Fn(ExtractionJob) -> ExtractionStatus + Send + Sync>;
 /// The status write-back seam (the hub installs the workspace-keyed map).
 type ReportFn = Arc<dyn Fn(&Path, ExtractionStatus) + Send + Sync>;
 
@@ -215,6 +237,10 @@ struct SchedulerInner {
     /// and the pending slot is dropped with the bump.
     generation: u64,
     running: bool,
+    /// The in-flight job's workspace: the tombstone target when a close
+    /// voids a lane that never settles -- the panel must not strand on the
+    /// submit-time Running forever (issue #1530 review). Cleared at settle.
+    running_workspace: Option<PathBuf>,
     pending: Option<ExtractionJob>,
 }
 
@@ -234,6 +260,7 @@ impl ExtractionScheduler {
                 Mutex::new(SchedulerInner {
                     generation: 0,
                     running: false,
+                    running_workspace: None,
                     pending: None,
                 }),
                 Condvar::new(),
@@ -253,6 +280,7 @@ impl ExtractionScheduler {
             return;
         }
         inner.running = true;
+        inner.running_workspace = Some(job.workspace.clone());
         (self.report)(&job.workspace, ExtractionStatus::Running);
         self.spawn_locked(inner, job);
     }
@@ -261,13 +289,25 @@ impl ExtractionScheduler {
     /// (voiding every in-flight or future result of this era), drop the
     /// pending slot, then wait -- at most [`CLOSE_DRAIN_WINDOW`] -- for the
     /// running call to settle. A call slower than the window keeps running
-    /// detached; its late result dies on the generation check.
+    /// detached; its late result dies on the generation check. When the
+    /// bump voided an in-flight lane, THIS side records the era's terminal
+    /// face (the settled thread cannot -- a write from the dead era must
+    /// never clobber the next era's status), so the panel never strands on
+    /// the submit-time Running (issue #1530 review).
     pub(crate) fn close_and_drain(&self) {
         let (lock, cv) = &*self.inner;
         let mut inner = lock.lock().expect("extraction scheduler lock poisoned");
         inner.generation += 1;
         inner.pending = None;
+        let voided = if inner.running {
+            inner.running_workspace.take()
+        } else {
+            None
+        };
+        let report = Arc::clone(&self.report);
+        drop(inner);
         let deadline = Instant::now() + CLOSE_DRAIN_WINDOW;
+        let mut inner = lock.lock().expect("extraction scheduler lock poisoned");
         while inner.running {
             let now = Instant::now();
             if now >= deadline {
@@ -277,6 +317,15 @@ impl ExtractionScheduler {
                 .wait_timeout(inner, deadline - now)
                 .expect("drain wait poisoned");
             inner = guard;
+        }
+        drop(inner);
+        if let Some(workspace) = voided {
+            report(
+                &workspace,
+                ExtractionStatus::Failed {
+                    detail: "the session closed before the extraction settled".to_string(),
+                },
+            );
         }
     }
 
@@ -289,26 +338,40 @@ impl ExtractionScheduler {
         let rollback_state = Arc::clone(&state);
         let execute = Arc::clone(&self.execute);
         let report = Arc::clone(&self.report);
+        let rollback_report = Arc::clone(&self.report);
+        let rollback_workspace = job.workspace.clone();
         drop(inner);
         let spawned = std::thread::Builder::new()
             .name("memory-extraction".into())
             .spawn(move || run_one(state, execute, report, job, generation));
         if let Err(err) = spawned {
             // A failed spawn must not strand `running` -- roll the slot back
-            // so the next submit starts instead of deadlocking the lane.
+            // so the next submit starts instead of deadlocking the lane --
+            // and land a terminal face: the submit-time Running must not
+            // outlive the lane it announced (issue #1530 review).
             log::error!(target: "toptopduck::workspace_memory", "extraction thread spawn failed: {err}");
             let (lock, cv) = &*rollback_state;
             let mut inner = lock.lock().expect("extraction scheduler lock poisoned");
             if inner.generation == generation {
                 inner.running = false;
+                inner.running_workspace = None;
                 cv.notify_all();
+                drop(inner);
+                rollback_report(
+                    &rollback_workspace,
+                    ExtractionStatus::Failed {
+                        detail: "extraction thread spawn failed".to_string(),
+                    },
+                );
             }
         }
     }
 }
 
 /// One extraction's settle protocol: clear the running flag, then (same
-/// generation only) report the result and chain the pending job.
+/// generation only) report the result and chain the pending job. A voided
+/// era reports NOTHING -- the close side owns that era's tombstone, and a
+/// late write from a dead era must never clobber the next era's status.
 fn run_one(
     state: Arc<(Mutex<SchedulerInner>, Condvar)>,
     execute: ExecuteFn,
@@ -320,19 +383,21 @@ fn run_one(
     let (lock, cv) = &*state;
     let mut inner = lock.lock().expect("extraction scheduler lock poisoned");
     inner.running = false;
+    inner.running_workspace = None;
     cv.notify_all();
     if inner.generation != generation {
         return; // a close voided this era: the result dies here
     }
-    if let Some(status) = result {
-        report(&job.workspace, status);
-    }
+    report(&job.workspace, result);
     if let Some(next) = inner.pending.take() {
         inner.running = true;
+        inner.running_workspace = Some(next.workspace.clone());
         drop(inner);
         report(&next.workspace, ExtractionStatus::Running);
         let next_gen = generation;
         let rollback_state = Arc::clone(&state);
+        let rollback_report = Arc::clone(&report);
+        let rollback_workspace = next.workspace.clone();
         let spawned = std::thread::Builder::new()
             .name("memory-extraction".into())
             .spawn(move || run_one(state, execute, report, next, next_gen));
@@ -342,10 +407,19 @@ fn run_one(
             let mut inner = lock.lock().expect("extraction scheduler lock poisoned");
             // Same-generation guard as `spawn_locked`'s rollback: a close in
             // the spawn gap owns the flag now -- clearing it would cancel
-            // the next era's in-flight call.
+            // the next era's in-flight call. The terminal face mirrors
+            // spawn_locked's rollback (issue #1530 review).
             if inner.generation == next_gen {
                 inner.running = false;
+                inner.running_workspace = None;
                 cv.notify_all();
+                drop(inner);
+                rollback_report(
+                    &rollback_workspace,
+                    ExtractionStatus::Failed {
+                        detail: "extraction thread spawn failed".to_string(),
+                    },
+                );
             }
         }
     }
@@ -390,6 +464,15 @@ impl ExtractionHub {
                     reason: SkipReason::ToggleOff,
                 },
             );
+            return;
+        }
+        // Guards at the gate, BEFORE any Running is recorded or a thread
+        // is spent (issue #1530 review): a guard-fired turn is a
+        // non-event -- the panel's LAST real outcome stays the truth
+        // untouched.
+        if !extract::has_independent_user_block(question)
+            || extract::has_memory_write_segment(&turn_tool_names)
+        {
             return;
         }
         let job = ExtractionJob {
@@ -525,8 +608,7 @@ mod tests {
                     .to_string(),
             ),
         );
-        let status = perform_with_provider(&the_job, &provider, ResponseLocale::ZhCN, &rows)
-            .expect("a terminal status");
+        let status = perform_with_provider(&the_job, &provider, ResponseLocale::ZhCN, &rows);
         assert_eq!(
             status,
             ExtractionStatus::Extracted {
@@ -558,8 +640,9 @@ mod tests {
         assert!(file.contains("origin_session: s-1"), "{file}");
     }
 
-    /// The no-op reply shape: an empty array (or any unparsable text) is
-    /// NoNewFacts -- never a failure.
+    /// The no-op reply shape: an empty array is NoNewFacts -- the model's
+    /// honest nothing-to-extract answer (a dead reply is a different face,
+    /// pinned below).
     #[test]
     fn an_empty_array_reply_is_no_new_facts() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -572,9 +655,30 @@ mod tests {
             ),
             ToolTurnReply::Text("[]".to_string()),
         );
-        let status = perform_with_provider(&the_job, &provider, ResponseLocale::ZhCN, &[])
-            .expect("a terminal status");
+        let status = perform_with_provider(&the_job, &provider, ResponseLocale::ZhCN, &[]);
         assert_eq!(status, ExtractionStatus::NoNewFacts);
+    }
+
+    /// A reply that is not extraction JSON at all is Failed, never
+    /// NoNewFacts (issue #1530 review): the call was as dead as an error,
+    /// and the panel must not read it as a healthy no-op.
+    #[test]
+    fn an_unparsable_reply_is_failed_not_no_new_facts() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let the_job = job(workspace.path(), "记住这个偏好");
+        let provider = FakeProvider::new().scripted_tool_turn(
+            &extract::render_extraction_user_message(
+                &the_job.question,
+                &the_job.response_text,
+                &[],
+            ),
+            ToolTurnReply::Text("The user thanked me politely.".to_string()),
+        );
+        let status = perform_with_provider(&the_job, &provider, ResponseLocale::ZhCN, &[]);
+        assert!(
+            matches!(&status, ExtractionStatus::Failed { detail } if detail.contains("not extraction JSON")),
+            "{status:?}"
+        );
     }
 
     /// A provider error is Failed with the error text (a skip it is not --
@@ -585,8 +689,7 @@ mod tests {
         let the_job = job(workspace.path(), "记住这个偏好");
         // No script staged: the fake refuses as NotWired.
         let status =
-            perform_with_provider(&the_job, &FakeProvider::new(), ResponseLocale::ZhCN, &[])
-                .expect("a terminal status");
+            perform_with_provider(&the_job, &FakeProvider::new(), ResponseLocale::ZhCN, &[]);
         assert!(
             matches!(status, ExtractionStatus::Failed { .. }),
             "{status:?}"
@@ -616,9 +719,9 @@ mod tests {
                         .expect("calls lock poisoned")
                         .push(the_job.question.clone());
                     gate.wait_open();
-                    Some(ExtractionStatus::Extracted {
+                    ExtractionStatus::Extracted {
                         titles: vec![the_job.question],
-                    })
+                    }
                 }),
                 Arc::new(move |workspace, status| {
                     statuses
@@ -670,9 +773,9 @@ mod tests {
                         .expect("calls lock poisoned")
                         .push(the_job.question.clone());
                     gate.wait_open();
-                    Some(ExtractionStatus::Extracted {
+                    ExtractionStatus::Extracted {
                         titles: vec![the_job.question],
-                    })
+                    }
                 }),
                 Arc::new(move |workspace, status| {
                     statuses
@@ -698,18 +801,20 @@ mod tests {
             ["A".to_string()].as_slice(),
             "the pending slot died with the close"
         );
-        // The submit-time Running face may linger (the era's terminal state
-        // was voided); what must NOT exist is A's terminal Extracted.
-        assert_ne!(
-            statuses
-                .lock()
-                .expect("statuses lock poisoned")
-                .get(workspace.path()),
-            Some(&ExtractionStatus::Extracted {
-                titles: vec!["A".to_string()]
-            }),
-            "the voided era's result never lands"
-        );
+        // The era's tombstone (issue #1530 review): the close side lands a
+        // terminal face -- the submit-time Running never strands, and what
+        // must NOT exist is A's terminal Extracted (the voided era's result
+        // never lands).
+        match statuses
+            .lock()
+            .expect("statuses lock poisoned")
+            .get(workspace.path())
+        {
+            Some(ExtractionStatus::Failed { detail }) => {
+                assert!(detail.contains("session closed"), "{detail}");
+            }
+            other => panic!("the close tombstone face: {other:?}"),
+        }
         // The lane itself survives: a fresh submit runs and reports.
         gate.release();
         scheduler.submit(job(workspace.path(), "C"));
@@ -757,8 +862,7 @@ mod tests {
     }
 
     /// Toggle off at the gate: the skip face records, no scheduler spawns,
-    /// no model call can happen (the zero-profile live config doubles as
-    /// the proof -- an executor run would have ended in NoProvider).
+    /// no model call can happen (the gate returns before any lane exists).
     #[test]
     fn hub_toggle_off_records_the_skip_face() {
         let tmp = tempfile::tempdir().expect("tmp");
@@ -804,5 +908,27 @@ mod tests {
         );
         // Close is a no-op-but-clean return for an unknown session id.
         hub.close_and_drain("never-seen");
+    }
+
+    /// The gate guards (issue #1530 review): a guard-fired turn (a
+    /// fragment question) records NOTHING and spends no thread -- the last
+    /// real outcome stays the panel's truth, so no Running can strand.
+    #[test]
+    fn hub_guard_fired_turn_records_nothing() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (registry, hub) = hub_under(tmp.path());
+        let dir = tmp.path().join("ws");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        registry.record_at(&dir, None, true, 1_000).expect("record");
+        registry.set_auto_extraction(&dir, true).expect("opt in");
+        // Seed a real terminal outcome (the zero-profile chain tail), then
+        // fire a guard-turn: the seed must survive untouched.
+        hub.submit_turn("s-1", &dir, "记住这个偏好", "好的", Vec::new());
+        let seeded = wait_for(Duration::from_secs(5), || match hub.status(&dir) {
+            Some(status) if status != ExtractionStatus::Running => Some(status),
+            _ => None,
+        });
+        hub.submit_turn("s-1", &dir, "好", "好的", Vec::new());
+        assert_eq!(hub.status(&dir), Some(seeded));
     }
 }

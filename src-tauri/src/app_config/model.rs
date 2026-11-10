@@ -398,8 +398,11 @@ pub struct AppConfig {
     /// extraction is a mechanical task, ADR-0147 Why 7). Dangling pointers
     /// (the named profile deleted) null on the next normalize, the
     /// `active_profile` repair precedent. Forward-compat: a pre-#1530 file
-    /// has no key, so serde(default) fills None; None never serializes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// has no key, so serde(default) fills None. None serializes as an
+    /// explicit null -- the wire face the `active_profile` precedent rides
+    /// (issue #1530 review: a skipped key hands the frontend undefined
+    /// where its type promises null).
+    #[serde(default)]
     pub memory_extraction_profile: Option<ProfileId>,
 }
 

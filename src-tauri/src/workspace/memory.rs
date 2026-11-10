@@ -492,11 +492,21 @@ fn warn_index_full(workspace: &Path, detail: String) {
 /// failure returns `Err` with the fact already persisted -- the next read
 /// reconciles the index from the files, and a caller must not read that
 /// error as the entry being absent.
+/// Serializes every workspace's [`save_entry`] against the concurrent
+/// unique-file-name race (issue #1530 review): two sessions extracting
+/// into one workspace can both load the taken set before either writes,
+/// minting the same file name and overwriting each other's memory file.
+/// One global lock is correct at extraction's write rate (one call per
+/// turn); per-workspace locks only if cross-workspace contention ever
+/// matters.
+static SAVE_ENTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn save_entry(
     workspace: &Path,
     entry: &MemoryEntry,
     body: &str,
 ) -> Result<MemoryIndexRow, MemoryError> {
+    let _guard = SAVE_ENTRY_LOCK.lock().expect("memory save lock poisoned");
     let rows = load_rows(workspace);
     if rows.len() >= INDEX_MAX_ROWS {
         warn_index_full(workspace, format!("{INDEX_MAX_ROWS} rows"));
@@ -665,6 +675,28 @@ mod tests {
         assert_eq!(first.file, "feedback-dup.md");
         assert_eq!(second.file, "feedback-dup-2.md");
         assert_eq!(load_rows(workspace.path()).len(), 2);
+    }
+
+    /// The concurrent face of the de-conflict contract (issue #1530
+    /// review): same-title saves racing from several threads must all
+    /// land -- the save lock serializes the read-modify-write, so no
+    /// thread's file silently overwrites another's.
+    #[test]
+    fn concurrent_same_title_saves_keep_every_file() {
+        let workspace = ws();
+        let path = workspace.path().to_path_buf();
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    save_entry(&path, &entry("race"), &format!("body {i}\n")).expect("save");
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("thread panicked");
+        }
+        assert_eq!(load_rows(workspace.path()).len(), 8);
     }
 
     /// The row cap refuses BEFORE anything lands: 200 rows is the ceiling,

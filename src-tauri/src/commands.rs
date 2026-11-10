@@ -924,12 +924,15 @@ pub fn set_workspace_auto_extraction(
 /// The panel's extraction face (issue #1530): the workspace's latest
 /// extraction status (running / skipped + reason / no new facts /
 /// extracted titles / failed detail). `None` = no extraction ever ran.
+/// The lookup rides the same canonical key discipline as the toggle faces
+/// (issue #1530 review: a raw-spelling miss would silently blank the
+/// status line).
 #[tauri::command]
 pub fn get_workspace_extraction_status(
     hub: State<'_, Arc<crate::workspace::extract_runtime::ExtractionHub>>,
     workspace: String,
 ) -> Option<crate::workspace::extract_runtime::ExtractionStatus> {
-    hub.status(std::path::Path::new(&workspace))
+    hub.status(&resolve_registry_key(&workspace))
 }
 
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
@@ -949,7 +952,7 @@ pub fn get_workspace_extraction_status(
 /// Returns `true` when cleanup happened, `false` for a normal close or when
 /// the lock was unavailable (ask in flight).
 #[tauri::command]
-pub fn close_session(
+pub async fn close_session(
     store: State<'_, Arc<SessionStore>>,
     extraction: State<'_, Arc<crate::workspace::extract_runtime::ExtractionHub>>,
     session_id: String,
@@ -1504,12 +1507,7 @@ pub async fn ask(
     // drains it bounded.
     if !is_external_turn {
         if let Some(workspace) = bound_workspace {
-            let settled = match &outcome {
-                TurnOutcome::Materialized { body, .. } => Some(body.clone().unwrap_or_default()),
-                TurnOutcome::Textual { body, .. } => Some(body.clone()),
-                TurnOutcome::Failed(_) | TurnOutcome::Cancelled(_) => None,
-            };
-            if let Some(response_text) = settled {
+            if let Some(response_text) = settled_reply_for_extraction(&outcome) {
                 extraction.submit_turn(
                     &session_id,
                     &workspace,
@@ -1525,6 +1523,19 @@ pub async fn ask(
         }
     }
     Ok(outcome)
+}
+
+/// Issue #1530's firing contract, extracted for its truth-table pin: the
+/// settled-reply projection. `Some(text)` only for a settled outcome --
+/// Failed and Cancelled turns carry no settled facts, so they never fire
+/// an extraction. The caller additionally gates on the turn being built-in
+/// (external ACP turns never fire) and a bound workspace.
+fn settled_reply_for_extraction(outcome: &TurnOutcome) -> Option<String> {
+    match outcome {
+        TurnOutcome::Materialized { body, .. } => Some(body.clone().unwrap_or_default()),
+        TurnOutcome::Textual { body, .. } => Some(body.clone()),
+        TurnOutcome::Failed(_) | TurnOutcome::Cancelled(_) => None,
+    }
 }
 
 /// Cancel the named session's in-flight turn (ADR-0021, issue #28). Fires THAT
@@ -6625,6 +6636,46 @@ mod tests {
         assert!(
             listing.degraded,
             "the corrupt read carries the flag true -- the tell"
+        );
+    }
+
+    // Issue #1530's firing contract, pinned as a truth table: the settled
+    // outcomes (Materialized and Textual) project their reply text; Failed
+    // and Cancelled carry no settled facts and never fire an extraction.
+    // (The command's remaining gates -- the external-turn arm and the
+    // bound workspace -- wrap this projection; they are wiring, not
+    // decision, and ride the fire block they guard.)
+    #[test]
+    fn the_extraction_firing_contract_projects_settled_replies_only() {
+        let materialized = TurnOutcome::Materialized {
+            promotions: vec![],
+            viz: None,
+            body: Some("settled materialized".to_string()),
+            assumption: None,
+        };
+        assert_eq!(
+            settled_reply_for_extraction(&materialized).as_deref(),
+            Some("settled materialized")
+        );
+        let textual = TurnOutcome::Textual {
+            text_kind: crate::model::TextKind::Agent,
+            body: "settled textual".to_string(),
+            assumption: None,
+        };
+        assert_eq!(
+            settled_reply_for_extraction(&textual).as_deref(),
+            Some("settled textual")
+        );
+        let failed = TurnOutcome::Failed(crate::model::TurnFailure::Execute {
+            detail: "step cap".to_string(),
+        });
+        assert!(
+            settled_reply_for_extraction(&failed).is_none(),
+            "a failed turn carries no settled facts"
+        );
+        assert!(
+            settled_reply_for_extraction(&TurnOutcome::Cancelled(None)).is_none(),
+            "a cancelled turn carries no settled facts"
         );
     }
 }

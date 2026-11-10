@@ -138,21 +138,51 @@ impl ExtractedMemory {
     }
 }
 
+/// The parsed extraction reply: the surviving entries, or the dead-reply
+/// signal. `NotJson` covers a reply that is not extraction JSON at all (no
+/// array span, an unparsable payload, or an array from which no entry
+/// survived) -- a wasted call the caller must NOT mistake for a healthy
+/// "no new facts" (issue #1530 review: the panel needs the two apart).
+pub(crate) enum ExtractionReply {
+    Entries(Vec<ExtractedMemory>),
+    NotJson,
+}
+
 /// Parse the model's reply: a JSON array of entries. Tolerant by design --
-/// extraction must never turn a malformed reply into user-visible failure:
-/// a fenced reply is unwrapped first, and anything still unparsable reads
-/// as "no new facts". Per-entry failures drop that entry only.
-pub(crate) fn parse_extraction_reply(text: &str) -> Vec<ExtractedMemory> {
+/// a malformed ENTRY never costs the batch: each element parses and
+/// validates on its own, and only the failing entries drop (logged). A
+/// reply that is not extraction JSON at all reads as
+/// [`ExtractionReply::NotJson`]; an empty array reads as
+/// `Entries(vec![])` -- the model's honest "nothing to extract".
+pub(crate) fn parse_extraction_reply(text: &str) -> ExtractionReply {
     let Some(payload) = json_array_payload(text) else {
-        return Vec::new();
+        return ExtractionReply::NotJson;
     };
-    let Ok(entries) = serde_json::from_str::<Vec<ExtractedMemory>>(&payload) else {
-        return Vec::new();
+    let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(&payload) else {
+        return ExtractionReply::NotJson;
     };
-    entries
-        .into_iter()
-        .filter(|entry| entry.is_well_formed() && entry.memory_type().is_some())
-        .collect()
+    let mut entries = Vec::with_capacity(values.len());
+    let mut dropped = 0usize;
+    for value in values {
+        match serde_json::from_value::<ExtractedMemory>(value) {
+            Ok(entry) if entry.is_well_formed() && entry.memory_type().is_some() => {
+                entries.push(entry);
+            }
+            _ => dropped += 1,
+        }
+    }
+    if dropped > 0 {
+        log::warn!(
+            target: "toptopduck::workspace_memory",
+            "extraction reply carried {dropped} malformed entries (dropped individually)"
+        );
+    }
+    if entries.is_empty() && dropped > 0 {
+        // Nothing survived the per-entry parse: the call was as dead as an
+        // unparsable reply.
+        return ExtractionReply::NotJson;
+    }
+    ExtractionReply::Entries(entries)
 }
 
 /// Extract the JSON array payload: strip a markdown code fence when
@@ -302,29 +332,62 @@ mod tests {
     }
 
     /// The reply parser's tolerance ladder: plain array, fenced array,
-    /// prose-wrapped array all parse; garbage and empty array read as no
-    /// new facts; malformed entries drop individually.
+    /// prose-wrapped array all parse; malformed entries drop individually
+    /// (serde-level shape failures included) while healthy siblings
+    /// survive; a reply that is not extraction JSON at all reads NotJson --
+    /// a dead call, distinct from an empty array's honest "no facts"
+    /// (issue #1530 review: the two must not share a face).
     #[test]
     fn the_reply_parser_is_tolerant_per_entry() {
         let plain = r#"[{"name":"偏好中文","description":"回复用中文","type":"feedback","body":"用户要求中文回复"}]"#;
-        assert_eq!(parse_extraction_reply(plain).len(), 1);
+        let parse_entries = |text: &str| match parse_extraction_reply(text) {
+            ExtractionReply::Entries(entries) => entries,
+            ExtractionReply::NotJson => panic!("expected entries, got NotJson"),
+        };
+        assert_eq!(parse_entries(plain).len(), 1);
         let fenced = format!("```json\n{plain}\n```");
-        assert_eq!(parse_extraction_reply(&fenced).len(), 1, "fence unwrapped");
+        assert_eq!(parse_entries(&fenced).len(), 1, "fence unwrapped");
         let chatty = format!("以下是提取结果：\n{plain}\n以上。");
-        assert_eq!(parse_extraction_reply(&chatty).len(), 1, "prose tolerated");
-        assert!(parse_extraction_reply("[]").is_empty());
-        assert!(parse_extraction_reply("Nothing to save.").is_empty());
-        assert!(parse_extraction_reply("").is_empty());
-        // A bad type drops the entry; a blank name drops it; the healthy
-        // sibling survives.
+        assert_eq!(parse_entries(&chatty).len(), 1, "prose tolerated");
+        // An empty array is the model's honest no-facts answer.
+        assert!(
+            matches!(&parse_extraction_reply("[]"), ExtractionReply::Entries(v) if v.is_empty())
+        );
+        // A reply that is not extraction JSON at all is a dead call.
+        assert!(matches!(
+            parse_extraction_reply("Nothing to save."),
+            ExtractionReply::NotJson
+        ));
+        assert!(matches!(
+            parse_extraction_reply(""),
+            ExtractionReply::NotJson
+        ));
+        // A missing field (serde-level), a bad type, and a blank name each
+        // drop their entry; the healthy sibling survives.
         let mixed = r#"[
             {"name":"好条目","description":"钩子","type":"user","body":"正文"},
+            {"name":"缺字段","type":"user","body":"正文"},
             {"name":"坏类型","description":"钩子","type":"vibe","body":"正文"},
             {"name":"  ","description":"钩子","type":"user","body":"正文"}
         ]"#;
-        let parsed = parse_extraction_reply(mixed);
+        let parsed = parse_entries(mixed);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].name, "好条目");
         assert_eq!(parsed[0].memory_type(), Some(MemoryType::User));
+    }
+
+    /// The dead-batch faces (issue #1530 review): an array from which no
+    /// entry survives is as dead as an unparsable reply -- NotJson, never
+    /// a healthy no-facts.
+    #[test]
+    fn an_all_malformed_array_is_not_json() {
+        let all_bad = r#"[
+            {"name":"坏类型","description":"钩子","type":"vibe","body":"正文"},
+            {"name":"  ","description":"钩子","type":"user","body":"正文"}
+        ]"#;
+        assert!(matches!(
+            parse_extraction_reply(all_bad),
+            ExtractionReply::NotJson
+        ));
     }
 }
