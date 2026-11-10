@@ -30,12 +30,16 @@ import {
   DialogTitle,
 } from "../components/ui/dialog";
 import { Switch } from "../components/ui/switch";
+import { toast } from "../components/ui/use-toast";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "../components/ui/tooltip";
-import { SETTINGS_TOOLTIP_CLASS } from "../components/settings/settings-chrome";
+import {
+  HeaderActionButton,
+  SETTINGS_TOOLTIP_CLASS,
+} from "../components/settings/settings-chrome";
 import { cn } from "../lib/utils";
 import { log } from "../lib/log";
 import { describeError } from "../lib/error-presentation";
@@ -107,22 +111,16 @@ function MemoryRow({ memory }: { memory: ListedMemory }) {
           </p>
         )}
       </div>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        className="size-7 shrink-0"
-        aria-label={revealLabel}
-        title={revealLabel}
+      <HeaderActionButton
+        label={revealLabel}
+        icon={FolderSearch}
         // The opener can refuse (a file deleted after the listing): log it
         // -- the ArtifactHeader posture (the action is simply retryable).
         onClick={() =>
           revealItemInDir(memory.file_path).catch((e: unknown) =>
             log.warn("WorkspaceMemoryDialog", "revealItemInDir failed", e),
           )}
-      >
-        <FolderSearch className="size-4" aria-hidden />
-      </Button>
+      />
     </li>
   );
 }
@@ -245,16 +243,13 @@ export function WorkspaceMemoryDialog({
   if (workspace !== null && workspace !== panel) {
     setPanel(workspace);
   }
-  // The create form's mount + the "saved." confirmation after it lands
-  // (#1538). Both are scoped to ONE panel open: they reset whenever the
-  // prop leaves the retained panel (a close nulls it, a swap replaces
-  // it), so neither bleeds into the next open's face -- the toggle
-  // failure's path-scoped posture.
+  // The create form's mount is scoped to ONE panel open: it resets
+  // whenever the prop leaves the retained panel (a close nulls it, a swap
+  // replaces it), so a half-filled form never bleeds into the next open's
+  // face -- the toggle failure's path-scoped posture.
   const [creating, setCreating] = useState(false);
-  const [savedFlash, setSavedFlash] = useState(false);
-  if (workspace !== panel && (creating || savedFlash)) {
+  if (workspace !== panel && creating) {
     setCreating(false);
-    setSavedFlash(false);
   }
   const path = panel?.path ?? "";
   const label = panel?.label ?? "";
@@ -269,6 +264,11 @@ export function WorkspaceMemoryDialog({
     queryFn: () => listWorkspaceMemory(path),
     // Off = the panel's deactivated face: no refetch while disabled.
     enabled: open && enabled.data === true,
+    // The listing polls the cheap local scan while the panel stands (#1538
+    // follow-up): a hand edit in the memory folder (add/remove via any
+    // editor) lands within one interval, and the query's enabled gate
+    // stops the poll when the panel closes or the layer switches off.
+    refetchInterval: 2000,
   });
   // The extraction toggle + latest status (issue #1530): only meaningful
   // while the memory layer itself is on. The status polls ONLY while the
@@ -410,16 +410,6 @@ export function WorkspaceMemoryDialog({
               <ExtractionStatusLine status={extractionStatus.data} />
             </div>
           )}
-          {savedFlash && !creating && (
-            // The brief "saved." confirmation (#1538): appears right where
-            // the form was, clears the next time the form opens.
-            <p className="text-muted-foreground m-0 pb-2 text-sm" role="status">
-              <FormattedMessage
-                id="workspace.memory.created"
-                defaultMessage="Saved."
-              />
-            </p>
-          )}
           {creating ? (
             // The create form replaces the list face while mounted (#1538):
             // the entry points are the empty state's primary action and the
@@ -429,7 +419,17 @@ export function WorkspaceMemoryDialog({
                 workspace={path}
                 onCreated={() => {
                   setCreating(false);
-                  setSavedFlash(true);
+                  // The save confirmation is a toast (5s radix default),
+                  // not an in-panel line: a persistent note never reads
+                  // as done-and-gone. The formatMessage stays a LITERAL
+                  // call site (the i18n catalog guard recovers ids from
+                  // those, describeError's precedent).
+                  toast({
+                    description: intl.formatMessage({
+                      id: "workspace.memory.created",
+                      defaultMessage: "Saved.",
+                    }),
+                  });
                 }}
                 onCancel={() => setCreating(false)}
               />
@@ -467,10 +467,7 @@ export function WorkspaceMemoryDialog({
                 <Button
                   type="button"
                   size="sm"
-                  onClick={() => {
-                    setSavedFlash(false);
-                    setCreating(true);
-                  }}
+                  onClick={() => setCreating(true)}
                 >
                   <Plus className="size-4" aria-hidden />
                   {createLabel}
@@ -506,31 +503,16 @@ export function WorkspaceMemoryDialog({
                   )}
                   {/* The header's secondary actions (#1538): open the
                       memory folder, then create. */}
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="size-7"
-                    aria-label={openFolderLabel}
-                    title={openFolderLabel}
+                  <HeaderActionButton
+                    label={openFolderLabel}
+                    icon={FolderOpen}
                     onClick={openFolder}
-                  >
-                    <FolderOpen className="size-4" aria-hidden />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="size-7"
-                    aria-label={createLabel}
-                    title={createLabel}
-                    onClick={() => {
-                      setSavedFlash(false);
-                      setCreating(true);
-                    }}
-                  >
-                    <Plus className="size-4" aria-hidden />
-                  </Button>
+                  />
+                  <HeaderActionButton
+                    label={createLabel}
+                    icon={Plus}
+                    onClick={() => setCreating(true)}
+                  />
                 </span>
               </h2>
               <ul className={`m-0 list-none overflow-y-auto p-0 ${LIST_MAX_HEIGHT_CLASS}`}>

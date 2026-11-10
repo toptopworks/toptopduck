@@ -6,13 +6,18 @@
 // is no seam module to stub.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
   openPath: vi.fn(),
 }));
+
+// The toast store is a module-level singleton (would leak across tests);
+// the contract is the call, not the radix mount (the datasets suite's
+// posture).
+vi.mock("../../components/ui/use-toast", () => ({ toast: vi.fn() }));
 
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
@@ -41,6 +46,7 @@ import {
 } from "../../api";
 import { WorkspaceMemoryDialog } from "../WorkspaceMemoryDialog";
 import { TooltipProvider } from "../../components/ui/tooltip";
+import { toast } from "../../components/ui/use-toast";
 import { withIntl } from "../../components/common/__tests__/helpers";
 import type { WorkspaceTarget } from "../useWorkspaceDatasets";
 import type { ListedMemory } from "../../types/workspace-memory";
@@ -54,6 +60,7 @@ const mockedReveal = vi.mocked(revealItemInDir);
 const mockedCreate = vi.mocked(createWorkspaceMemory);
 const mockedOpenDir = vi.mocked(openWorkspaceMemoryDir);
 const mockedOpenPath = vi.mocked(openPath);
+const mockedToast = vi.mocked(toast);
 
 function memory(overrides: Partial<ListedMemory> = {}): ListedMemory {
   return {
@@ -106,7 +113,11 @@ function renderMountedPanel() {
     view.rerender(tree(null));
     view.rerender(tree({ path: "/ws", label: "Demo" }));
   };
-  return { closeAndReopen };
+  // Close without reopening (the prop nulls, the component stays mounted).
+  const closeOnly = () => {
+    view.rerender(tree(null));
+  };
+  return { closeAndReopen, closeOnly };
 }
 
 afterEach(() => {
@@ -311,16 +322,18 @@ describe("WorkspaceMemoryDialog", () => {
 
   // The form's contract: the example prefill fills all three fields; a
   // blank title never reaches the backend (the local guard mirrors the
-  // store's); a successful save collapses the form, flashes the
-  // confirmation, and refreshes the listing.
+  // store's); a successful save collapses the form, raises the save
+  // toast, and refreshes the listing.
   it("prefills the example, guards the blank title, and saves", async () => {
     mockedEnabled.mockResolvedValue(true);
     // Two staged reads: the empty face first, then the saved row -- the
-    // invalidation is the ONLY refetch trigger (staleTime Infinity), so
-    // the new row rendering without a reopen pins the refresh leg.
+    // invalidation drives that saved-row read, so the new row rendering
+    // without a reopen pins the refresh leg. The steady fallback answers
+    // the listing poll (the save's own toast is not a read).
     mockedList
       .mockResolvedValueOnce({ rows: [], usage_percent: 0, unreadable: [] })
-      .mockResolvedValueOnce({ rows: [memory()], usage_percent: 0, unreadable: [] });
+      .mockResolvedValueOnce({ rows: [memory()], usage_percent: 0, unreadable: [] })
+      .mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: "新建记忆" }));
     // The create face owns the bottom: the extraction switch is gone
@@ -356,7 +369,9 @@ describe("WorkspaceMemoryDialog", () => {
         type: "user",
       }),
     );
-    expect(await screen.findByText("已保存。")).toBeInTheDocument();
+    // The confirmation is the toast (the shell viewport's face, the 5s
+    // radix default), not an in-panel line that outstays its welcome.
+    expect(mockedToast).toHaveBeenCalledWith({ description: "已保存。" });
     expect(screen.queryByLabelText("标题")).not.toBeInTheDocument();
     expect(await screen.findByText("季度报表走 DuckDB")).toBeInTheDocument();
   });
@@ -391,22 +406,53 @@ describe("WorkspaceMemoryDialog", () => {
     expect(screen.queryByLabelText("标题")).not.toBeInTheDocument();
   });
 
-  // The saved flash is scoped to ONE panel open too: closing after a
-  // successful save clears it, so the next open carries no stale
-  // confirmation line.
-  it("clears the saved flash when the dialog closes and reopens", async () => {
-    mockedEnabled.mockResolvedValue(true);
-    mockedList.mockResolvedValue({ rows: [], usage_percent: 0, unreadable: [] });
-    const { closeAndReopen } = renderMountedPanel();
-    fireEvent.click(await screen.findByRole("button", { name: "新建记忆" }));
-    fireEvent.change(await screen.findByLabelText("标题"), {
-      target: { value: "偏好中文回复" },
-    });
-    fireEvent.submit(screen.getByLabelText("标题").closest("form")!);
-    expect(await screen.findByText("已保存。")).toBeInTheDocument();
-    closeAndReopen();
-    expect(await screen.findByText(/还没有记忆/)).toBeInTheDocument();
-    expect(screen.queryByText("已保存。")).not.toBeInTheDocument();
+  // The listing poll (#1540): while the panel stands the listing re-reads
+  // every 2s -- a hand edit in the memory folder (add/remove via any
+  // editor) lands within one interval. Fake timers drive the interval; the
+  // enabled gate stopping the poll on close/off is TanStack semantics
+  // (a disabled query runs no interval), not a component behavior to pin.
+  it("polls the listing every 2s while the panel stands", async () => {
+    vi.useFakeTimers();
+    try {
+      mockedEnabled.mockResolvedValue(true);
+      mockedList.mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
+      renderPanel();
+      // Flush the mount reads (enabled, then the listing).
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(mockedList).toHaveBeenCalledTimes(1);
+      // One full interval: the poll re-reads.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(mockedList).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The poll's stop leg (#1540): with the dialog closed (the prop nulls,
+  // the component stays mounted) the listing query disables and the
+  // interval stops firing -- no further reads after the close.
+  it("stops the listing poll when the dialog closes", async () => {
+    vi.useFakeTimers();
+    try {
+      mockedEnabled.mockResolvedValue(true);
+      mockedList.mockResolvedValue({ rows: [], usage_percent: 0, unreadable: [] });
+      const { closeOnly } = renderMountedPanel();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const calls = mockedList.mock.calls.length;
+      closeOnly();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4000);
+      });
+      expect(mockedList).toHaveBeenCalledTimes(calls);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // The list header's secondary actions: open the folder (backend mints +

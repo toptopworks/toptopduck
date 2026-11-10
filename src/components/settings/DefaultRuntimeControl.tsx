@@ -16,14 +16,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../ui/select";
-import { SettingsCard, SettingsRow } from "./settings-chrome";
+import { SettingsRow } from "./settings-chrome";
 
 // Default runtime control (issue #571, ADR-0098 Decision 2): the machine-level
 // preference selecting the runtime new sessions start on (since ADR-0102 a
 // resume continues the session's own last runtime -- the default stays the
-// fallback for a pre-#589 recipe without the field). Rendered at
-// the top of the Runtime pane (above the two sub-tabs, always mounted), so it
-// reads as a section-level preamble preference rather than either tab's content.
+// fallback for a pre-#589 recipe without the field). Rendered above the
+// Runtime pane's two sub-tabs (the preferences card, always mounted), so it
+// reads as a section-level preference rather than either tab's content.
 //
 // Persistence follows the sessions-dir draft + Save row (ADR-0075): a local
 // draft gates Save; the DEDICATED setDefaultRuntime IPC persists it (it carries
@@ -131,111 +131,114 @@ export function DefaultRuntimeControl({
   }
 
   return (
-    <div className="mb-6">
-      <SettingsCard>
-        <SettingsRow
-          title={(
-            <FormattedMessage
-              id="settings.runtime.defaultRuntime.legend"
-              defaultMessage="Default runtime"
-            />
-          )}
-          description={(
-            <FormattedMessage
-              id="settings.runtime.defaultRuntime.description"
-              defaultMessage="The runtime new sessions start with."
-            />
-          )}
-          action={(
-            <div className="flex shrink-0 items-center gap-2">
-              <Select
-                value={runtimeKey(displayed)}
-                onValueChange={(key) => {
-                  setDraft(runtimeFromKey(key));
-                  setError(null);
-                }}
-              >
-                <SelectTrigger
-                  className="w-48"
-                  aria-label={intl.formatMessage({
-                    id: "settings.runtime.defaultRuntime.legend",
-                    defaultMessage: "Default runtime",
-                  })}
-                >
-                  {/* Fallback text while the table has not loaded (pending or
-                      failed read): the external value has no option to portal
-                      its text from, and Radix suppresses the placeholder for a
-                      non-empty value, so without children the trigger would
-                      render blank. Children presence also suppresses the
-                      selected-item portal (Radix gates it on the value node
-                      having none), so this must stay conditional on exactly
-                      the no-option state. */}
-                  <SelectValue>
-                    {adapterData === undefined && displayed.kind === "external"
-                      ? displayed.data
-                      : undefined}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    <SelectLabel>
-                      <FormattedMessage
-                        id="common.apiAccess"
-                        defaultMessage="API Access"
-                      />
-                    </SelectLabel>
-                    <SelectItem value="built_in">
-                      <FormattedMessage
-                        id="common.builtin"
-                        defaultMessage="Built-in"
-                      />
-                    </SelectItem>
-                  </SelectGroup>
-                  <SelectGroup>
-                    <SelectLabel>
-                      <FormattedMessage
-                        id="common.localCli"
-                        defaultMessage="Local CLI"
-                      />
-                    </SelectLabel>
-                    {detected.map((a) => (
-                      <SelectItem key={a.id} value={`external:${a.id}`}>
-                        {a.display_name}
-                      </SelectItem>
-                    ))}
-                    {staleEntry && (
-                      <SelectItem value={`external:${staleEntry.id}`}>
-                        {intl.formatMessage(
-                          {
-                            id: "settings.runtime.defaultRuntime.notInstalled",
-                            defaultMessage: "{name} (Not installed)",
-                          },
-                          { name: staleEntry.display_name },
-                        )}
-                      </SelectItem>
-                    )}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-              <Button
-                type="button"
-                size="sm"
-                disabled={!hasDraft || busy}
-                onClick={() => void save()}
-              >
-                <FormattedMessage id="common.save" defaultMessage="Save" />
-              </Button>
-            </div>
-          )}
+    // A bare row: the wrapping card is the caller's group (the Runtime
+    // pane's preferences card) -- this component renders its row and its
+    // inline failure faces, no shell of its own.
+    <SettingsRow
+      title={(
+        <FormattedMessage
+          id="settings.runtime.defaultRuntime.legend"
+          defaultMessage="Default runtime"
         />
-      </SettingsCard>
-
-      {loadError && !adapterData && (
-        <p className="settings-error mt-3 text-destructive text-sm">{loadError}</p>
       )}
-      {error && (
-        <p className="settings-error mt-3 text-destructive text-sm">{error}</p>
+      description={(
+        <FormattedMessage
+          id="settings.runtime.defaultRuntime.description"
+          defaultMessage="The runtime new sessions start with."
+        />
       )}
-    </div>
+      action={(
+        <div className="flex shrink-0 items-center gap-2">
+          <Select
+            value={runtimeKey(displayed)}
+            onValueChange={(key) => {
+              setDraft(runtimeFromKey(key));
+              setError(null);
+            }}
+          >
+            <SelectTrigger
+              className="w-48"
+              aria-label={intl.formatMessage({
+                id: "settings.runtime.defaultRuntime.legend",
+                defaultMessage: "Default runtime",
+              })}
+            >
+              {/* Fallback text while the table has not loaded (pending or
+                  failed read): the external value has no option to portal
+                  its text from, and Radix suppresses the placeholder for a
+                  non-empty value, so without children the trigger would
+                  render blank. Children presence also suppresses the
+                  selected-item portal (Radix gates it on the value node
+                  having none), so this must stay conditional on exactly
+                  the no-option state. */}
+              <SelectValue>
+                {adapterData === undefined && displayed.kind === "external"
+                  ? displayed.data
+                  : undefined}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectLabel>
+                  <FormattedMessage
+                    id="common.apiAccess"
+                    defaultMessage="API Access"
+                  />
+                </SelectLabel>
+                <SelectItem value="built_in">
+                  <FormattedMessage
+                    id="common.builtin"
+                    defaultMessage="Built-in"
+                  />
+                </SelectItem>
+              </SelectGroup>
+              <SelectGroup>
+                <SelectLabel>
+                  <FormattedMessage
+                    id="common.localCli"
+                    defaultMessage="Local CLI"
+                  />
+                </SelectLabel>
+                {detected.map((a) => (
+                  <SelectItem key={a.id} value={`external:${a.id}`}>
+                    {a.display_name}
+                  </SelectItem>
+                ))}
+                {staleEntry && (
+                  <SelectItem value={`external:${staleEntry.id}`}>
+                    {intl.formatMessage(
+                      {
+                        id: "settings.runtime.defaultRuntime.notInstalled",
+                        defaultMessage: "{name} (Not installed)",
+                      },
+                      { name: staleEntry.display_name },
+                    )}
+                  </SelectItem>
+                )}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <Button
+            type="button"
+            size="sm"
+            disabled={!hasDraft || busy}
+            onClick={() => void save()}
+          >
+            <FormattedMessage id="common.save" defaultMessage="Save" />
+          </Button>
+        </div>
+      )}
+    >
+      {(loadError && !adapterData) || error ? (
+        <div className="space-y-1">
+          {loadError && !adapterData && (
+            <p className="settings-error text-destructive text-sm">{loadError}</p>
+          )}
+          {error && (
+            <p className="settings-error text-destructive text-sm">{error}</p>
+          )}
+        </div>
+      ) : null}
+    </SettingsRow>
   );
 }
