@@ -470,7 +470,10 @@ pub fn run() {
                      startup retries): {detail}"
                 );
             }
-            app.manage(live);
+            app.manage(live.clone());
+            // The extraction hub's config half (issue #1530): the clone
+            // rides below to the hub alongside the workspace registry.
+            let live_for_extraction = live;
             app.manage(SessionsRoot::new(sessions_root));
             app.manage(SkillsRoot(skills_root));
             app.manage(agents::AgentsRoot(agents_root));
@@ -529,6 +532,16 @@ pub fn run() {
                     }
                 }
             }
+            // The memory-extraction hub (issue #1530): one scheduler per
+            // session (close is the abort boundary), one latest status per
+            // workspace (the panel truth), over this registry + the live
+            // provider config.
+            app.manage(Arc::new(
+                crate::workspace::extract_runtime::ExtractionHub::new(
+                    Arc::clone(&workspace_registry),
+                    live_for_extraction,
+                ),
+            ));
             app.manage(workspace_registry);
 
             // System tray residency (ADR-0125, issue #1140). The tray is the
@@ -603,6 +616,9 @@ pub fn run() {
             commands::list_workspace_memory,
             commands::get_workspace_memory_enabled,
             commands::set_workspace_memory_enabled,
+            commands::get_workspace_auto_extraction,
+            commands::set_workspace_auto_extraction,
+            commands::get_workspace_extraction_status,
             commands::ingest_file,
             commands::ingest_file_guided,
             commands::guidance_window,

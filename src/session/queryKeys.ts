@@ -178,6 +178,12 @@ export const workspaceDatasetKeys = {
 export const workspaceMemoryKeys = {
   listing: (workspace: string) => ["workspace-memory", workspace] as const,
   enabled: (workspace: string) => ["workspace-memory", workspace, "enabled"] as const,
+  /** The extraction toggle + status leaves (issue #1530): own leaves so a
+   *  toggle write invalidates exactly its face, never the listing. */
+  autoExtraction: (workspace: string) =>
+    ["workspace-memory", workspace, "auto-extraction"] as const,
+  extractionStatus: (workspace: string) =>
+    ["workspace-memory", workspace, "extraction-status"] as const,
 } as const;
 
 /** The update-check slice (ADR-0143, issue #1509): one process-wide cached

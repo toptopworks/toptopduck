@@ -5,6 +5,7 @@ import type { AppConfig, DefaultRuntime } from "../../types/app-config";
 import { bareButtonReset } from "../../lib/buttonReset";
 import { cn } from "../../lib/utils";
 import { DefaultRuntimeControl } from "./DefaultRuntimeControl";
+import { ExtractionModelSelect } from "./ExtractionModelSelect";
 import type { ProfilesControls } from "./ProfilesSection";
 import { ProfilesSection } from "./ProfilesSection";
 import { LocalCliTab } from "./LocalCliTab";
@@ -34,6 +35,10 @@ const DEFAULT_TAB: RuntimeTab = "api-access";
 
 export type RuntimeSectionProps = {
   provider: AppConfig["provider"];
+  /** The extraction-model pointer (issue #1530): rides the api-access tab
+   *  above the profiles list -- a section-level preference like the
+   *  default runtime, not any single profile's field. */
+  memoryExtractionProfile: string | null;
   /** The persisted default-runtime preference (issue #571), feeding the
    *  section-top control. */
   defaultRuntime: DefaultRuntime;
@@ -53,6 +58,7 @@ export type RuntimeSectionProps = {
 
 export function RuntimeSection({
   provider,
+  memoryExtractionProfile,
   defaultRuntime,
   onCommit,
   onDefaultRuntimeChanged,
@@ -109,6 +115,15 @@ export function RuntimeSection({
         defaultRuntime={defaultRuntime}
         onSaved={onDefaultRuntimeChanged}
         onIpcBusy={onIpcBusy}
+      />
+
+      {/* The extraction-model picker (issue #1530, ADR-0147 Decision 7):
+          section-level like the default runtime above -- it points INTO the
+          profile pool, so it sits where the pool is managed. */}
+      <ExtractionModelSelect
+        provider={provider}
+        memoryExtractionProfile={memoryExtractionProfile}
+        onCommit={onCommit}
       />
 
       {/* Tab switcher (issue #489): two tab buttons. State is NOT persisted --

@@ -61,6 +61,14 @@ pub struct WorkspaceRecord {
     /// `explicit`, upgrade-neutral both ways (re-enabling is a normal edit).
     #[serde(default = "memory_enabled_default", skip_serializing_if = "is_true")]
     pub memory_enabled: bool,
+    /// Whether this workspace opted into automatic memory extraction
+    /// (issue #1530): the write path's own gate, deliberately SEPARATE from
+    /// [`Self::memory_enabled`] (ADR-0147 Decision 6 -- read/write risk
+    /// profiles differ). Default OFF: extraction costs a model call per
+    /// turn, so only an explicit opt-in writes `true` (additive like
+    /// `explicit`; `false` never serializes).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory_auto_extraction: bool,
     /// Epoch milliseconds.
     pub created_at: u64,
     /// Epoch milliseconds.
@@ -250,6 +258,33 @@ impl WorkspaceRegistry {
         self.save(&records)
     }
 
+    /// The extraction toggle's read (issue #1530): OFF unless the record says
+    /// otherwise -- the mirror of [`Self::memory_enabled`]'s default-on, per
+    /// ADR-0147 Decision 6 (write-path risk, explicit opt-in). A missing or
+    /// pre-field record reads as the default-off posture.
+    pub fn auto_extraction(&self, canonical: &Path) -> bool {
+        let (records, _) = self.load();
+        records
+            .into_iter()
+            .find(|r| r.path == canonical)
+            .map(|r| r.memory_auto_extraction)
+            .unwrap_or(false)
+    }
+
+    /// The extraction toggle's write (issue #1530): strict like
+    /// [`Self::set_memory_enabled`] -- an explicit user action.
+    pub fn set_auto_extraction(&self, canonical: &Path, enabled: bool) -> Result<(), String> {
+        let Ok(_guard) = self.write_lock.lock() else {
+            return Err("workspace registry write lock poisoned".to_string());
+        };
+        let mut records = self.load_for_write()?;
+        match records.iter_mut().find(|r| r.path == canonical) {
+            Some(record) => record.memory_auto_extraction = enabled,
+            None => return Err(format!("no workspace record for {}", canonical.display())),
+        }
+        self.save(&records)
+    }
+
     /// The reclaim-time counterpart (ADR-0138 Decision 4): a reclaimed empty
     /// App-minted workspace deletes its record -- a record never outlives
     /// its directory through the App's own hand. Best-effort like `record`.
@@ -338,6 +373,7 @@ impl WorkspaceRegistry {
                 title: title.map(str::to_string),
                 explicit,
                 memory_enabled: memory_enabled_default(),
+                memory_auto_extraction: false,
                 created_at: now,
                 last_used_at: now,
             }),
@@ -538,6 +574,7 @@ mod tests {
             title: None,
             explicit: false,
             memory_enabled: true,
+            memory_auto_extraction: false,
             created_at: 1_000,
             last_used_at: 1_000,
         };
@@ -547,6 +584,7 @@ mod tests {
             title: None,
             explicit: false,
             memory_enabled: true,
+            memory_auto_extraction: false,
             created_at: 2_000,
             last_used_at: 2_000,
         };
@@ -951,6 +989,35 @@ mod tests {
         let legacy = r#"[{"id":"00000000-0000-0000-0000-000000000001","path":"/nowhere","created_at":1,"last_used_at":1}]"#;
         std::fs::write(root.path().join(WORKSPACES_FILE_NAME), legacy).unwrap();
         assert!(reg.memory_enabled(Path::new("/nowhere")));
+    }
+
+    /// The extraction toggle (issue #1530): the memory toggle's mirror --
+    /// default OFF (ADR-0147 Decision 6: write-path risk, explicit opt-in),
+    /// the opt-in byte serializes, and the write stays strict.
+    #[test]
+    fn auto_extraction_defaults_off_and_round_trips_strictly() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let dir = dir_under(root.path(), "mem");
+        // A missing record reads the default-off posture.
+        assert!(!reg.auto_extraction(&dir));
+        // Strict write on a missing record refuses.
+        assert!(reg.set_auto_extraction(&dir, true).is_err());
+        reg.record_at(&dir, None, true, 1_000).expect("record");
+        assert!(!reg.auto_extraction(&dir), "fresh record defaults off");
+        // The default never serializes: the field is absent from the file.
+        let raw = std::fs::read_to_string(root.path().join(WORKSPACES_FILE_NAME)).unwrap();
+        assert!(!raw.contains("memory_auto_extraction"), "{raw}");
+        reg.set_auto_extraction(&dir, true).expect("opt in");
+        assert!(reg.auto_extraction(&dir));
+        assert!(raw_or(root.path()).contains("memory_auto_extraction"));
+        reg.set_auto_extraction(&dir, false).expect("opt back out");
+        assert!(!reg.auto_extraction(&dir));
+        // A pre-field record (hand-written, no memory_auto_extraction key)
+        // reads off.
+        let legacy = r#"[{"id":"00000000-0000-0000-0000-000000000001","path":"/nowhere","created_at":1,"last_used_at":1}]"#;
+        std::fs::write(root.path().join(WORKSPACES_FILE_NAME), legacy).unwrap();
+        assert!(!reg.auto_extraction(Path::new("/nowhere")));
     }
 
     /// Raw file read helper for the serialization-posture assertions.

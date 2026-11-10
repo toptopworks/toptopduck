@@ -107,6 +107,14 @@ pub struct ListedMemory {
     pub file_path: String,
 }
 
+/// The panel's one-shot read (issue #1530): the rows plus the index usage
+/// percentage the color scale renders.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ListedMemorySection {
+    pub rows: Vec<ListedMemory>,
+    pub usage_percent: u8,
+}
+
 /// Why a memory operation failed. `IndexFull` carries the actionable cap
 /// detail (the panel's own sentence); `Io` is the infrastructure echo.
 #[derive(Debug, Clone, PartialEq)]
@@ -356,9 +364,25 @@ pub fn load_rows(workspace: &Path) -> Vec<MemoryIndexRow> {
     rows
 }
 
-/// The panel's list face: rows plus typed category + absolute path.
-pub fn list(workspace: &Path) -> Vec<ListedMemory> {
-    load_rows(workspace)
+/// The index usage ratio (issue #1530): the WORSE of the two capacity hats
+/// as a percentage, clamped to 100. Drives the panel's color scale (80
+/// yellow / 95 red) and the red-cap extraction pause. Computed from the
+/// same render the write path refuses on, so the percentage the panel
+/// shows is the percentage the cap enforces.
+pub(crate) fn index_usage_percent(rows: &[MemoryIndexRow]) -> u8 {
+    let row_pct = rows.len().saturating_mul(100) / INDEX_MAX_ROWS;
+    let byte_pct = render_index(rows).len().saturating_mul(100) / INDEX_MAX_BYTES;
+    row_pct.max(byte_pct).min(100) as u8
+}
+
+/// The panel's full read (issue #1530's calibration): the list rows plus
+/// the index usage percentage, from ONE directory scan. The percentage is
+/// the same ratio the write path's caps enforce, so the panel's color
+/// scale never disagrees with the refusal.
+pub fn list_section(workspace: &Path) -> ListedMemorySection {
+    let rows = load_rows(workspace);
+    let usage_percent = index_usage_percent(&rows);
+    let memories = rows
         .into_iter()
         .map(|row| {
             let kind = type_from_file_name(&row.file).unwrap_or(MemoryType::Reference);
@@ -372,7 +396,19 @@ pub fn list(workspace: &Path) -> Vec<ListedMemory> {
                 row,
             }
         })
-        .collect()
+        .collect();
+    ListedMemorySection {
+        rows: memories,
+        usage_percent,
+    }
+}
+
+/// The panel's list face: rows plus typed category + absolute path.
+/// (Retained for the test suites' direct row fixtures; the command layer
+/// reads [`list_section`], and this delegates to it so the row mapping
+/// lives once.)
+pub fn list(workspace: &Path) -> Vec<ListedMemory> {
+    list_section(workspace).rows
 }
 
 /// Rewrite the derived index when it has drifted from the files (the files
@@ -501,6 +537,29 @@ pub fn save_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The usage ratio drives the panel color scale + the red-cap pause
+    /// (issue #1530): it reports the WORSE hat, clamped at 100.
+    #[test]
+    fn usage_percent_reports_the_worse_hat_clamped() {
+        fn row(title: &str) -> MemoryIndexRow {
+            MemoryIndexRow {
+                title: title.to_string(),
+                file: format!("feedback-{title}.md"),
+                hook: "hook".to_string(),
+            }
+        }
+        assert_eq!(index_usage_percent(&[]), 0);
+        // 190/200 rows = 95% with bytes far under the byte hat.
+        let rows_190: Vec<MemoryIndexRow> = (0..190).map(|i| row(&format!("f{i}"))).collect();
+        assert_eq!(index_usage_percent(&rows_190), 95);
+        // 200 rows = the row hat at 100.
+        let rows_200: Vec<MemoryIndexRow> = (0..200).map(|i| row(&format!("f{i}"))).collect();
+        assert_eq!(index_usage_percent(&rows_200), 100);
+        // A hand-stuffed pile beyond the cap clamps at 100, never overflows.
+        let rows_300: Vec<MemoryIndexRow> = (0..300).map(|i| row(&format!("f{i}"))).collect();
+        assert_eq!(index_usage_percent(&rows_300), 100);
+    }
 
     fn ws() -> tempfile::TempDir {
         tempfile::tempdir().expect("workspace dir")

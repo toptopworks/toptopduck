@@ -189,6 +189,7 @@ function SectionContent({
       return (
         <RuntimeSection
           provider={appConfig.provider}
+          memoryExtractionProfile={appConfig.memory_extraction_profile}
           defaultRuntime={appConfig.default_runtime}
           onCommit={onCommit}
           onDefaultRuntimeChanged={onDefaultRuntimeChanged}

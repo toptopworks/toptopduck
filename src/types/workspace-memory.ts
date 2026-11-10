@@ -16,3 +16,24 @@ export interface ListedMemory {
   type: MemoryType;
   file_path: string;
 }
+
+// The panel's one-shot read (issue #1530): the rows plus the index usage
+// percentage the color scale renders (the same ratio the write caps
+// enforce).
+export interface ListedMemorySection {
+  rows: ListedMemory[];
+  usage_percent: number;
+}
+
+// Why an extraction was skipped (the panel's "skipped" faces).
+export type ExtractionSkipReason = "no_provider" | "toggle_off" | "index_cap";
+
+// The extraction status the panel renders (issue #1530's three states:
+// running / skipped / no-new-facts, with failure spelled out). Mirrors the
+// Rust `ExtractionStatus` (serde snake_case tag).
+export type ExtractionStatus =
+  | { state: "running" }
+  | { state: "skipped"; reason: ExtractionSkipReason }
+  | { state: "no_new_facts" }
+  | { state: "extracted"; titles: string[] }
+  | { state: "failed"; detail: string };

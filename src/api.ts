@@ -29,7 +29,10 @@ import type {
   ListedWorkspaceDataset,
   WorkspaceDatasetEntry,
 } from "./types/workspace-datasets";
-import type { ListedMemory } from "./types/workspace-memory";
+import type {
+  ExtractionStatus,
+  ListedMemorySection,
+} from "./types/workspace-memory";
 import type {
   ResumeProgress,
   SaveError,
@@ -228,13 +231,14 @@ export async function setWorkspaceDatasetPrivacy(
   });
 }
 
-// List a workspace's memory entries (issue #1529): the read-only panel's
-// face -- rows carry the reveal target path. A workspace without a memory
-// directory lists empty (the zero-footprint fresh workspace).
+// List a workspace's memory entries (issue #1529, calibrated by #1530):
+// the read-only panel's face -- rows carry the reveal target path, plus
+// the index usage percentage the color scale renders. A workspace without
+// a memory directory lists empty (the zero-footprint fresh workspace).
 export async function listWorkspaceMemory(
   workspace: string,
-): Promise<ListedMemory[]> {
-  return invoke<ListedMemory[]>("list_workspace_memory", { workspace });
+): Promise<ListedMemorySection> {
+  return invoke<ListedMemorySection>("list_workspace_memory", { workspace });
 }
 
 // Read a workspace's memory toggle (issue #1529): on unless the record
@@ -252,6 +256,33 @@ export async function setWorkspaceMemoryEnabled(
   enabled: boolean,
 ): Promise<void> {
   return invoke<void>("set_workspace_memory_enabled", { workspace, enabled });
+}
+
+// Read a workspace's extraction toggle (issue #1530): off unless the
+// record opted in (the write path's own gate).
+export async function getWorkspaceAutoExtraction(
+  workspace: string,
+): Promise<boolean> {
+  return invoke<boolean>("get_workspace_auto_extraction", { workspace });
+}
+
+// Write a workspace's extraction toggle (issue #1530).
+export async function setWorkspaceAutoExtraction(
+  workspace: string,
+  enabled: boolean,
+): Promise<void> {
+  return invoke<void>("set_workspace_auto_extraction", { workspace, enabled });
+}
+
+// Read a workspace's latest extraction status (issue #1530): the panel's
+// three-state face. Null = no extraction ever ran for this workspace.
+export async function getWorkspaceExtractionStatus(
+  workspace: string,
+): Promise<ExtractionStatus | null> {
+  return invoke<ExtractionStatus | null>(
+    "get_workspace_extraction_status",
+    { workspace },
+  );
 }
 
 // Create a new session (ADR-0056/0089): the backend builds an independent

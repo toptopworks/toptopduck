@@ -51,6 +51,7 @@ function renderSection(overrides: Partial<React.ComponentProps<typeof RuntimeSec
   const controlsRef = { current: null as ProfilesControls | null } as React.MutableRefObject<ProfilesControls | null>;
   const props: React.ComponentProps<typeof RuntimeSection> = {
     provider,
+    memoryExtractionProfile: null,
     defaultRuntime: { kind: "built_in" },
     onCommit: vi.fn(),
     onDefaultRuntimeChanged: vi.fn(),

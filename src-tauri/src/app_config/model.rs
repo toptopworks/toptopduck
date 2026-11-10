@@ -19,7 +19,7 @@ use crate::guardrail::{
     is_well_formed_memory_limit, DEFAULT_MAX_RESULT_ROWS, MAX_THREADS, MEMORY_LIMIT,
 };
 use crate::mcp::config::McpServerRegistry;
-use crate::model::{ProviderConfig, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
+use crate::model::{ProfileId, ProviderConfig, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
 use crate::turn_window::WINDOW_TURNS;
 use crate::workingset::DEFAULT_RESULT_COUNT_CAP;
 
@@ -390,6 +390,17 @@ pub struct AppConfig {
     /// pre-#961 file has no key, so serde(default) fills an empty set.
     #[serde(default)]
     pub disabled_skills: BTreeSet<String>,
+    /// The memory extraction model's profile pointer (issue #1530,
+    /// ADR-0147 Decision 7): which provider profile runs the after-turn
+    /// extraction. `None` = fall back to the ACTIVE profile (the
+    /// zero-config behavior is indistinguishable from the bound posture);
+    /// a set pointer names a profile in the pool (the cheap-model path --
+    /// extraction is a mechanical task, ADR-0147 Why 7). Dangling pointers
+    /// (the named profile deleted) null on the next normalize, the
+    /// `active_profile` repair precedent. Forward-compat: a pre-#1530 file
+    /// has no key, so serde(default) fills None; None never serializes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_extraction_profile: Option<ProfileId>,
 }
 
 impl AppConfig {
@@ -415,6 +426,7 @@ impl AppConfig {
             enabled_agents: BTreeSet::new(),
             materialized_builtin_agents: BTreeSet::new(),
             disabled_skills: BTreeSet::new(),
+            memory_extraction_profile: None,
         }
     }
 
@@ -457,6 +469,15 @@ impl AppConfig {
         // profile is `None`), so a `None` pointer is an idempotent no-op.
         if self.provider.active().is_none() {
             self.provider.active_profile = None;
+        }
+        // The extraction pointer takes the same dangling-null repair
+        // (issue #1530): a named profile that no longer exists must not
+        // silently re-route extraction onto a wrong keychain slot -- null it
+        // and let the active-profile fallback carry the chain.
+        if let Some(pointer) = &self.memory_extraction_profile {
+            if !self.provider.profiles.iter().any(|p| &p.id == pointer) {
+                self.memory_extraction_profile = None;
+            }
         }
         // Normalize the active profile's endpoint fields (mirrors the legacy
         // set_provider_config normalization): empty -> canonical defaults so the
@@ -709,6 +730,28 @@ mod tests {
         let active = cfg.provider.active().expect("active profile still present");
         assert_eq!(active.base_url, DEFAULT_PROVIDER_BASE_URL);
         assert_eq!(active.model, DEFAULT_PROVIDER_MODEL);
+    }
+
+    /// The extraction pointer's dangling-null repair (issue #1530): a named
+    /// profile that no longer exists must null so the read side falls back
+    /// to the active profile -- never a silent re-route onto a wrong slot.
+    #[test]
+    fn normalize_nulls_a_dangling_extraction_pointer_and_keeps_a_live_one() {
+        let mut cfg = AppConfig::defaults();
+        cfg.provider = seeded_provider();
+        let live_id = cfg.provider.profiles[0].id.clone();
+        cfg.memory_extraction_profile = Some(crate::model::ProfileId("ghost".into()));
+        cfg.normalize();
+        assert_eq!(
+            cfg.memory_extraction_profile, None,
+            "a pointer to no profile nulls"
+        );
+        cfg.memory_extraction_profile = Some(live_id);
+        cfg.normalize();
+        assert!(
+            cfg.memory_extraction_profile.is_some(),
+            "a pointer to a live profile survives"
+        );
     }
 
     #[test]
