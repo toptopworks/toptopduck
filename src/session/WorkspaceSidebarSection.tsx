@@ -862,7 +862,7 @@ function WorkspaceGroupMenu({
           }}
         >
           <FolderOpen aria-hidden />
-          <FormattedMessage id="sidebar.workspace.openFolder" defaultMessage="Open folder" />
+          <FormattedMessage id="common.openFolder" defaultMessage="Open folder" />
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onRename}>
           <Pencil aria-hidden />

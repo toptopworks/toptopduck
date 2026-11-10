@@ -17,8 +17,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormattedMessage, useIntl } from "react-intl";
-import { FolderSearch } from "lucide-react";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { FolderOpen, FolderSearch, Plus } from "lucide-react";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -30,6 +30,13 @@ import {
   DialogTitle,
 } from "../components/ui/dialog";
 import { Switch } from "../components/ui/switch";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "../components/ui/tooltip";
+import { SETTINGS_TOOLTIP_CLASS } from "../components/settings/settings-chrome";
+import { cn } from "../lib/utils";
 import { log } from "../lib/log";
 import { describeError } from "../lib/error-presentation";
 import {
@@ -37,10 +44,12 @@ import {
   getWorkspaceExtractionStatus,
   getWorkspaceMemoryEnabled,
   listWorkspaceMemory,
+  openWorkspaceMemoryDir,
   setWorkspaceAutoExtraction,
   setWorkspaceMemoryEnabled,
 } from "../api";
 import { workspaceMemoryKeys } from "./queryKeys";
+import { MemoryCreateForm } from "./MemoryCreateForm";
 import type { WorkspaceTarget } from "./useWorkspaceDatasets";
 import type {
   ExtractionStatus,
@@ -51,6 +60,12 @@ import type {
 // The list card's chrome -- the datasets panel's PANEL_CARD_BASE form, so
 // the two workspace management faces read as one family.
 const PANEL_CARD_BASE = "panel bg-card border rounded-lg shadow-sm p-4";
+
+// The list's visible ceiling (#1538 layout): ~5 rows (a full row is
+// title 20px + hook 16px + py-2 16px + border 1px = 53px), then the list
+// scrolls inside the card instead of stretching the dialog toward its
+// 80vh cap. Fewer rows keep the panel at its natural height.
+const LIST_MAX_HEIGHT_CLASS = "max-h-[265px]";
 
 /** The category badge: four STATIC branches (the i18n catalog guard reads
  * literal ids at call sites -- a dynamically built id would be invisible
@@ -115,8 +130,12 @@ function MemoryRow({ memory }: { memory: ListedMemory }) {
 /** The extraction status line (issue #1530's three panel states): running /
  * skipped(+reason) / no-new-facts, with the extracted titles and the
  * failure detail spelled out. Rendered only when the status exists -- a
- * workspace that never extracted shows nothing. */
+ * workspace that never extracted shows nothing. The settled states announce
+ * (role=status on saved, role=alert on failure -- the toggle banner's
+ * posture), and the failure carries the destructive tone: a failure must
+ * never read as quiet "nothing happened" muted text. */
 function ExtractionStatusLine({ status }: { status: ExtractionStatus }) {
+  const intl = useIntl();
   switch (status.state) {
     case "running":
       return (
@@ -160,18 +179,25 @@ function ExtractionStatusLine({ status }: { status: ExtractionStatus }) {
         </p>
       );
     case "extracted":
+      // The title list joins per locale (zh-CN narrow conjunction renders
+      // the enumeration comma; the hardcoded 、 never fit en-US).
       return (
-        <p className="m-0 text-xs text-muted-foreground">
+        <p className="m-0 text-xs text-muted-foreground" role="status">
           <FormattedMessage
             id="workspace.memory.extraction.extracted"
             defaultMessage="Last turn saved: {titles}"
-            values={{ titles: status.titles.join("、") }}
+            values={{
+              titles: intl.formatList(status.titles, {
+                style: "narrow",
+                type: "conjunction",
+              }),
+            }}
           />
         </p>
       );
     case "failed":
       return (
-        <p className="m-0 text-xs text-muted-foreground">
+        <p className="text-destructive m-0 text-xs" role="alert">
           <FormattedMessage
             id="workspace.memory.extraction.failed"
             defaultMessage="Extraction failed: {detail}"
@@ -218,6 +244,17 @@ export function WorkspaceMemoryDialog({
   const [panel, setPanel] = useState(workspace);
   if (workspace !== null && workspace !== panel) {
     setPanel(workspace);
+  }
+  // The create form's mount + the "saved." confirmation after it lands
+  // (#1538). Both are scoped to ONE panel open: they reset whenever the
+  // prop leaves the retained panel (a close nulls it, a swap replaces
+  // it), so neither bleeds into the next open's face -- the toggle
+  // failure's path-scoped posture.
+  const [creating, setCreating] = useState(false);
+  const [savedFlash, setSavedFlash] = useState(false);
+  if (workspace !== panel && (creating || savedFlash)) {
+    setCreating(false);
+    setSavedFlash(false);
   }
   const path = panel?.path ?? "";
   const label = panel?.label ?? "";
@@ -294,9 +331,34 @@ export function WorkspaceMemoryDialog({
   });
 
   const rows = listing.data?.rows ?? [];
+  const unreadable = listing.data?.unreadable ?? [];
   const usagePercent = listing.data?.usage_percent ?? 0;
   const isOn = enabled.data !== false; // undefined (pending) reads on-face.
   const extractionOn = autoExtraction.data === true;
+
+  const openFolderLabel = intl.formatMessage({
+    id: "common.openFolder",
+    defaultMessage: "Open folder",
+  });
+  const createLabel = intl.formatMessage({
+    id: "workspace.memory.create",
+    defaultMessage: "New memory",
+  });
+  const memoryToggleLabel = intl.formatMessage({
+    id: "workspace.memory.toggle",
+    defaultMessage: "Memory enabled",
+  });
+  // The folder-open action (#1538): the backend mints the directory family
+  // on demand (the zero-footprint fresh workspace included), then the
+  // front-end opener navigates to it. A refusal is logged, not thrown --
+  // the action is simply retryable (the reveal button's posture).
+  const openFolder = () => {
+    openWorkspaceMemoryDir(path)
+      .then((dir) => openPath(dir))
+      .catch((e: unknown) =>
+        log.warn("WorkspaceMemoryDialog", "open memory folder failed", e),
+      );
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -307,13 +369,30 @@ export function WorkspaceMemoryDialog({
         className="flex max-h-[80vh] flex-col overflow-hidden sm:max-w-lg"
       >
         <DialogHeader>
-          <DialogTitle>
-            <FormattedMessage
-              id="workspace.memory.title"
-              defaultMessage="Memory — {workspace}"
-              values={{ workspace: label }}
+          {/* The master switch rides the title row (#1538 layout): an
+              unlabeled switch whose accessible name and tooltip share one
+              source (the settings HeaderActionButton posture). It sits
+              RIGHT AFTER the title text -- not flush right, where the
+              dialog's absolute close button would cover it. The
+              description keeps its own line below. */}
+          <div className="flex items-center gap-2">
+            <DialogTitle className="min-w-0 truncate">
+              <FormattedMessage
+                id="workspace.memory.title"
+                defaultMessage="Memory — {workspace}"
+                values={{ workspace: label }}
+              />
+            </DialogTitle>
+            {/* Icon-only: the accessible name carries the meaning (no
+                tooltip). */}
+            <Switch
+              aria-label={memoryToggleLabel}
+              checked={isOn}
+              disabled={enabled.isPending || toggle.isPending}
+              onCheckedChange={(next) => toggle.mutate(next)}
+              className="shrink-0"
             />
-          </DialogTitle>
+          </div>
           <DialogDescription>
             <FormattedMessage
               id="workspace.memory.description"
@@ -322,74 +401,40 @@ export function WorkspaceMemoryDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex items-center justify-between gap-3 pb-2">
-          <label
-            htmlFor="workspace-memory-toggle"
-            className="flex cursor-pointer items-center gap-2 text-sm"
-          >
-            <FormattedMessage
-              id="workspace.memory.toggle"
-              defaultMessage="Memory enabled"
-            />
-          </label>
-          <Switch
-            id="workspace-memory-toggle"
-            checked={isOn}
-            disabled={enabled.isPending || toggle.isPending}
-            onCheckedChange={(next) => toggle.mutate(next)}
-          />
-        </div>
-
-        {isOn && (
-          // The extraction block (issue #1530): its own OFF-by-default
-          // toggle with the standing cost note (one model call per turn --
-          // the ruling's "cost follows the switch"), plus the latest
-          // status line.
-          <section className="pb-3">
-            <div className="flex items-center justify-between gap-3">
-              <label
-                htmlFor="workspace-extraction-toggle"
-                className="flex cursor-pointer items-center gap-2 text-sm"
-              >
-                <FormattedMessage
-                  id="workspace.memory.extraction.toggle"
-                  defaultMessage="Auto-extract memories"
-                />
-              </label>
-              <Switch
-                id="workspace-extraction-toggle"
-                checked={extractionOn}
-                disabled={
-                  autoExtraction.isPending || extractionToggle.isPending
-                }
-                onCheckedChange={(next) => extractionToggle.mutate(next)}
-              />
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {isOn && extractionStatus.data && (
+            // The extraction's latest outcome rides ABOVE the list (#1538
+            // layout: the switches live in the footer, the feedback lives
+            // next to the content it describes).
+            <div className="pb-2">
+              <ExtractionStatusLine status={extractionStatus.data} />
             </div>
-            <p className="text-muted-foreground m-0 pt-1 text-xs">
+          )}
+          {savedFlash && !creating && (
+            // The brief "saved." confirmation (#1538): appears right where
+            // the form was, clears the next time the form opens.
+            <p className="text-muted-foreground m-0 pb-2 text-sm" role="status">
               <FormattedMessage
-                id="workspace.memory.extraction.cost"
-                defaultMessage="One model request per reply."
+                id="workspace.memory.created"
+                defaultMessage="Saved."
               />
             </p>
-            {extractionStatus.data && (
-              <div className="pt-1">
-                <ExtractionStatusLine status={extractionStatus.data} />
-              </div>
-            )}
-          </section>
-        )}
-
-        {toggleFailure?.path === path && (
-          // A refused toggle write (locked ledger, missing record) surfaces
-          // here -- the same alert face as the query failures above, so the
-          // switch never just silently fails to move.
-          <p className="text-destructive pb-2 text-sm" role="alert">
-            {toggleFailure.message}
-          </p>
-        )}
-
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {enabled.isError ? (
+          )}
+          {creating ? (
+            // The create form replaces the list face while mounted (#1538):
+            // the entry points are the empty state's primary action and the
+            // list header's secondary one.
+            <section className={PANEL_CARD_BASE}>
+              <MemoryCreateForm
+                workspace={path}
+                onCreated={() => {
+                  setCreating(false);
+                  setSavedFlash(true);
+                }}
+                onCancel={() => setCreating(false)}
+              />
+            </section>
+          ) : enabled.isError ? (
             <p className="text-destructive text-sm" role="alert">
               {describeError(enabled.error, intl)}
             </p>
@@ -408,46 +453,169 @@ export function WorkspaceMemoryDialog({
             <p className="text-destructive text-sm" role="alert">
               {describeError(listing.error, intl)}
             </p>
-          ) : !listing.isPending && rows.length === 0 ? (
-            <section className={`${PANEL_CARD_BASE} flex min-h-64 items-center justify-center`}>
+          ) : !listing.isPending && rows.length === 0 && unreadable.length === 0 ? (
+            // The empty face (#1538 rewrite): the primary action creates
+            // the first memory in-panel; the folder is the escape hatch.
+            <section className={`${PANEL_CARD_BASE} flex min-h-64 flex-col items-center justify-center gap-3`}>
               <p className="text-muted-foreground m-0 text-center">
                 <FormattedMessage
                   id="workspace.memory.empty"
-                  defaultMessage="No memories yet. Each memory is a Markdown file — write one and later conversations remember it."
+                  defaultMessage="No memories yet. Create one and later conversations will remember it."
                 />
               </p>
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => {
+                    setSavedFlash(false);
+                    setCreating(true);
+                  }}
+                >
+                  <Plus className="size-4" aria-hidden />
+                  {createLabel}
+                </Button>
+                <Button type="button" size="sm" variant="outline" onClick={openFolder}>
+                  <FolderOpen className="size-4" aria-hidden />
+                  {openFolderLabel}
+                </Button>
+              </div>
             </section>
           ) : listing.isPending ? null : (
             <section className={PANEL_CARD_BASE}>
-              <h2 className="flex items-baseline justify-between gap-2 text-base font-semibold">
+              <h2 className="flex items-center justify-between gap-2 text-base font-semibold">
                 <FormattedMessage
                   id="workspace.memory.listHeading"
                   defaultMessage="Memories · {count}"
                   values={{ count: rows.length }}
                 />
-                {/* The usage scale (issue #1530): yellow >=80, red >=95 --
-                    the same thresholds the backend enforces. Shown only
-                    when a non-trivial share is in use. */}
-                {usagePercent >= USAGE_YELLOW_PERCENT && (
-                  <span
-                    className={`text-xs font-normal ${usageTone(usagePercent)}`}
+                <span className="flex items-center gap-1">
+                  {/* The usage scale (issue #1530): yellow >=80, red >=95 --
+                      the same thresholds the backend enforces. Shown only
+                      when a non-trivial share is in use. */}
+                  {usagePercent >= USAGE_YELLOW_PERCENT && (
+                    <span
+                      className={`text-xs font-normal ${usageTone(usagePercent)}`}
+                    >
+                      <FormattedMessage
+                        id="workspace.memory.usage"
+                        defaultMessage="{percent}% used"
+                        values={{ percent: usagePercent }}
+                      />
+                    </span>
+                  )}
+                  {/* The header's secondary actions (#1538): open the
+                      memory folder, then create. */}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    aria-label={openFolderLabel}
+                    title={openFolderLabel}
+                    onClick={openFolder}
                   >
-                    <FormattedMessage
-                      id="workspace.memory.usage"
-                      defaultMessage="{percent}% used"
-                      values={{ percent: usagePercent }}
-                    />
-                  </span>
-                )}
+                    <FolderOpen className="size-4" aria-hidden />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    aria-label={createLabel}
+                    title={createLabel}
+                    onClick={() => {
+                      setSavedFlash(false);
+                      setCreating(true);
+                    }}
+                  >
+                    <Plus className="size-4" aria-hidden />
+                  </Button>
+                </span>
               </h2>
-              <ul className="m-0 list-none p-0">
+              <ul className={`m-0 list-none overflow-y-auto p-0 ${LIST_MAX_HEIGHT_CLASS}`}>
                 {rows.map((memory) => (
                   <MemoryRow key={memory.file} memory={memory} />
                 ))}
               </ul>
+              {unreadable.length > 0 && (
+                // The unreadable face (#1538): fence-less .md files surface
+                // by name -- neutral copy, the fix for the silent skip.
+                <p className="text-muted-foreground m-0 pt-2 text-xs">
+                  <FormattedMessage
+                    id="workspace.memory.unreadable"
+                    defaultMessage="Unrecognized files: {files}"
+                    values={{
+                      files: intl.formatList(unreadable, {
+                        style: "narrow",
+                        type: "conjunction",
+                      }),
+                    }}
+                  />
+                </p>
+              )}
             </section>
           )}
         </div>
+
+        {/* The extraction pair is the footer's only control, parked on the
+            right (#1538 layout): the master switch is up in the header.
+            The cost hint hangs straight off the label -- hover the text
+            and the tooltip surfaces (the popover skin matches the settings
+            FieldHint's, the same SETTINGS_TOOLTIP_CLASS source). Off hides
+            the footer's control (a refused toggle write keeps the footer
+            for its banner line), and so does the create face -- the form
+            owns the bottom while mounted. */}
+        {!creating && (isOn || toggleFailure?.path === path) && (
+          <footer className="flex flex-col gap-2 border-t pt-3">
+            {isOn && (
+              <div className="flex items-center justify-end gap-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <label
+                      htmlFor="workspace-extraction-toggle"
+                      className="flex cursor-pointer items-center gap-2 text-sm"
+                    >
+                      <FormattedMessage
+                        id="workspace.memory.extraction.toggle"
+                        defaultMessage="Auto-extract"
+                      />
+                    </label>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="top"
+                    align="start"
+                    sideOffset={3}
+                    className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
+                  >
+                    <div className="text-muted-foreground text-sm">
+                      <FormattedMessage
+                        id="workspace.memory.extraction.cost"
+                        defaultMessage="One model request per reply."
+                      />
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+                <Switch
+                  id="workspace-extraction-toggle"
+                  checked={extractionOn}
+                  disabled={
+                    autoExtraction.isPending || extractionToggle.isPending
+                  }
+                  onCheckedChange={(next) => extractionToggle.mutate(next)}
+                />
+              </div>
+            )}
+            {toggleFailure?.path === path && (
+              // A refused toggle write (locked ledger, missing record)
+              // surfaces right under the switch -- never a silently
+              // unmoved control.
+              <p className="text-destructive m-0 text-sm" role="alert">
+                {toggleFailure.message}
+              </p>
+            )}
+          </footer>
+        )}
       </DialogContent>
     </Dialog>
   );

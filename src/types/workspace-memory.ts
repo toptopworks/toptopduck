@@ -19,10 +19,13 @@ export interface ListedMemory {
 
 // The panel's one-shot read (issue #1530): the rows plus the index usage
 // percentage the color scale renders (the same ratio the write caps
-// enforce).
+// enforce). `unreadable` (issue #1538) names the .md files that carry no
+// frontmatter fence or fail to read -- a hand-written file must never
+// vanish silently.
 export interface ListedMemorySection {
   rows: ListedMemory[];
   usage_percent: number;
+  unreadable: string[];
 }
 
 // Why an extraction was skipped (the panel's "skipped" faces).

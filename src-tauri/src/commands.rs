@@ -874,6 +874,37 @@ pub fn list_workspace_memory(
     ))
 }
 
+/// Create a memory from the panel's form (issue #1538): the host stamps
+/// `source: manual` + today's date; the type arrives as the enum itself --
+/// serde refuses an unknown variant at the IPC boundary, so no string
+/// mapping lives here.
+#[tauri::command]
+pub fn create_workspace_memory(
+    workspace: String,
+    title: String,
+    description: String,
+    memory_type: crate::workspace::memory::MemoryType,
+) -> Result<(), String> {
+    crate::workspace::memory::create_entry(
+        std::path::Path::new(&workspace),
+        &title,
+        &description,
+        memory_type,
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Open the workspace's memory directory (issue #1538): create the family
+/// on demand (the zero-footprint fresh workspace included) and hand back
+/// the absolute path for the front-end opener.
+#[tauri::command]
+pub fn open_workspace_memory_dir(workspace: String) -> Result<String, String> {
+    crate::workspace::memory::ensure_memory_dir(std::path::Path::new(&workspace))
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| e.to_string())
+}
+
 /// Read a workspace's memory toggle (issue #1529): `true` unless the record
 /// opted out. A missing record reads the default-on posture.
 #[tauri::command]

@@ -32,6 +32,7 @@ import type {
 import type {
   ExtractionStatus,
   ListedMemorySection,
+  MemoryType,
 } from "./types/workspace-memory";
 import type {
   ResumeProgress,
@@ -283,6 +284,29 @@ export async function getWorkspaceExtractionStatus(
     "get_workspace_extraction_status",
     { workspace },
   );
+}
+
+// Create a memory from the panel's form (issue #1538): the host stamps
+// `source: manual` + today's date; the type is the four-category string.
+export async function createWorkspaceMemory(
+  workspace: string,
+  memory: { title: string; description: string; type: MemoryType },
+): Promise<void> {
+  return invoke<void>("create_workspace_memory", {
+    workspace,
+    title: memory.title,
+    description: memory.description,
+    memoryType: memory.type,
+  });
+}
+
+// Open the workspace's memory directory (issue #1538): the backend creates
+// the directory family on demand (the zero-footprint fresh workspace
+// included) and returns the absolute path for the opener.
+export async function openWorkspaceMemoryDir(
+  workspace: string,
+): Promise<string> {
+  return invoke<string>("open_workspace_memory_dir", { workspace });
 }
 
 // Create a new session (ADR-0056/0089): the backend builds an independent

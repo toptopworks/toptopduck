@@ -614,6 +614,8 @@ pub fn run() {
             commands::set_workspace_dataset_privacy,
             commands::rename_workspace_dataset,
             commands::list_workspace_memory,
+            commands::create_workspace_memory,
+            commands::open_workspace_memory_dir,
             commands::get_workspace_memory_enabled,
             commands::set_workspace_memory_enabled,
             commands::get_workspace_auto_extraction,
