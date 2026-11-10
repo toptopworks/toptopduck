@@ -93,7 +93,7 @@ export function MemoryCreateForm({
         />{" "}
         <FormattedMessage
           id="workspace.memory.form.exampleTitle"
-          defaultMessage="Quarterly reports use DuckDB"
+          defaultMessage="Metrics follow the monthly definitions"
         />
       </button>
       <div className="grid gap-1.5">

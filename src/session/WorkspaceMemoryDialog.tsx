@@ -246,9 +246,16 @@ export function WorkspaceMemoryDialog({
     setPanel(workspace);
   }
   // The create form's mount + the "saved." confirmation after it lands
-  // (#1538). The flash clears the next time the form opens.
+  // (#1538). Both are scoped to ONE panel open: they reset whenever the
+  // prop leaves the retained panel (a close nulls it, a swap replaces
+  // it), so neither bleeds into the next open's face -- the toggle
+  // failure's path-scoped posture.
   const [creating, setCreating] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
+  if (workspace !== panel && (creating || savedFlash)) {
+    setCreating(false);
+    setSavedFlash(false);
+  }
   const path = panel?.path ?? "";
   const label = panel?.label ?? "";
 
@@ -556,8 +563,9 @@ export function WorkspaceMemoryDialog({
             The cost hint hangs straight off the label -- hover the text
             and the tooltip surfaces (the popover skin matches the settings
             FieldHint's, the same SETTINGS_TOOLTIP_CLASS source). Off hides
-            the footer entirely (nothing left to control), and so does the
-            create face -- the form owns the bottom while mounted. */}
+            the footer's control (a refused toggle write keeps the footer
+            for its banner line), and so does the create face -- the form
+            owns the bottom while mounted. */}
         {!creating && (isOn || toggleFailure?.path === path) && (
           <footer className="flex flex-col gap-2 border-t pt-3">
             {isOn && (

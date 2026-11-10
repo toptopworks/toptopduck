@@ -580,7 +580,8 @@ pub fn save_entry(
 
 /// Create a memory from the panel's form (issue #1538): the host stamps
 /// `source: manual` + today's absolute date + no origin session, and the
-/// body carries the description (the form's one-liner). The blank-title
+/// body carries the description verbatim -- the form's textarea is
+/// multi-line, and only the frontmatter line folds. The blank-title
 /// guard lives HERE, not in the UI alone -- every future caller of the
 /// store inherits it. Rides [`save_entry`], so the caps, the global save
 /// lock, and the index reconcile all apply unchanged.
@@ -915,7 +916,7 @@ mod tests {
 
     /// The manual create stamps the host fields (`source: manual`, today's
     /// absolute date, no origin session) and lands the file + index row;
-    /// the body carries the description (the form's one-liner).
+    /// the body carries the description verbatim (the form's textarea).
     #[test]
     fn create_entry_stamps_manual_source_and_today() {
         let workspace = ws();
@@ -942,7 +943,7 @@ mod tests {
             "saved_at is an absolute date: {}",
             parsed.saved_at
         );
-        assert!(text.contains("always zh"), "body carries the one-liner");
+        assert!(text.contains("always zh"), "body carries the description");
         let index = std::fs::read_to_string(index_path(workspace.path())).unwrap();
         assert!(
             index.contains("- [reply in chinese](user-reply-in-chinese.md) — always zh\n"),

@@ -42,6 +42,7 @@ import {
 import { WorkspaceMemoryDialog } from "../WorkspaceMemoryDialog";
 import { TooltipProvider } from "../../components/ui/tooltip";
 import { withIntl } from "../../components/common/__tests__/helpers";
+import type { WorkspaceTarget } from "../useWorkspaceDatasets";
 import type { ListedMemory } from "../../types/workspace-memory";
 
 const mockedList = vi.mocked(listWorkspaceMemory);
@@ -83,6 +84,29 @@ function renderPanel() {
       </TooltipProvider>,
     ),
   );
+}
+
+// The stay-mounted variant: the sidebar renders the dialog
+// unconditionally, so a close + reopen rides prop swaps on ONE mounted
+// component -- the shape the per-open resets are pinned against.
+function renderMountedPanel() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const tree = (ws: WorkspaceTarget | null) =>
+    withIntl(
+      <TooltipProvider>
+        <QueryClientProvider client={client}>
+          <WorkspaceMemoryDialog workspace={ws} onOpenChange={() => {}} />
+        </QueryClientProvider>
+      </TooltipProvider>,
+    );
+  const view = render(tree({ path: "/ws", label: "Demo" }));
+  const closeAndReopen = () => {
+    view.rerender(tree(null));
+    view.rerender(tree({ path: "/ws", label: "Demo" }));
+  };
+  return { closeAndReopen };
 }
 
 afterEach(() => {
@@ -291,7 +315,12 @@ describe("WorkspaceMemoryDialog", () => {
   // confirmation, and refreshes the listing.
   it("prefills the example, guards the blank title, and saves", async () => {
     mockedEnabled.mockResolvedValue(true);
-    mockedList.mockResolvedValue({ rows: [], usage_percent: 0, unreadable: [] });
+    // Two staged reads: the empty face first, then the saved row -- the
+    // invalidation is the ONLY refetch trigger (staleTime Infinity), so
+    // the new row rendering without a reopen pins the refresh leg.
+    mockedList
+      .mockResolvedValueOnce({ rows: [], usage_percent: 0, unreadable: [] })
+      .mockResolvedValueOnce({ rows: [memory()], usage_percent: 0, unreadable: [] });
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: "新建记忆" }));
     // The create face owns the bottom: the extraction switch is gone
@@ -329,6 +358,7 @@ describe("WorkspaceMemoryDialog", () => {
     );
     expect(await screen.findByText("已保存。")).toBeInTheDocument();
     expect(screen.queryByLabelText("标题")).not.toBeInTheDocument();
+    expect(await screen.findByText("季度报表走 DuckDB")).toBeInTheDocument();
   });
 
   // The refused create surfaces through the form's alert, never a silently
@@ -344,6 +374,39 @@ describe("WorkspaceMemoryDialog", () => {
     });
     fireEvent.submit(screen.getByLabelText("标题").closest("form")!);
     expect(await screen.findByRole("alert")).toHaveTextContent("refused");
+  });
+
+  // The create face is scoped to ONE panel open: closing the dialog while
+  // the form is mounted (the workspace prop nulls, the component stays
+  // mounted) resets it, so the next open starts at the list face -- never
+  // a half-filled form from the previous open.
+  it("resets a mounted create form when the dialog closes and reopens", async () => {
+    mockedEnabled.mockResolvedValue(true);
+    mockedList.mockResolvedValue({ rows: [], usage_percent: 0, unreadable: [] });
+    const { closeAndReopen } = renderMountedPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "新建记忆" }));
+    expect(await screen.findByLabelText("标题")).toBeInTheDocument();
+    closeAndReopen();
+    expect(await screen.findByText(/还没有记忆/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("标题")).not.toBeInTheDocument();
+  });
+
+  // The saved flash is scoped to ONE panel open too: closing after a
+  // successful save clears it, so the next open carries no stale
+  // confirmation line.
+  it("clears the saved flash when the dialog closes and reopens", async () => {
+    mockedEnabled.mockResolvedValue(true);
+    mockedList.mockResolvedValue({ rows: [], usage_percent: 0, unreadable: [] });
+    const { closeAndReopen } = renderMountedPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "新建记忆" }));
+    fireEvent.change(await screen.findByLabelText("标题"), {
+      target: { value: "偏好中文回复" },
+    });
+    fireEvent.submit(screen.getByLabelText("标题").closest("form")!);
+    expect(await screen.findByText("已保存。")).toBeInTheDocument();
+    closeAndReopen();
+    expect(await screen.findByText(/还没有记忆/)).toBeInTheDocument();
+    expect(screen.queryByText("已保存。")).not.toBeInTheDocument();
   });
 
   // The list header's secondary actions: open the folder (backend mints +

@@ -875,27 +875,21 @@ pub fn list_workspace_memory(
 }
 
 /// Create a memory from the panel's form (issue #1538): the host stamps
-/// `source: manual` + today's date; the four-type string is the form's
-/// selection and anything else is refused at this boundary.
+/// `source: manual` + today's date; the type arrives as the enum itself --
+/// serde refuses an unknown variant at the IPC boundary, so no string
+/// mapping lives here.
 #[tauri::command]
 pub fn create_workspace_memory(
     workspace: String,
     title: String,
     description: String,
-    memory_type: String,
+    memory_type: crate::workspace::memory::MemoryType,
 ) -> Result<(), String> {
-    let r#type = match memory_type.as_str() {
-        "user" => crate::workspace::memory::MemoryType::User,
-        "feedback" => crate::workspace::memory::MemoryType::Feedback,
-        "project" => crate::workspace::memory::MemoryType::Project,
-        "reference" => crate::workspace::memory::MemoryType::Reference,
-        other => return Err(format!("unknown memory type: {other}")),
-    };
     crate::workspace::memory::create_entry(
         std::path::Path::new(&workspace),
         &title,
         &description,
-        r#type,
+        memory_type,
     )
     .map(|_| ())
     .map_err(|e| e.to_string())
