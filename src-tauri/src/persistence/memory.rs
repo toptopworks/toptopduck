@@ -449,6 +449,11 @@ pub fn list_section(dir: &Path) -> ListedMemorySection {
 /// stale index on disk -- the in-memory rows are already the truth the
 /// callers use, and the next successful read retries the rewrite.
 fn reconcile_index(dir: &Path, rows: &[MemoryIndexRow]) {
+    // A never-minted root stays missing (zero footprint): the reconcile
+    // runs only when the memory directory already exists.
+    if !dir.is_dir() {
+        return;
+    }
     let rendered = render_index(rows);
     let path = index_path(dir);
     let current = std::fs::read_to_string(&path).unwrap_or_default();

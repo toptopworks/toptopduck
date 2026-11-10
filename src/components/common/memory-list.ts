@@ -15,13 +15,12 @@ export const USAGE_YELLOW_PERCENT = 80;
 export const USAGE_RED_PERCENT = 95;
 
 /** The index-usage color scale (issue #1530): the warning token for the
- * yellow band (DESIGN.md), destructive for the red. */
+ * yellow band (DESIGN.md), destructive for the red. Both call sites
+ * render the span only from the yellow threshold up, so the yellow
+ * token is the floor. */
 export function usageTone(percent: number): string {
   if (percent >= USAGE_RED_PERCENT) {
     return "text-destructive";
   }
-  if (percent >= USAGE_YELLOW_PERCENT) {
-    return "text-warning";
-  }
-  return "text-muted-foreground";
+  return "text-warning";
 }

@@ -922,7 +922,9 @@ pub fn open_workspace_memory_dir(workspace: String) -> Result<String, String> {
     let dir = crate::persistence::memory::workspace_memory_dir(std::path::Path::new(&workspace));
     crate::persistence::memory::ensure_memory_dir(&dir)
         .map(|p| p.to_string_lossy().into_owned())
-        .map_err(|e| e.to_string())
+        // An io::Error carries no path -- name the directory so the
+        // surfaced failure (and the log) is diagnosable.
+        .map_err(|e| format!("failed to create the memory folder {}: {e}", dir.display()))
 }
 
 /// Open the user-layer memory directory (issue #1531): the app-domain
@@ -930,11 +932,11 @@ pub fn open_workspace_memory_dir(workspace: String) -> Result<String, String> {
 /// entry point (any editor, via the folder).
 #[tauri::command]
 pub fn open_user_memory_dir(app: tauri::AppHandle) -> Result<String, String> {
-    crate::persistence::memory::ensure_memory_dir(&crate::persistence::default_user_memory_root(
-        &app,
-    ))
-    .map(|p| p.to_string_lossy().into_owned())
-    .map_err(|e| e.to_string())
+    let dir = crate::persistence::default_user_memory_root(&app);
+    crate::persistence::memory::ensure_memory_dir(&dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        // Same as the workspace twin: the io::Error names no directory.
+        .map_err(|e| format!("failed to create the memory folder {}: {e}", dir.display()))
 }
 
 /// Read a workspace's memory toggle (issue #1529): `true` unless the record

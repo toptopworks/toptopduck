@@ -7,6 +7,8 @@
 // workspace. The listing polls while the pane stands so a hand edit in the
 // folder lands within one interval (the workspace panel's posture).
 
+import { useState } from "react";
+
 import { FormattedMessage, useIntl } from "react-intl";
 import { useQuery } from "@tanstack/react-query";
 import { FolderOpen } from "lucide-react";
@@ -21,7 +23,6 @@ import {
 } from "../common/memory-list";
 import { listUserMemory, openUserMemoryDir } from "../../api";
 import { userMemoryKeys } from "../../session/queryKeys";
-import { log } from "../../lib/log";
 import { describeError } from "../../lib/error-presentation";
 
 export function MemorySection() {
@@ -33,14 +34,16 @@ export function MemorySection() {
   });
 
   // The folder open: the backend mints the app-domain root on demand and
-  // the front-end opener navigates to it. A refusal is logged, not thrown
-  // -- the action is simply retryable (the reveal button's posture).
+  // the front-end opener navigates to it. The folder is the layer's whole
+  // hand-write entry (no create form), so a failure surfaces on the pane's
+  // alert face -- the backend error carries the directory -- and a
+  // successful retry clears it.
+  const [openFailure, setOpenFailure] = useState<string | null>(null);
   const openFolder = () => {
     openUserMemoryDir()
       .then((dir) => openPath(dir))
-      .catch((e: unknown) =>
-        log.warn("MemorySection", "open user memory folder failed", e),
-      );
+      .then(() => setOpenFailure(null))
+      .catch((e: unknown) => setOpenFailure(describeError(e, intl)));
   };
 
   const rows = listing.data?.rows ?? [];
@@ -85,6 +88,11 @@ export function MemorySection() {
           </span>
         )}
       />
+      {openFailure !== null && (
+        <p className="text-destructive m-0 text-sm" role="alert">
+          {openFailure}
+        </p>
+      )}
       {listing.isError ? (
         <p className="text-destructive m-0 text-sm" role="alert">
           {describeError(listing.error, intl)}

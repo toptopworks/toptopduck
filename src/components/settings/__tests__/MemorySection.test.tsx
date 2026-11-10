@@ -96,6 +96,23 @@ describe("MemorySection", () => {
     );
   });
 
+  it("surfaces a folder-open failure as the alert and clears it on retry", async () => {
+    mockedList.mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
+    mockedOpenDir.mockRejectedValueOnce(
+      new Error("failed to create the memory folder"),
+    );
+    renderSettings(<MemorySection />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open folder" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "failed to create the memory folder",
+    );
+    // The default resolve takes over: a successful retry clears the alert.
+    fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+  });
+
   it("surfaces a listing failure as the alert", async () => {
     mockedList.mockRejectedValue(new Error("boom"));
     renderSettings(<MemorySection />);

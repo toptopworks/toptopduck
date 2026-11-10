@@ -18,7 +18,7 @@ import type { ListedMemory, MemoryType } from "../../types/workspace-memory";
 /** The category badge: four STATIC branches (the i18n catalog guard reads
  * literal ids at call sites -- a dynamically built id would be invisible
  * to the check). */
-export function TypeBadge({ type }: { type: MemoryType }) {
+function TypeBadge({ type }: { type: MemoryType }) {
   return (
     <Badge variant="secondary" className="shrink-0">
       {type === "user" ? (

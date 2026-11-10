@@ -177,12 +177,17 @@ fn render_skill_disclosure(skills: &[SkillPromptFragment]) -> String {
     out
 }
 
-/// Render the workspace memory index block (issue #1529's 轨 A read path):
-/// the workspace's persistent memory rows ride the built-in engine's system
-/// prompt every turn as one index block -- `- title — hook` per row, no
-/// bodies and no file links. No bodies: the built-in engine has no
-/// file-read tool (bodies are the external agents' -- 轨 B -- and the
-/// future extraction path's concern). No file links either: the model
+/// Render the memory index block (the built-in engine's read path, issue
+/// #1529; two layers since #1531): the injected rows ride the built-in
+/// engine's system prompt every turn as one index block. The caller
+/// concatenates the user layer first and the workspace layer after
+/// (ADR-0147 Decision 3), so from here down the rows are layer-agnostic
+/// `- title — hook` lines, no bodies and no file links. The block header
+/// predates the second layer and keeps its workspace-scoped wording --
+/// the template is frozen, and rewording the header belongs to that
+/// decision, not the assembly. No bodies: the built-in engine has no
+/// file-read tool (bodies are the external agents' and the extraction
+/// path's concern). No file links either: the model
 /// cannot open them on this path, so a `(file.md)` segment would be dead
 /// noise spending tokens; the on-disk index keeps the full link shape for
 /// the humans and agents that CAN follow it. Titles and hooks are
