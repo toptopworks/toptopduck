@@ -108,20 +108,29 @@ pub struct ListedMemory {
 }
 
 /// The panel's one-shot read (issue #1530): the rows plus the index usage
-/// percentage the color scale renders.
+/// percentage the color scale renders, and (issue #1538) the names of
+/// `.md` files that carry no frontmatter fence -- a hand-written file that
+/// would otherwise vanish silently from the panel.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ListedMemorySection {
     pub rows: Vec<ListedMemory>,
     pub usage_percent: u8,
+    pub unreadable: Vec<String>,
 }
 
 /// Why a memory operation failed. `IndexFull` carries the actionable cap
-/// detail (the panel's own sentence); `Io` is the infrastructure echo.
+/// detail (the panel's own sentence); `Invalid` is the boundary guard's
+/// reject (a blank title); `Io` is the infrastructure echo.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MemoryError {
     /// The write would push the index past its row or byte cap: refused,
     /// nothing landed (never a silent truncation).
     IndexFull {
+        detail: String,
+    },
+    /// The input itself is unusable (a blank title): refused, nothing
+    /// landed.
+    Invalid {
         detail: String,
     },
     Io {
@@ -143,6 +152,7 @@ impl std::fmt::Display for MemoryError {
             MemoryError::IndexFull { detail } => {
                 write!(f, "workspace memory index is at its cap: {detail}")
             }
+            MemoryError::Invalid { detail } => write!(f, "invalid memory input: {detail}"),
             MemoryError::Io { detail } => write!(f, "{detail}"),
         }
     }
@@ -213,19 +223,26 @@ fn slug_for(title: &str) -> String {
 /// with [`HOOK_MAX_CHARS`] (titles + hooks); the skill index calls it with
 /// its own description budget on the prompt side.
 pub(crate) fn clamp_injection_line(text: &str, max_chars: usize) -> String {
-    let folded: String = text
-        .chars()
-        .map(|c| match c {
-            '\r' | '\n' | '\t' => ' ',
-            c => c,
-        })
-        .collect();
+    let folded = fold_line(text);
     if folded.chars().count() <= max_chars {
         return folded;
     }
     let mut clamped: String = folded.chars().take(max_chars - 1).collect();
     clamped.push('…');
     clamped
+}
+
+/// Fold the characters a single-line surface cannot carry (`\r`, `\n`,
+/// `\t`) to one space. Shared by the injection clamp and the frontmatter
+/// writer: a raw multi-line value inside the fence would forge extra
+/// `key:` lines that a re-parse then reads as fields.
+fn fold_line(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\r' | '\n' | '\t' => ' ',
+            c => c,
+        })
+        .collect()
 }
 
 /// Render the index document from rows: the header + one
@@ -323,45 +340,60 @@ fn type_from_file_name(name: &str) -> Option<MemoryType> {
 /// corrupt file is skipped + logged. The index reconcile is the one write
 /// a read performs, and only when the memory directory already exists.
 pub fn load_rows(workspace: &Path) -> Vec<MemoryIndexRow> {
+    let (rows, _unreadable) = scan_and_reconcile(workspace);
+    rows
+}
+
+/// Scan the memory directory's files: the parsed rows plus the names that
+/// LOOK like memories (`.md`, not the index) but carry no frontmatter
+/// fence or are unreadable -- the panel's unreadable list (#1538: a
+/// hand-written file with a missing fence must never vanish silently).
+/// `MEMORY.md` and non-`.md` files are not memories and never surface.
+fn scan_memory_files(workspace: &Path) -> (Vec<MemoryIndexRow>, Vec<String>) {
     let dir = memory_dir(workspace);
     let Ok(read_dir) = std::fs::read_dir(&dir) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut rows = Vec::new();
-    for entry in read_dir.flatten() {
-        let path = entry.path();
+    let mut unreadable = Vec::new();
+    for entry_path in read_dir.flatten() {
+        let path = entry_path.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if name == MEMORY_INDEX_NAME || !name.ends_with(".md") {
+        let name = name.to_string();
+        if path.is_dir() || name == MEMORY_INDEX_NAME || !name.ends_with(".md") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            log::warn!(
-                target: "toptopduck::workspace_memory",
-                "unreadable memory file skipped: {}",
-                path.display()
-            );
-            continue;
-        };
-        let stem = name.strip_suffix(".md").unwrap_or(name);
-        let Some(parsed) = parse_frontmatter(&text, stem) else {
+        let parsed = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| parse_frontmatter(&text, name.strip_suffix(".md").unwrap_or(&name)));
+        let Some(parsed) = parsed else {
             log::warn!(
                 target: "toptopduck::workspace_memory",
                 "memory file without frontmatter skipped: {}",
                 path.display()
             );
+            unreadable.push(name);
             continue;
         };
         rows.push(MemoryIndexRow {
             title: parsed.name,
-            file: name.to_string(),
+            file: name,
             hook: parsed.description,
         });
     }
     rows.sort_by(|a, b| a.file.cmp(&b.file));
+    unreadable.sort();
+    (rows, unreadable)
+}
+
+/// The read-path scan: the files' rows + the unreadable names, with the
+/// derived index reconciled from the files (the one read that writes).
+fn scan_and_reconcile(workspace: &Path) -> (Vec<MemoryIndexRow>, Vec<String>) {
+    let (rows, unreadable) = scan_memory_files(workspace);
     reconcile_index(workspace, &rows);
-    rows
+    (rows, unreadable)
 }
 
 /// The index usage ratio (issue #1530): the WORSE of the two capacity hats
@@ -378,9 +410,10 @@ pub(crate) fn index_usage_percent(rows: &[MemoryIndexRow]) -> u8 {
 /// The panel's full read (issue #1530's calibration): the list rows plus
 /// the index usage percentage, from ONE directory scan. The percentage is
 /// the same ratio the write path's caps enforce, so the panel's color
-/// scale never disagrees with the refusal.
+/// scale never disagrees with the refusal. The unreadable list (#1538)
+/// names the fence-less `.md` files the panel surfaces separately.
 pub fn list_section(workspace: &Path) -> ListedMemorySection {
-    let rows = load_rows(workspace);
+    let (rows, unreadable) = scan_and_reconcile(workspace);
     let usage_percent = index_usage_percent(&rows);
     let memories = rows
         .into_iter()
@@ -400,6 +433,7 @@ pub fn list_section(workspace: &Path) -> ListedMemorySection {
     ListedMemorySection {
         rows: memories,
         usage_percent,
+        unreadable,
     }
 }
 
@@ -437,8 +471,8 @@ fn render_memory_file(entry: &MemoryEntry, body: &str) -> String {
     let mut out = String::new();
     out.push_str(FENCE);
     out.push('\n');
-    out.push_str(&format!("name: {}\n", entry.name));
-    out.push_str(&format!("description: {}\n", entry.description));
+    out.push_str(&format!("name: {}\n", fold_line(&entry.name)));
+    out.push_str(&format!("description: {}\n", fold_line(&entry.description)));
     out.push_str(&format!("type: {}\n", entry.r#type.as_segment()));
     if let Some(session) = &entry.origin_session {
         out.push_str(&format!("origin_session: {session}\n"));
@@ -544,6 +578,45 @@ pub fn save_entry(
     Ok(row)
 }
 
+/// Create a memory from the panel's form (issue #1538): the host stamps
+/// `source: manual` + today's absolute date + no origin session, and the
+/// body carries the description (the form's one-liner). The blank-title
+/// guard lives HERE, not in the UI alone -- every future caller of the
+/// store inherits it. Rides [`save_entry`], so the caps, the global save
+/// lock, and the index reconcile all apply unchanged.
+pub fn create_entry(
+    workspace: &Path,
+    title: &str,
+    description: &str,
+    r#type: MemoryType,
+) -> Result<MemoryIndexRow, MemoryError> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(MemoryError::Invalid {
+            detail: "title is blank".to_string(),
+        });
+    }
+    let description = description.trim();
+    let entry = MemoryEntry {
+        name: title.to_string(),
+        description: description.to_string(),
+        r#type,
+        origin_session: None,
+        saved_at: chrono::Local::now().format("%Y-%m-%d").to_string(),
+        source: MemorySource::Manual,
+    };
+    save_entry(workspace, &entry, description)
+}
+
+/// The folder-open primitive (issue #1538): create the directory family on
+/// demand and return its path -- the one sanctioned eager mkdir, so the
+/// panel's "open memory folder" works on the zero-footprint fresh
+/// workspace too (the read path stays lazy). Idempotent.
+pub fn ensure_memory_dir(workspace: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(memory_dir(workspace))?;
+    Ok(memory_dir(workspace))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,6 +685,21 @@ mod tests {
         let text = render_memory_file(&e, "why + how\n");
         let parsed = parse_frontmatter(&text, "ignored-stem").expect("parses");
         assert_eq!(parsed, e);
+    }
+
+    /// A multi-line description (the panel's textarea allows it) folds to
+    /// ONE frontmatter line -- a raw newline inside the fence would forge
+    /// `key:` lines a re-parse would read as fields -- while the body keeps
+    /// its newlines verbatim.
+    #[test]
+    fn multiline_description_folds_in_frontmatter_body_stays_verbatim() {
+        let mut e = entry("multiline");
+        e.description = "first line\ntype: user\nthird".to_string();
+        let text = render_memory_file(&e, "body line one\nbody line two\n");
+        let parsed = parse_frontmatter(&text, "ignored-stem").expect("parses");
+        assert_eq!(parsed.description, "first line type: user third");
+        assert_eq!(parsed.r#type, e.r#type);
+        assert!(text.contains("body line one\nbody line two\n"));
     }
 
     /// Tolerant parse: a missing field never crashes -- name falls back to
@@ -820,5 +908,101 @@ mod tests {
         assert_eq!(listed[0].r#type, MemoryType::Feedback);
         assert!(listed[0].file_path.contains("feedback-fact-a.md"));
         assert!(Path::new(&listed[0].file_path).is_absolute());
+    }
+
+    // ---- The #1538 write-path faces: manual create, folder open,
+    // unreadable visibility. ----
+
+    /// The manual create stamps the host fields (`source: manual`, today's
+    /// absolute date, no origin session) and lands the file + index row;
+    /// the body carries the description (the form's one-liner).
+    #[test]
+    fn create_entry_stamps_manual_source_and_today() {
+        let workspace = ws();
+        let row = create_entry(
+            workspace.path(),
+            "reply in chinese",
+            "always zh",
+            MemoryType::User,
+        )
+        .expect("create");
+        assert_eq!(row.file, "user-reply-in-chinese.md");
+        let listed = list_section(workspace.path());
+        assert_eq!(listed.rows.len(), 1);
+        assert_eq!(listed.rows[0].row.title, "reply in chinese");
+        let text = std::fs::read_to_string(memory_dir(workspace.path()).join(&row.file)).unwrap();
+        let parsed = parse_frontmatter(&text, "s").expect("parses");
+        assert_eq!(parsed.source, MemorySource::Manual);
+        assert_eq!(parsed.origin_session, None);
+        // The stamp is an absolute date -- pinned by SHAPE, not by comparing
+        // two live `now()` evaluations (a midnight-crossing race would make
+        // a same-expression compare flake).
+        assert!(
+            chrono::NaiveDate::parse_from_str(&parsed.saved_at, "%Y-%m-%d").is_ok(),
+            "saved_at is an absolute date: {}",
+            parsed.saved_at
+        );
+        assert!(text.contains("always zh"), "body carries the one-liner");
+        let index = std::fs::read_to_string(index_path(workspace.path())).unwrap();
+        assert!(
+            index.contains("- [reply in chinese](user-reply-in-chinese.md) — always zh\n"),
+            "{index}"
+        );
+    }
+
+    /// A blank title is refused before anything lands -- the required-field
+    /// guard lives in the store, not the UI alone, and the fresh workspace
+    /// mints nothing.
+    #[test]
+    fn create_entry_refuses_a_blank_title() {
+        let workspace = ws();
+        let err =
+            create_entry(workspace.path(), "   ", "d", MemoryType::Reference).expect_err("refused");
+        assert!(matches!(err, MemoryError::Invalid { .. }), "{err:?}");
+        assert!(!memory_dir(workspace.path()).exists(), "nothing minted");
+    }
+
+    /// Fence-less .md files surface as unreadable in the section; the index
+    /// and non-.md files never do; healthy rows are untouched.
+    #[test]
+    fn unreadable_files_surface_in_the_section() {
+        let workspace = ws();
+        save_entry(workspace.path(), &entry("healthy"), "b\n").expect("save");
+        let dir = memory_dir(workspace.path());
+        std::fs::write(dir.join("broken.md"), "no fence\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "plain\n").unwrap();
+        let listed = list_section(workspace.path());
+        assert_eq!(listed.rows.len(), 1);
+        assert_eq!(listed.rows[0].row.title, "healthy");
+        assert_eq!(listed.unreadable, vec!["broken.md".to_string()]);
+    }
+
+    /// The folder-open primitive: creates the directory family on demand
+    /// (the one sanctioned eager mkdir) and is idempotent.
+    #[test]
+    fn ensure_memory_dir_creates_the_family() {
+        let workspace = ws();
+        assert!(!memory_dir(workspace.path()).exists());
+        let dir = ensure_memory_dir(workspace.path()).expect("ensure");
+        assert!(dir.is_dir());
+        assert!(dir.ends_with("memory"));
+        ensure_memory_dir(workspace.path()).expect("again");
+    }
+
+    /// The pure-CJK title rides the same slug protocol through create_entry
+    /// (the FNV-1a hash fallback -- the 中文必走路径, pinned on the new
+    /// command per #1538's acceptance row).
+    #[test]
+    fn create_entry_pure_cjk_title_hashes_the_slug() {
+        let workspace = ws();
+        let row = create_entry(
+            workspace.path(),
+            "偏好中文回复",
+            "always zh",
+            MemoryType::User,
+        )
+        .expect("create");
+        assert!(row.file.starts_with("user-n"), "hash shape: {}", row.file);
+        assert_eq!(load_rows(workspace.path()).len(), 1);
     }
 }
