@@ -242,6 +242,14 @@ export async function listWorkspaceMemory(
   return invoke<ListedMemorySection>("list_workspace_memory", { workspace });
 }
 
+// List the USER-level memory entries (issue #1531): the app-domain layer
+// shared across workspaces. Read-only -- the layer is hand-written files
+// only (no create form), so this and the folder open are its whole panel
+// surface.
+export async function listUserMemory(): Promise<ListedMemorySection> {
+  return invoke<ListedMemorySection>("list_user_memory");
+}
+
 // Read a workspace's memory toggle (issue #1529): on unless the record
 // opted out (the default-on posture).
 export async function getWorkspaceMemoryEnabled(
@@ -307,6 +315,12 @@ export async function openWorkspaceMemoryDir(
   workspace: string,
 ): Promise<string> {
   return invoke<string>("open_workspace_memory_dir", { workspace });
+}
+
+// Open the user-level memory directory (issue #1531): the app-domain
+// `memory/` root, created on demand -- the hand-write entry point.
+export async function openUserMemoryDir(): Promise<string> {
+  return invoke<string>("open_user_memory_dir");
 }
 
 // Create a new session (ADR-0056/0089): the backend builds an independent

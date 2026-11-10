@@ -25,8 +25,8 @@
 
 use super::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload};
 use crate::model::TextKind;
+use crate::persistence::memory::{clamp_injection_line, HOOK_MAX_CHARS};
 use crate::skills::SkillPromptFragment;
-use crate::workspace::memory::{clamp_injection_line, HOOK_MAX_CHARS};
 
 /// The resolved response locale (ADR-0052 layer 3). Two-state -- the third
 /// persistence state ("system") is resolved to one of these before reaching
@@ -177,12 +177,17 @@ fn render_skill_disclosure(skills: &[SkillPromptFragment]) -> String {
     out
 }
 
-/// Render the workspace memory index block (issue #1529's 轨 A read path):
-/// the workspace's persistent memory rows ride the built-in engine's system
-/// prompt every turn as one index block -- `- title — hook` per row, no
-/// bodies and no file links. No bodies: the built-in engine has no
-/// file-read tool (bodies are the external agents' -- 轨 B -- and the
-/// future extraction path's concern). No file links either: the model
+/// Render the memory index block (the built-in engine's read path, issue
+/// #1529; two layers since #1531): the injected rows ride the built-in
+/// engine's system prompt every turn as one index block. The caller
+/// concatenates the user layer first and the workspace layer after
+/// (ADR-0147 Decision 3), so from here down the rows are layer-agnostic
+/// `- title — hook` lines, no bodies and no file links. The block header
+/// predates the second layer and keeps its workspace-scoped wording --
+/// the template is frozen, and rewording the header belongs to that
+/// decision, not the assembly. No bodies: the built-in engine has no
+/// file-read tool (bodies are the external agents' and the extraction
+/// path's concern). No file links either: the model
 /// cannot open them on this path, so a `(file.md)` segment would be dead
 /// noise spending tokens; the on-disk index keeps the full link shape for
 /// the humans and agents that CAN follow it. Titles and hooks are
@@ -191,7 +196,7 @@ fn render_skill_disclosure(skills: &[SkillPromptFragment]) -> String {
 /// hand-edited memory file cannot forge rows or fake a section header.
 /// An empty set renders the empty string -- no empty block, so the
 /// pre-memory assembly shape is preserved.
-pub fn render_memory_block(rows: &[crate::workspace::memory::MemoryIndexRow]) -> String {
+pub fn render_memory_block(rows: &[crate::persistence::memory::MemoryIndexRow]) -> String {
     if rows.is_empty() {
         return String::new();
     }
@@ -338,7 +343,7 @@ pub fn build_tool_system_prompt(
     request: &ProviderRequest,
     locale: ResponseLocale,
     skills: &[SkillPromptFragment],
-    memory: &[crate::workspace::memory::MemoryIndexRow],
+    memory: &[crate::persistence::memory::MemoryIndexRow],
 ) -> String {
     let mut out = String::from(TOOL_CALLING_PROMPT);
     let disclosure = render_skill_disclosure(skills);
@@ -1266,8 +1271,8 @@ mod tests {
     // shape).
 
     /// Build a memory index row for the injection tests.
-    fn mem_row(title: &str, hook: &str) -> crate::workspace::memory::MemoryIndexRow {
-        crate::workspace::memory::MemoryIndexRow {
+    fn mem_row(title: &str, hook: &str) -> crate::persistence::memory::MemoryIndexRow {
+        crate::persistence::memory::MemoryIndexRow {
             title: title.into(),
             file: "project-fixture.md".into(),
             hook: hook.into(),

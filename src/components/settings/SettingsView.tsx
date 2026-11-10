@@ -3,6 +3,7 @@ import { FormattedMessage, useIntl } from "react-intl";
 import {
   ArrowLeft,
   Box,
+  Brain,
   Cable, Terminal,
   Database,
   Info,
@@ -36,6 +37,7 @@ import { EngineSection } from "./EngineSection";
 import { GeneralSection } from "./GeneralSection";
 import { CliSection } from "./CliSection";
 import { McpSection } from "./McpSection";
+import { MemorySection } from "./MemorySection";
 import { type ProfilesControls } from "./ProfilesSection";
 import { PrivacySection } from "./PrivacySection";
 import { RuntimeSection } from "./RuntimeSection";
@@ -90,6 +92,8 @@ function SectionIcon({ section }: { section: SettingsSection }) {
       return <Box className="size-4 shrink-0" aria-hidden />;
     case "database-engine":
       return <Database className="size-4 shrink-0" aria-hidden />;
+    case "memory":
+      return <Brain className="size-4 shrink-0" aria-hidden />;
     case "privacy":
       return <ShieldCheck className="size-4 shrink-0" aria-hidden />;
     case "mcp":
@@ -120,6 +124,8 @@ function SectionLabel({ section }: { section: SettingsSection }) {
       return <FormattedMessage id="settings.nav.runtime" defaultMessage="Runtime" />;
     case "database-engine":
       return <FormattedMessage id="settings.nav.databaseEngine" defaultMessage="Analysis Engine" />;
+    case "memory":
+      return <FormattedMessage id="settings.nav.memory" defaultMessage="User Memory" />;
     case "privacy":
       return <FormattedMessage id="settings.nav.privacy" defaultMessage="Privacy" />;
     case "mcp":
@@ -200,6 +206,8 @@ function SectionContent({
       );
     case "database-engine":
       return <EngineSection appConfig={appConfig} onCommit={onCommit} />;
+    case "memory":
+      return <MemorySection />;
     case "privacy":
       return <PrivacySection />;
     case "mcp":

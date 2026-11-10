@@ -6,21 +6,21 @@
 // Editing lives outside the shell by design (any editor, via the reveal) --
 // the in-shell editor is a P2 question. The header's switch is the
 // workspace-level `memory_enabled` toggle: off stops the built-in engine's
-// injection and deactivates the list (the off note replaces it), on
+// injection (BOTH layers -- the user layer rides the same gate, ADR-0147
+// Decision 6) and deactivates the list (the off note replaces it), on
 // restores both.
 //
-// Copy never promises automatic capture: the write path (extraction) is a
-// later ticket -- the empty state explains where memories live and that
-// they can be hand-written. Code and i18n keys keep the workspace.memory
-// namespace.
+// The USER memory layer (#1531) is global semantics -- it spans all
+// workspaces and lives in the settings overlay (MemorySection), not here.
+// Copy never promises automatic capture: extraction is workspace-layer
+// only (#1530). Code and i18n keys keep the workspace.memory namespace.
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormattedMessage, useIntl } from "react-intl";
-import { FolderOpen, FolderSearch, Plus } from "lucide-react";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { FolderOpen, Plus } from "lucide-react";
+import { openPath } from "@tauri-apps/plugin-opener";
 
-import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import {
   Dialog,
@@ -40,6 +40,12 @@ import {
   HeaderActionButton,
   SETTINGS_TOOLTIP_CLASS,
 } from "../components/settings/settings-chrome";
+import { MemoryRow } from "../components/common/MemoryRow";
+import {
+  LIST_MAX_HEIGHT_CLASS,
+  USAGE_YELLOW_PERCENT,
+  usageTone,
+} from "../components/common/memory-list";
 import { cn } from "../lib/utils";
 import { log } from "../lib/log";
 import { describeError } from "../lib/error-presentation";
@@ -55,75 +61,11 @@ import {
 import { workspaceMemoryKeys } from "./queryKeys";
 import { MemoryCreateForm } from "./MemoryCreateForm";
 import type { WorkspaceTarget } from "./useWorkspaceDatasets";
-import type {
-  ExtractionStatus,
-  ListedMemory,
-  MemoryType,
-} from "../types/workspace-memory";
+import type { ExtractionStatus } from "../types/workspace-memory";
 
 // The list card's chrome -- the datasets panel's PANEL_CARD_BASE form, so
 // the two workspace management faces read as one family.
 const PANEL_CARD_BASE = "panel bg-card border rounded-lg shadow-sm p-4";
-
-// The list's visible ceiling (#1538 layout): ~5 rows (a full row is
-// title 20px + hook 16px + py-2 16px + border 1px = 53px), then the list
-// scrolls inside the card instead of stretching the dialog toward its
-// 80vh cap. Fewer rows keep the panel at its natural height.
-const LIST_MAX_HEIGHT_CLASS = "max-h-[265px]";
-
-/** The category badge: four STATIC branches (the i18n catalog guard reads
- * literal ids at call sites -- a dynamically built id would be invisible
- * to the check). */
-function TypeBadge({ type }: { type: MemoryType }) {
-  return (
-    <Badge variant="secondary" className="shrink-0">
-      {type === "user" ? (
-        <FormattedMessage id="workspace.memory.type.user" defaultMessage="user" />
-      ) : type === "feedback" ? (
-        <FormattedMessage id="workspace.memory.type.feedback" defaultMessage="feedback" />
-      ) : type === "project" ? (
-        <FormattedMessage id="workspace.memory.type.project" defaultMessage="project" />
-      ) : (
-        <FormattedMessage id="workspace.memory.type.reference" defaultMessage="reference" />
-      )}
-    </Badge>
-  );
-}
-
-/** One read-only memory row: title + category badge + hook + the reveal
- * button (the row's only action). */
-function MemoryRow({ memory }: { memory: ListedMemory }) {
-  const intl = useIntl();
-  const revealLabel = intl.formatMessage({
-    id: "workspace.memory.reveal",
-    defaultMessage: "Reveal in folder",
-  });
-  return (
-    <li className="flex items-start gap-2 border-b border-border py-2 last:border-b-0">
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="truncate text-sm font-medium">{memory.title}</span>
-          <TypeBadge type={memory.type} />
-        </div>
-        {memory.hook.length > 0 && (
-          <p className="m-0 truncate text-xs text-muted-foreground" title={memory.hook}>
-            {memory.hook}
-          </p>
-        )}
-      </div>
-      <HeaderActionButton
-        label={revealLabel}
-        icon={FolderSearch}
-        // The opener can refuse (a file deleted after the listing): log it
-        // -- the ArtifactHeader posture (the action is simply retryable).
-        onClick={() =>
-          revealItemInDir(memory.file_path).catch((e: unknown) =>
-            log.warn("WorkspaceMemoryDialog", "revealItemInDir failed", e),
-          )}
-      />
-    </li>
-  );
-}
 
 /** The extraction status line (issue #1530's three panel states): running /
  * skipped(+reason) / no-new-facts, with the extracted titles and the
@@ -206,24 +148,6 @@ function ExtractionStatusLine({ status }: { status: ExtractionStatus }) {
   }
 }
 
-// The color-scale thresholds (issue #1530): yellow from 80%, red from 95%.
-// The red figure mirrors the backend's pause threshold; there is no shared
-// cross-end constant channel, so the pair is named here instead.
-const USAGE_YELLOW_PERCENT = 80;
-const USAGE_RED_PERCENT = 95;
-
-/** The index-usage color scale (issue #1530): the warning token for the
- * yellow band (DESIGN.md), destructive for the red. */
-function usageTone(percent: number): string {
-  if (percent >= USAGE_RED_PERCENT) {
-    return "text-destructive";
-  }
-  if (percent >= USAGE_YELLOW_PERCENT) {
-    return "text-warning";
-  }
-  return "text-muted-foreground";
-}
-
 export function WorkspaceMemoryDialog({
   workspace,
   onOpenChange,
@@ -285,7 +209,6 @@ export function WorkspaceMemoryDialog({
     refetchInterval: (query) =>
       query.state.data?.state === "running" ? 1500 : false,
   });
-
   // A refused toggle write, scoped to the workspace it failed on (the
   // dialog stays mounted across closes, so a stale banner must never
   // bleed into another workspace's panel). Cleared the moment a retry
@@ -359,7 +282,6 @@ export function WorkspaceMemoryDialog({
         log.warn("WorkspaceMemoryDialog", "open memory folder failed", e),
       );
   };
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {/* No auto-focus on open (the datasets panel's posture): focus stays

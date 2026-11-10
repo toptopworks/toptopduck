@@ -377,6 +377,12 @@ pub fn create_session(
             // root's sibling): workspaces are user assets and do not follow a
             // user-overridden sessions dir.
             s.set_workspaces_root(Some(crate::persistence::default_workspaces_root(&app)));
+            // #1531 (ADR-0147): seat the user-layer memory root beside the
+            // mint source -- the built-in engine's injection reads it as the
+            // user layer on every turn. Same fixed product-domain placement
+            // (the default sessions root's sibling), so it too ignores a
+            // user-overridden sessions dir.
+            s.set_user_memory_root(Some(crate::persistence::default_user_memory_root(&app)));
             // ADR-0138 (issue #1384): seat the registry before the bind below
             // records the explicit selection, and for the close-time reclaim's
             // record removal. Seated unconditionally -- the lazy-mint path
@@ -868,9 +874,22 @@ pub async fn set_workspace_dataset_privacy(
 #[tauri::command]
 pub fn list_workspace_memory(
     workspace: String,
-) -> Result<crate::workspace::memory::ListedMemorySection, String> {
-    Ok(crate::workspace::memory::list_section(
-        std::path::Path::new(&workspace),
+) -> Result<crate::persistence::memory::ListedMemorySection, String> {
+    Ok(crate::persistence::memory::list_section(
+        &crate::persistence::memory::workspace_memory_dir(std::path::Path::new(&workspace)),
+    ))
+}
+
+/// The memory panel's USER-layer read (issue #1531): the app-domain
+/// user memories, listed beside the workspace section. Read-only -- the
+/// user layer has no create form (hand-written files only, D4), so this
+/// and the folder open below are the layer's whole panel surface.
+#[tauri::command]
+pub fn list_user_memory(
+    app: tauri::AppHandle,
+) -> Result<crate::persistence::memory::ListedMemorySection, String> {
+    Ok(crate::persistence::memory::list_section(
+        &crate::persistence::default_user_memory_root(&app),
     ))
 }
 
@@ -883,10 +902,10 @@ pub fn create_workspace_memory(
     workspace: String,
     title: String,
     description: String,
-    memory_type: crate::workspace::memory::MemoryType,
+    memory_type: crate::persistence::memory::MemoryType,
 ) -> Result<(), String> {
-    crate::workspace::memory::create_entry(
-        std::path::Path::new(&workspace),
+    crate::persistence::memory::create_entry(
+        &crate::persistence::memory::workspace_memory_dir(std::path::Path::new(&workspace)),
         &title,
         &description,
         memory_type,
@@ -900,9 +919,24 @@ pub fn create_workspace_memory(
 /// the absolute path for the front-end opener.
 #[tauri::command]
 pub fn open_workspace_memory_dir(workspace: String) -> Result<String, String> {
-    crate::workspace::memory::ensure_memory_dir(std::path::Path::new(&workspace))
+    let dir = crate::persistence::memory::workspace_memory_dir(std::path::Path::new(&workspace));
+    crate::persistence::memory::ensure_memory_dir(&dir)
         .map(|p| p.to_string_lossy().into_owned())
-        .map_err(|e| e.to_string())
+        // An io::Error carries no path -- name the directory so the
+        // surfaced failure (and the log) is diagnosable.
+        .map_err(|e| format!("failed to create the memory folder {}: {e}", dir.display()))
+}
+
+/// Open the user-layer memory directory (issue #1531): the app-domain
+/// `memory/` root, created on demand -- the user layer's hand-write
+/// entry point (any editor, via the folder).
+#[tauri::command]
+pub fn open_user_memory_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = crate::persistence::default_user_memory_root(&app);
+    crate::persistence::memory::ensure_memory_dir(&dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        // Same as the workspace twin: the io::Error names no directory.
+        .map_err(|e| format!("failed to create the memory folder {}: {e}", dir.display()))
 }
 
 /// Read a workspace's memory toggle (issue #1529): `true` unless the record
@@ -2943,6 +2977,9 @@ pub async fn open_recipe(
         // binding inside open_recipe; this root only ever mints. Same FIXED
         // product-domain placement as create_session.
         new_session.set_workspaces_root(Some(workspaces_root_path));
+        // #1531 (ADR-0147): seat the user-layer memory root on the resumed
+        // session too -- same construction-point wiring as create_session.
+        new_session.set_user_memory_root(Some(crate::persistence::default_user_memory_root(&app)));
         // #1446: apply the count-cap snapshot before the session lands in the
         // store -- identical semantics to create_session's construction-point
         // wiring.

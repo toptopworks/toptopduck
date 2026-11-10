@@ -9,11 +9,7 @@
 pub mod datasets;
 pub mod extract;
 pub mod extract_runtime;
-pub mod memory;
 pub mod registry;
 
 pub use datasets::{DatasetEntry, ListedDataset, StoreError};
-pub use memory::{
-    ListedMemory, ListedMemorySection, MemoryEntry, MemoryError, MemoryIndexRow, MemoryType,
-};
 pub use registry::{WorkspaceRecord, WorkspaceRegistry, WORKSPACES_FILE_NAME};

@@ -16,12 +16,12 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::app_config::AppConfig;
+use crate::persistence::memory::{self, MemoryEntry, MemorySource};
 use crate::provider::keychain::{ProviderConfigSource, StaticConfig};
 use crate::provider::live_config::LiveProviderConfig;
 use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnReply, ToolTurnRequest};
 use crate::provider::{LiveProvider, Provider};
 use crate::workspace::extract::{self, ExtractedMemory};
-use crate::workspace::memory::{self, MemoryEntry, MemorySource};
 use crate::workspace::registry::WorkspaceRegistry;
 
 /// The bounded close-time drain window: how long a session close waits for
@@ -90,7 +90,7 @@ pub(crate) fn perform_extraction(
             reason: SkipReason::ToggleOff,
         };
     }
-    let rows = memory::load_rows(&job.workspace);
+    let rows = memory::load_rows(&memory::workspace_memory_dir(&job.workspace));
     if memory::index_usage_percent(&rows) >= RED_CAP_PERCENT {
         return Skipped {
             reason: SkipReason::IndexCap,
@@ -205,7 +205,11 @@ fn persist_entries(job: &ExtractionJob, entries: &[ExtractedMemory]) -> Extracti
             saved_at: today.clone(),
             source: MemorySource::Extract,
         };
-        match memory::save_entry(&job.workspace, &memory, &entry.body) {
+        match memory::save_entry(
+            &memory::workspace_memory_dir(&job.workspace),
+            &memory,
+            &entry.body,
+        ) {
             Ok(row) => titles.push(row.title),
             Err(memory::MemoryError::IndexFull { detail }) => {
                 log::warn!(
@@ -600,7 +604,7 @@ mod tests {
     fn extraction_lands_entries_with_host_stamps() {
         let workspace = tempfile::tempdir().expect("workspace");
         let the_job = job(workspace.path(), "记住：回复一律用中文");
-        let rows = memory::load_rows(workspace.path());
+        let rows = memory::load_rows(&memory::workspace_memory_dir(workspace.path()));
         let provider = FakeProvider::new().scripted_tool_turn(
             &extract::render_extraction_user_message(&the_job.question, &the_job.response_text, &[]),
             ToolTurnReply::Text(
@@ -617,7 +621,7 @@ mod tests {
         );
         // The CJK title's file rides the FNV-hash slug fallback (#1529's
         // naming rule); read it back through the derived index's file name.
-        let rows = memory::load_rows(workspace.path());
+        let rows = memory::load_rows(&memory::workspace_memory_dir(workspace.path()));
         assert_eq!(rows.len(), 2, "the derived index follows the files");
         let feedback_file = rows
             .iter()

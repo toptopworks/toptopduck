@@ -1,6 +1,8 @@
-// Workspace memory contracts (issue #1529), mirroring the Rust
-// `workspace::memory` shapes: one row per memory file (the files are the
-// source of truth; MEMORY.md is a derived projection).
+// Memory contracts (issue #1529; user layer since #1531), mirroring the
+// Rust `persistence::memory` shapes: one row per memory file (the files
+// are the source of truth; MEMORY.md is a derived projection). Both layers
+// share these shapes -- only the directory differs (the workspace's
+// `.toptopduck/memory/` vs the app-domain user `memory/`).
 
 // The four memory categories (the storage protocol's classification).
 export type MemoryType = "user" | "feedback" | "project" | "reference";
@@ -9,7 +11,7 @@ export type MemoryType = "user" | "feedback" | "project" | "reference";
 // category, and the memory file's absolute path (the reveal target).
 export interface ListedMemory {
   title: string;
-  // The memory file's name inside `.toptopduck/memory/`.
+  // The memory file's name inside its layer's directory.
   file: string;
   // The one-line hook (what the injection block carries per row).
   hook: string;

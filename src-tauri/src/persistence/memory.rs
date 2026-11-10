@@ -1,21 +1,29 @@
-//! Workspace memory store (issue #1529): the workspace's persistent memory
-//! layer under `.toptopduck/memory/` -- one `<type>-<slug>.md` file per fact
-//! (flat `key: value` frontmatter + free-text body) plus the derived
-//! `MEMORY.md` index. The FILES are the source of truth; the index is a
-//! projection reconciled on every read (a hand-edited or drifted index is
-//! rewritten from the files, never the other way around).
+//! The file-backed memory store (issue #1529, two layers since #1531 /
+//! ADR-0147): one `<type>-<slug>.md` file per fact (flat `key: value`
+//! frontmatter + free-text body) plus the derived `MEMORY.md` index. The
+//! FILES are the source of truth; the index is a projection reconciled on
+//! every read (a hand-edited or drifted index is rewritten from the files,
+//! never the other way around).
+//!
+//! Layer-neutral by construction: every function takes the memory
+//! DIRECTORY itself, so the two layers differ only in which directory the
+//! caller resolves -- the workspace layer's `.toptopduck/memory/`
+//! ([`workspace_memory_dir`]) and the user layer's app-domain `memory/`
+//! (resolved by the caller from the sessions-root sibling; see
+//! `persistence::listing`). One implementation, zero copied logic; a
+//! future auto-routing between layers moves entries by moving files.
 //!
 //! Posture mirrors the dataset store's neighbors: reads are tolerant (a
-//! missing directory reads as empty -- the zero-footprint fresh workspace;
-//! a corrupt file is skipped + logged, never fatal), writes are honest
-//! (the index cap REFUSES a new entry instead of silently truncating), and
-//! the directory family is created lazily on the first write only.
+//! missing directory reads as empty -- the zero-footprint fresh root; a
+//! corrupt file is skipped + logged, never fatal), writes are honest (the
+//! index cap REFUSES a new entry instead of silently truncating), and the
+//! directory family is created lazily on the first write only.
 
 use std::path::{Path, PathBuf};
 
 use crate::persistence::io::{write_str_atomic, WritePerms};
 
-/// The memory subdirectory inside the workspace state directory.
+/// The memory directory name (each layer's leaf directory).
 const MEMORY_DIR_NAME: &str = "memory";
 /// The derived index file inside the memory directory.
 const MEMORY_INDEX_NAME: &str = "MEMORY.md";
@@ -158,15 +166,18 @@ impl std::fmt::Display for MemoryError {
     }
 }
 
-/// The memory directory for a workspace root (sibling of the datasets
-/// manifest inside `.toptopduck/`).
-fn memory_dir(workspace: &Path) -> PathBuf {
+/// The WORKSPACE layer's memory directory (issue #1529): the `memory`
+/// sibling of the datasets manifest inside the workspace's
+/// `.toptopduck/` state directory. The user layer's directory is resolved
+/// by the caller from the app-domain root instead (issue #1531) -- this is
+/// the one place the two layers' roots differ.
+pub fn workspace_memory_dir(workspace: &Path) -> PathBuf {
     workspace.join(".toptopduck").join(MEMORY_DIR_NAME)
 }
 
 /// The derived index path.
-fn index_path(workspace: &Path) -> PathBuf {
-    memory_dir(workspace).join(MEMORY_INDEX_NAME)
+fn index_path(dir: &Path) -> PathBuf {
+    dir.join(MEMORY_INDEX_NAME)
 }
 
 /// FNV-1a 32-bit (the pure-CJK slug fallback): tiny, dependency-free, and
@@ -339,8 +350,8 @@ fn type_from_file_name(name: &str) -> Option<MemoryType> {
 /// directory is the empty set and stays missing (zero footprint), a
 /// corrupt file is skipped + logged. The index reconcile is the one write
 /// a read performs, and only when the memory directory already exists.
-pub fn load_rows(workspace: &Path) -> Vec<MemoryIndexRow> {
-    let (rows, _unreadable) = scan_and_reconcile(workspace);
+pub fn load_rows(dir: &Path) -> Vec<MemoryIndexRow> {
+    let (rows, _unreadable) = scan_and_reconcile(dir);
     rows
 }
 
@@ -349,9 +360,8 @@ pub fn load_rows(workspace: &Path) -> Vec<MemoryIndexRow> {
 /// fence or are unreadable -- the panel's unreadable list (#1538: a
 /// hand-written file with a missing fence must never vanish silently).
 /// `MEMORY.md` and non-`.md` files are not memories and never surface.
-fn scan_memory_files(workspace: &Path) -> (Vec<MemoryIndexRow>, Vec<String>) {
-    let dir = memory_dir(workspace);
-    let Ok(read_dir) = std::fs::read_dir(&dir) else {
+fn scan_memory_files(dir: &Path) -> (Vec<MemoryIndexRow>, Vec<String>) {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
         return (Vec::new(), Vec::new());
     };
     let mut rows = Vec::new();
@@ -370,7 +380,7 @@ fn scan_memory_files(workspace: &Path) -> (Vec<MemoryIndexRow>, Vec<String>) {
             .and_then(|text| parse_frontmatter(&text, name.strip_suffix(".md").unwrap_or(&name)));
         let Some(parsed) = parsed else {
             log::warn!(
-                target: "toptopduck::workspace_memory",
+                target: "toptopduck::memory",
                 "memory file without frontmatter skipped: {}",
                 path.display()
             );
@@ -390,9 +400,9 @@ fn scan_memory_files(workspace: &Path) -> (Vec<MemoryIndexRow>, Vec<String>) {
 
 /// The read-path scan: the files' rows + the unreadable names, with the
 /// derived index reconciled from the files (the one read that writes).
-fn scan_and_reconcile(workspace: &Path) -> (Vec<MemoryIndexRow>, Vec<String>) {
-    let (rows, unreadable) = scan_memory_files(workspace);
-    reconcile_index(workspace, &rows);
+fn scan_and_reconcile(dir: &Path) -> (Vec<MemoryIndexRow>, Vec<String>) {
+    let (rows, unreadable) = scan_memory_files(dir);
+    reconcile_index(dir, &rows);
     (rows, unreadable)
 }
 
@@ -412,17 +422,14 @@ pub(crate) fn index_usage_percent(rows: &[MemoryIndexRow]) -> u8 {
 /// the same ratio the write path's caps enforce, so the panel's color
 /// scale never disagrees with the refusal. The unreadable list (#1538)
 /// names the fence-less `.md` files the panel surfaces separately.
-pub fn list_section(workspace: &Path) -> ListedMemorySection {
-    let (rows, unreadable) = scan_and_reconcile(workspace);
+pub fn list_section(dir: &Path) -> ListedMemorySection {
+    let (rows, unreadable) = scan_and_reconcile(dir);
     let usage_percent = index_usage_percent(&rows);
     let memories = rows
         .into_iter()
         .map(|row| {
             let kind = type_from_file_name(&row.file).unwrap_or(MemoryType::Reference);
-            let file_path = memory_dir(workspace)
-                .join(&row.file)
-                .to_string_lossy()
-                .into_owned();
+            let file_path = dir.join(&row.file).to_string_lossy().into_owned();
             ListedMemory {
                 r#type: kind,
                 file_path,
@@ -437,28 +444,25 @@ pub fn list_section(workspace: &Path) -> ListedMemorySection {
     }
 }
 
-/// The panel's list face: rows plus typed category + absolute path.
-/// (Retained for the test suites' direct row fixtures; the command layer
-/// reads [`list_section`], and this delegates to it so the row mapping
-/// lives once.)
-pub fn list(workspace: &Path) -> Vec<ListedMemory> {
-    list_section(workspace).rows
-}
-
 /// Rewrite the derived index when it has drifted from the files (the files
 /// win, issue #1529). Best-effort + logged: a failed reconcile leaves the
 /// stale index on disk -- the in-memory rows are already the truth the
 /// callers use, and the next successful read retries the rewrite.
-fn reconcile_index(workspace: &Path, rows: &[MemoryIndexRow]) {
+fn reconcile_index(dir: &Path, rows: &[MemoryIndexRow]) {
+    // A never-minted root stays missing (zero footprint): the reconcile
+    // runs only when the memory directory already exists.
+    if !dir.is_dir() {
+        return;
+    }
     let rendered = render_index(rows);
-    let path = index_path(workspace);
+    let path = index_path(dir);
     let current = std::fs::read_to_string(&path).unwrap_or_default();
     if current == rendered {
         return;
     }
     if let Err(e) = write_str_atomic(&path, &rendered, WritePerms::Default) {
         log::warn!(
-            target: "toptopduck::workspace_memory",
+            target: "toptopduck::memory",
             "memory index reconcile failed for {}: {e}",
             path.display()
         );
@@ -509,11 +513,11 @@ fn unique_file_name(taken: &std::collections::HashSet<String>, entry: &MemoryEnt
 
 /// The index-full refusal's warning face (issue #1529: refuse AND warn --
 /// never a silent refusal). Every `IndexFull` return logs the cap it hit.
-fn warn_index_full(workspace: &Path, detail: String) {
+fn warn_index_full(dir: &Path, detail: String) {
     log::warn!(
-        target: "toptopduck::workspace_memory",
+        target: "toptopduck::memory",
         "memory index at its cap for {} -- entry refused ({detail})",
-        workspace.display()
+        dir.display()
     );
 }
 
@@ -526,24 +530,23 @@ fn warn_index_full(workspace: &Path, detail: String) {
 /// failure returns `Err` with the fact already persisted -- the next read
 /// reconciles the index from the files, and a caller must not read that
 /// error as the entry being absent.
-/// Serializes every workspace's [`save_entry`] against the concurrent
+/// Serializes every root's [`save_entry`] against the concurrent
 /// unique-file-name race (issue #1530 review): two sessions extracting
 /// into one workspace can both load the taken set before either writes,
 /// minting the same file name and overwriting each other's memory file.
 /// One global lock is correct at extraction's write rate (one call per
-/// turn); per-workspace locks only if cross-workspace contention ever
-/// matters.
+/// turn); per-root locks only if cross-root contention ever matters.
 static SAVE_ENTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn save_entry(
-    workspace: &Path,
+    dir: &Path,
     entry: &MemoryEntry,
     body: &str,
 ) -> Result<MemoryIndexRow, MemoryError> {
     let _guard = SAVE_ENTRY_LOCK.lock().expect("memory save lock poisoned");
-    let rows = load_rows(workspace);
+    let rows = load_rows(dir);
     if rows.len() >= INDEX_MAX_ROWS {
-        warn_index_full(workspace, format!("{INDEX_MAX_ROWS} rows"));
+        warn_index_full(dir, format!("{INDEX_MAX_ROWS} rows"));
         return Err(MemoryError::IndexFull {
             detail: format!("{INDEX_MAX_ROWS} rows"),
         });
@@ -560,21 +563,20 @@ pub fn save_entry(
     next_rows.sort_by(|a, b| a.file.cmp(&b.file));
     let rendered = render_index(&next_rows);
     if rendered.len() > INDEX_MAX_BYTES {
-        warn_index_full(workspace, format!("{INDEX_MAX_BYTES} bytes"));
+        warn_index_full(dir, format!("{INDEX_MAX_BYTES} bytes"));
         return Err(MemoryError::IndexFull {
             detail: format!("{INDEX_MAX_BYTES} bytes"),
         });
     }
-    std::fs::create_dir_all(memory_dir(workspace)).map_err(MemoryError::io)?;
-    let file_path = memory_dir(workspace).join(&file);
+    std::fs::create_dir_all(dir).map_err(MemoryError::io)?;
+    let file_path = dir.join(&file);
     write_str_atomic(
         &file_path,
         &render_memory_file(entry, body),
         WritePerms::Default,
     )
     .map_err(MemoryError::io)?;
-    write_str_atomic(&index_path(workspace), &rendered, WritePerms::Default)
-        .map_err(MemoryError::io)?;
+    write_str_atomic(&index_path(dir), &rendered, WritePerms::Default).map_err(MemoryError::io)?;
     Ok(row)
 }
 
@@ -584,9 +586,10 @@ pub fn save_entry(
 /// multi-line, and only the frontmatter line folds. The blank-title
 /// guard lives HERE, not in the UI alone -- every future caller of the
 /// store inherits it. Rides [`save_entry`], so the caps, the global save
-/// lock, and the index reconcile all apply unchanged.
+/// lock, and the index reconcile all apply unchanged. Workspace-layer
+/// only by design (the user layer is hand-written files, #1531 D4).
 pub fn create_entry(
-    workspace: &Path,
+    dir: &Path,
     title: &str,
     description: &str,
     r#type: MemoryType,
@@ -606,16 +609,17 @@ pub fn create_entry(
         saved_at: chrono::Local::now().format("%Y-%m-%d").to_string(),
         source: MemorySource::Manual,
     };
-    save_entry(workspace, &entry, description)
+    save_entry(dir, &entry, description)
 }
 
-/// The folder-open primitive (issue #1538): create the directory family on
+/// The folder-open primitive (issue #1538): create the directory on
 /// demand and return its path -- the one sanctioned eager mkdir, so the
-/// panel's "open memory folder" works on the zero-footprint fresh
-/// workspace too (the read path stays lazy). Idempotent.
-pub fn ensure_memory_dir(workspace: &Path) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(memory_dir(workspace))?;
-    Ok(memory_dir(workspace))
+/// panel's "open memory folder" works on the zero-footprint fresh root
+/// too (the read path stays lazy). Idempotent. Both layers' reveal
+/// actions ride it (#1531: the user layer's folder too).
+pub fn ensure_memory_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    Ok(dir.to_path_buf())
 }
 
 #[cfg(test)]
@@ -645,8 +649,16 @@ mod tests {
         assert_eq!(index_usage_percent(&rows_300), 100);
     }
 
-    fn ws() -> tempfile::TempDir {
-        tempfile::tempdir().expect("workspace dir")
+    fn mem_dir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("memory dir")
+    }
+
+    /// A memory directory path that does not exist yet (the zero-footprint
+    /// fresh root): a never-created child of a live tempdir.
+    fn unborn_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = mem_dir();
+        let dir = root.path().join("memory");
+        (root, dir)
     }
 
     fn entry(name: &str) -> MemoryEntry {
@@ -660,20 +672,33 @@ mod tests {
         }
     }
 
+    /// The workspace layer's resolver: the memory directory nests inside
+    /// the workspace's `.toptopduck/` state directory (the datasets
+    /// sibling). The user layer's root is resolved by its callers instead
+    /// -- this is the layers' one structural difference.
+    #[test]
+    fn workspace_memory_dir_nests_under_the_state_dir() {
+        let ws = Path::new("/ws");
+        assert_eq!(
+            workspace_memory_dir(ws),
+            ws.join(".toptopduck").join("memory")
+        );
+    }
+
     /// The full round trip: save lands file + index, and the read path
     /// recovers the row from the FILE side (frontmatter is the truth).
     #[test]
     fn save_then_load_round_trips_the_row() {
-        let workspace = ws();
-        let row = save_entry(workspace.path(), &entry("reply in chinese"), "body\n").expect("save");
+        let dir = mem_dir();
+        let row = save_entry(dir.path(), &entry("reply in chinese"), "body\n").expect("save");
         assert_eq!(row.file, "feedback-reply-in-chinese.md");
-        let rows = load_rows(workspace.path());
+        let rows = load_rows(dir.path());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "reply in chinese");
         assert_eq!(rows[0].hook, "one-line hook");
         assert_eq!(rows[0].file, "feedback-reply-in-chinese.md");
         // The index landed on disk in the protocol's line shape.
-        let index = std::fs::read_to_string(index_path(workspace.path())).unwrap();
+        let index = std::fs::read_to_string(index_path(dir.path())).unwrap();
         assert!(
             index.contains("- [reply in chinese](feedback-reply-in-chinese.md) — one-line hook\n")
         );
@@ -737,11 +762,11 @@ mod tests {
             a.starts_with('n') && b.starts_with('n'),
             "hash fallback shape"
         );
-        let workspace = ws();
-        let row_a = save_entry(workspace.path(), &entry("偏好中文回复"), "a\n").expect("a");
-        let row_b = save_entry(workspace.path(), &entry("季度数据用中文列名"), "b\n").expect("b");
+        let dir = mem_dir();
+        let row_a = save_entry(dir.path(), &entry("偏好中文回复"), "a\n").expect("a");
+        let row_b = save_entry(dir.path(), &entry("季度数据用中文列名"), "b\n").expect("b");
         assert_ne!(row_a.file, row_b.file);
-        assert_eq!(load_rows(workspace.path()).len(), 2);
+        assert_eq!(load_rows(dir.path()).len(), 2);
     }
 
     /// The slug rules: lowercase, collapse separators, trim, cap at 48.
@@ -758,12 +783,12 @@ mod tests {
     /// Two same-title saves de-conflict with a -2 suffix (no overwrite).
     #[test]
     fn same_title_saves_deconflict() {
-        let workspace = ws();
-        let first = save_entry(workspace.path(), &entry("dup"), "1\n").expect("first");
-        let second = save_entry(workspace.path(), &entry("dup"), "2\n").expect("second");
+        let dir = mem_dir();
+        let first = save_entry(dir.path(), &entry("dup"), "1\n").expect("first");
+        let second = save_entry(dir.path(), &entry("dup"), "2\n").expect("second");
         assert_eq!(first.file, "feedback-dup.md");
         assert_eq!(second.file, "feedback-dup-2.md");
-        assert_eq!(load_rows(workspace.path()).len(), 2);
+        assert_eq!(load_rows(dir.path()).len(), 2);
     }
 
     /// The concurrent face of the de-conflict contract (issue #1530
@@ -772,8 +797,8 @@ mod tests {
     /// thread's file silently overwrites another's.
     #[test]
     fn concurrent_same_title_saves_keep_every_file() {
-        let workspace = ws();
-        let path = workspace.path().to_path_buf();
+        let dir = mem_dir();
+        let path = dir.path().to_path_buf();
         let handles: Vec<_> = (0..8)
             .map(|i| {
                 let path = path.clone();
@@ -785,21 +810,21 @@ mod tests {
         for handle in handles {
             handle.join().expect("thread panicked");
         }
-        assert_eq!(load_rows(workspace.path()).len(), 8);
+        assert_eq!(load_rows(dir.path()).len(), 8);
     }
 
     /// The row cap refuses BEFORE anything lands: 200 rows is the ceiling,
     /// the 201st save is an IndexFull and the disk state is untouched.
     #[test]
     fn row_cap_refuses_the_201st_entry() {
-        let workspace = ws();
+        let dir = mem_dir();
         for i in 0..INDEX_MAX_ROWS {
-            save_entry(workspace.path(), &entry(&format!("fact {i}")), "b\n").expect("save");
+            save_entry(dir.path(), &entry(&format!("fact {i}")), "b\n").expect("save");
         }
-        let before = load_rows(workspace.path());
-        let err = save_entry(workspace.path(), &entry("one too many"), "b\n").expect_err("refused");
+        let before = load_rows(dir.path());
+        let err = save_entry(dir.path(), &entry("one too many"), "b\n").expect_err("refused");
         assert!(matches!(err, MemoryError::IndexFull { .. }), "{err:?}");
-        assert_eq!(load_rows(workspace.path()).len(), before.len());
+        assert_eq!(load_rows(dir.path()).len(), before.len());
     }
 
     /// The byte cap refuses too: the cap reads the RENDERED index (hooks and
@@ -810,7 +835,7 @@ mod tests {
     /// under the cap.
     #[test]
     fn byte_cap_refuses_without_truncation() {
-        let workspace = ws();
+        let dir = mem_dir();
         // A title at the clamp ceiling: each rendered line is ~360 bytes of
         // CJK, so the cap trips well before the 200-row ceiling.
         let long_title = "题".repeat(HOOK_MAX_CHARS);
@@ -819,7 +844,7 @@ mod tests {
         for i in 0..80 {
             let mut e = entry(&format!("{long_title}{i}"));
             e.description = String::new();
-            match save_entry(workspace.path(), &e, "b\n") {
+            match save_entry(dir.path(), &e, "b\n") {
                 Ok(_) => landed += 1,
                 Err(err) => {
                     refused = Some(err);
@@ -831,8 +856,8 @@ mod tests {
         assert!(matches!(err, MemoryError::IndexFull { .. }), "{err:?}");
         // The refused entry landed nothing: the rows on disk are exactly the
         // successful saves, and the index never crossed the cap.
-        assert_eq!(load_rows(workspace.path()).len(), landed);
-        let index = std::fs::read_to_string(index_path(workspace.path())).unwrap();
+        assert_eq!(load_rows(dir.path()).len(), landed);
+        let index = std::fs::read_to_string(index_path(dir.path())).unwrap();
         assert!(index.len() <= INDEX_MAX_BYTES, "{}", index.len());
         assert!(landed < 80, "the cap actually tripped");
     }
@@ -853,47 +878,44 @@ mod tests {
         assert_eq!(clamp_injection_line("short", HOOK_MAX_CHARS), "short");
     }
 
-    /// Zero footprint: a read on a fresh workspace creates NOTHING, and
+    /// Zero footprint: a read on a fresh root creates NOTHING, and
     /// the first save creates the directory family + index.
     #[test]
     fn read_creates_nothing_and_first_save_creates_the_family() {
-        let workspace = ws();
-        assert!(load_rows(workspace.path()).is_empty());
-        assert!(
-            !memory_dir(workspace.path()).exists(),
-            "no directory minted"
-        );
-        save_entry(workspace.path(), &entry("first"), "b\n").expect("save");
-        assert!(memory_dir(workspace.path()).is_dir());
-        assert!(index_path(workspace.path()).is_file());
+        let (_root, dir) = unborn_dir();
+        assert!(load_rows(&dir).is_empty());
+        assert!(!dir.exists(), "no directory minted");
+        save_entry(&dir, &entry("first"), "b\n").expect("save");
+        assert!(dir.is_dir());
+        assert!(index_path(&dir).is_file());
     }
 
     /// The index is derived: a hand-edited (or deleted) MEMORY.md is
     /// rewritten from the files on the next read -- the files win.
     #[test]
     fn drifted_index_is_rewritten_from_the_files() {
-        let workspace = ws();
-        save_entry(workspace.path(), &entry("fact a"), "b\n").expect("save");
+        let dir = mem_dir();
+        save_entry(dir.path(), &entry("fact a"), "b\n").expect("save");
         // Hand-vandalize the index.
-        std::fs::write(index_path(workspace.path()), "garbage").unwrap();
-        let rows = load_rows(workspace.path());
+        std::fs::write(index_path(dir.path()), "garbage").unwrap();
+        let rows = load_rows(dir.path());
         assert_eq!(rows.len(), 1, "rows come from the files, not the index");
-        let index = std::fs::read_to_string(index_path(workspace.path())).unwrap();
+        let index = std::fs::read_to_string(index_path(dir.path())).unwrap();
         assert!(index.contains("- [fact a]"), "index reconciled: {index}");
         // A deleted index is also rebuilt.
-        std::fs::remove_file(index_path(workspace.path())).unwrap();
-        load_rows(workspace.path());
-        assert!(index_path(workspace.path()).is_file());
+        std::fs::remove_file(index_path(dir.path())).unwrap();
+        load_rows(dir.path());
+        assert!(index_path(dir.path()).is_file());
     }
 
     /// A corrupt file (unreadable UTF-8 / no frontmatter) is skipped +
     /// never crashes the read; healthy siblings still surface.
     #[test]
     fn corrupt_file_is_skipped_and_siblings_survive() {
-        let workspace = ws();
-        save_entry(workspace.path(), &entry("healthy"), "b\n").expect("save");
-        std::fs::write(memory_dir(workspace.path()).join("broken.md"), "no fence\n").unwrap();
-        let rows = load_rows(workspace.path());
+        let dir = mem_dir();
+        save_entry(dir.path(), &entry("healthy"), "b\n").expect("save");
+        std::fs::write(dir.path().join("broken.md"), "no fence\n").unwrap();
+        let rows = load_rows(dir.path());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "healthy");
     }
@@ -902,13 +924,57 @@ mod tests {
     /// the reveal target.
     #[test]
     fn list_face_carries_type_and_absolute_path() {
-        let workspace = ws();
-        save_entry(workspace.path(), &entry("fact a"), "b\n").expect("save");
-        let listed = list(workspace.path());
+        let dir = mem_dir();
+        save_entry(dir.path(), &entry("fact a"), "b\n").expect("save");
+        let listed = list_section(dir.path()).rows;
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].r#type, MemoryType::Feedback);
         assert!(listed[0].file_path.contains("feedback-fact-a.md"));
         assert!(Path::new(&listed[0].file_path).is_absolute());
+    }
+
+    /// Issue #1531's zero-leakage pin (ADR-0147 Decision 4): a user-layer
+    /// entry NEVER lands anywhere in the workspace's tree -- the layers
+    /// share the protocol, not the storage. A save through the user root
+    /// leaves the workspace layer listing empty and no workspace file
+    /// carrying the user content.
+    #[test]
+    fn user_layer_entries_never_leak_into_the_workspace_tree() {
+        let workspace_root = tempfile::tempdir().expect("workspace root");
+        // Pre-create the workspace layer's family so the walk sees a live
+        // `.toptopduck/memory/` directory, not a missing one.
+        let ws_dir = workspace_memory_dir(workspace_root.path());
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        let user_root = tempfile::tempdir().expect("user root");
+        let user_body = "private identity body 用户身份";
+        let row = save_entry(user_root.path(), &entry("private identity fact"), user_body)
+            .expect("user save");
+        // The user layer lists its row; the workspace layer stays empty.
+        assert_eq!(load_rows(user_root.path()).len(), 1);
+        assert!(load_rows(&ws_dir).is_empty());
+        // The workspace tree carries no trace of the user entry's content.
+        fn walk(dir: &Path, visit: &mut dyn FnMut(&Path)) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, visit);
+                } else {
+                    visit(&path);
+                }
+            }
+        }
+        walk(workspace_root.path(), &mut |file| {
+            if let Ok(text) = std::fs::read_to_string(file) {
+                assert!(
+                    !text.contains(row.title.as_str()) && !text.contains(user_body),
+                    "user-layer content leaked into {}",
+                    file.display()
+                );
+            }
+        });
     }
 
     // ---- The #1538 write-path faces: manual create, folder open,
@@ -919,19 +985,19 @@ mod tests {
     /// the body carries the description verbatim (the form's textarea).
     #[test]
     fn create_entry_stamps_manual_source_and_today() {
-        let workspace = ws();
+        let dir = mem_dir();
         let row = create_entry(
-            workspace.path(),
+            dir.path(),
             "reply in chinese",
             "always zh",
             MemoryType::User,
         )
         .expect("create");
         assert_eq!(row.file, "user-reply-in-chinese.md");
-        let listed = list_section(workspace.path());
+        let listed = list_section(dir.path());
         assert_eq!(listed.rows.len(), 1);
         assert_eq!(listed.rows[0].row.title, "reply in chinese");
-        let text = std::fs::read_to_string(memory_dir(workspace.path()).join(&row.file)).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(&row.file)).unwrap();
         let parsed = parse_frontmatter(&text, "s").expect("parses");
         assert_eq!(parsed.source, MemorySource::Manual);
         assert_eq!(parsed.origin_session, None);
@@ -944,7 +1010,7 @@ mod tests {
             parsed.saved_at
         );
         assert!(text.contains("always zh"), "body carries the description");
-        let index = std::fs::read_to_string(index_path(workspace.path())).unwrap();
+        let index = std::fs::read_to_string(index_path(dir.path())).unwrap();
         assert!(
             index.contains("- [reply in chinese](user-reply-in-chinese.md) — always zh\n"),
             "{index}"
@@ -952,42 +1018,40 @@ mod tests {
     }
 
     /// A blank title is refused before anything lands -- the required-field
-    /// guard lives in the store, not the UI alone, and the fresh workspace
+    /// guard lives in the store, not the UI alone, and the fresh root
     /// mints nothing.
     #[test]
     fn create_entry_refuses_a_blank_title() {
-        let workspace = ws();
-        let err =
-            create_entry(workspace.path(), "   ", "d", MemoryType::Reference).expect_err("refused");
+        let (_root, dir) = unborn_dir();
+        let err = create_entry(&dir, "   ", "d", MemoryType::Reference).expect_err("refused");
         assert!(matches!(err, MemoryError::Invalid { .. }), "{err:?}");
-        assert!(!memory_dir(workspace.path()).exists(), "nothing minted");
+        assert!(!dir.exists(), "nothing minted");
     }
 
     /// Fence-less .md files surface as unreadable in the section; the index
     /// and non-.md files never do; healthy rows are untouched.
     #[test]
     fn unreadable_files_surface_in_the_section() {
-        let workspace = ws();
-        save_entry(workspace.path(), &entry("healthy"), "b\n").expect("save");
-        let dir = memory_dir(workspace.path());
-        std::fs::write(dir.join("broken.md"), "no fence\n").unwrap();
-        std::fs::write(dir.join("notes.txt"), "plain\n").unwrap();
-        let listed = list_section(workspace.path());
+        let dir = mem_dir();
+        save_entry(dir.path(), &entry("healthy"), "b\n").expect("save");
+        std::fs::write(dir.path().join("broken.md"), "no fence\n").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "plain\n").unwrap();
+        let listed = list_section(dir.path());
         assert_eq!(listed.rows.len(), 1);
         assert_eq!(listed.rows[0].row.title, "healthy");
         assert_eq!(listed.unreadable, vec!["broken.md".to_string()]);
     }
 
-    /// The folder-open primitive: creates the directory family on demand
-    /// (the one sanctioned eager mkdir) and is idempotent.
+    /// The folder-open primitive: creates the directory on demand (the one
+    /// sanctioned eager mkdir) and is idempotent.
     #[test]
     fn ensure_memory_dir_creates_the_family() {
-        let workspace = ws();
-        assert!(!memory_dir(workspace.path()).exists());
-        let dir = ensure_memory_dir(workspace.path()).expect("ensure");
-        assert!(dir.is_dir());
-        assert!(dir.ends_with("memory"));
-        ensure_memory_dir(workspace.path()).expect("again");
+        let (_root, dir) = unborn_dir();
+        assert!(!dir.exists());
+        let created = ensure_memory_dir(&dir).expect("ensure");
+        assert!(created.is_dir());
+        assert!(created.ends_with("memory"));
+        ensure_memory_dir(&dir).expect("again");
     }
 
     /// The pure-CJK title rides the same slug protocol through create_entry
@@ -995,15 +1059,10 @@ mod tests {
     /// command per #1538's acceptance row).
     #[test]
     fn create_entry_pure_cjk_title_hashes_the_slug() {
-        let workspace = ws();
-        let row = create_entry(
-            workspace.path(),
-            "偏好中文回复",
-            "always zh",
-            MemoryType::User,
-        )
-        .expect("create");
+        let dir = mem_dir();
+        let row = create_entry(dir.path(), "偏好中文回复", "always zh", MemoryType::User)
+            .expect("create");
         assert!(row.file.starts_with("user-n"), "hash shape: {}", row.file);
-        assert_eq!(load_rows(workspace.path()).len(), 1);
+        assert_eq!(load_rows(dir.path()).len(), 1);
     }
 }

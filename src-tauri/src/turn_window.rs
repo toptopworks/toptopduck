@@ -102,7 +102,7 @@ pub fn assemble_tool_turn(
     user_invocations: &[crate::model::SkillInvocation],
     window_turns: usize,
     shared: &[DatasetRef],
-    memory: &[crate::workspace::memory::MemoryIndexRow],
+    memory: &[crate::persistence::memory::MemoryIndexRow],
 ) -> ToolTurnRequest {
     let request = assemble(
         question,
@@ -623,7 +623,7 @@ mod tests {
     /// assembly byte-free of the block.
     #[test]
     fn assembled_tool_turn_carries_the_memory_block() {
-        let memory = [crate::workspace::memory::MemoryIndexRow {
+        let memory = [crate::persistence::memory::MemoryIndexRow {
             title: "fact".into(),
             file: "project-fact.md".into(),
             hook: "hook".into(),
