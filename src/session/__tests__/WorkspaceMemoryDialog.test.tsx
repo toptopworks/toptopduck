@@ -42,6 +42,7 @@ import {
   getWorkspaceMemoryEnabled,
   listWorkspaceMemory,
   openWorkspaceMemoryDir,
+  setWorkspaceAutoExtraction,
   setWorkspaceMemoryEnabled,
 } from "../../api";
 import { WorkspaceMemoryDialog } from "../WorkspaceMemoryDialog";
@@ -55,6 +56,7 @@ const mockedList = vi.mocked(listWorkspaceMemory);
 const mockedEnabled = vi.mocked(getWorkspaceMemoryEnabled);
 const mockedSet = vi.mocked(setWorkspaceMemoryEnabled);
 const mockedAutoExtraction = vi.mocked(getWorkspaceAutoExtraction);
+const mockedSetExtraction = vi.mocked(setWorkspaceAutoExtraction);
 const mockedExtractionStatus = vi.mocked(getWorkspaceExtractionStatus);
 const mockedReveal = vi.mocked(revealItemInDir);
 const mockedCreate = vi.mocked(createWorkspaceMemory);
@@ -501,5 +503,32 @@ describe("WorkspaceMemoryDialog", () => {
       await screen.findByText(/无法识别的文件：broken\.md/),
     ).toBeInTheDocument();
     expect(screen.queryByText(/还没有记忆/)).not.toBeInTheDocument();
+  });
+
+  // ---- #1530 留尾 C: the panel's toggle interactions. ----
+  // (The #1531 user layer's panel face lives in the settings overlay's
+  // MemorySection -- global semantics, never inside a workspace panel.)
+
+  // The extraction toggle flips through its set command; the refused write
+  // surfaces through the shared banner (the master toggle's posture).
+  it("flips the extraction toggle through the set command", async () => {
+    mockedEnabled.mockResolvedValue(true);
+    mockedList.mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
+    mockedSetExtraction.mockResolvedValue(undefined);
+    renderPanel();
+    // Anchor on the settled faces first (the master toggle's posture): the
+    // extraction switch is disabled while its own query is pending, and a
+    // click on a disabled switch is swallowed.
+    const toggle = await screen.findByRole("switch", { name: /自动提取/ });
+    await waitFor(() => expect(toggle).not.toBeDisabled());
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(mockedSetExtraction).toHaveBeenCalledWith("/ws", true),
+    );
+    // The refused write surfaces through the shared banner.
+    mockedSetExtraction.mockRejectedValueOnce(new Error("ledger locked"));
+    fireEvent.click(screen.getByRole("switch", { name: /自动提取/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("ledger locked");
   });
 });

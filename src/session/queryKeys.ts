@@ -186,6 +186,13 @@ export const workspaceMemoryKeys = {
     ["workspace-memory", workspace, "extraction-status"] as const,
 } as const;
 
+/** The USER-level memory listing (issue #1531): app-global -- not keyed by
+ *  any workspace (the layer rides every workspace's injection). Session-
+ *  agnostic like the sibling above. */
+export const userMemoryKeys = {
+  listing: () => ["user-memory"] as const,
+} as const;
+
 /** The update-check slice (ADR-0143, issue #1509): one process-wide cached
  *  check -- the startup auto-check populates it; the sidebar indicator and
  *  the settings block subscribe (enabled:false reads, no mount refetch) and

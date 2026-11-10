@@ -9,8 +9,8 @@
 
 use crate::app_config::AppConfig;
 use crate::model::ProviderProfile;
+use crate::persistence::memory::MemoryType;
 use crate::provider::prompt::ResponseLocale;
-use crate::workspace::memory::MemoryType;
 
 /// The reply length cap for the extraction call: a mechanical task with a
 /// bounded JSON payload (a handful of entries). Generous on purpose -- a

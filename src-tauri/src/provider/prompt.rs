@@ -25,8 +25,8 @@
 
 use super::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload};
 use crate::model::TextKind;
+use crate::persistence::memory::{clamp_injection_line, HOOK_MAX_CHARS};
 use crate::skills::SkillPromptFragment;
-use crate::workspace::memory::{clamp_injection_line, HOOK_MAX_CHARS};
 
 /// The resolved response locale (ADR-0052 layer 3). Two-state -- the third
 /// persistence state ("system") is resolved to one of these before reaching
@@ -191,7 +191,7 @@ fn render_skill_disclosure(skills: &[SkillPromptFragment]) -> String {
 /// hand-edited memory file cannot forge rows or fake a section header.
 /// An empty set renders the empty string -- no empty block, so the
 /// pre-memory assembly shape is preserved.
-pub fn render_memory_block(rows: &[crate::workspace::memory::MemoryIndexRow]) -> String {
+pub fn render_memory_block(rows: &[crate::persistence::memory::MemoryIndexRow]) -> String {
     if rows.is_empty() {
         return String::new();
     }
@@ -338,7 +338,7 @@ pub fn build_tool_system_prompt(
     request: &ProviderRequest,
     locale: ResponseLocale,
     skills: &[SkillPromptFragment],
-    memory: &[crate::workspace::memory::MemoryIndexRow],
+    memory: &[crate::persistence::memory::MemoryIndexRow],
 ) -> String {
     let mut out = String::from(TOOL_CALLING_PROMPT);
     let disclosure = render_skill_disclosure(skills);
@@ -1266,8 +1266,8 @@ mod tests {
     // shape).
 
     /// Build a memory index row for the injection tests.
-    fn mem_row(title: &str, hook: &str) -> crate::workspace::memory::MemoryIndexRow {
-        crate::workspace::memory::MemoryIndexRow {
+    fn mem_row(title: &str, hook: &str) -> crate::persistence::memory::MemoryIndexRow {
+        crate::persistence::memory::MemoryIndexRow {
             title: title.into(),
             file: "project-fixture.md".into(),
             hook: hook.into(),
