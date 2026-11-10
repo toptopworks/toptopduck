@@ -109,25 +109,23 @@ export function RuntimeSection({
 
       {/* The two section-level preferences as ONE card above the tabs (no
           group title -- the rows carry their own names): cross-tab pointers
-          always mounted outside the panels, so the default-runtime draft
-          survives a sub-tab switch (a nav switch unmounts the pane, resetting
-          the draft like every pane-local state). */}
-      <div className="mb-6">
-        <SettingsCard>
-          <DefaultRuntimeControl
-            defaultRuntime={defaultRuntime}
-            onSaved={onDefaultRuntimeChanged}
-            onIpcBusy={onIpcBusy}
-          />
-          {/* The extraction-model pointer (issue #1530, ADR-0147 Decision 7):
-              it points INTO the profile pool managed in the API Access tab. */}
-          <ExtractionModelSelect
-            provider={provider}
-            memoryExtractionProfile={memoryExtractionProfile}
-            onCommit={onCommit}
-          />
-        </SettingsCard>
-      </div>
+          always mounted outside the panels, so both rows' drafts survive a
+          sub-tab switch (a nav switch unmounts the pane, resetting the
+          drafts like every pane-local state). */}
+      <SettingsCard className="mb-6">
+        <DefaultRuntimeControl
+          defaultRuntime={defaultRuntime}
+          onSaved={onDefaultRuntimeChanged}
+          onIpcBusy={onIpcBusy}
+        />
+        {/* The extraction-model pointer (issue #1530, ADR-0147 Decision 7):
+            it points INTO the profile pool managed in the API Access tab. */}
+        <ExtractionModelSelect
+          provider={provider}
+          memoryExtractionProfile={memoryExtractionProfile}
+          onCommit={onCommit}
+        />
+      </SettingsCard>
 
       {/* Tab switcher (issue #489): two tab buttons. State is NOT persisted --
           a nav switch unmounts RuntimeSection and useState resets on remount.

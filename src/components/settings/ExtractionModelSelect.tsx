@@ -146,7 +146,7 @@ export function ExtractionModelSelect({
                 />
               </SelectItem>
               {options.map((profile) => (
-                <SelectItem key={profile.id} value={`profile:${profile.id}`}>
+                <SelectItem key={profile.id} value={keyForProfile(profile.id, options)}>
                   {profile.display_name || profile.id}
                   {profile.id === provider.active_profile ? " *" : ""}
                 </SelectItem>
@@ -164,17 +164,21 @@ export function ExtractionModelSelect({
         </div>
       )}
     >
-      {options.length === 0 && (
-        <p className="text-muted-foreground text-xs">
-          <FormattedMessage
-            id="settings.runtime.extractionNoProfiles"
-            defaultMessage="Add a profile above to enable extraction."
-          />
-        </p>
-      )}
-      {error && (
-        <p className="settings-error text-destructive text-sm">{error}</p>
-      )}
+      {options.length === 0 || error !== null ? (
+        <div className="space-y-1">
+          {options.length === 0 && (
+            <p className="text-muted-foreground text-xs">
+              <FormattedMessage
+                id="settings.runtime.extractionNoProfiles"
+                defaultMessage="Add a profile above to enable extraction."
+              />
+            </p>
+          )}
+          {error && (
+            <p className="settings-error text-destructive text-sm">{error}</p>
+          )}
+        </div>
+      ) : null}
     </SettingsRow>
   );
 }

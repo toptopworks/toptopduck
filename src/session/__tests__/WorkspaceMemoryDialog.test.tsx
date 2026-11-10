@@ -409,8 +409,9 @@ describe("WorkspaceMemoryDialog", () => {
   // The listing poll (#1540): while the panel stands the listing re-reads
   // every 2s -- a hand edit in the memory folder (add/remove via any
   // editor) lands within one interval. Fake timers drive the interval; the
-  // enabled gate stopping the poll on close/off is TanStack semantics
-  // (a disabled query runs no interval), not a component behavior to pin.
+  // off-layer stop is pure TanStack semantics (a disabled query runs no
+  // interval), while the close leg -- the component wiring its open prop
+  // into enabled -- is what the next case pins.
   it("polls the listing every 2s while the panel stands", async () => {
     vi.useFakeTimers();
     try {

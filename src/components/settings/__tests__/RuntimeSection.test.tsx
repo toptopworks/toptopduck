@@ -113,7 +113,7 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
   it("renders the default-runtime control above the tab switcher, mounted on both tabs", async () => {
     // The card is a section-level preamble: it sits above the tabs (document
     // order) and stays mounted across a sub-tab switch -- gating it on either
-    // tab would silently reset its draft.
+    // tab would silently reset both rows' drafts.
     renderSection();
     const combobox = await screen.findByRole("combobox", { name: "Default runtime" });
     const tablist = screen.getByRole("tablist");
@@ -129,6 +129,9 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
         (el) => el.closest("[data-slot=\"settings-card\"]"),
       ),
     );
+    // closest returns null outside any card; without this check two nulls
+    // would still collapse to one member and pass the size assert (#1271).
+    expect(cards.has(null)).toBe(false);
     expect(cards.size).toBe(1);
 
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
