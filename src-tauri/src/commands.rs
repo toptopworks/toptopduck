@@ -653,23 +653,35 @@ fn remove_registry_record(
     Ok(())
 }
 
-/// Apply the memory-toggle write for an echoed path: the same
-/// dual-spelling rule as the rename -- a strict write whose record is
-/// stored under a spelling the re-canonicalized key misses (a junction
-/// swapped under the path, a record predating the filesystem's final
-/// form) must not strand the toggle: retry the verbatim echo before
-/// surfacing the refusal (issue #1529, on the #1392 review's rule).
+/// Apply a strict per-record registry write for an echoed path under the
+/// dual-spelling rule (the rename face's, issue #1392): a record stored
+/// under a spelling the re-canonicalized key misses (a junction swapped
+/// under the path, a record predating the filesystem's final form) must
+/// not strand the write -- retry the verbatim echo before surfacing the
+/// refusal. Shared by the memory + extraction toggles (issue #1530).
+fn set_registry_toggle_dual_spelling(
+    registry: &crate::workspace::WorkspaceRegistry,
+    workspace: &str,
+    write: impl Fn(&crate::workspace::WorkspaceRegistry, &std::path::Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let key = resolve_registry_key(workspace);
+    let attempt = write(registry, &key);
+    if attempt.is_err() && key != std::path::Path::new(workspace) {
+        return write(registry, std::path::Path::new(workspace));
+    }
+    attempt
+}
+
+/// The memory toggle's command face (issue #1529) over the shared
+/// dual-spelling rule.
 fn set_memory_registry_toggle(
     registry: &crate::workspace::WorkspaceRegistry,
     workspace: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    let key = resolve_registry_key(workspace);
-    let attempt = registry.set_memory_enabled(&key, enabled);
-    if attempt.is_err() && key != std::path::Path::new(workspace) {
-        return registry.set_memory_enabled(std::path::Path::new(workspace), enabled);
-    }
-    attempt
+    set_registry_toggle_dual_spelling(registry, workspace, |registry, key| {
+        registry.set_memory_enabled(key, enabled)
+    })
 }
 
 #[tauri::command]
@@ -849,17 +861,17 @@ pub async fn set_workspace_dataset_privacy(
     .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
 }
 
-/// The memory panel's list face (issue #1529): the workspace's memory rows
-/// (title, category, hook) with each file's absolute path as the
-/// reveal-in-folder target. A missing memory directory lists empty -- the
-/// zero-footprint fresh workspace.
+/// The memory panel's full read (issue #1529, calibrated by #1530): the
+/// workspace's memory rows (title, category, hook, absolute reveal target)
+/// plus the index usage percentage the color scale renders. A missing
+/// memory directory lists empty (zero-footprint fresh workspace).
 #[tauri::command]
 pub fn list_workspace_memory(
     workspace: String,
-) -> Result<Vec<crate::workspace::memory::ListedMemory>, String> {
-    Ok(crate::workspace::memory::list(std::path::Path::new(
-        &workspace,
-    )))
+) -> Result<crate::workspace::memory::ListedMemorySection, String> {
+    Ok(crate::workspace::memory::list_section(
+        std::path::Path::new(&workspace),
+    ))
 }
 
 /// Read a workspace's memory toggle (issue #1529): `true` unless the record
@@ -885,6 +897,44 @@ pub fn set_workspace_memory_enabled(
     set_memory_registry_toggle(&registry, &workspace, enabled)
 }
 
+/// Read a workspace's extraction toggle (issue #1530): OFF unless the
+/// record opted in (ADR-0147 Decision 6 -- the write path's own gate,
+/// deliberately separate from the memory read toggle).
+#[tauri::command]
+pub fn get_workspace_auto_extraction(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    workspace: String,
+) -> bool {
+    registry.auto_extraction(&resolve_registry_key(&workspace))
+}
+
+/// Write a workspace's extraction toggle (issue #1530). Strict like the
+/// memory toggle's write, on the same dual-spelling rule.
+#[tauri::command]
+pub fn set_workspace_auto_extraction(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    workspace: String,
+    enabled: bool,
+) -> Result<(), String> {
+    set_registry_toggle_dual_spelling(&registry, &workspace, |registry, key| {
+        registry.set_auto_extraction(key, enabled)
+    })
+}
+
+/// The panel's extraction face (issue #1530): the workspace's latest
+/// extraction status (running / skipped + reason / no new facts /
+/// extracted titles / failed detail). `None` = no extraction ever ran.
+/// The lookup rides the same canonical key discipline as the toggle faces
+/// (issue #1530 review: a raw-spelling miss would silently blank the
+/// status line).
+#[tauri::command]
+pub fn get_workspace_extraction_status(
+    hub: State<'_, Arc<crate::workspace::extract_runtime::ExtractionHub>>,
+    workspace: String,
+) -> Option<crate::workspace::extract_runtime::ExtractionStatus> {
+    hub.status(&resolve_registry_key(&workspace))
+}
+
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
 /// from the store. Returns immediately -- it does NOT wait for an in-flight
 /// ask. If a turn is in flight, cancel fires (HTTP still runs to completion
@@ -902,10 +952,16 @@ pub fn set_workspace_memory_enabled(
 /// Returns `true` when cleanup happened, `false` for a normal close or when
 /// the lock was unavailable (ask in flight).
 #[tauri::command]
-pub fn close_session(
+pub async fn close_session(
     store: State<'_, Arc<SessionStore>>,
+    extraction: State<'_, Arc<crate::workspace::extract_runtime::ExtractionHub>>,
     session_id: String,
 ) -> Result<bool, SessionError> {
+    // Issue #1530: abort + bounded-drain the session's extraction lane
+    // first (in-flight model calls void on the generation bump; the drain
+    // waits at most a bounded window, so a close never hangs on a slow
+    // call).
+    extraction.close_and_drain(&session_id);
     // Exempt from resolve_session (issue #1412): the typed id keys into
     // close_and_cleanup_empty, which addresses by id, not by handle.
     let id = SessionId::parse(&session_id)?;
@@ -1294,6 +1350,7 @@ pub async fn ask(
     live: State<'_, LiveProviderConfig>,
     skills_root: State<'_, SkillsRoot>,
     agents_root: State<'_, crate::agents::AgentsRoot>,
+    extraction: State<'_, Arc<crate::workspace::extract_runtime::ExtractionHub>>,
     session_id: String,
     question: String,
     // The user's staged skill names (ADR-0112 picker channel, calibrated by
@@ -1310,6 +1367,17 @@ pub async fn ask(
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     reject_if_in_flight(&handle)?;
+    // Issue #1530: the after-turn extraction's gate inputs, read before the
+    // turn -- external ACP turns never extract (the follow-up ticket's
+    // scope), and only a bound workspace has a memory store to write.
+    let is_external_turn = handle.runtime_and_posture().0.is_some();
+    let bound_workspace = handle
+        .session_lock()
+        .ok()
+        .and_then(|s| s.workspace().map(std::path::Path::to_path_buf));
+    // The turn body moves `question` into its closure; the extraction fire
+    // below needs it after the settle.
+    let question_for_extraction = question.clone();
     // ADR-0080/0083: the session's tiered-approval gateway rides the turn.
     // The store-attached ApprovalState is the SAME instance the
     // `respond_tool_approval` command wakes, so an in-flow approval card
@@ -1432,7 +1500,42 @@ pub async fn ask(
     })
     .await
     .map_err(|e| SessionError::Engine(e.to_string()))??;
+    // Issue #1530: fire-and-forget the after-turn extraction. Only a
+    // SETTLED built-in turn with a bound workspace fires -- Failed and
+    // Cancelled turns carry no settled facts. The reply never waits on
+    // this: the hub's scheduler owns its own thread, and a close aborts +
+    // drains it bounded.
+    if !is_external_turn {
+        if let Some(workspace) = bound_workspace {
+            if let Some(response_text) = settled_reply_for_extraction(&outcome) {
+                extraction.submit_turn(
+                    &session_id,
+                    &workspace,
+                    &question_for_extraction,
+                    &response_text,
+                    // v1's built-in table has no memory-write tool (the
+                    // guard's reserved names fire only when that tool
+                    // exists); the turn's tool names arrive as the empty
+                    // set by construction.
+                    Vec::new(),
+                );
+            }
+        }
+    }
     Ok(outcome)
+}
+
+/// Issue #1530's firing contract, extracted for its truth-table pin: the
+/// settled-reply projection. `Some(text)` only for a settled outcome --
+/// Failed and Cancelled turns carry no settled facts, so they never fire
+/// an extraction. The caller additionally gates on the turn being built-in
+/// (external ACP turns never fire) and a bound workspace.
+fn settled_reply_for_extraction(outcome: &TurnOutcome) -> Option<String> {
+    match outcome {
+        TurnOutcome::Materialized { body, .. } => Some(body.clone().unwrap_or_default()),
+        TurnOutcome::Textual { body, .. } => Some(body.clone()),
+        TurnOutcome::Failed(_) | TurnOutcome::Cancelled(_) => None,
+    }
 }
 
 /// Cancel the named session's in-flight turn (ADR-0021, issue #28). Fires THAT
@@ -6533,6 +6636,46 @@ mod tests {
         assert!(
             listing.degraded,
             "the corrupt read carries the flag true -- the tell"
+        );
+    }
+
+    // Issue #1530's firing contract, pinned as a truth table: the settled
+    // outcomes (Materialized and Textual) project their reply text; Failed
+    // and Cancelled carry no settled facts and never fire an extraction.
+    // (The command's remaining gates -- the external-turn arm and the
+    // bound workspace -- wrap this projection; they are wiring, not
+    // decision, and ride the fire block they guard.)
+    #[test]
+    fn the_extraction_firing_contract_projects_settled_replies_only() {
+        let materialized = TurnOutcome::Materialized {
+            promotions: vec![],
+            viz: None,
+            body: Some("settled materialized".to_string()),
+            assumption: None,
+        };
+        assert_eq!(
+            settled_reply_for_extraction(&materialized).as_deref(),
+            Some("settled materialized")
+        );
+        let textual = TurnOutcome::Textual {
+            text_kind: crate::model::TextKind::Agent,
+            body: "settled textual".to_string(),
+            assumption: None,
+        };
+        assert_eq!(
+            settled_reply_for_extraction(&textual).as_deref(),
+            Some("settled textual")
+        );
+        let failed = TurnOutcome::Failed(crate::model::TurnFailure::Execute {
+            detail: "step cap".to_string(),
+        });
+        assert!(
+            settled_reply_for_extraction(&failed).is_none(),
+            "a failed turn carries no settled facts"
+        );
+        assert!(
+            settled_reply_for_extraction(&TurnOutcome::Cancelled(None)).is_none(),
+            "a cancelled turn carries no settled facts"
         );
     }
 }

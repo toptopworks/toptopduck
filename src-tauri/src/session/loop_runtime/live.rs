@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use rig_agent::agent::ModelHandle;
 use rig_core::client::CompletionClient;
+use rig_core::completion::CompletionModel as _;
 use rig_core::providers::{anthropic, openai};
 
 use crate::model::Protocol;
@@ -54,22 +55,23 @@ pub(crate) fn turn_loop_for(provider: Arc<dyn Provider>) -> Result<LoopRuntime, 
     }
 }
 
-/// Construct the real upstream client + model handle from live facts.
-/// Profile freshness survives the shared egress client: key and base ride
-/// this per-turn construction into the provider builder itself, so a
-/// mid-session profile switch reroutes the very next turn (the
-/// protocol-flip pin rides the wire-level integration tests) while the
-/// connection pool beneath it stays shared (#926).
-fn live_runtime(facts: TurnModelFacts) -> Result<LoopRuntime, Termination> {
+/// Construct the real upstream client + model handle from live facts (the
+/// shared construction behind both live faces: the session loop's runner
+/// and the extraction one-shot). Profile freshness survives the shared
+/// egress client: key and base ride this per-turn construction into the
+/// provider builder itself, so a mid-session profile switch reroutes the
+/// very next turn (the protocol-flip pin rides the wire-level integration
+/// tests) while the connection pool beneath it stays shared (#926).
+fn handle_from_facts(facts: &TurnModelFacts) -> Result<ModelHandle, Termination> {
     // Key first, then scheme, so
     // a misconfigured profile surfaces the same first refusal it always
     // did (a keyless https base reports NotWired, not InvalidConfig).
-    let api_key = facts.api_key.ok_or(Termination::NotWired)?;
+    let api_key = facts.api_key.clone().ok_or(Termination::NotWired)?;
     validate_http_base_url(&facts.base_url)
         .map_err(|e| Termination::InvalidConfig(e.to_string()))?;
     let base = facts.base_url.trim_end_matches('/');
     let http = egress_client().map_err(termination_for_build_failure)?;
-    let handle = match facts.protocol {
+    Ok(match facts.protocol {
         // The app's anthropic base is the host root; rig's normalization
         // keeps it there and appends `/v1/messages` itself, so the request
         // URL equals the built-in adapter's bit-for-bit.
@@ -96,18 +98,71 @@ fn live_runtime(facts: TurnModelFacts) -> Result<LoopRuntime, Termination> {
                 .map_err(termination_for_build_failure)?
                 .completion_model(&facts.model),
         ),
-    };
-    // The stamped output cap (issue #1001) and the serving model name
-    // (ADR-0130 Decision 4's occupancy-denominator key, #1290) reads the
-    // SAME facts that built
-    // the handle above, so both are keyed on the exact model serving the
-    // turn -- a profile switch lands handle + cap + denominator together,
-    // never apart.
+    })
+}
+
+/// Construct the session loop's per-turn runner from live facts. The
+/// stamped output cap (issue #1001) and the serving model name
+/// (ADR-0130 Decision 4's occupancy-denominator key, #1290) reads the
+/// SAME facts that built
+/// the handle above, so both are keyed on the exact model serving the
+/// turn -- a profile switch lands handle + cap + denominator together,
+/// never apart.
+fn live_runtime(facts: TurnModelFacts) -> Result<LoopRuntime, Termination> {
+    let handle = handle_from_facts(&facts)?;
     Ok(LoopRuntime::live(
         handle,
         facts.protocol,
         output_cap::output_token_cap(&facts.model),
         facts.model.clone(),
+    ))
+}
+
+/// The extraction engine's single model call (issue #1530): one
+/// NON-streaming round-trip over live facts -- the same dispatch
+/// [`turn_loop_for`] applies, so a production extraction constructs the
+/// REAL upstream clients (never the completion face only the scripted
+/// fake answers). Blocking by design: the extraction lane owns a
+/// dedicated thread, so this parks THAT thread for the call's duration,
+/// never a tokio worker. `Err` carries the completion face's
+/// [`ProviderError`] vocabulary.
+pub(crate) fn one_shot_tool_turn(
+    facts: TurnModelFacts,
+    request: &crate::provider::tool_calling::ToolTurnRequest,
+) -> Result<crate::provider::tool_calling::ToolTurnOutcome, crate::provider::ProviderError> {
+    use crate::provider::ProviderError;
+    let handle = handle_from_facts(&facts).map_err(|term| match term {
+        Termination::NotWired => ProviderError::NotWired,
+        Termination::InvalidConfig(detail) => ProviderError::InvalidConfig(detail),
+        other => ProviderError::Unavailable(format!("{other:?}")),
+    })?;
+    // The loop's split, one message deep: the LAST message is the prompt,
+    // everything before it the history (the extraction request carries
+    // exactly one user message; no tools are advertised).
+    let mut history = super::model::to_rig_history(&request.messages);
+    let Some(prompt) = history.pop() else {
+        return Err(ProviderError::Unavailable(
+            "empty extraction request: no prompt message".to_string(),
+        ));
+    };
+    let completion = handle
+        .completion_request(prompt)
+        .preamble(request.system.clone())
+        .messages(history)
+        .max_tokens(u64::from(request.max_tokens))
+        .build();
+    let response = tauri::async_runtime::block_on(handle.completion(completion))
+        .map_err(|err| ProviderError::Unavailable(err.to_string()))?;
+    // Terminal text only -- the request advertises no tools, so the
+    // round's text items ARE the reply (any non-text content drops).
+    let mut text = String::new();
+    for item in response.choice {
+        if let rig_core::message::AssistantContent::Text(chunk) = item {
+            text.push_str(&chunk.text);
+        }
+    }
+    Ok(crate::provider::tool_calling::ToolTurnOutcome::from(
+        crate::provider::tool_calling::ToolTurnReply::Text(text),
     ))
 }
 

@@ -150,6 +150,7 @@ const { appConfigWith } = vi.hoisted(() => {
       enabled_agents: [],
       materialized_builtin_agents: [],
       disabled_skills: [],
+      memory_extraction_profile: null,
     };
   }
   return { appConfigWith };
