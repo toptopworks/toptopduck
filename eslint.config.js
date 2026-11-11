@@ -16,7 +16,7 @@ import tseslint from "typescript-eslint";
 // churning readable code. Mirrors `cargo fmt --check` on the Rust side.
 // `lint` script and CI run `eslint .` with --max-warnings 0 (parity with cargo).
 export default tseslint.config(
-  { ignores: ["dist"] },
+  { ignores: ["dist", "target"] },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ["**/*.{ts,tsx}"],
