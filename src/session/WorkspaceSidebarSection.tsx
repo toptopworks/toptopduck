@@ -8,10 +8,11 @@
 // and locale keys are the shared parts) as the "New workspace" entry.
 //
 // Mutation stance: rename / remove are explicit user actions served by
-// strict IPC commands; a refusal surfaces inline in the rename modal or as
-// a failed mutation (the group simply stays). Every success invalidates the
-// workspace listing so the pill / popover / sidebar faces re-derive from
-// the registry (issue #1392's three-faces rule).
+// strict IPC commands; a refusal surfaces inline in the rename modal, or
+// under the failed group's own row when no modal remains to carry it (the
+// remove confirm is gone by the time the command refuses). Every success
+// invalidates the workspace listing so the pill / popover / sidebar faces
+// re-derive from the registry (issue #1392's three-faces rule).
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
@@ -204,6 +205,15 @@ export function WorkspaceSidebarSection({
         setFolderOpenFailure({ path, message: describeError(e, intl) });
       });
   };
+  // A refused remove (#1547): the confirm dialog is already gone when the
+  // registry command refuses, so the failure surfaces under the group's own
+  // row -- the same #1543 row-alert posture, one live slot (a newer group's
+  // refusal displaces an older one). The clear is path-guarded: only that
+  // group's own successful retry retires it.
+  const [removeFailure, setRemoveFailure] = useState<{
+    path: string;
+    message: string;
+  } | null>(null);
 
   function toggleGroup(path: string) {
     const next = new Set(expanded);
@@ -331,12 +341,20 @@ export function WorkspaceSidebarSection({
 
   const remove = useMutation({
     mutationFn: (path: string) => removeWorkspace(path),
-    onSuccess: invalidate,
-    // The confirm dialog is already gone when the mutation runs, so a
-    // refusal has no modal to surface in: log it -- the ArtifactHeader
-    // posture (the record stays, the action is simply retryable).
-    onError: (e) =>
-      log.warn("WorkspaceSidebarSection", "removeWorkspace failed", e),
+    onSuccess: (_data, path) => {
+      invalidate();
+      // A stale slot for a re-registered path must not leak into the fresh
+      // group: the success retires that path's refusal only.
+      setRemoveFailure((prev) => (prev?.path === path ? null : prev));
+    },
+    // The confirm dialog is already gone when the mutation runs, so the
+    // refusal has no modal to surface in: it lands under the failed group's
+    // own row (#1547, the #1543 row-alert posture -- the record stays, the
+    // action is simply retryable). The log keeps the technical detail.
+    onError: (e, path) => {
+      log.warn("WorkspaceSidebarSection", "removeWorkspace failed", e);
+      setRemoveFailure({ path, message: describeError(e, intl) });
+    },
   });
 
   const rename = useMutation({
@@ -567,6 +585,13 @@ export function WorkspaceSidebarSection({
                   // (#1543) -- the menu is gone by then, the row stays.
                   <p className="text-destructive m-0 py-1 pl-7 text-xs" role="alert">
                     {folderOpenFailure.message}
+                  </p>
+                )}
+                {removeFailure?.path === g.path && (
+                  // A refused remove surfaces under its group's row (#1547)
+                  // -- the confirm dialog is gone by then, the row stays.
+                  <p className="text-destructive m-0 py-1 pl-7 text-xs" role="alert">
+                    {removeFailure.message}
                   </p>
                 )}
                 {open && shown.length > 0 && (

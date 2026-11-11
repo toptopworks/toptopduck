@@ -5,7 +5,11 @@
 // surface. The suite pins the scoping (only the failing group's row shows
 // the alert) and the clear (that group's successful retry retires it; a
 // sibling group's success does not).
-// The modal-off-the-menu faces (rename / remove / datasets / memory) have
+// Issue #1547 rides the same pipeline for the remove mutation: the confirm
+// dialog is already gone when the registry command refuses, so the refusal
+// surfaces under the failed group's own row -- same scoping, same
+// path-guarded clear.
+// The remaining modal-off-the-menu faces (rename / datasets / memory) have
 // their own suites; this one rides the section alone with empty groups.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,12 +21,19 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
 }));
 
+vi.mock("../../api", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  removeWorkspace: vi.fn(),
+}));
+
 import { openPath } from "@tauri-apps/plugin-opener";
+import { removeWorkspace } from "../../api";
 import { WorkspaceSidebarSection } from "../WorkspaceSidebarSection";
 import { withIntl } from "../../components/common/__tests__/helpers";
 import type { WorkspaceGroup } from "../sidebarModel";
 
 const mockedOpenPath = vi.mocked(openPath);
+const mockedRemoveWorkspace = vi.mocked(removeWorkspace);
 
 function group(overrides: Partial<WorkspaceGroup> = {}): WorkspaceGroup {
   return { path: "/w/alpha", label: "Alpha", missing: false, entries: [], ...overrides };
@@ -113,6 +124,57 @@ describe("WorkspaceSidebarSection folder-open failure (#1543)", () => {
     await openGroupMenu(1);
     activateItem(screen.getByRole("menuitem", { name: "打开文件夹" }));
     await waitFor(() => expect(mockedOpenPath).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("alert")).toBe(alert);
+  });
+});
+
+describe("WorkspaceSidebarSection remove refusal (#1547)", () => {
+  beforeEach(() => {
+    mockedRemoveWorkspace.mockResolvedValue(undefined);
+  });
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /** The remove path's full gesture: the group menu's remove item stages
+   *  the strong-confirm dialog, its destructive action fires the mutation. */
+  async function removeGroup(index = 0) {
+    await openGroupMenu(index);
+    activateItem(screen.getByRole("menuitem", { name: "从列表中移除" }));
+    fireEvent.click(screen.getByRole("button", { name: "移除" }));
+  }
+
+  it("surfaces a refused remove as an alert under its own group row, cleared by that group's retry", async () => {
+    mockedRemoveWorkspace.mockRejectedValueOnce(new Error("remove refused"));
+    renderSection([group(), group({ path: "/w/beta", label: "Beta" })]);
+    await removeGroup();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("remove refused");
+    // Scoped to the failing group's row: the sibling group shows nothing.
+    expect(within(groupRowLi("Alpha")).getByRole("alert")).toBe(alert);
+    expect(within(groupRowLi("Beta")).queryByRole("alert")).not.toBeInTheDocument();
+    // A successful retry of the same group retires the alert.
+    await removeGroup();
+    await waitFor(() =>
+      expect(mockedRemoveWorkspace).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+  });
+
+  // The clear is path-guarded (the #1543 posture): a sibling group's
+  // successful remove must not retire the failing group's alert -- only
+  // that group's own successful retry clears it.
+  it("keeps a group's alert when a sibling group removes successfully", async () => {
+    mockedRemoveWorkspace.mockRejectedValueOnce(new Error("alpha refused"));
+    renderSection([group(), group({ path: "/w/beta", label: "Beta" })]);
+    await removeGroup();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("alpha refused");
+    // Beta's successful remove leaves Alpha's alert live.
+    await removeGroup(1);
+    await waitFor(() => expect(mockedRemoveWorkspace).toHaveBeenCalledTimes(2));
     expect(screen.getByRole("alert")).toBe(alert);
   });
 });
