@@ -366,8 +366,8 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
       .catch((e: unknown) => {
         // Inline above the dialog footer (the panel's banner sits behind
         // the modal scrim); the dialog stays open for retry and the park
-        // stays parked -- its paging keeps working while the submit
-        // itself re-parses the workbook.
+        // stays parked -- its paging keeps working and the retry reuses
+        // the same parked parse (#1554).
         setGuidanceError({ message: describeError(e, intl), kind: "shell", detail: null });
       })
       .finally(() => setGuidedLoading(false));

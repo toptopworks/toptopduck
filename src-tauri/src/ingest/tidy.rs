@@ -1,8 +1,9 @@
 //! Best-effort Excel auto-tidy (ADR-0015/0042). Takes a raw sheet's cached cell
-//! grid + merged-cell ranges and produces a tidy single-header table when the
+//! grid + merged-cell ranges and detects the single header row when the
 //! structure can be read *confidently*; otherwise signals
 //! [`TidyOutcome::NeedsGuidance`] so the UI can gather explicit header/skip
-//! choices (guided fallback). The auto algorithm's own result is never recorded
+//! choices (guided fallback). Row selection/materialization lives in the
+//! rectify step, not here. The auto algorithm's own result is never recorded
 //! as rectify params (ADR-0042) -- resume re-runs the current version.
 //!
 //! Two deterministic transforms, in order:
@@ -23,26 +24,21 @@ use calamine::Data;
 use crate::ingest::excel::SheetRows;
 use crate::model::GuidanceReason;
 
-/// A sheet auto-tidied into a single-header table: the materialized rows (first
-/// row = header) still as `Data` cells, so the shared CSV renderer + DuckDB type
-/// inference apply uniformly (ADR-0032 single source of truth).
-#[derive(Debug, Clone, PartialEq)]
-pub struct TidiedSheet {
-    pub rows: Vec<Vec<Data>>,
-    /// 1-based absolute row number of the detected header in the RAW sheet
-    /// (issue #751). Forward-fill never changes the row count, so the index
-    /// `auto_tidy` computes on the raw grid is the header's position in the
-    /// sheet the user sees -- the same row-number semantics the guided rectify
-    /// uses (ADR-0015). Lets the guided dialog pre-fill the header pick for a
-    /// sheet the auto algorithm resolved instead of restarting from row 1.
-    pub header_row: u32,
-}
-
-/// Outcome of auto-tidying one sheet.
+/// Outcome of auto-tidying one sheet: a detection result, not a materialized
+/// table (issue #1554) -- row selection lives in the rectify step
+/// (`apply_rectify`), so detection never clones the grid.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TidyOutcome {
-    /// The sheet tidied confidently into a single-header table.
-    Tidied(TidiedSheet),
+    /// The sheet read confidently as a single-header table.
+    Tidied {
+        /// 1-based absolute row number of the detected header in the RAW sheet
+        /// (issue #751). Forward-fill never changes the row count, so the
+        /// index computed on the raw grid is the header's position in the
+        /// sheet the user sees -- the same row-number semantics the guided
+        /// rectify uses (ADR-0015). Lets the guided dialog pre-fill the header
+        /// pick for a sheet the auto algorithm resolved.
+        header_row: u32,
+    },
     /// The structure can't be confidently read -- the UI must gather explicit
     /// header/skip choices (ADR-0015 guided fallback). Carries WHY the auto
     /// algorithm gave up (issue #750) so the dialog can surface it under the
@@ -50,12 +46,22 @@ pub enum TidyOutcome {
     NeedsGuidance(GuidanceReason),
 }
 
-/// Auto-tidy one sheet (ADR-0015). See the module docs for the transform
-/// sequence and the confidence gate.
+/// Auto-tidy one sheet (ADR-0015): detect the header row, or why it can't be
+/// read confidently. See the module docs for the transform sequence and the
+/// confidence gate. Borrow-only on merge-free sheets (the common case); a
+/// sheet with merged ranges is detected on a forward-filled copy (issue
+/// #1554 -- no full-grid clone when there is nothing to fill).
 pub fn auto_tidy(sheet: &SheetRows) -> TidyOutcome {
-    // Clone so forward-fill + row selection don't mutate the caller's grid.
-    let mut rows = sheet.rows.clone();
-    forward_fill_merges(&mut rows, &sheet.merges);
+    // Forward-fill only touches merged ranges, so a merge-free sheet is
+    // detected on a borrow of the caller's grid.
+    let mut filled: Vec<Vec<Data>>;
+    let rows: &[Vec<Data>] = if sheet.merges.is_empty() {
+        &sheet.rows
+    } else {
+        filled = sheet.rows.clone();
+        forward_fill_merges(&mut filled, &sheet.merges);
+        &filled
+    };
 
     // Indices of non-blank rows (after forward-fill, so a filled merge region
     // counts as non-blank).
@@ -77,7 +83,7 @@ pub fn auto_tidy(sheet: &SheetRows) -> TidyOutcome {
             // header. Multi-row all-text headers can't be auto-detected without
             // a type anchor -- an accepted auto-tidy limitation the user can
             // override via guided load.
-            first_multi_col_row(&rows, &non_blank).unwrap_or(non_blank[0])
+            first_multi_col_row(rows, &non_blank).unwrap_or(non_blank[0])
         }
         Some(data_idx) => {
             // Header zone = non-blank rows strictly above the first data row.
@@ -113,19 +119,11 @@ pub fn auto_tidy(sheet: &SheetRows) -> TidyOutcome {
         }
     };
 
-    // Materialize: the header row, then every row below it. Leading title/blank
-    // rows above the header are dropped; so is anything between the header and
-    // the first data row (already guaranteed non-header-like above).
-    let mut tidy = Vec::with_capacity(rows.len().saturating_sub(header_idx));
-    tidy.push(rows[header_idx].clone());
-    tidy.extend(rows[header_idx + 1..].iter().cloned());
     // The header's 1-based raw row (issue #751). An .xlsx grid can't outgrow
     // u32 (1,048,576 rows max), so the conversion never truncates.
-    let header_row = u32::try_from(header_idx + 1).expect("xlsx row count fits u32");
-    TidyOutcome::Tidied(TidiedSheet {
-        rows: tidy,
-        header_row,
-    })
+    TidyOutcome::Tidied {
+        header_row: u32::try_from(header_idx + 1).expect("xlsx row count fits u32"),
+    }
 }
 
 /// Forward-fill every merged range with its top-left cell's value. Only
@@ -233,9 +231,9 @@ mod tests {
             merges,
         }
     }
-    fn tidied_sheet(o: TidyOutcome) -> TidiedSheet {
+    fn tidied_header(o: TidyOutcome) -> u32 {
         match o {
-            TidyOutcome::Tidied(t) => t,
+            TidyOutcome::Tidied { header_row } => header_row,
             TidyOutcome::NeedsGuidance(r) => panic!("expected Tidied, got NeedsGuidance({r:?})"),
         }
     }
@@ -271,12 +269,9 @@ mod tests {
             ],
             vec![],
         );
-        let t = tidied_sheet(auto_tidy(&g));
-        // Header preserved, all data rows retained -- nothing to skip.
-        assert_eq!(t.rows.len(), 3);
-        assert_eq!(t.rows[0], row(&[s("id"), s("name"), s("score")]));
+        let t = tidied_header(auto_tidy(&g));
         // The header sits on the very first raw row (issue #751).
-        assert_eq!(t.header_row, 1);
+        assert_eq!(t, 1);
     }
 
     #[test]
@@ -290,11 +285,9 @@ mod tests {
             ],
             vec![],
         );
-        let t = tidied_sheet(auto_tidy(&g));
-        assert_eq!(t.rows[0], row(&[s("id"), s("name")])); // title dropped
-        assert_eq!(t.rows.len(), 2); // header + 1 data row
-                                     // The header sits on raw row 2, below the banner title (issue #751).
-        assert_eq!(t.header_row, 2);
+        let t = tidied_header(auto_tidy(&g));
+        // The header sits on raw row 2, below the banner title (issue #751).
+        assert_eq!(t, 2);
     }
 
     #[test]
@@ -308,12 +301,11 @@ mod tests {
             ],
             vec![merge(1, 1, 2, 1)],
         );
-        let t = tidied_sheet(auto_tidy(&g));
-        assert_eq!(t.rows[2][1], s("East")); // merged cell unmerged (forward-filled)
-        assert_eq!(t.rows[0], row(&[s("id"), s("region"), s("amt")]));
+        let t = tidied_header(auto_tidy(&g));
         // Forward-fill never changes the row count, so the header keeps its
-        // raw position (issue #751).
-        assert_eq!(t.header_row, 1);
+        // raw position (issue #751); the fill itself is pinned directly on
+        // forward_fill_merges above.
+        assert_eq!(t, 1);
     }
 
     #[test]
@@ -376,10 +368,8 @@ mod tests {
             ],
             vec![],
         );
-        let t = tidied_sheet(auto_tidy(&g));
-        assert_eq!(t.rows[0], row(&[s("name"), s("city")]));
-        assert_eq!(t.rows.len(), 3);
-        assert_eq!(t.header_row, 1);
+        let t = tidied_header(auto_tidy(&g));
+        assert_eq!(t, 1);
     }
 
     #[test]
@@ -392,10 +382,8 @@ mod tests {
             ],
             vec![],
         );
-        let t = tidied_sheet(auto_tidy(&g));
-        assert_eq!(t.rows[0], row(&[s("name"), s("city")]));
-        assert_eq!(t.rows.len(), 2);
-        assert_eq!(t.header_row, 2); // the banner title's row is not the header
+        let t = tidied_header(auto_tidy(&g));
+        assert_eq!(t, 2); // the banner title's row is not the header
     }
 
     #[test]
@@ -427,10 +415,8 @@ mod tests {
         // A narrow one-column table (header + data) tidies via the
         // single-column fallback, not NeedsGuidance.
         let g = sheet(vec![row(&[s("id")]), row(&[i(1)]), row(&[i(2)])], vec![]);
-        let t = tidied_sheet(auto_tidy(&g));
-        assert_eq!(t.rows[0], row(&[s("id")]));
-        assert_eq!(t.rows.len(), 3);
-        assert_eq!(t.header_row, 1); // narrow table: the single column's header
+        let t = tidied_header(auto_tidy(&g));
+        assert_eq!(t, 1); // narrow table: the single column's header
     }
 
     #[test]
@@ -445,10 +431,8 @@ mod tests {
             ],
             vec![merge(0, 0, 0, 2)],
         );
-        let t = tidied_sheet(auto_tidy(&g));
-        assert_eq!(t.rows[0], row(&[s("id"), s("name"), s("score")]));
-        assert_eq!(t.rows.len(), 2);
+        let t = tidied_header(auto_tidy(&g));
         // The merged banner occupies row 1; the real header sits on row 2.
-        assert_eq!(t.header_row, 2);
+        assert_eq!(t, 2);
     }
 }

@@ -159,9 +159,7 @@ pub fn guidance_states(sheets: &[SheetRows]) -> Vec<GuidanceSheetState> {
     sheets
         .iter()
         .map(|sheet| match auto_tidy(sheet) {
-            TidyOutcome::Tidied(t) => GuidanceSheetState::AutoTidied {
-                header_row: t.header_row,
-            },
+            TidyOutcome::Tidied { header_row } => GuidanceSheetState::AutoTidied { header_row },
             TidyOutcome::NeedsGuidance(reason) => GuidanceSheetState::NeedsGuidance { reason },
         })
         .collect()
@@ -209,8 +207,17 @@ pub fn apply_rectify(
     sheet: &SheetRows,
     rectify: &SheetRectify,
 ) -> Result<Vec<Vec<Data>>, LoadError> {
-    let mut rows = sheet.rows.clone();
-    forward_fill_merges(&mut rows, &sheet.merges);
+    // Forward-fill only touches merged ranges, so a merge-free sheet (the
+    // common case) rectifies on a borrow of the caller's grid -- no full-grid
+    // clone when there is nothing to fill (issue #1554).
+    let mut filled: Vec<Vec<Data>>;
+    let rows: &[Vec<Data>] = if sheet.merges.is_empty() {
+        &sheet.rows
+    } else {
+        filled = sheet.rows.clone();
+        forward_fill_merges(&mut filled, &sheet.merges);
+        &filled
+    };
     if rectify.header_row == 0 || rectify.header_row as usize > rows.len() {
         return Err(LoadError::Parse {
             detail: format!(

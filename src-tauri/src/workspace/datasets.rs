@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use calamine::Data;
 use duckdb::{AccessMode, Config, Connection};
@@ -388,8 +388,9 @@ pub fn add(workspace: &Path, src: &Path) -> Result<DatasetEntry, StoreError> {
 }
 
 /// One parked preview: the (workspace root, source path) key + the full
-/// parse behind it.
-type ParkedPreview = ((String, String), Vec<ingest::excel::SheetRows>);
+/// parse behind it, shared (Arc) between the dialog's paging and the guided
+/// commit (issue #1554: a large workbook parses once, not twice).
+type ParkedPreview = ((String, String), Arc<Vec<ingest::excel::SheetRows>>);
 
 /// The parked workbook parses behind [`preview`] (the guided import's
 /// zero-reparse paging, issue #1552): keyed by (workspace root, source
@@ -422,7 +423,7 @@ fn park_key(workspace: &Path, src: &Path) -> (String, String) {
 /// Read-only: the working set and the manifest are untouched.
 pub fn preview(workspace: &Path, src: &Path) -> Result<GuidanceRequest, StoreError> {
     excel_source(src)?;
-    let sheets = ingest::excel::read_non_empty_sheets(src).map_err(StoreError::from)?;
+    let sheets = Arc::new(ingest::excel::read_non_empty_sheets(src).map_err(StoreError::from)?);
     let states = ingest::excel::guidance_states(&sheets);
     let request = ingest::excel::build_guidance(src, &sheets, &states);
     let key = park_key(workspace, src);
@@ -517,8 +518,10 @@ fn materialize_sheet(
 /// BOTH names against the manifest and the batch. Transactional on the
 /// manifest: all sheets rectify and materialize before one manifest write,
 /// so a failure leaves the manifest untouched (partially-landed store files
-/// are unreferenced orphans the sweep removes). Re-parses the workbook --
-/// the parked parse is only the dialog's paging cache.
+/// are unreferenced orphans the sweep removes). Reuses the preview's parked
+/// parse (issue #1554) -- one parse per workbook, and what lands is exactly
+/// what the dialog showed -- falling back to a fresh parse when no preview
+/// parked one.
 pub fn add_guided(
     workspace: &Path,
     src: &Path,
@@ -527,7 +530,19 @@ pub fn add_guided(
     excel_source(src)?;
     let _guard = manifest_lock();
     let mut entries = load_entries(workspace)?;
-    let sheets = ingest::excel::read_non_empty_sheets(src).map_err(StoreError::from)?;
+    // Peek (never take): a failed commit keeps the park for the dialog's
+    // retry paging; a landed one drops it at the tail below.
+    let parked = {
+        let key = park_key(workspace, src);
+        let park = PREVIEW_PARK.lock().unwrap_or_else(|p| p.into_inner());
+        park.iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, sheets)| Arc::clone(sheets))
+    };
+    let sheets = match parked {
+        Some(sheets) => sheets,
+        None => Arc::new(ingest::excel::read_non_empty_sheets(src).map_err(StoreError::from)?),
+    };
     if guidance.is_empty() {
         return Err(StoreError::DataUnreadable {
             detail: ingest::excel::NO_SHEET_SELECTED.into(),
@@ -966,8 +981,17 @@ mod tests {
         }
     }
 
-    fn park_len() -> usize {
-        PREVIEW_PARK.lock().unwrap_or_else(|p| p.into_inner()).len()
+    /// Entries parked for one (workspace, source) key. The park is a
+    /// process-wide static and the tests run in parallel, so pins count
+    /// their OWN key, never the whole park.
+    fn park_count_for(workspace: &Path, src: &Path) -> usize {
+        let key = park_key(workspace, src);
+        PREVIEW_PARK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(k, _)| *k == key)
+            .count()
     }
 
     const PEOPLE_ROWS: &[&[CV]] = &[
@@ -1183,7 +1207,11 @@ mod tests {
             crate::model::GuidanceSheetState::NeedsGuidance { .. } => {}
             other => panic!("expected NeedsGuidance, got {other:?}"),
         }
-        assert_eq!(park_len(), 1, "the parse parks keyed by (ws, path)");
+        assert_eq!(
+            park_count_for(workspace.path(), &book),
+            1,
+            "the parse parks keyed by (ws, path)"
+        );
 
         // The pager reads from the park; a clamp and an overshoot stay honest.
         let window = parked_window(workspace.path(), &book, "People", 0, 12).expect("window");
@@ -1196,20 +1224,62 @@ mod tests {
 
         // A repeated preview of the same key replaces the entry.
         preview(workspace.path(), &book).expect("re-preview");
-        assert_eq!(park_len(), 1, "no accumulation on the same key");
+        assert_eq!(
+            park_count_for(workspace.path(), &book),
+            1,
+            "no accumulation on the same key"
+        );
 
         // A failed guided commit keeps the park (retry paging still works);
         // a successful one drops it.
         add_guided(workspace.path(), &book, &[pick("Ghost", 1)]).expect_err("the floor refuses");
-        assert_eq!(park_len(), 1, "failure keeps the park");
+        assert_eq!(
+            park_count_for(workspace.path(), &book),
+            1,
+            "failure keeps the park"
+        );
         add_guided(workspace.path(), &book, &[pick("People", 1)]).expect("commit");
-        assert_eq!(park_len(), 0, "a landed commit drops the park");
+        assert_eq!(
+            park_count_for(workspace.path(), &book),
+            0,
+            "a landed commit drops the park"
+        );
 
         // The dialog-cancel path: preview then discard leaves nothing.
         preview(workspace.path(), &book).expect("re-preview");
         discard_parked(workspace.path(), &book);
-        assert_eq!(park_len(), 0);
+        assert_eq!(park_count_for(workspace.path(), &book), 0);
         assert!(parked_window(workspace.path(), &book, "People", 0, 12).is_none());
+    }
+
+    /// The guided commit reuses the parked parse (issue #1554): after a
+    /// preview, deleting the source workbook still lands the import -- the
+    /// commit reads no workbook bytes. The dialog's paging has served from
+    /// the same park since #1552; the commit now rides it too, so what
+    /// lands is exactly what the dialog showed.
+    #[test]
+    fn add_guided_reuses_the_parked_parse() {
+        let workspace = ws();
+        let sources = src_dir();
+        let book = xlsx(sources.path(), "book.xlsx", &[("People", PEOPLE_ROWS)]);
+        preview(workspace.path(), &book).expect("preview");
+        fs::remove_file(&book).expect("delete the source");
+        let entries = add_guided(workspace.path(), &book, &[pick("People", 1)])
+            .expect("commit from the park");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].reference_name, "People");
+    }
+
+    /// No preview round (a bypass channel) -> the commit falls back to a
+    /// fresh parse of the workbook (the park is an optimization, not a
+    /// requirement).
+    #[test]
+    fn add_guided_without_a_park_reparses() {
+        let workspace = ws();
+        let sources = src_dir();
+        let book = xlsx(sources.path(), "book.xlsx", &[("People", PEOPLE_ROWS)]);
+        let entries = add_guided(workspace.path(), &book, &[pick("People", 1)]).expect("commit");
+        assert_eq!(entries.len(), 1);
     }
 
     /// add() pins the full entry shape: name from the file stem, fingerprint
