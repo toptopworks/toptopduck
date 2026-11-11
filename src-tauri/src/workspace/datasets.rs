@@ -8,14 +8,17 @@
 //! aside (`.corrupt`) and refused, never silently rebuilt; store files no
 //! manifest entry references are orphans and are swept at startup.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use calamine::Data;
 use duckdb::{AccessMode, Config, Connection};
 
 use crate::ingest::{self, loader};
-use crate::model::{ColumnSchema, DatasetPrivacy, LoadError};
+use crate::model::{ColumnSchema, DatasetPrivacy, GuidanceRequest, LoadError, SheetGuidance};
 use crate::persistence::io::save_atomic;
 use crate::session::snapshot::Snapshot;
 
@@ -31,8 +34,10 @@ const TEMP_PREFIX: &str = ".tmp_";
 
 /// One manifest entry (ADR-0141 Decision 2): the dataset's stable
 /// workspace-level identity plus the shape facts the cards and resume checks
-/// read. `fingerprint` is the SHA256 of the ORIGINAL source bytes -- the store
-/// key -- not the derived table fingerprint on the descriptor.
+/// read. `fingerprint` is the content key -- the store file's identity: the
+/// source bytes' SHA256 for the direct formats (CSV/Parquet/JSON), the
+/// rectified sheet CSV's SHA256 for the guided Excel import (issue #1552) --
+/// never the derived table fingerprint on the descriptor.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DatasetEntry {
     pub reference_name: String,
@@ -73,8 +78,10 @@ pub struct ListedDataset {
 /// hint and the corrupt-manifest posture distinctly (ADR-0141 D8/D11).
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoreError {
-    /// xlsx is out of the shared face's first cut (ADR-0141 D11): the error
-    /// carries the actionable redirect, not a bare format refusal.
+    /// xlsx refused on the one channel that cannot take it (ADR-0141 D11 as
+    /// revised by the guided import, issue #1552): adding goes through the
+    /// guided confirm dialog, and replace stays out of scope -- content swaps
+    /// remove the entry and import the workbook again.
     XlsxRejected,
     /// Legacy .xls -- same refusal as the private ingest face (ADR-0015).
     LegacyExcel,
@@ -119,7 +126,7 @@ impl std::fmt::Display for StoreError {
         match self {
             StoreError::XlsxRejected => write!(
                 f,
-                "xlsx is not supported on the shared face; convert to CSV/Parquet or use a session-private source"
+                "xlsx workbooks import through the guided confirm dialog; replacing a dataset with a workbook is not supported -- remove the dataset and import the workbook again"
             ),
             StoreError::LegacyExcel => {
                 write!(f, "legacy .xls is not supported; save as .xlsx or CSV")
@@ -350,6 +357,13 @@ fn deconflict_display(base: &str, entries: &[DatasetEntry]) -> String {
 /// manifest append). The store file lands BEFORE the manifest write
 /// (ADR-0141 D2's ordering).
 pub fn add(workspace: &Path, src: &Path) -> Result<DatasetEntry, StoreError> {
+    // The guided import owns xlsx (ADR-0141 D11 as revised, issue #1552);
+    // the direct face refuses it before any work (the frontend routes the
+    // picker's xlsx picks to preview + guided add, so this is the bypass
+    // floor for any channel that slips one through).
+    if is_xlsx(src) {
+        return Err(StoreError::XlsxRejected);
+    }
     let _guard = manifest_lock();
     let reader = dispatch_reader(src)?;
     let mut entries = load_entries(workspace)?;
@@ -371,6 +385,234 @@ pub fn add(workspace: &Path, src: &Path) -> Result<DatasetEntry, StoreError> {
     entries.push(entry.clone());
     write_entries(workspace, &entries)?;
     Ok(entry)
+}
+
+/// One parked preview: the (workspace root, source path) key + the full
+/// parse behind it.
+type ParkedPreview = ((String, String), Vec<ingest::excel::SheetRows>);
+
+/// The parked workbook parses behind [`preview`] (the guided import's
+/// zero-reparse paging, issue #1552): keyed by (workspace root, source
+/// path), so a superseding preview replaces in place (no unbounded growth)
+/// and a landed or cancelled import drops its entry. Process-lifetime like
+/// the session face's guidance retention -- never persisted. A Vec, not a
+/// map: parks number in the ones (one per open confirm dialog) and the
+/// MSRV forbids the const-map statics.
+static PREVIEW_PARK: Mutex<Vec<ParkedPreview>> = Mutex::new(Vec::new());
+
+/// Unique temp-CSV token for the guided import's sheet materialization
+/// (content key comes FROM the CSV bytes, so the name only needs
+/// uniqueness, never determinism).
+static SHEET_CSV_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// The park's lookup key: the lossy string spellings of the workspace root
+/// and the source path, shared by the park's three faces.
+fn park_key(workspace: &Path, src: &Path) -> (String, String) {
+    (
+        workspace.to_string_lossy().to_string(),
+        src.to_string_lossy().to_string(),
+    )
+}
+
+/// Read a workbook and build its guided-import confirmation payload
+/// (ADR-0148's dialog on the shared face, issue #1552): every visible
+/// non-blank sheet auto-tidied to its two-state, previews inlined. The full
+/// parse parks in-process keyed by (workspace, path) so the dialog's paging
+/// never re-reads the file; a superseding preview replaces the entry.
+/// Read-only: the working set and the manifest are untouched.
+pub fn preview(workspace: &Path, src: &Path) -> Result<GuidanceRequest, StoreError> {
+    excel_source(src)?;
+    let sheets = ingest::excel::read_non_empty_sheets(src).map_err(StoreError::from)?;
+    let states = ingest::excel::guidance_states(&sheets);
+    let request = ingest::excel::build_guidance(src, &sheets, &states);
+    let key = park_key(workspace, src);
+    let mut park = PREVIEW_PARK.lock().unwrap_or_else(|p| p.into_inner());
+    // Replace in place on a repeated preview of the same key: the stale
+    // parse must not linger behind the fresh one (the lifecycle pin).
+    if let Some(slot) = park.iter_mut().find(|(k, _)| *k == key) {
+        slot.1 = sheets;
+    } else {
+        park.push((key, sheets));
+    }
+    Ok(request)
+}
+
+/// Serve one preview window for a sheet parked by [`preview`], from the
+/// retained parse -- no workbook re-read. `limit` clamps to the shared
+/// window size (IPC input is untrusted); `None` when nothing is retained
+/// for the (workspace, path, sheet) triple -- committed, discarded, or
+/// superseded. The park is PEEKED, not taken: the dialog pages repeatedly.
+pub fn parked_window(
+    workspace: &Path,
+    src: &Path,
+    sheet_name: &str,
+    offset: usize,
+    limit: usize,
+) -> Option<Vec<Vec<String>>> {
+    let key = park_key(workspace, src);
+    let park = PREVIEW_PARK.lock().unwrap_or_else(|p| p.into_inner());
+    let sheets = &park.iter().find(|(k, _)| *k == key)?.1;
+    let sheet = sheets.iter().find(|s| s.name == sheet_name)?;
+    Some(ingest::excel::render_preview_window(
+        sheet,
+        offset,
+        limit.min(ingest::excel::GUIDANCE_PREVIEW_ROWS),
+    ))
+}
+
+/// Drop a parked parse (the dialog-cancel path, issue #1552). Idempotent --
+/// a second discard finds nothing.
+pub fn discard_parked(workspace: &Path, src: &Path) {
+    let key = park_key(workspace, src);
+    let mut park = PREVIEW_PARK.lock().unwrap_or_else(|p| p.into_inner());
+    park.retain(|(k, _)| *k != key);
+}
+
+/// Materialize one rectified sheet through its canonical CSV (the session
+/// face's `attach_sheet` pipeline, re-keyed for the store): the CSV bytes
+/// ARE the content key -- `write_sheet_csv` renders deterministically, so
+/// the same sheet content lands on the same store file whatever the
+/// workbook or sheet is named (cross-workbook dedup comes free). The CSV is
+/// transient: written to the OS temp dir, hashed + copied in, removed.
+fn materialize_sheet(
+    workspace: &Path,
+    sheet_name: &str,
+    rows: &[Vec<Data>],
+) -> Result<Snapshot, StoreError> {
+    let token = format!(
+        "ws-guided-{}-{}",
+        std::process::id(),
+        SHEET_CSV_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let csv_path = ingest::excel::write_sheet_csv(rows, sheet_name, &std::env::temp_dir(), &token)
+        .map_err(StoreError::from)?;
+    // materialize hashes the CSV (the content key), reuses the store file
+    // on a hit, and copies in + renames on a miss -- the store discipline,
+    // unchanged for the new key source. A failed materialization logs a
+    // failed temp-CSV removal (the session face's attach_sheet posture);
+    // the success path stays silent best-effort.
+    let landed = match materialize(workspace, &csv_path, "read_csv_auto") {
+        Ok(s) => s,
+        Err(e) => {
+            if let Err(io_err) = fs::remove_file(&csv_path) {
+                log::warn!(
+                    target: "toptopduck::workspace_datasets",
+                    "temp CSV removal failed for sheet {sheet_name}: {io_err}"
+                );
+            }
+            return Err(e);
+        }
+    };
+    let _ = fs::remove_file(&csv_path);
+    Ok(landed)
+}
+
+/// Add a workbook's CHECKED sheets as shared datasets (the guided import,
+/// ADR-0141 D11 as revised by issue #1552): one [`DatasetEntry`] per
+/// guidance entry whose sheet exists, skipped sheets land nothing, and an
+/// empty selection is the defensive floor (the dialog disables its submit;
+/// this catches any client that bypasses it -- ADR-0148's wording). Each
+/// sheet rectifies by its user choices, materializes through its canonical
+/// CSV (content-addressed, see [`materialize_sheet`]), and de-conflicts
+/// BOTH names against the manifest and the batch. Transactional on the
+/// manifest: all sheets rectify and materialize before one manifest write,
+/// so a failure leaves the manifest untouched (partially-landed store files
+/// are unreferenced orphans the sweep removes). Re-parses the workbook --
+/// the parked parse is only the dialog's paging cache.
+pub fn add_guided(
+    workspace: &Path,
+    src: &Path,
+    guidance: &[SheetGuidance],
+) -> Result<Vec<DatasetEntry>, StoreError> {
+    excel_source(src)?;
+    let _guard = manifest_lock();
+    let mut entries = load_entries(workspace)?;
+    let sheets = ingest::excel::read_non_empty_sheets(src).map_err(StoreError::from)?;
+    if guidance.is_empty() {
+        return Err(StoreError::DataUnreadable {
+            detail: ingest::excel::NO_SHEET_SELECTED.into(),
+        });
+    }
+
+    // Rectify every checked sheet up front (transactional: an out-of-range
+    // header aborts before any materialization). Guidance entries naming a
+    // sheet the workbook doesn't have are ignored, exactly like the session
+    // face's guided commit.
+    let rectified: Vec<(&ingest::excel::SheetRows, Vec<Vec<Data>>)> = sheets
+        .iter()
+        .filter_map(|sheet| {
+            guidance
+                .iter()
+                .find(|g| g.name == sheet.name)
+                .map(|g| (sheet, g.rectify.clone()))
+        })
+        .map(|(sheet, rectify)| {
+            let rows = ingest::excel::apply_rectify(sheet, &rectify)?;
+            Ok::<_, StoreError>((sheet, rows))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if rectified.is_empty() {
+        return Err(StoreError::DataUnreadable {
+            detail: ingest::excel::NO_SHEET_SELECTED.into(),
+        });
+    }
+    // A checked entry that missed every workbook sheet means the file
+    // changed under the open dialog: the survivors still commit, the
+    // dropped picks get a trace instead of vanishing silently.
+    let missed: Vec<&str> = guidance
+        .iter()
+        .map(|g| g.name.as_str())
+        .filter(|name| !rectified.iter().any(|(sheet, _)| sheet.name == *name))
+        .collect();
+    if !missed.is_empty() {
+        log::warn!(
+            target: "toptopduck::workspace_datasets",
+            "guided import ignored checked sheets absent from the workbook: {missed:?}"
+        );
+    }
+
+    // Materialize every sheet before any naming (a materialization failure
+    // leaves the manifest untouched; the landed files are orphans).
+    let materialized: Vec<(String, Snapshot)> = rectified
+        .iter()
+        .map(|(sheet, rows)| {
+            materialize_sheet(workspace, &sheet.name, rows).map(|snap| (sheet.name.clone(), snap))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Name + append: reference = sanitized sheet name, display = raw sheet
+    // name (ADR-0037's dual-name scheme, the session face's commit_excel
+    // shape), each de-conflicted against the manifest AND the batch so two
+    // sheets that sanitize alike never collide.
+    let mut out = Vec::with_capacity(materialized.len());
+    let mut reserved_ref: HashSet<String> = HashSet::new();
+    let mut reserved_disp: HashSet<String> = HashSet::new();
+    for (sheet_name, snapshot) in materialized {
+        let taken_ref =
+            |n: &str| entries.iter().any(|e| e.reference_name == n) || reserved_ref.contains(n);
+        let reference = crate::workingset::deconflict_loop(
+            &ingest::sanitize_sheet_name(&sheet_name),
+            taken_ref,
+            |c, n| format!("{c}_{n}"),
+        );
+        reserved_ref.insert(reference.clone());
+        let taken_disp =
+            |n: &str| entries.iter().any(|e| e.display_name == n) || reserved_disp.contains(n);
+        let display = crate::workingset::deconflict_loop(&sheet_name, taken_disp, |c, n| {
+            format!("{c} ({n})")
+        });
+        reserved_disp.insert(display.clone());
+        let entry =
+            entry_from_materialized(reference, display, snapshot, DatasetPrivacy::default(), src);
+        entries.push(entry.clone());
+        out.push(entry);
+    }
+    write_entries(workspace, &entries)?;
+    // The dialog resolved on a successful commit: drop THIS key's parked
+    // parse (a failed commit keeps it -- the dialog stays open for retry
+    // and its paging must keep working).
+    discard_parked(workspace, src);
+    Ok(out)
 }
 
 /// The fingerprint (content key) for a store file, recovered from its file
@@ -420,6 +662,11 @@ pub fn replace(
     reference_name: &str,
     src: &Path,
 ) -> Result<DatasetEntry, StoreError> {
+    // Out of scope by the D11 revision: content swaps through a workbook go
+    // remove-then-reimport (the actionable copy rides the error).
+    if is_xlsx(src) {
+        return Err(StoreError::XlsxRejected);
+    }
     let _guard = manifest_lock();
     let reader = dispatch_reader(src)?;
     let mut entries = load_entries(workspace)?;
@@ -598,12 +845,13 @@ pub fn sweep_orphans(workspace: &Path) -> Result<usize, StoreError> {
     Ok(removed)
 }
 
-/// Dispatch a source for the shared face: CSV / Parquet / JSON+JSONL share
-/// the copy-in path; xlsx is refused with the redirect hint (ADR-0141 D11),
-/// legacy .xls and unknown formats refuse like the private face.
+/// Dispatch a source for the shared face's direct add/replace: CSV / Parquet /
+/// JSON+JSONL share the copy-in path; legacy .xls and unknown formats refuse
+/// like the private face. xlsx never reaches here -- the add and replace
+/// faces guard it off first (the guided import owns that format, ADR-0141
+/// D11 as revised by issue #1552), so the reader has no xlsx arm to remove.
 fn dispatch_reader(src: &Path) -> Result<&'static str, StoreError> {
     match ingest::dispatch(src) {
-        ingest::Dispatched::Xlsx => Err(StoreError::XlsxRejected),
         ingest::Dispatched::Xls => Err(StoreError::LegacyExcel),
         dispatched => {
             ingest::reader_for(&dispatched).ok_or_else(|| StoreError::UnsupportedFormat {
@@ -613,6 +861,27 @@ fn dispatch_reader(src: &Path) -> Result<&'static str, StoreError> {
                 },
             })
         }
+    }
+}
+
+/// Whether the source is an .xlsx workbook -- the guided import's format,
+/// refused on the direct add/replace channels (ADR-0141 D11 as revised).
+fn is_xlsx(src: &Path) -> bool {
+    matches!(ingest::dispatch(src), ingest::Dispatched::Xlsx)
+}
+
+/// Validate a guided-import source IS an .xlsx workbook (the face's only
+/// multi-sheet format; every other dispatch is a misrouted channel).
+fn excel_source(src: &Path) -> Result<(), StoreError> {
+    match ingest::dispatch(src) {
+        ingest::Dispatched::Xlsx => Ok(()),
+        ingest::Dispatched::Xls => Err(StoreError::LegacyExcel),
+        dispatched => Err(StoreError::UnsupportedFormat {
+            requested: match dispatched {
+                ingest::Dispatched::Unsupported(ext) => ext,
+                _ => String::new(),
+            },
+        }),
     }
 }
 
@@ -644,6 +913,303 @@ mod tests {
 
     fn src_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("source dir")
+    }
+
+    /// One fixture cell: text or integer (enough for the guided-import pins
+    /// -- the type mix is the CSV renderer's contract, already pinned on the
+    /// session face).
+    enum CV {
+        S(&'static str),
+        I(i32),
+    }
+
+    /// Generate an .xlsx fixture (rust_xlsxwriter, no binaries committed --
+    /// the ingest blackbox suite's posture) with one worksheet per entry.
+    fn xlsx(dir: &Path, name: &str, sheets: &[(&str, &[&[CV]])]) -> PathBuf {
+        let mut book = rust_xlsxwriter::Workbook::new();
+        for (sheet_name, rows) in sheets {
+            let sheet = book.add_worksheet();
+            sheet.set_name(*sheet_name).expect("sheet name");
+            for (r, row) in rows.iter().enumerate() {
+                for (c, cell) in row.iter().enumerate() {
+                    match cell {
+                        CV::S(v) => {
+                            sheet.write(r as u32, c as u16, *v).expect("write text");
+                        }
+                        CV::I(v) => {
+                            sheet.write(r as u32, c as u16, *v).expect("write int");
+                        }
+                    }
+                }
+            }
+        }
+        let p = dir.join(name);
+        book.save(&p).expect("save xlsx");
+        p
+    }
+
+    fn pick(sheet: &str, header_row: u32) -> SheetGuidance {
+        SheetGuidance {
+            name: sheet.to_string(),
+            rectify: crate::model::SheetRectify {
+                header_row,
+                skip_rows: Vec::new(),
+            },
+        }
+    }
+
+    fn store_file_count(workspace: &Path) -> usize {
+        match fs::read_dir(store_dir(workspace)) {
+            Ok(dir) => dir.count(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => panic!("store dir: {e}"),
+        }
+    }
+
+    fn park_len() -> usize {
+        PREVIEW_PARK.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    const PEOPLE_ROWS: &[&[CV]] = &[
+        &[CV::S("name"), CV::S("score")],
+        &[CV::S("Ada"), CV::I(9)],
+        &[CV::S("Grace"), CV::I(7)],
+    ];
+
+    /// The guided add lands one entry per CHECKED sheet; the skipped sheet
+    /// lands nothing (ADR-0148's per-sheet acceptance on the shared face).
+    #[test]
+    fn guided_add_lands_checked_sheets_only() {
+        let workspace = ws();
+        let sources = src_dir();
+        let book = xlsx(
+            sources.path(),
+            "book.xlsx",
+            &[("People", PEOPLE_ROWS), ("Extra", PEOPLE_ROWS)],
+        );
+        let landed = add_guided(workspace.path(), &book, &[pick("People", 1)]).expect("guided add");
+        assert_eq!(landed.len(), 1, "only the checked sheet");
+        // The sanitizer keeps case (the private face's sheet-name contract).
+        assert_eq!(landed[0].reference_name, "People");
+        assert_eq!(landed[0].display_name, "People");
+        let entries = load_entries(workspace.path()).expect("reload");
+        assert_eq!(entries.len(), 1);
+        assert!(entries.iter().all(|e| e.reference_name != "Extra"));
+    }
+
+    /// The defensive floor: an empty selection and an all-unknown-names
+    /// selection both refuse with the shared ADR-0148 wording, nothing lands
+    /// (the dialog disables its submit; this catches any bypassing client).
+    #[test]
+    fn empty_or_unknown_guidance_refuses() {
+        let workspace = ws();
+        let sources = src_dir();
+        let book = xlsx(sources.path(), "book.xlsx", &[("People", PEOPLE_ROWS)]);
+        for guidance in [&[][..], &[pick("Ghost", 1)][..]] {
+            let err = add_guided(workspace.path(), &book, guidance).expect_err("the floor refuses");
+            match err {
+                StoreError::DataUnreadable { detail } => {
+                    assert_eq!(detail, ingest::excel::NO_SHEET_SELECTED);
+                }
+                other => panic!("expected the selection floor, got {other:?}"),
+            }
+        }
+        assert!(
+            load_entries(workspace.path()).expect("reload").is_empty(),
+            "the refused commits landed nothing"
+        );
+        assert_eq!(store_file_count(workspace.path()), 0);
+    }
+
+    /// Content addressing (the D11 revision's core pin): the store key is
+    /// the RECTIFIED SHEET's canonical CSV hash -- the same sheet content
+    /// reuses one store file across imports and workbooks, an edited sheet
+    /// splits into a new key, and editing an UNRELATED sheet never disturbs
+    /// the reused one.
+    #[test]
+    fn content_addressing_reuses_and_splits() {
+        let workspace = ws();
+        let sources = src_dir();
+        let book1 = xlsx(
+            sources.path(),
+            "one.xlsx",
+            &[("People", PEOPLE_ROWS), ("Noise", PEOPLE_ROWS)],
+        );
+        let first =
+            add_guided(workspace.path(), &book1, &[pick("People", 1)]).expect("import people");
+        let key = first[0].fingerprint.clone();
+        assert_eq!(store_file_count(workspace.path()), 1);
+
+        // Same book, same sheet again: a second entry shares the file.
+        let again = add_guided(workspace.path(), &book1, &[pick("People", 1)]).expect("re-import");
+        assert_eq!(again[0].reference_name, "People_2", "batch de-conflict");
+        assert_eq!(again[0].fingerprint, key, "same content, same key");
+        assert_eq!(store_file_count(workspace.path()), 1);
+
+        // A DIFFERENT workbook whose People sheet is byte-identical: the
+        // key follows the content, not the container.
+        let book2 = xlsx(
+            sources.path(),
+            "two.xlsx",
+            &[("People", PEOPLE_ROWS), ("Noise", &[&[CV::S("x")]])],
+        );
+        let cross =
+            add_guided(workspace.path(), &book2, &[pick("People", 1)]).expect("cross-book import");
+        assert_eq!(cross[0].fingerprint, key, "cross-workbook reuse");
+        assert_eq!(store_file_count(workspace.path()), 1);
+
+        // Edited sheet content: a new key, a new store file.
+        let edited: &[&[CV]] = &[
+            &[CV::S("name"), CV::S("score")],
+            &[CV::S("Ada"), CV::I(10)],
+            &[CV::S("Grace"), CV::I(7)],
+        ];
+        let book3 = xlsx(
+            sources.path(),
+            "three.xlsx",
+            &[("People", edited), ("Noise", PEOPLE_ROWS)],
+        );
+        let split =
+            add_guided(workspace.path(), &book3, &[pick("People", 1)]).expect("edited import");
+        assert_ne!(split[0].fingerprint, key, "edited content, new key");
+        assert_eq!(store_file_count(workspace.path()), 2);
+    }
+
+    /// Naming (ADR-0037's dual-name scheme + ADR-0141 D6 on the guided
+    /// face): sheets that SANITIZE alike never collide with each other or
+    /// the manifest's reference vocabulary (the sanitizer keeps case, so a
+    /// collision needs crafted names), and a raw sheet name colliding with
+    /// a taken display label de-conflicts at the display layer.
+    #[test]
+    fn names_deconflict_within_batch_and_manifest() {
+        let workspace = ws();
+        let sources = src_dir();
+        // Pre-seed the reference vocabulary AND a taken display label.
+        add(workspace.path(), &csv(sources.path(), "east.csv", PEOPLE)).expect("seed east");
+        rename(workspace.path(), "east", "Orders").expect("seed label");
+
+        // "East 1" and "East_1!" are distinct sheet names that sanitize to
+        // the same reference ("East_1"); "Orders" hits the seeded label.
+        let book = xlsx(
+            sources.path(),
+            "book.xlsx",
+            &[
+                ("East 1", PEOPLE_ROWS),
+                ("East_1!", PEOPLE_ROWS),
+                ("Orders", PEOPLE_ROWS),
+            ],
+        );
+        let landed = add_guided(
+            workspace.path(),
+            &book,
+            &[pick("East 1", 1), pick("East_1!", 1), pick("Orders", 1)],
+        )
+        .expect("guided add");
+        let refs: Vec<&str> = landed.iter().map(|e| e.reference_name.as_str()).collect();
+        assert_eq!(refs, ["East_1", "East_1_2", "Orders"], "reference layer");
+        let displays: Vec<&str> = landed.iter().map(|e| e.display_name.as_str()).collect();
+        assert_eq!(
+            displays,
+            ["East 1", "East_1!", "Orders (2)"],
+            "display layer de-conflicts against the manifest's taken label"
+        );
+    }
+
+    /// Transactionality: an out-of-range header aborts the whole commit
+    /// before any materialization -- the manifest and the store stay empty.
+    #[test]
+    fn out_of_range_header_aborts_without_landing() {
+        let workspace = ws();
+        let sources = src_dir();
+        let book = xlsx(sources.path(), "book.xlsx", &[("People", PEOPLE_ROWS)]);
+        let err = add_guided(workspace.path(), &book, &[pick("People", 99)])
+            .expect_err("the range guard refuses");
+        assert!(matches!(err, StoreError::DataUnreadable { .. }), "{err:?}");
+        assert!(load_entries(workspace.path()).expect("reload").is_empty());
+        assert_eq!(store_file_count(workspace.path()), 0);
+    }
+
+    /// The D11 guard faces: the direct add channel refuses xlsx (the guided
+    /// import owns the format), and replace refuses it with the actionable
+    /// remove-and-reimport posture.
+    #[test]
+    fn add_and_replace_refuse_xlsx() {
+        let workspace = ws();
+        let sources = src_dir();
+        let book = xlsx(sources.path(), "book.xlsx", &[("People", PEOPLE_ROWS)]);
+        assert_eq!(
+            add(workspace.path(), &book),
+            Err(StoreError::XlsxRejected),
+            "the bypass floor on the direct add face"
+        );
+        add(workspace.path(), &csv(sources.path(), "people.csv", PEOPLE)).expect("seed");
+        assert_eq!(
+            replace(workspace.path(), "people", &book),
+            Err(StoreError::XlsxRejected),
+            "replace stays out of scope"
+        );
+    }
+
+    /// The preview park: the payload carries every visible sheet's two-state
+    /// (auto-detected header guess / the failure reason), the parked parse
+    /// serves the pager's windows without a re-read, a repeated preview of
+    /// the same key replaces instead of accumulating, discard drops it, and
+    /// a successful guided commit drops it too (a failed one keeps it --
+    /// the dialog stays open for retry).
+    #[test]
+    fn preview_park_lifecycle() {
+        let workspace = ws();
+        let sources = src_dir();
+        let messy: &[&[CV]] = &[
+            &[CV::S("base"), CV::S("base"), CV::S("contact")],
+            &[CV::S("id"), CV::S("name"), CV::S("email")],
+            &[CV::I(1), CV::S("Alice"), CV::S("a@x")],
+        ];
+        let book = xlsx(
+            sources.path(),
+            "book.xlsx",
+            &[("People", PEOPLE_ROWS), ("Messy", messy)],
+        );
+
+        let request = preview(workspace.path(), &book).expect("preview");
+        assert_eq!(request.sheets.len(), 2);
+        match &request.sheets[0].state {
+            crate::model::GuidanceSheetState::AutoTidied { header_row } => {
+                assert_eq!(*header_row, 1);
+            }
+            other => panic!("expected AutoTidied, got {other:?}"),
+        }
+        match &request.sheets[1].state {
+            crate::model::GuidanceSheetState::NeedsGuidance { .. } => {}
+            other => panic!("expected NeedsGuidance, got {other:?}"),
+        }
+        assert_eq!(park_len(), 1, "the parse parks keyed by (ws, path)");
+
+        // The pager reads from the park; a clamp and an overshoot stay honest.
+        let window = parked_window(workspace.path(), &book, "People", 0, 12).expect("window");
+        assert_eq!(window.len(), 3);
+        assert_eq!(window[0], vec!["name", "score"]);
+        assert!(parked_window(workspace.path(), &book, "People", 99, 12)
+            .expect("overshoot is an empty window, not a miss")
+            .is_empty());
+        assert!(parked_window(workspace.path(), &book, "Ghost", 0, 12).is_none());
+
+        // A repeated preview of the same key replaces the entry.
+        preview(workspace.path(), &book).expect("re-preview");
+        assert_eq!(park_len(), 1, "no accumulation on the same key");
+
+        // A failed guided commit keeps the park (retry paging still works);
+        // a successful one drops it.
+        add_guided(workspace.path(), &book, &[pick("Ghost", 1)]).expect_err("the floor refuses");
+        assert_eq!(park_len(), 1, "failure keeps the park");
+        add_guided(workspace.path(), &book, &[pick("People", 1)]).expect("commit");
+        assert_eq!(park_len(), 0, "a landed commit drops the park");
+
+        // The dialog-cancel path: preview then discard leaves nothing.
+        preview(workspace.path(), &book).expect("re-preview");
+        discard_parked(workspace.path(), &book);
+        assert_eq!(park_len(), 0);
+        assert!(parked_window(workspace.path(), &book, "People", 0, 12).is_none());
     }
 
     /// add() pins the full entry shape: name from the file stem, fingerprint

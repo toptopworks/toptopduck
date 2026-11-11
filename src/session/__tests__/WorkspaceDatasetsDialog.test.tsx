@@ -28,7 +28,28 @@ import { previewDeleteImpact } from "../../api";
 import { WorkspaceDatasetsDialog } from "../WorkspaceDatasetsDialog";
 import { useWorkspaceDatasets, type UseWorkspaceDatasets } from "../useWorkspaceDatasets";
 import { withIntl } from "../../components/common/__tests__/helpers";
+import type { GuidanceRequest } from "../../types/dataset";
 import type { ListedWorkspaceDataset } from "../../types/workspace-datasets";
+
+// One sheet's confirmation payload (the wire shape, ADR-0148): auto-tidied
+// with the header guess riding as the pre-fill.
+function guidanceRequest(): GuidanceRequest {
+  return {
+    source_path: "/src/book.xlsx",
+    workbook_name: "book",
+    sheets: [
+      {
+        name: "People",
+        preview: [
+          ["name", "score"],
+          ["Ada", "9"],
+        ],
+        total_rows: 2,
+        state: { kind: "AutoTidied", data: { header_row: 1 } },
+      },
+    ],
+  };
+}
 
 // One manifest entry fixture (the wire shape, ADR-0141): stable identity +
 // shape facts + frozen 2-row sample.
@@ -67,6 +88,9 @@ function stubModule(overrides: Partial<UseWorkspaceDatasets> = {}) {
     select: vi.fn(),
     dismissBadge: vi.fn(),
     setError: vi.fn(),
+    handleGuidedSubmit: vi.fn(),
+    handleGuidedCancel: vi.fn(),
+    fetchGuidanceWindow: vi.fn(),
   };
   const value: UseWorkspaceDatasets = {
     panel: { path: "/ws", label: "Demo" },
@@ -89,6 +113,12 @@ function stubModule(overrides: Partial<UseWorkspaceDatasets> = {}) {
     replace: actions.replace,
     remove: actions.remove,
     setPrivacy: actions.setPrivacy,
+    guidance: null,
+    guidanceError: null,
+    guidedLoading: false,
+    handleGuidedSubmit: actions.handleGuidedSubmit,
+    handleGuidedCancel: actions.handleGuidedCancel,
+    fetchGuidanceWindow: actions.fetchGuidanceWindow,
     ...overrides,
   };
   vi.mocked(useWorkspaceDatasets).mockReturnValue(value);
@@ -297,5 +327,44 @@ describe("WorkspaceDatasetsDialog", () => {
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
     expect(actions.pickAndAdd).toHaveBeenCalledTimes(1);
+  });
+
+  // The guided Excel import (#1552): the dialog mounts over the panel while
+  // an upload parks on it, the AutoTidied sheet's pre-check keeps Load live,
+  // and the submit/cancel wiring rides the seam -- the session pane's
+  // posture, mirrored. The park ARRIVES after the panel settled (a preview
+  // resolving under the open panel): same-pass double-mounting leaves both
+  // dialogs aria-hidden in jsdom (Radix's stack sweep never converges),
+  // while the open-after-settled order is the nested confirm's proven
+  // cycle.
+  it("mounts the guided import dialog over the panel while an xlsx parks", async () => {
+    stubModule({});
+    const { rerender } = renderPanel();
+    stubModule({
+      guidance: { request: guidanceRequest(), path: "/src/book.xlsx", workspace: "/ws" },
+    });
+    rerender(withIntl(<WorkspaceDatasetsDialog workspace={{ path: "/ws", label: "Demo" }} onOpenChange={() => {}} />));
+    expect(await screen.findByText("导入 Excel：book")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "加载" })).toBeEnabled();
+  });
+
+  it("wires the guided dialog's submit and cancel through the seam", async () => {
+    stubModule({});
+    const { rerender } = renderPanel();
+    const { actions } = stubModule({
+      guidance: { request: guidanceRequest(), path: "/src/book.xlsx", workspace: "/ws" },
+    });
+    rerender(withIntl(<WorkspaceDatasetsDialog workspace={{ path: "/ws", label: "Demo" }} onOpenChange={() => {}} />));
+    await screen.findByText("导入 Excel：book");
+    fireEvent.click(await screen.findByRole("button", { name: "加载" }));
+    expect(actions.handleGuidedSubmit).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(actions.handleGuidedCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders no guided dialog while nothing parks", () => {
+    stubModule({});
+    renderPanel();
+    expect(screen.queryByText("导入 Excel：book")).not.toBeInTheDocument();
   });
 });

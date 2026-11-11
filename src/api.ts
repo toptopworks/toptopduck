@@ -8,6 +8,7 @@ import type {
   DatasetDescriptor,
   DatasetPrivacy,
   DeleteImpactEntry,
+  GuidanceRequest,
   LoadOutcome,
   RowPage,
   SheetGuidance,
@@ -180,6 +181,62 @@ export async function addWorkspaceDataset(
   path: string,
 ): Promise<WorkspaceDatasetEntry> {
   return invoke<WorkspaceDatasetEntry>("add_workspace_dataset", { workspace, path });
+}
+
+// Read an .xlsx workbook for the shared face's guided import (issue #1552):
+// every visible non-blank sheet's two-state + previews, and the full parse parks
+// server-side keyed by (workspace, path) so the dialog's paging never
+// re-reads the file. A superseding preview replaces the park.
+export async function previewWorkspaceDataset(
+  workspace: string,
+  path: string,
+): Promise<GuidanceRequest> {
+  return invoke<GuidanceRequest>("preview_workspace_dataset", { workspace, path });
+}
+
+// Add a workbook's checked sheets as shared datasets, after a preview round
+// trip gathered the per-sheet rectify choices. One entry lands per checked
+// sheet.
+export async function addWorkspaceDatasetGuided(
+  workspace: string,
+  path: string,
+  guidance: SheetGuidance[],
+): Promise<WorkspaceDatasetEntry[]> {
+  return invoke<WorkspaceDatasetEntry[]>("add_workspace_dataset_guided", {
+    workspace,
+    path,
+    guidance,
+  });
+}
+
+// Fetch one preview window for a sheet parked by previewWorkspaceDataset:
+// rows [offset, offset + limit) rendered as strings, served from the parked
+// parse. Rejects when the (workspace, path, sheet) triple no longer matches
+// (committed / discarded / superseded).
+export async function workspaceDatasetPreviewWindow(
+  workspace: string,
+  path: string,
+  sheetName: string,
+  offset: number,
+  limit: number,
+): Promise<string[][]> {
+  return invoke<string[][]>("workspace_dataset_preview_window", {
+    workspace,
+    path,
+    sheetName,
+    offset,
+    limit,
+  });
+}
+
+// Drop a parked preview parse (the dialog-cancel path). Idempotent; a
+// reject leaks nothing (the park dies with the process), so callers treat
+// it best-effort.
+export async function discardWorkspaceDatasetPreview(
+  workspace: string,
+  path: string,
+): Promise<void> {
+  await invoke<void>("discard_workspace_dataset_preview", { workspace, path });
 }
 
 // Remove a shared dataset: the manifest drops the name immediately; bound

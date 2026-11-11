@@ -65,17 +65,23 @@ import { useIntl } from "react-intl";
 
 import {
   addWorkspaceDataset,
+  addWorkspaceDatasetGuided,
+  discardWorkspaceDatasetPreview,
   listWorkspaceDatasets,
+  previewWorkspaceDataset,
   removeWorkspaceDataset,
   renameWorkspaceDataset,
   replaceWorkspaceDataset,
   setWorkspaceDatasetPrivacy,
+  workspaceDatasetPreviewWindow,
 } from "../api";
 import { fileBasename } from "../lib/basename";
 import { describeError } from "../lib/error-presentation";
+import { log } from "../lib/log";
 import { toast } from "../components/ui/use-toast";
 import { workspaceDatasetKeys } from "./queryKeys";
-import type { DatasetPrivacy } from "../types/dataset";
+import type { AppError } from "../types/error";
+import type { DatasetPrivacy, GuidanceRequest, SheetGuidance } from "../types/dataset";
 import type { ListedWorkspaceDataset } from "../types/workspace-datasets";
 
 /** The panel's target workspace: the listing projection's canonical path +
@@ -167,12 +173,49 @@ export interface UseWorkspaceDatasets {
   replace: (name: string, file: string) => void;
   remove: (name: string) => void;
   setPrivacy: (name: string, next: DatasetPrivacy) => void;
+  // The guided Excel import (issue #1552, ADR-0141 D11 as revised): the
+  // dialog state + handlers, the session pane's ingest-flow shape mirrored
+  // onto the shared face. `guidance` parks while the batch waits; submit
+  // commits the checked sheets; cancel skips the file and the batch
+  // continues.
+  /** The open guided-import dialog state, or null. `{ request, path,
+   *  workspace }` carries the confirmation payload, the workbook path to
+   *  feed back into addWorkspaceDatasetGuided, and the minting workspace
+   *  (the park's key half + the batch's attribution). */
+  guidance: { request: GuidanceRequest; path: string; workspace: string } | null;
+  /** Guided-submit failure dedicated to the dialog: the panel's error
+   *  banner sits BEHIND the modal scrim, so the failure renders inline
+   *  above the dialog footer instead. Cleared on re-submit / cancel / a
+   *  fresh park. */
+  guidanceError: AppError | null;
+  /** The guided submit's in-flight gate: drives the dialog's loading face
+   *  (the session pane passes its mutation-loading flag; the panel owns
+   *  this narrow one). */
+  guidedLoading: boolean;
+  handleGuidedSubmit: (sheetGuidance: SheetGuidance[]) => void;
+  handleGuidedCancel: () => void;
+  /** Fetch one preview window for the parked workbook's sheet, from the
+   *  backend park -- zero re-parse per page. Rejects when no dialog is
+   *  parked (defensive -- the dialog only calls it while open). */
+  fetchGuidanceWindow: (
+    sheetName: string,
+    offset: number,
+    limit: number,
+  ) => Promise<string[][]>;
 }
 
-/** The picker extensions the shared face accepts (ADR-0141 D11: xlsx is
- *  refused -- the picker never offers it; the store-side refusal stays as
- *  the honest boundary for any channel that slips one through). */
-const PICKER_EXTENSIONS = ["csv", "parquet", "json", "jsonl", "ndjson"];
+/** The picker extensions the shared face accepts (ADR-0141 D11 as revised
+ *  by #1552: xlsx joins the picker and routes to the guided confirm dialog;
+ *  .xls stays out -- the store-side LegacyExcel refusal remains the honest
+ *  boundary for any channel that slips one through). */
+const PICKER_EXTENSIONS = ["csv", "parquet", "json", "jsonl", "ndjson", "xlsx"];
+
+/** Whether a picked file routes to the guided Excel import (the D11
+ *  revision's dispatch; .xls deliberately excluded -- the legacy refusal
+ *  owns it). */
+function isGuidedImport(file: string): boolean {
+  return file.toLowerCase().endsWith(".xlsx");
+}
 
 /** Drop one key from a record without mutating (the badge map's clear
  *  paths). */
@@ -287,6 +330,117 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
   const bumpPrivacy = (ws: string, delta: number) =>
     setPrivacyFlights((prev) => ({ ...prev, [ws]: Math.max(0, (prev[ws] ?? 0) + delta) }));
 
+  // The guided-import park (issue #1552, ADR-0141 D11 as revised): the
+  // dialog state + the batch's wait handle. The park is a Promise the
+  // pickAndAdd loop awaits while the dialog is interactive -- submit
+  // resolves it true (the commit already landed by then), cancel resolves
+  // it false (the file is skipped, the batch continues). The session pane's
+  // ingest flow (#748) mirrored onto the shared face, minus the halt: an
+  // offsite batch has no auto-ask gate to protect.
+  const [guidance, setGuidance] = useState<{
+    request: GuidanceRequest;
+    path: string;
+    workspace: string;
+  } | null>(null);
+  const [guidanceError, setGuidanceError] = useState<AppError | null>(null);
+  const [guidedLoading, setGuidedLoading] = useState(false);
+  const parkResolveRef = useRef<((landed: boolean) => void) | null>(null);
+
+  const handleGuidedSubmit = (sheetGuidance: SheetGuidance[]) => {
+    if (guidance === null) return;
+    const { workspace: ws, path: file } = guidance;
+    setGuidedLoading(true);
+    setGuidanceError(null);
+    addWorkspaceDatasetGuided(ws, file, sheetGuidance)
+      .then((landed) => {
+        setGuidance(null);
+        // The last landed sheet becomes the detail pick (the batch's
+        // posture), only while the panel still shows the workspace (#1492).
+        const live = workspaceRef.current;
+        if (live !== null && live.path === ws && landed.length > 0) {
+          setSelectedName(landed[landed.length - 1].reference_name);
+        }
+        invalidateFor(ws);
+        parkResolveRef.current?.(true);
+      })
+      .catch((e: unknown) => {
+        // Inline above the dialog footer (the panel's banner sits behind
+        // the modal scrim); the dialog stays open for retry and the park
+        // stays parked -- its paging keeps working while the submit
+        // itself re-parses the workbook.
+        setGuidanceError({ message: describeError(e, intl), kind: "shell", detail: null });
+      })
+      .finally(() => setGuidedLoading(false));
+  };
+
+  const handleGuidedCancel = () => {
+    const parked = guidance;
+    setGuidance(null);
+    setGuidanceError(null);
+    if (parked !== null) {
+      discardWorkspaceDatasetPreview(parked.workspace, parked.path).catch((e: unknown) => {
+        log.warn(
+          "useWorkspaceDatasets",
+          "guided-preview discard failed (park retained in-process until a same-key preview or exit)",
+          { error: String(e) },
+        );
+      });
+    }
+    parkResolveRef.current?.(false);
+  };
+
+  const fetchGuidanceWindow = (
+    sheetName: string,
+    offset: number,
+    limit: number,
+  ): Promise<string[][]> => {
+    if (guidance === null) {
+      return Promise.reject(new Error("fetchGuidanceWindow without parked guidance"));
+    }
+    return workspaceDatasetPreviewWindow(
+      guidance.workspace,
+      guidance.path,
+      sheetName,
+      offset,
+      limit,
+    );
+  };
+
+  // One xlsx file's guided leg: preview (parking the parse server-side),
+  // park the batch on the dialog, and report whether the file LANDED. A
+  // preview failure routes like any batch failure (banner on-site, toast
+  // offsite) and the leg returns false so the batch continues.
+  const runGuidedImport = async (ws: string, file: string): Promise<boolean> => {
+    let request: GuidanceRequest;
+    try {
+      request = await previewWorkspaceDataset(ws, file);
+    } catch (e) {
+      routeOffsiteFailure(e, ws, () =>
+        intl.formatMessage(
+          {
+            id: "workspace.datasets.uploadFailedToast",
+            defaultMessage: "Upload to {workspace} failed",
+          },
+          { workspace: panel?.label ?? "" },
+        ),
+      );
+      return false;
+    }
+    // A fresh park opens clean (the session pane's posture): a stale inline
+    // error from an earlier guided submit must not ride into this dialog.
+    setGuidanceError(null);
+    setGuidance({ request, path: file, workspace: ws });
+    // The batch parks here: the Promise settles through the dialog's
+    // submit (true -- the commit landed inside handleGuidedSubmit, which
+    // also invalidates + picks the last landed sheet) or cancel (false --
+    // the file is skipped; handleGuidedCancel owns the park's discard).
+    const landed = await new Promise<boolean>((resolve) => {
+      parkResolveRef.current = resolve;
+    });
+    parkResolveRef.current = null;
+    return landed;
+  };
+
   const rowFlightCount = rowFlights[path] ?? 0;
   const privacyFlightCount = privacyFlights[path] ?? 0;
   const badge = uploadStatuses[path] ?? null;
@@ -295,8 +449,9 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
   const privacyBusy = privacyFlightCount > 0;
 
   // The picker: the panel's only add / replace channel (the same
-  // plugin-dialog face the working set uses). xlsx never appears -- the
-  // filter is the first refusal edge (ADR-0141 D11).
+  // plugin-dialog face the working set uses). xlsx appears and routes to
+  // the guided dialog (D11 as revised, #1552); .xls never appears -- the
+  // filter is the first refusal edge for it.
   const pickerFilters = [
     {
       name: intl.formatMessage({
@@ -345,6 +500,15 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
         },
       }));
       bumpRow(path, 1);
+      // The D11 dispatch: xlsx parks on the guided confirm dialog (the
+      // badge keeps narrating "Adding … file i of N" -- the file hasn't
+      // settled), the direct formats copy in as before.
+      if (isGuidedImport(file)) {
+        const landed = await runGuidedImport(path, file);
+        bumpRow(path, -1);
+        if (landed) lastLanded = fileBasename(file);
+        continue;
+      }
       await addWorkspaceDataset(path, file)
         .then((entry) => {
           // The freshly added dataset becomes the detail pick: the user's
@@ -511,5 +675,11 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
     replace,
     remove,
     setPrivacy,
+    guidance,
+    guidanceError,
+    guidedLoading,
+    handleGuidedSubmit,
+    handleGuidedCancel,
+    fetchGuidanceWindow,
   };
 }
