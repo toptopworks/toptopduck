@@ -274,7 +274,7 @@ export function WorkspaceMemoryDialog({
   // The folder-open action (#1538): the backend mints the directory family
   // on demand (the zero-footprint fresh workspace included), then the
   // front-end opener navigates to it. A refusal is logged AND surfaced
-  // (#1543, the MemorySection posture): scoped to the workspace it failed
+  // (#1543, the MemorySection alert face): scoped to the workspace it failed
   // on (the toggle failure's stale-bleed guard), cleared by a successful
   // retry -- the action stays retryable, never silent.
   const [openFailure, setOpenFailure] = useState<{
@@ -475,8 +475,9 @@ export function WorkspaceMemoryDialog({
             The cost hint hangs straight off the label -- hover the text
             and the tooltip surfaces (the popover skin matches the settings
             FieldHint's, the same SETTINGS_TOOLTIP_CLASS source). Off hides
-            the footer's control (a refused toggle write keeps the footer
-            for its banner line), and so does the create face -- the form
+            the footer's control (a refused toggle or folder-open write
+            keeps the footer for its banner line), and so does the create
+            face -- the form
             owns the bottom while mounted. */}
         {!creating &&
           (isOn || toggleFailure?.path === path || openFailure?.path === path) && (

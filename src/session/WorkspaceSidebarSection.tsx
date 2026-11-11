@@ -187,8 +187,9 @@ export function WorkspaceSidebarSection({
   } | null>(null);
   // A refused group folder open (#1543): the menu is closed by the time the
   // opener refuses, so the failure surfaces under the group's own row --
-  // scoped to the group it failed on, cleared only by THAT group's
-  // successful retry.
+  // scoped to the group it failed on. The clear is path-guarded (another
+  // group's successful open cannot retire it), but a newer group's failure
+  // displaces it: one live slot, whichever failed last (#1317's posture).
   const [folderOpenFailure, setFolderOpenFailure] = useState<{
     path: string;
     message: string;

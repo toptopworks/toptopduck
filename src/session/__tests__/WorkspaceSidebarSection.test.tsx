@@ -3,7 +3,8 @@
 // a refusal surfaces as an alert under the failing group's own row -- the
 // menu is closed by the time the opener refuses, so the row is the honest
 // surface. The suite pins the scoping (only the failing group's row shows
-// the alert) and the clear (that group's successful retry retires it).
+// the alert) and the clear (that group's successful retry retires it; a
+// sibling group's success does not).
 // The modal-off-the-menu faces (rename / remove / datasets / memory) have
 // their own suites; this one rides the section alone with empty groups.
 
@@ -96,5 +97,22 @@ describe("WorkspaceSidebarSection folder-open failure (#1543)", () => {
     await waitFor(() =>
       expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
     );
+  });
+
+  // The clear is path-guarded (#1543 review): the functional updater keeps
+  // a sibling group's successful open from retiring the failing group's
+  // alert -- only that group's own successful retry clears it.
+  it("keeps a group's alert when a sibling group opens successfully", async () => {
+    mockedOpenPath.mockRejectedValueOnce(new Error("alpha refused"));
+    renderSection([group(), group({ path: "/w/beta", label: "Beta" })]);
+    await openGroupMenu();
+    activateItem(screen.getByRole("menuitem", { name: "打开文件夹" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("alpha refused");
+    // Beta's successful open leaves Alpha's alert live.
+    await openGroupMenu(1);
+    activateItem(screen.getByRole("menuitem", { name: "打开文件夹" }));
+    await waitFor(() => expect(mockedOpenPath).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("alert")).toBe(alert);
   });
 });
