@@ -1,5 +1,6 @@
 // The user-memory settings pane's render contract (issue #1531): the
 // read-only list (title + category badge + hook) with the reveal wiring,
+// the MCP-style count line + title-and-hook search filter above the card,
 // the empty guide (the folder is the hand-write entry point), the folder
 // open, and the listing error face. The suite mocks the api module (the
 // IPC boundary) and the opener plugin, rendered through the settings seam
@@ -64,8 +65,41 @@ describe("MemorySection", () => {
     expect(screen.getByText("always zh")).toBeInTheDocument();
     // The category badge renders localized (the en-US catalog).
     expect(screen.getByText("User")).toBeInTheDocument();
-    // The count rides the pane title.
-    expect(screen.getByText("User memories · 1")).toBeInTheDocument();
+    // The pane title is the static nav name; the count rides the MCP-style
+    // line above the card (the count digit sits in a nested span, so the
+    // loose matcher rides the whole line element -- exact: false).
+    expect(screen.getByText("Memory")).toBeInTheDocument();
+    expect(screen.getByText("User memories", { exact: false })).toBeInTheDocument();
+    // The digit itself: an exact match pins the nested span's text node.
+    expect(screen.getByText("1")).toBeInTheDocument();
+    // The read-only layer has no enabled axis: search box only, no Select.
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  });
+
+  it("filters rows through the search box and shows the no-results face", async () => {
+    mockedList.mockResolvedValue({
+      rows: [
+        memory(),
+        memory({ title: "Pinned projects", file: "pinned.md", hook: "favorites" }),
+      ],
+      usage_percent: 0,
+      unreadable: [],
+    });
+    renderSettings(<MemorySection />);
+    const box = await screen.findByPlaceholderText("Search memories…");
+    // Baseline: both rows visible before the query lands.
+    expect(screen.getByText("Reply in Simplified Chinese")).toBeInTheDocument();
+    expect(screen.getByText("Pinned projects")).toBeInTheDocument();
+    fireEvent.change(box, { target: { value: "pinned" } });
+    expect(screen.queryByText("Reply in Simplified Chinese")).not.toBeInTheDocument();
+    expect(screen.getByText("Pinned projects")).toBeInTheDocument();
+    // The hook half of the projection: "always zh" rides no title, so the
+    // hit must come through searchableText's hook leg.
+    fireEvent.change(box, { target: { value: "always zh" } });
+    expect(screen.getByText("Reply in Simplified Chinese")).toBeInTheDocument();
+    expect(screen.queryByText("Pinned projects")).not.toBeInTheDocument();
+    fireEvent.change(box, { target: { value: "zzz" } });
+    expect(screen.getByText(/No memories match the current search/)).toBeInTheDocument();
   });
 
   it("reveals the row's memory file in the folder", async () => {
@@ -85,6 +119,28 @@ describe("MemorySection", () => {
     expect(
       await screen.findByText(/No user memories yet/),
     ).toBeInTheDocument();
+    // The count line gates on a non-empty layer: no zero line above
+    // the empty guide (case-sensitive anchor -- a loose substring would
+    // hit the guide's own "user memories yet").
+    expect(
+      screen.queryByText(/^User memories/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows only the unreadable tail when every file is unrecognized", async () => {
+    mockedList.mockResolvedValue({
+      rows: [],
+      usage_percent: 0,
+      unreadable: ["loose.md"],
+    });
+    renderSettings(<MemorySection />);
+    // No search is active, so the no-results face must not claim a
+    // failed search -- the tail stands alone (issue #1544 review).
+    expect(await screen.findByText(/Unrecognized files/)).toBeInTheDocument();
+    expect(screen.queryByText(/No memories match/)).not.toBeInTheDocument();
+    // The empty guide stays away too: unreadable files mean the layer
+    // is not empty, the files are just not memories yet.
+    expect(screen.queryByText(/No user memories yet/)).not.toBeInTheDocument();
   });
 
   it("opens the memory folder through the backend-minted root", async () => {
@@ -117,6 +173,9 @@ describe("MemorySection", () => {
     mockedList.mockRejectedValue(new Error("boom"));
     renderSettings(<MemorySection />);
     expect(await screen.findByRole("alert")).toHaveTextContent("boom");
+    // A dataless failure renders the alert alone: the empty guide must
+    // not claim an unknown layer (issue #1544 review).
+    expect(screen.queryByText(/No user memories yet/)).not.toBeInTheDocument();
   });
 
   it("shows the red usage band at the cap", async () => {
