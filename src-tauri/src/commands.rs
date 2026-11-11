@@ -719,9 +719,9 @@ pub fn remove_workspace(
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum WorkspaceDatasetError {
-    /// xlsx is out of the shared face's first cut (ADR-0141 D11): the catalog
-    /// owns the "convert to CSV/Parquet or use a session-private source"
-    /// redirect this kind triggers.
+    /// The direct add and replace faces refuse workbooks (ADR-0141 D11 as
+    /// revised, #1552): the catalog owns the guided-dialog redirect and
+    /// remove-then-reimport wording this kind triggers.
     XlsxRejected,
     LegacyExcel,
     UnsupportedFormat(String),
@@ -827,7 +827,7 @@ pub async fn replace_workspace_dataset(
 
 /// Read a workbook parked for the shared face's guided import (ADR-0141 D11
 /// as revised, issue #1552) and return its confirmation payload: every
-/// visible sheet's two-state + previews. The parse parks in-process keyed by
+/// visible non-blank sheet's two-state + previews. The parse parks in-process keyed by
 /// (workspace, path) so the dialog's paging never re-reads the file; a
 /// superseding preview replaces the entry, a landed or cancelled import
 /// drops it. Runs the parse off the async/UI thread (AC8's shared-face

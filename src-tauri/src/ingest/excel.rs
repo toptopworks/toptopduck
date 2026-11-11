@@ -110,8 +110,8 @@ pub fn render_preview(sheet: &SheetRows, n: usize) -> Vec<Vec<String>> {
     render_preview_window(sheet, 0, n)
 }
 
-/// Render one window of raw rows as strings for the guided-load pager
-/// (issue #750): rows `[offset .. offset + limit)`, clamped to the sheet's
+/// Render one window of raw rows as strings for the guided-load pagers
+/// (issues #750 and #1552): rows `[offset .. offset + limit)`, clamped to the sheet's
 /// row count by `skip` / `take` -- an offset past the last row yields an
 /// empty window rather than panicking. Same raw-grid semantics as
 /// [`render_preview`] (merged cells appear as calamine yields them); the
@@ -128,8 +128,8 @@ pub fn render_preview_window(sheet: &SheetRows, offset: usize, limit: usize) -> 
 
 /// Raw rows surfaced per sheet in the guided-load preview -- enough to spot
 /// the header row and any separator/sub-header/footer rows to skip
-/// (ADR-0015). Doubles as the pager's window size (issue #750): the first
-/// inlined window and every fetched window are the same height.
+/// (ADR-0015). Doubles as the pagers' window size (issues #750 and #1552):
+/// the first inlined window and every fetched window are the same height.
 pub const GUIDANCE_PREVIEW_ROWS: usize = 12;
 
 /// The defensive floor for a guided commit that selects nothing (ADR-0148):

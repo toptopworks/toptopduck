@@ -16,7 +16,7 @@ export function describeError(e: unknown, intl: IntlShape): string {
         return intl.formatMessage({
           id: "workspace.datasets.error.xlsx",
           defaultMessage:
-            "xlsx is not supported in this panel; convert to CSV/Parquet or use a session-private source",
+            "xlsx workbooks import through the guided confirm dialog; replacing a dataset with a workbook is not supported — remove the dataset and import the workbook again",
         });
       case "LegacyExcel":
         return intl.formatMessage({

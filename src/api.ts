@@ -184,7 +184,7 @@ export async function addWorkspaceDataset(
 }
 
 // Read an .xlsx workbook for the shared face's guided import (issue #1552):
-// every visible sheet's two-state + previews, and the full parse parks
+// every visible non-blank sheet's two-state + previews, and the full parse parks
 // server-side keyed by (workspace, path) so the dialog's paging never
 // re-reads the file. A superseding preview replaces the park.
 export async function previewWorkspaceDataset(

@@ -366,7 +366,8 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
       .catch((e: unknown) => {
         // Inline above the dialog footer (the panel's banner sits behind
         // the modal scrim); the dialog stays open for retry and the park
-        // stays parked -- retry reuses the backend's retained parse.
+        // stays parked -- its paging keeps working while the submit
+        // itself re-parses the workbook.
         setGuidanceError({ message: describeError(e, intl), kind: "shell", detail: null });
       })
       .finally(() => setGuidedLoading(false));
@@ -380,7 +381,7 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
       discardWorkspaceDatasetPreview(parked.workspace, parked.path).catch((e: unknown) => {
         log.warn(
           "useWorkspaceDatasets",
-          "guided-preview discard failed (process-ephemeral; leaking nothing)",
+          "guided-preview discard failed (park retained in-process until a same-key preview or exit)",
           { error: String(e) },
         );
       });
@@ -448,8 +449,9 @@ export function useWorkspaceDatasets(workspace: WorkspaceTarget | null): UseWork
   const privacyBusy = privacyFlightCount > 0;
 
   // The picker: the panel's only add / replace channel (the same
-  // plugin-dialog face the working set uses). xlsx never appears -- the
-  // filter is the first refusal edge (ADR-0141 D11).
+  // plugin-dialog face the working set uses). xlsx appears and routes to
+  // the guided dialog (D11 as revised, #1552); .xls never appears -- the
+  // filter is the first refusal edge for it.
   const pickerFilters = [
     {
       name: intl.formatMessage({

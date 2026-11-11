@@ -488,10 +488,23 @@ fn materialize_sheet(
         .map_err(StoreError::from)?;
     // materialize hashes the CSV (the content key), reuses the store file
     // on a hit, and copies in + renames on a miss -- the store discipline,
-    // unchanged for the new key source.
-    let landed = materialize(workspace, &csv_path, "read_csv_auto");
+    // unchanged for the new key source. A failed materialization logs a
+    // failed temp-CSV removal (the session face's attach_sheet posture);
+    // the success path stays silent best-effort.
+    let landed = match materialize(workspace, &csv_path, "read_csv_auto") {
+        Ok(s) => s,
+        Err(e) => {
+            if let Err(io_err) = fs::remove_file(&csv_path) {
+                log::warn!(
+                    target: "toptopduck::workspace_datasets",
+                    "temp CSV removal failed for sheet {sheet_name}: {io_err}"
+                );
+            }
+            return Err(e);
+        }
+    };
     let _ = fs::remove_file(&csv_path);
-    landed
+    Ok(landed)
 }
 
 /// Add a workbook's CHECKED sheets as shared datasets (the guided import,
