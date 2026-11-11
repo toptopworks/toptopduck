@@ -10,7 +10,9 @@
 //
 // The header's single failure slot (issue #1317): at most one live note at a
 // time -- whichever action failed last; starting any action (refresh
-// included) clears the previous note.
+// included) clears the previous note. The notes carry the alert form
+// (#1543): role="alert" + the destructive tone, never a quiet muted line --
+// the MemorySection failure posture.
 
 import { useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
@@ -241,7 +243,7 @@ export function ArtifactHeader({
           </p>
         )}
         {failure === "open" && (
-          <p className="m-0 text-xs text-muted-foreground" role="status">
+          <p className="text-destructive m-0 text-xs" role="alert">
             <FormattedMessage
               id="workspace.artifact.openFailed"
               defaultMessage="Could not open the file externally"
@@ -249,7 +251,7 @@ export function ArtifactHeader({
           </p>
         )}
         {failure === "folder" && (
-          <p className="m-0 text-xs text-muted-foreground" role="status">
+          <p className="text-destructive m-0 text-xs" role="alert">
             <FormattedMessage
               id="workspace.artifact.folderFailed"
               defaultMessage="Could not locate the file in the folder"
@@ -257,7 +259,7 @@ export function ArtifactHeader({
           </p>
         )}
         {failure === "save" && (
-          <p className="m-0 text-xs text-muted-foreground" role="status">
+          <p className="text-destructive m-0 text-xs" role="alert">
             <FormattedMessage
               id="workspace.artifact.saveFailed"
               defaultMessage="Could not save a copy of the file"

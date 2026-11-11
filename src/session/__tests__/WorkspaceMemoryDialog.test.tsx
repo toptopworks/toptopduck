@@ -473,6 +473,23 @@ describe("WorkspaceMemoryDialog", () => {
     expect(await screen.findByLabelText("标题")).toBeInTheDocument();
   });
 
+  // The refused folder open (#1543): a failure surfaces on the footer's
+  // alert face -- never a silently dead button -- and a successful retry
+  // clears it.
+  it("surfaces a folder-open failure as the footer alert and clears on retry", async () => {
+    mockedEnabled.mockResolvedValue(true);
+    mockedList.mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
+    mockedOpenDir.mockRejectedValueOnce(new Error("mint refused"));
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "打开文件夹" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("mint refused");
+    // The beforeEach resolve takes over: a successful retry clears the alert.
+    fireEvent.click(screen.getByRole("button", { name: "打开文件夹" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+  });
+
   // The unreadable tail (#1538): fence-less .md files surface by name,
   // neutrally, after the healthy rows.
   it("surfaces unreadable files at the list tail", async () => {

@@ -85,10 +85,10 @@ describe("ArtifactHeader", () => {
       vi.mocked(openPath).mockRejectedValue(new Error("no association"));
       renderHeader("C:/sessions/s1/artifacts/report.pdf", true);
       fireEvent.click(await screen.findByRole("button", { name: /外部打开|externally/ }));
-      // Scoped to the header; no other status region exists here (the
+      // Scoped to the header; no other alert region exists here (the
       // header owns no frame).
       const header = screen.getByTestId("artifact-header");
-      expect(await within(header).findByRole("status")).toHaveTextContent(
+      expect(await within(header).findByRole("alert")).toHaveTextContent(
         /无法在外部打开|Could not open/,
       );
     });
@@ -103,10 +103,10 @@ describe("ArtifactHeader", () => {
       const open = await screen.findByRole("button", { name: /外部打开|externally/ });
       fireEvent.click(open);
       const header = screen.getByTestId("artifact-header");
-      expect(await within(header).findByRole("status")).toBeInTheDocument();
+      expect(await within(header).findByRole("alert")).toBeInTheDocument();
       fireEvent.click(open);
       await waitFor(() =>
-        expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
+        expect(within(header).queryByRole("alert")).not.toBeInTheDocument(),
       );
     });
   });
@@ -244,7 +244,7 @@ describe("ArtifactHeader", () => {
       // Quiet means quiet: a cancel routed into the failure slot would show
       // a header note, so none may be live.
       const header = screen.getByTestId("artifact-header");
-      expect(within(header).queryByRole("status")).not.toBeInTheDocument();
+      expect(within(header).queryByRole("alert")).not.toBeInTheDocument();
     });
 
     it("surfaces a failed copy as a header live note", async () => {
@@ -254,7 +254,7 @@ describe("ArtifactHeader", () => {
       await openMoreMenu();
       activateItem(screen.getByRole("menuitem", { name: "另存为…" }));
       const header = screen.getByTestId("artifact-header");
-      expect(await within(header).findByRole("status")).toHaveTextContent(
+      expect(await within(header).findByRole("alert")).toHaveTextContent(
         /无法另存|Could not save/,
       );
     });
@@ -275,7 +275,7 @@ describe("ArtifactHeader", () => {
       await openMoreMenu();
       activateItem(screen.getByRole("menuitem", { name: "在文件夹中显示" }));
       const header = screen.getByTestId("artifact-header");
-      expect(await within(header).findByRole("status")).toHaveTextContent(
+      expect(await within(header).findByRole("alert")).toHaveTextContent(
         /无法在文件夹|Could not locate/,
       );
     });
@@ -286,12 +286,12 @@ describe("ArtifactHeader", () => {
       renderHeader("C:/sessions/s1/artifacts/report.pdf", true);
       fireEvent.click(await screen.findByRole("button", { name: /外部打开|externally/ }));
       const header = screen.getByTestId("artifact-header");
-      expect(await within(header).findByRole("status")).toBeInTheDocument();
+      expect(await within(header).findByRole("alert")).toBeInTheDocument();
       await openMoreMenu();
       activateItem(screen.getByRole("menuitem", { name: "在文件夹中显示" }));
       await waitFor(() => expect(revealItemInDir).toHaveBeenCalledTimes(1));
       await waitFor(() =>
-        expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
+        expect(within(header).queryByRole("alert")).not.toBeInTheDocument(),
       );
     });
 
@@ -302,14 +302,14 @@ describe("ArtifactHeader", () => {
       await openMoreMenu();
       activateItem(screen.getByRole("menuitem", { name: "另存为…" }));
       const header = screen.getByTestId("artifact-header");
-      expect(await within(header).findByRole("status")).toBeInTheDocument();
+      expect(await within(header).findByRole("alert")).toBeInTheDocument();
       await openMoreMenu();
       activateItem(screen.getByRole("menuitem", { name: "刷新" }));
       // Refresh leads with the same slot-clearing as every other action; no
-      // other status region exists in this suite, so the note vanishing
+      // other alert region exists in this suite, so the note vanishing
       // from the header is the whole signal.
       await waitFor(() =>
-        expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
+        expect(within(header).queryByRole("alert")).not.toBeInTheDocument(),
       );
     });
 
@@ -320,14 +320,14 @@ describe("ArtifactHeader", () => {
       renderHeader("C:/sessions/s1/artifacts/report.pdf", true);
       fireEvent.click(await screen.findByRole("button", { name: /外部打开|externally/ }));
       const header = screen.getByTestId("artifact-header");
-      expect(await within(header).findByRole("status")).toBeInTheDocument();
+      expect(await within(header).findByRole("alert")).toBeInTheDocument();
       await openMoreMenu();
       activateItem(screen.getByRole("menuitem", { name: "另存为…" }));
       await waitFor(() => expect(copyArtifactFile).toHaveBeenCalledTimes(1));
       // Save-as leads with the same slot-clearing as every other action;
       // a successful copy retires the live note.
       await waitFor(() =>
-        expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
+        expect(within(header).queryByRole("alert")).not.toBeInTheDocument(),
       );
     });
 

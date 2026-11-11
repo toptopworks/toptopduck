@@ -273,14 +273,22 @@ export function WorkspaceMemoryDialog({
   });
   // The folder-open action (#1538): the backend mints the directory family
   // on demand (the zero-footprint fresh workspace included), then the
-  // front-end opener navigates to it. A refusal is logged, not thrown --
-  // the action is simply retryable (the reveal button's posture).
+  // front-end opener navigates to it. A refusal is logged AND surfaced
+  // (#1543, the MemorySection alert face): scoped to the workspace it failed
+  // on (the toggle failure's stale-bleed guard), cleared by a successful
+  // retry -- the action stays retryable, never silent.
+  const [openFailure, setOpenFailure] = useState<{
+    path: string;
+    message: string;
+  } | null>(null);
   const openFolder = () => {
     openWorkspaceMemoryDir(path)
       .then((dir) => openPath(dir))
-      .catch((e: unknown) =>
-        log.warn("WorkspaceMemoryDialog", "open memory folder failed", e),
-      );
+      .then(() => setOpenFailure(null))
+      .catch((e: unknown) => {
+        log.warn("WorkspaceMemoryDialog", "open memory folder failed", e);
+        setOpenFailure({ path, message: describeError(e, intl) });
+      });
   };
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -467,10 +475,12 @@ export function WorkspaceMemoryDialog({
             The cost hint hangs straight off the label -- hover the text
             and the tooltip surfaces (the popover skin matches the settings
             FieldHint's, the same SETTINGS_TOOLTIP_CLASS source). Off hides
-            the footer's control (a refused toggle write keeps the footer
-            for its banner line), and so does the create face -- the form
+            the footer's control (a refused toggle or folder-open write
+            keeps the footer for its banner line), and so does the create
+            face -- the form
             owns the bottom while mounted. */}
-        {!creating && (isOn || toggleFailure?.path === path) && (
+        {!creating &&
+          (isOn || toggleFailure?.path === path || openFailure?.path === path) && (
           <footer className="flex flex-col gap-2 border-t pt-3">
             {isOn && (
               <div className="flex items-center justify-end gap-2">
@@ -516,6 +526,13 @@ export function WorkspaceMemoryDialog({
               // unmoved control.
               <p className="text-destructive m-0 text-sm" role="alert">
                 {toggleFailure.message}
+              </p>
+            )}
+            {openFailure?.path === path && (
+              // A refused folder open (backend mint or front-end opener,
+              // #1543) rides the same footer banner posture.
+              <p className="text-destructive m-0 text-sm" role="alert">
+                {openFailure.message}
               </p>
             )}
           </footer>

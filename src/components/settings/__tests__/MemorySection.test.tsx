@@ -113,6 +113,24 @@ describe("MemorySection", () => {
     );
   });
 
+  // A refused reveal (#1543) surfaces as the row's own alert -- the shared
+  // MemoryRow's face, pinned through this host -- and a successful retry
+  // clears it.
+  it("surfaces a reveal failure as the row's alert and clears on retry", async () => {
+    mockedList.mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
+    mockedReveal.mockRejectedValueOnce(new Error("file gone"));
+    renderSettings(<MemorySection />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Reveal in folder" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("file gone");
+    // The beforeEach resolve takes over: a successful retry clears the alert.
+    fireEvent.click(screen.getByRole("button", { name: "Reveal in folder" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+  });
+
   it("renders the empty guide when the layer has no memories", async () => {
     mockedList.mockResolvedValue({ rows: [], usage_percent: 0, unreadable: [] });
     renderSettings(<MemorySection />);

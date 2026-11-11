@@ -64,6 +64,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { bareButtonReset } from "@/lib/buttonReset";
+import { describeError } from "@/lib/error-presentation";
 import { log } from "@/lib/log";
 import { usePointerCloseIntent } from "@/lib/usePointerCloseIntent";
 import { isInvalidWorkspaceName } from "@/lib/workspaceName";
@@ -184,6 +185,25 @@ export function WorkspaceSidebarSection({
     path: string;
     label: string;
   } | null>(null);
+  // A refused group folder open (#1543): the menu is closed by the time the
+  // opener refuses, so the failure surfaces under the group's own row --
+  // scoped to the group it failed on. The clear is path-guarded (another
+  // group's successful open cannot retire it), but a newer group's failure
+  // displaces it: one live slot, whichever failed last (#1317's posture).
+  const [folderOpenFailure, setFolderOpenFailure] = useState<{
+    path: string;
+    message: string;
+  } | null>(null);
+  const openGroupFolder = (path: string) => {
+    openPath(path)
+      .then(() =>
+        setFolderOpenFailure((prev) => (prev?.path === path ? null : prev)),
+      )
+      .catch((e: unknown) => {
+        log.warn("WorkspaceSidebarSection", "openPath failed", e);
+        setFolderOpenFailure({ path, message: describeError(e, intl) });
+      });
+  };
 
   function toggleGroup(path: string) {
     const next = new Set(expanded);
@@ -534,6 +554,7 @@ export function WorkspaceSidebarSection({
                     <WorkspaceGroupMenu
                       group={g}
                       disabled={disabled}
+                      onOpenFolder={openGroupFolder}
                       onRename={() => openRename(g)}
                       onRemove={() => setRemoving(g)}
                       onManageDatasets={() => setManaging({ path: g.path, label: g.label })}
@@ -541,6 +562,13 @@ export function WorkspaceSidebarSection({
                     />
                   </div>
                 </div>
+                {folderOpenFailure?.path === g.path && (
+                  // A refused folder open surfaces under its group's row
+                  // (#1543) -- the menu is gone by then, the row stays.
+                  <p className="text-destructive m-0 py-1 pl-7 text-xs" role="alert">
+                    {folderOpenFailure.message}
+                  </p>
+                )}
                 {open && shown.length > 0 && (
                   <ul className="ml-4 border-l border-border pl-0.5">
                     {renderRows(shown)}
@@ -809,6 +837,7 @@ export function WorkspaceSidebarSection({
 function WorkspaceGroupMenu({
   group,
   disabled,
+  onOpenFolder,
   onRename,
   onRemove,
   onManageDatasets,
@@ -816,6 +845,7 @@ function WorkspaceGroupMenu({
 }: {
   group: WorkspaceGroup;
   disabled: boolean;
+  onOpenFolder: (path: string) => void;
   onRename: () => void;
   onRemove: () => void;
   onManageDatasets: () => void;
@@ -853,12 +883,10 @@ function WorkspaceGroupMenu({
         <DropdownMenuItem
           disabled={group.missing}
           onSelect={() => {
-            // The opener can refuse (a folder deleted after the listing
-            // snapshot): log it -- the ArtifactHeader posture. The menu is
-            // closed by then, so the log is the honest surface.
-            openPath(group.path).catch((e: unknown) =>
-              log.warn("WorkspaceSidebarSection", "openPath failed", e),
-            );
+            // The parent owns the open + its failure face (#1543): the menu
+            // is closed by the time the opener refuses, so the failure
+            // surfaces under the group's row, not here.
+            onOpenFolder(group.path);
           }}
         >
           <FolderOpen aria-hidden />
