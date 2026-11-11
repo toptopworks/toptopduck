@@ -24,22 +24,10 @@ use calamine::Data;
 
 use crate::ingest;
 use crate::ingest::schema::{attach_sql, quote_ident};
-use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, GuidanceSheetState,
-    LoadError, LoadOutcome, RectifyProvenance, SheetGuidance, SheetRectify, SourceLifecycleKind,
+    DatasetDescriptor, DatasetPrivacy, LoadError, LoadOutcome, RectifyProvenance, SheetGuidance,
+    SourceLifecycleKind,
 };
-
-/// Raw rows surfaced per sheet in the guided-load preview -- enough to spot the
-/// header row and any separator/sub-header/footer rows to skip (ADR-0015).
-/// Doubles as the pager's window size (issue #750): the first inlined window
-/// and every fetched window are the same height.
-const GUIDANCE_PREVIEW_ROWS: usize = 12;
-
-/// The defensive floor for a guided commit that selects nothing (ADR-0148):
-/// shared wording for the empty-selection guard and the all-unknown-names
-/// guard, so the two rejects can never drift apart.
-const NO_SHEET_SELECTED: &str = "未选择任何 sheet";
 
 /// The parsed sheets of a workbook parked on the guided-load dialog (issue
 /// #750): `read_non_empty_sheets` already parsed the workbook fully for the
@@ -217,22 +205,6 @@ impl super::Session {
         LoadOutcome::Loaded(descriptor)
     }
 
-    /// Read a workbook's visible sheets and drop blank ones -- the shared
-    /// preamble for both legs of the Excel ingest flow: the confirmation
-    /// park and the guided commit. Returns
-    /// `Err` with a single shared message when no sheet carries data, so the
-    /// "工作簿不含任何含数据的 sheet" wording lives in one place.
-    fn read_non_empty_sheets(path: &Path) -> Result<Vec<ingest::excel::SheetRows>, LoadError> {
-        let mut sheets = ingest::excel::read_sheets(path)?;
-        sheets.retain(|s| !s.rows.is_empty());
-        if sheets.is_empty() {
-            return Err(LoadError::Parse {
-                detail: "工作簿不含任何含数据的 sheet".into(),
-            });
-        }
-        Ok(sheets)
-    }
-
     /// Ingest a .xlsx workbook (ADR-0148): best-effort auto-tidy each sheet
     /// (ADR-0015) for its two-state -- the detected header row as the dialog's
     /// pre-fill guess (AutoTidied), or the failure reason (NeedsGuidance) --
@@ -245,21 +217,13 @@ impl super::Session {
     /// parse. Formula cells use their cached value (ADR-0015). The working set
     /// stays untouched here.
     fn ingest_excel(&mut self, path: &Path) -> LoadOutcome {
-        let sheets = match Self::read_non_empty_sheets(path) {
+        let sheets = match ingest::excel::read_non_empty_sheets(path) {
             Ok(s) => s,
             Err(e) => return LoadOutcome::Error(e),
         };
 
-        let states: Vec<GuidanceSheetState> = sheets
-            .iter()
-            .map(|sheet| match auto_tidy(sheet) {
-                TidyOutcome::Tidied(t) => GuidanceSheetState::AutoTidied {
-                    header_row: t.header_row,
-                },
-                TidyOutcome::NeedsGuidance(reason) => GuidanceSheetState::NeedsGuidance { reason },
-            })
-            .collect();
-        let request = Self::build_guidance(path, &sheets, &states);
+        let states = ingest::excel::guidance_states(&sheets);
+        let request = ingest::excel::build_guidance(path, &sheets, &states);
         // Retain the parse for zero-reparse preview paging (issue #750);
         // dropped on guided commit / dialog cancel (see GuidanceRetention).
         self.guidance_retained = Some(GuidanceRetention {
@@ -280,13 +244,13 @@ impl super::Session {
     /// merged cells, then loaded with `rectify = User(...)` recorded on the
     /// descriptor. Transactional like [`Self::ingest`].
     pub fn ingest_guided(&mut self, path: &Path, guidance: &[SheetGuidance]) -> LoadOutcome {
-        let sheets = match Self::read_non_empty_sheets(path) {
+        let sheets = match ingest::excel::read_non_empty_sheets(path) {
             Ok(s) => s,
             Err(e) => return LoadOutcome::Error(e),
         };
         if guidance.is_empty() {
             return LoadOutcome::Error(LoadError::Parse {
-                detail: NO_SHEET_SELECTED.into(),
+                detail: ingest::excel::NO_SHEET_SELECTED.into(),
             });
         }
 
@@ -304,7 +268,7 @@ impl super::Session {
                     .map(|g| (sheet, g.rectify.clone()))
             })
             .map(|(sheet, rectify)| {
-                let rows = Self::apply_rectify(sheet, &rectify)?;
+                let rows = ingest::excel::apply_rectify(sheet, &rectify)?;
                 Ok::<_, LoadError>((sheet.name.clone(), rows, RectifyProvenance::User(rectify)))
             })
             .collect::<Result<Vec<_>, _>>()
@@ -316,7 +280,7 @@ impl super::Session {
         // floor as the empty-selection guard above.
         if entries.is_empty() {
             return LoadOutcome::Error(LoadError::Parse {
-                detail: NO_SHEET_SELECTED.into(),
+                detail: ingest::excel::NO_SHEET_SELECTED.into(),
             });
         }
         // A checked entry that missed every workbook sheet means the file
@@ -379,7 +343,7 @@ impl super::Session {
         Some(ingest::excel::render_preview_window(
             sheet,
             offset,
-            limit.min(GUIDANCE_PREVIEW_ROWS),
+            limit.min(ingest::excel::GUIDANCE_PREVIEW_ROWS),
         ))
     }
 
@@ -538,82 +502,6 @@ impl super::Session {
             privacy: DatasetPrivacy::default(),
             stale: None,
         })
-    }
-
-    /// Build a [`GuidanceRequest`] from a workbook's sheets: each visible
-    /// non-blank sheet's raw top rows rendered as strings (pre-rectify preview)
-    /// plus the total row count + the per-sheet two-state (issue #750/#751:
-    /// the failure reason or the auto-detected header guess). `states` is
-    /// index-aligned with `sheets`.
-    fn build_guidance(
-        path: &Path,
-        sheets: &[ingest::excel::SheetRows],
-        states: &[GuidanceSheetState],
-    ) -> GuidanceRequest {
-        let workbook_name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("workbook")
-            .to_string();
-        // The zip below truncates silently on a length mismatch; both vecs
-        // are filled in the same loop, so make that alignment loud.
-        debug_assert_eq!(sheets.len(), states.len());
-        let sheets_preview = sheets
-            .iter()
-            .zip(states)
-            .map(|(s, state)| GuidanceSheet {
-                name: s.name.clone(),
-                preview: ingest::excel::render_preview(s, GUIDANCE_PREVIEW_ROWS),
-                total_rows: s.rows.len(),
-                state: *state,
-            })
-            .collect();
-        GuidanceRequest {
-            source_path: path.to_string_lossy().to_string(),
-            workbook_name,
-            sheets: sheets_preview,
-        }
-    }
-
-    /// Apply a user's rectify choices to a sheet's raw grid: forward-fill merged
-    /// cells, then take the header from `header_row` (1-based) and the data rows
-    /// below it minus `skip_rows` (1-based absolute). Deterministic for the same
-    /// input + params (ADR-0042).
-    ///
-    /// `header_row` is validated to be in `1..=rows.len()`: a guided ingest is a
-    /// `#[tauri::command]`, so the value crosses the IPC boundary, and an
-    /// out-of-range header_row would otherwise silently yield a header-less table
-    /// (range miss) or a header-duplicated table (`0` -- the first row serves as
-    /// both header and data). Rejecting it keeps the user's explicit decision
-    /// producing exactly the table they asked for (ADR-0042).
-    fn apply_rectify(
-        sheet: &ingest::excel::SheetRows,
-        rectify: &SheetRectify,
-    ) -> Result<Vec<Vec<Data>>, LoadError> {
-        let mut rows = sheet.rows.clone();
-        forward_fill_merges(&mut rows, &sheet.merges);
-        if rectify.header_row == 0 || rectify.header_row as usize > rows.len() {
-            return Err(LoadError::Parse {
-                detail: format!(
-                    "表头行号 {} 越界（sheet \"{}\" 共 {} 行，需在 1..={} 内）",
-                    rectify.header_row,
-                    sheet.name,
-                    rows.len(),
-                    rows.len()
-                ),
-            });
-        }
-        let header_idx = rectify.header_row as usize - 1;
-        let mut out = Vec::with_capacity(rows.len());
-        out.push(rows[header_idx].clone());
-        let skip: HashSet<u32> = rectify.skip_rows.iter().copied().collect();
-        for (i, row) in rows.iter().enumerate() {
-            let abs = (i + 1) as u32; // 1-based absolute row
-            if abs > rectify.header_row && !skip.contains(&abs) {
-                out.push(row.clone());
-            }
-        }
-        Ok(out)
     }
 
     /// Detach already-attached excel snapshots and delete their files (rollback).

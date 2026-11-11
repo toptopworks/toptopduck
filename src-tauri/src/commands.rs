@@ -35,9 +35,10 @@ use crate::cancel::CancelToken;
 use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
 use crate::mcp::McpClient;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, LoadOutcome, ProfileId, ProfileKeyStatus,
-    ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
-    SessionNamedPayload, SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
+    DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, GuidanceRequest, LoadOutcome, ProfileId,
+    ProfileKeyStatus, ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView,
+    RemoveSourceError, RowPage, SessionNamedPayload, SheetGuidance, ThreadEntry, TurnOutcome,
+    TurnProgress,
 };
 use crate::persistence::recipe::LastRuntime;
 use crate::persistence::{
@@ -819,6 +820,99 @@ pub async fn replace_workspace_dataset(
             std::path::Path::new(&path),
         )
         .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Read a workbook parked for the shared face's guided import (ADR-0141 D11
+/// as revised, issue #1552) and return its confirmation payload: every
+/// visible sheet's two-state + previews. The parse parks in-process keyed by
+/// (workspace, path) so the dialog's paging never re-reads the file; a
+/// superseding preview replaces the entry, a landed or cancelled import
+/// drops it. Runs the parse off the async/UI thread (AC8's shared-face
+/// posture).
+#[tauri::command]
+pub async fn preview_workspace_dataset(
+    workspace: String,
+    path: String,
+) -> Result<GuidanceRequest, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::preview(
+            std::path::Path::new(&workspace),
+            std::path::Path::new(&path),
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Add a workbook's checked sheets as shared datasets, after a
+/// `preview_workspace_dataset` round trip gathered the user's per-sheet
+/// rectify choices. Runs the copy-in off the async/UI thread.
+#[tauri::command]
+pub async fn add_workspace_dataset_guided(
+    workspace: String,
+    path: String,
+    guidance: Vec<SheetGuidance>,
+) -> Result<Vec<crate::workspace::DatasetEntry>, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::add_guided(
+            std::path::Path::new(&workspace),
+            std::path::Path::new(&path),
+            &guidance,
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Serve one preview window for a sheet parked by
+/// `preview_workspace_dataset` (issue #1552), from the retained parse --
+/// zero workbook re-parse per page. A miss (committed, discarded, or
+/// superseded) rejects so a stale dialog can never render window rows from
+/// a different workbook.
+#[tauri::command]
+pub async fn workspace_dataset_preview_window(
+    workspace: String,
+    path: String,
+    sheet_name: String,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<Vec<String>>, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::parked_window(
+            std::path::Path::new(&workspace),
+            std::path::Path::new(&path),
+            &sheet_name,
+            offset,
+            limit,
+        )
+        .ok_or_else(|| {
+            WorkspaceDatasetError::Io(format!(
+                "no parked preview for sheet \"{sheet_name}\" of {path} (already committed, discarded, or superseded)"
+            ))
+        })
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Drop a parked preview parse (the dialog-cancel path, issue #1552).
+/// Idempotent.
+#[tauri::command]
+pub async fn discard_workspace_dataset_preview(
+    workspace: String,
+    path: String,
+) -> Result<(), WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::discard_parked(
+            std::path::Path::new(&workspace),
+            std::path::Path::new(&path),
+        );
+        Ok::<(), WorkspaceDatasetError>(())
     })
     .await
     .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?

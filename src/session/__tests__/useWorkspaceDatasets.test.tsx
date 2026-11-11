@@ -28,12 +28,19 @@ vi.mock("../../api", async (importOriginal) => {
     renameWorkspaceDataset: vi.fn(),
     replaceWorkspaceDataset: vi.fn(),
     setWorkspaceDatasetPrivacy: vi.fn(),
+    previewWorkspaceDataset: vi.fn(),
+    addWorkspaceDatasetGuided: vi.fn(),
+    workspaceDatasetPreviewWindow: vi.fn(),
+    discardWorkspaceDatasetPreview: vi.fn(),
   };
 });
 
 import {
   addWorkspaceDataset,
+  addWorkspaceDatasetGuided,
+  discardWorkspaceDatasetPreview,
   listWorkspaceDatasets,
+  previewWorkspaceDataset,
   removeWorkspaceDataset,
   renameWorkspaceDataset,
   replaceWorkspaceDataset,
@@ -43,6 +50,7 @@ import { toast } from "../../components/ui/use-toast";
 import { open } from "@tauri-apps/plugin-dialog";
 import { withIntl } from "../../components/common/__tests__/helpers";
 import { useWorkspaceDatasets } from "../useWorkspaceDatasets";
+import type { GuidanceRequest, SheetGuidance } from "../../types/dataset";
 import type { ListedWorkspaceDataset } from "../../types/workspace-datasets";
 
 const WS = { path: "/ws", label: "Demo" };
@@ -63,6 +71,27 @@ function entry(overrides: Partial<ListedWorkspaceDataset>): ListedWorkspaceDatas
     ...overrides,
   };
 }
+
+// The guided Excel import's wire shapes (issue #1552): one auto-tidied
+// sheet, the user's acceptance for it.
+function guidanceRequest(): GuidanceRequest {
+  return {
+    source_path: "/src/book.xlsx",
+    workbook_name: "book",
+    sheets: [
+      {
+        name: "People",
+        preview: [["name", "score"]],
+        total_rows: 2,
+        state: { kind: "AutoTidied", data: { header_row: 1 } },
+      },
+    ],
+  };
+}
+
+const ACCEPT_PEOPLE: SheetGuidance[] = [
+  { name: "People", rectify: { header_row: 1, skip_rows: [] } },
+];
 
 function setup() {
   const queryClient = new QueryClient({
@@ -776,5 +805,131 @@ describe("useWorkspaceDatasets contract", () => {
     });
     await waitFor(() => expect(result.current.error).toBe("disk full"));
     expect(toast).toHaveBeenCalledTimes(2);
+  });
+
+  // The guided Excel import (issue #1552, ADR-0141 D11 as revised): the
+  // batch PARKS an xlsx on the confirm dialog while the direct formats copy
+  // straight in -- the session pane's #748 shape, minus the halt.
+  it("parks an xlsx on the guided dialog, lands the checked sheets on submit, and continues the batch", async () => {
+    seed([]);
+    vi.mocked(open).mockResolvedValue(["/src/book.xlsx", "/src/b.csv"]);
+    vi.mocked(previewWorkspaceDataset).mockResolvedValue(guidanceRequest());
+    vi.mocked(addWorkspaceDatasetGuided).mockResolvedValue([
+      entry({ reference_name: "People", display_name: "People", source_path: "/src/book.xlsx" }),
+    ]);
+    vi.mocked(addWorkspaceDataset).mockResolvedValue(entry({ reference_name: "b" }));
+    const { result, invalidateSpy } = setup();
+    const flight = launch(result);
+    // The park: the preview IPC fires, the dialog state mounts, and the
+    // plain add has NOT fired yet -- the batch waits underneath.
+    await waitFor(() =>
+      expect(previewWorkspaceDataset).toHaveBeenCalledWith("/ws", "/src/book.xlsx"),
+    );
+    expect(result.current.guidance?.path).toBe("/src/book.xlsx");
+    expect(result.current.guidance?.workspace).toBe("/ws");
+    expect(result.current.badge?.phase).toBe("running");
+    expect(addWorkspaceDataset).not.toHaveBeenCalled();
+    expect(addWorkspaceDatasetGuided).not.toHaveBeenCalled();
+    // Submit: the checked sheets commit, the pick rides the last landed
+    // sheet, the park resolves, and the queued remainder continues.
+    await act(async () => {
+      result.current.handleGuidedSubmit(ACCEPT_PEOPLE);
+    });
+    expect(addWorkspaceDatasetGuided).toHaveBeenCalledWith("/ws", "/src/book.xlsx", ACCEPT_PEOPLE);
+    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(addWorkspaceDataset).mock.calls[0][0]).toBe("/ws");
+    await act(async () => {
+      await flight;
+    });
+    expect(result.current.guidance).toBeNull();
+    // The pick follows the batch's posture -- the LAST LANDED file wins
+    // (the guided file's pick lands first, b.csv's lands after).
+    expect(result.current.selectedName).toBe("b");
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["workspace-datasets", "/ws"] });
+    // The done badge names the LAST LANDED file (b.csv -- the guided file
+    // landed first), the batch's single-clock shape unchanged.
+    expect(result.current.badge).toMatchObject({ phase: "done", mode: "add", name: "b.csv" });
+  });
+
+  it("cancel skips the parked file, discards the backend park, and the batch continues", async () => {
+    seed([]);
+    vi.mocked(open).mockResolvedValue(["/src/book.xlsx", "/src/b.csv"]);
+    vi.mocked(previewWorkspaceDataset).mockResolvedValue(guidanceRequest());
+    vi.mocked(addWorkspaceDataset).mockResolvedValue(entry({ reference_name: "b" }));
+    vi.mocked(discardWorkspaceDatasetPreview).mockResolvedValue(undefined);
+    const { result } = setup();
+    const flight = launch(result);
+    await waitFor(() => expect(previewWorkspaceDataset).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      result.current.handleGuidedCancel();
+    });
+    expect(discardWorkspaceDatasetPreview).toHaveBeenCalledWith("/ws", "/src/book.xlsx");
+    expect(result.current.guidance).toBeNull();
+    // The skipped file never reads as added; the remainder still lands.
+    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await flight;
+    });
+    expect(addWorkspaceDatasetGuided).not.toHaveBeenCalled();
+    expect(result.current.badge).toMatchObject({ phase: "done", mode: "add", name: "b.csv" });
+    expect(result.current.guidanceError).toBeNull();
+  });
+
+  it("a preview failure routes like any batch failure and the batch continues", async () => {
+    seed([]);
+    vi.mocked(toast).mockClear();
+    vi.mocked(open).mockResolvedValue(["/src/book.xlsx", "/src/b.csv"]);
+    vi.mocked(previewWorkspaceDataset).mockRejectedValue({ kind: "Io", data: "workbook gone" });
+    vi.mocked(addWorkspaceDataset).mockResolvedValue(entry({ reference_name: "b" }));
+    const { result } = setup();
+    await act(async () => {
+      await result.current.pickAndAdd();
+    });
+    // On site: the banner owns the face (describeError's Io body), no
+    // dialog mounted, the plain file still landed.
+    expect(result.current.error).toBe("workbook gone");
+    expect(toast).not.toHaveBeenCalled();
+    expect(result.current.guidance).toBeNull();
+    expect(addWorkspaceDataset).toHaveBeenCalledTimes(1);
+    expect(result.current.badge).toMatchObject({ phase: "done", mode: "add", name: "b.csv" });
+  });
+
+  it("a guided-submit failure keeps the dialog open with the inline error; a retry lands", async () => {
+    // The session pane's #748 posture: the panel's banner sits behind the
+    // modal scrim, so the failure renders INLINE (guidanceError) and the
+    // park stays parked for a retry -- the backend parse survives for the
+    // dialog's paging.
+    seed([]);
+    vi.mocked(open).mockResolvedValue("/src/book.xlsx");
+    vi.mocked(previewWorkspaceDataset).mockResolvedValue(guidanceRequest());
+    vi.mocked(addWorkspaceDatasetGuided)
+      .mockRejectedValueOnce({ kind: "Io", data: "store disk full" })
+      .mockResolvedValue([
+        entry({ reference_name: "People", display_name: "People", source_path: "/src/book.xlsx" }),
+      ]);
+    const { result } = setup();
+    const flight = launch(result);
+    await waitFor(() => expect(previewWorkspaceDataset).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      result.current.handleGuidedSubmit(ACCEPT_PEOPLE);
+    });
+    expect(result.current.guidanceError).toEqual({
+      message: "store disk full",
+      kind: "shell",
+      detail: null,
+    });
+    expect(result.current.guidance).not.toBeNull();
+    // Retry: the same handler re-fires, the commit lands, the park closes,
+    // the batch settles.
+    await act(async () => {
+      result.current.handleGuidedSubmit(ACCEPT_PEOPLE);
+    });
+    await act(async () => {
+      await flight;
+    });
+    expect(result.current.guidance).toBeNull();
+    expect(result.current.guidanceError).toBeNull();
+    expect(result.current.selectedName).toBe("People");
+    expect(result.current.badge).toMatchObject({ phase: "done", mode: "add", name: "book.xlsx" });
   });
 });

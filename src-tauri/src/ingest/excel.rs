@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 
 use calamine::{open_workbook, Data, Dimensions, Reader, SheetVisible, Xlsx, XlsxError};
 
-use crate::model::LoadError;
+use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
+use crate::model::{GuidanceRequest, GuidanceSheet, GuidanceSheetState, LoadError, SheetRectify};
 
 /// One sheet's worth of rows read from a workbook: the sheet name plus its cell
 /// grid (each row a vector of cached-value cells).
@@ -123,6 +124,115 @@ pub fn render_preview_window(sheet: &SheetRows, offset: usize, limit: usize) -> 
         .take(limit)
         .map(|r| r.iter().map(cell_to_string).collect())
         .collect()
+}
+
+/// Raw rows surfaced per sheet in the guided-load preview -- enough to spot
+/// the header row and any separator/sub-header/footer rows to skip
+/// (ADR-0015). Doubles as the pager's window size (issue #750): the first
+/// inlined window and every fetched window are the same height.
+pub const GUIDANCE_PREVIEW_ROWS: usize = 12;
+
+/// The defensive floor for a guided commit that selects nothing (ADR-0148):
+/// shared wording for the empty-selection guard and the all-unknown-names
+/// guard, so the two rejects can never drift apart. Crosses the IPC as a
+/// parse-error detail on both faces (session + shared store).
+pub const NO_SHEET_SELECTED: &str = "未选择任何 sheet";
+
+/// Read a workbook's visible sheets and refuse a workbook with no data rows
+/// at all (the parse-floor both ingest faces share). `Ok(vec![])` never
+/// happens -- an empty list means the caller can proceed sheet by sheet.
+pub fn read_non_empty_sheets(path: &Path) -> Result<Vec<SheetRows>, LoadError> {
+    let mut sheets = read_sheets(path)?;
+    sheets.retain(|s| !s.rows.is_empty());
+    if sheets.is_empty() {
+        return Err(LoadError::Parse {
+            detail: "工作簿不含任何含数据的 sheet".into(),
+        });
+    }
+    Ok(sheets)
+}
+
+/// Auto-tidy every sheet into its dialog two-state (ADR-0015): the detected
+/// header row as the pre-fill guess, or the failure reason. Index-aligned
+/// with the input.
+pub fn guidance_states(sheets: &[SheetRows]) -> Vec<GuidanceSheetState> {
+    sheets
+        .iter()
+        .map(|sheet| match auto_tidy(sheet) {
+            TidyOutcome::Tidied(t) => GuidanceSheetState::AutoTidied {
+                header_row: t.header_row,
+            },
+            TidyOutcome::NeedsGuidance(reason) => GuidanceSheetState::NeedsGuidance { reason },
+        })
+        .collect()
+}
+
+/// Build a [`GuidanceRequest`] from a workbook's sheets: each visible
+/// non-blank sheet's raw top rows rendered as strings (pre-rectify preview)
+/// plus the total row count + the per-sheet two-state (issue #750/#751).
+/// `states` is index-aligned with `sheets` (see [`guidance_states`]).
+pub fn build_guidance(
+    path: &Path,
+    sheets: &[SheetRows],
+    states: &[GuidanceSheetState],
+) -> GuidanceRequest {
+    let workbook_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("workbook")
+        .to_string();
+    // The zip below truncates silently on a length mismatch; both vecs
+    // are filled in the same loop, so make that alignment loud.
+    debug_assert_eq!(sheets.len(), states.len());
+    let sheets_preview = sheets
+        .iter()
+        .zip(states)
+        .map(|(s, state)| GuidanceSheet {
+            name: s.name.clone(),
+            preview: render_preview(s, GUIDANCE_PREVIEW_ROWS),
+            total_rows: s.rows.len(),
+            state: *state,
+        })
+        .collect();
+    GuidanceRequest {
+        source_path: path.to_string_lossy().to_string(),
+        workbook_name,
+        sheets: sheets_preview,
+    }
+}
+
+/// Apply a user's rectify choices to a sheet's raw grid: forward-fill merged
+/// cells, then take the header from `header_row` (1-based) and the data rows
+/// below it minus the marked skips (ADR-0042). An out-of-range header row is
+/// the caller's reject (transactional -- no partial load).
+pub fn apply_rectify(
+    sheet: &SheetRows,
+    rectify: &SheetRectify,
+) -> Result<Vec<Vec<Data>>, LoadError> {
+    let mut rows = sheet.rows.clone();
+    forward_fill_merges(&mut rows, &sheet.merges);
+    if rectify.header_row == 0 || rectify.header_row as usize > rows.len() {
+        return Err(LoadError::Parse {
+            detail: format!(
+                "表头行号 {} 越界（sheet \"{}\" 共 {} 行，需在 1..={} 内）",
+                rectify.header_row,
+                sheet.name,
+                rows.len(),
+                rows.len()
+            ),
+        });
+    }
+    let header_idx = rectify.header_row as usize - 1;
+    let mut out = Vec::with_capacity(rows.len());
+    out.push(rows[header_idx].clone());
+    let skip: HashSet<u32> = rectify.skip_rows.iter().copied().collect();
+    for (i, row) in rows.iter().enumerate() {
+        let abs = (i + 1) as u32; // 1-based absolute row
+        if abs > rectify.header_row && !skip.contains(&abs) {
+            out.push(row.clone());
+        }
+    }
+    Ok(out)
 }
 
 /// Write every row to `path`. While iterating we tally cells whose rendered

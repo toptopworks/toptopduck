@@ -806,7 +806,7 @@
   "workspace.datasets.error.legacyExcel": "不支持旧版 .xls；请另存为 .xlsx 或 CSV",
   "workspace.datasets.error.notFound": "没有该名称的数据集",
   "workspace.datasets.error.unsupported": "不支持的格式：{format}",
-  "workspace.datasets.error.xlsx": "数据集面板不支持 xlsx；请转换为 CSV/Parquet，或改用会话私有数据源",
+  "workspace.datasets.error.xlsx": "xlsx 工作簿请经导入确认窗导入；不支持用工作簿替换数据集——请先移除该数据集，再重新导入工作簿",
   "workspace.datasets.fileFilter": "数据文件",
   "workspace.datasets.listHeading": "数据集 · {count}",
   "workspace.datasets.missingBadge": "缺文件",

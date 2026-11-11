@@ -806,7 +806,7 @@
   "workspace.datasets.error.legacyExcel": "Legacy .xls is not supported; save as .xlsx or CSV",
   "workspace.datasets.error.notFound": "No dataset with that name",
   "workspace.datasets.error.unsupported": "Unsupported format: {format}",
-  "workspace.datasets.error.xlsx": "xlsx is not supported in this panel; convert to CSV/Parquet or use a session-private source",
+  "workspace.datasets.error.xlsx": "xlsx workbooks import through the guided confirm dialog; replacing a dataset with a workbook is not supported — remove the dataset and import the workbook again",
   "workspace.datasets.fileFilter": "Data files",
   "workspace.datasets.listHeading": "Datasets · {count}",
   "workspace.datasets.missingBadge": "Missing",
