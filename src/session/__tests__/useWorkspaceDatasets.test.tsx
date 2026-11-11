@@ -108,11 +108,25 @@ function launch(result: { current: { pickAndAdd: () => Promise<void> } }) {
 // index (a multi-file batch parks once per file). The wrapper reads the
 // CURRENT resolver array -- each call mints its resolve at call time.
 function gateAdd(): (i: number, e: ListedWorkspaceDataset) => void {
-  const resolvers: Array<(e: ListedWorkspaceDataset) => void> = [];
+  const gates = gateAddPerFile();
+  return (i, e) => gates[i].resolve(e);
+}
+
+// A per-file settle gate: the same per-call parking, but each file's gate
+// settles in EITHER direction -- the single-captured reject variable does
+// not scale past one file, and a whole-failed batch must be driven file by
+// file (each gate settles exactly once: resolve XOR reject).
+type AddGate = {
+  resolve: (e: ListedWorkspaceDataset) => void;
+  reject: (e: unknown) => void;
+};
+
+function gateAddPerFile(): AddGate[] {
+  const gates: AddGate[] = [];
   vi.mocked(addWorkspaceDataset).mockImplementation(
-    () => new Promise<ListedWorkspaceDataset>((r) => { resolvers.push(r); }),
+    () => new Promise<ListedWorkspaceDataset>((resolve, reject) => { gates.push({ resolve, reject }); }),
   );
-  return (i, e) => resolvers[i](e);
+  return gates;
 }
 
 beforeEach(() => {
@@ -261,6 +275,113 @@ describe("useWorkspaceDatasets contract", () => {
       await flight3;
     });
     expect(toast).toHaveBeenCalledTimes(2);
+    expect(result.current.error).toBeNull();
+  });
+
+  it("a whole-failed multi-file batch keeps the faces' granularity: one banner (last failure) on site, one toast per file offsite", async () => {
+    // #1497: every failure-matrix test was single-file before -- a dedupe
+    // or per-batch aggregation refactor could silently collapse the offsite
+    // per-file face (or fan out the on-site banner) with nothing red. Both
+    // directions are pinned here: on site the banner holds only the LAST
+    // failure (the batch's continued write), offsite each failed file fires
+    // its own toast, attributed to the origin, with its own description.
+    seed([]);
+    vi.mocked(toast).mockClear();
+    vi.mocked(open).mockResolvedValue(["/src/a.csv", "/src/b.csv"]);
+    const gates = gateAddPerFile();
+    const { result, rerender } = setup();
+    const flight = launch(result);
+    // On site: both failures land on the banner, the second overwrites the
+    // first -- one face, last failure wins, no toast.
+    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      gates[0].reject({ kind: "Io", data: "disk full on a" });
+    });
+    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      gates[1].reject({ kind: "Io", data: "disk full on b" });
+    });
+    await act(async () => {
+      await flight;
+    });
+    expect(result.current.error).toBe("disk full on b");
+    expect(toast).not.toHaveBeenCalled();
+    // Closed at settle: each failed file fires its own destructive toast,
+    // the title attributes the origin workspace, the descriptions stay
+    // per-file (distinct) -- the granularity the aggregation refactor would
+    // flatten into one toast. The banner never carries an offsite failure,
+    // and a whole-failed batch parks no badge across the reopen edge.
+    vi.mocked(toast).mockClear();
+    vi.mocked(addWorkspaceDataset).mockClear();
+    const closedGates = gateAddPerFile();
+    rerender(null);
+    const closedFlight = launch(result);
+    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      closedGates[0].reject({ kind: "Io", data: "disk full on a" });
+    });
+    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      closedGates[1].reject({ kind: "Io", data: "disk full on b" });
+    });
+    await act(async () => {
+      await closedFlight;
+    });
+    expect(toast).toHaveBeenCalledTimes(2);
+    expect(toast).toHaveBeenNthCalledWith(1, {
+      variant: "destructive",
+      title: "上传到 Demo 失败",
+      description: "disk full on a",
+    });
+    expect(toast).toHaveBeenNthCalledWith(2, {
+      variant: "destructive",
+      title: "上传到 Demo 失败",
+      description: "disk full on b",
+    });
+    expect(result.current.error).toBeNull();
+    rerender(WS);
+    expect(result.current.badge).toBeNull();
+    expect(result.current.error).toBeNull();
+  });
+
+  it("a partially landed batch settling offsite keeps both legs: the landed file invalidates the origin, the failed file fires the toast", async () => {
+    // #1497's combination cell: one file lands, one fails, the panel left
+    // the origin mid-batch. The landed leg's invalidation still targets the
+    // MINTED workspace's listing (the rebind-retarget pin's combination
+    // face), and the failed leg's toast still delivers -- neither leg may
+    // suppress the other.
+    seed([]);
+    vi.mocked(toast).mockClear();
+    vi.mocked(open).mockResolvedValue(["/src/good.csv", "/src/bad.csv"]);
+    const gates = gateAddPerFile();
+    const { result, rerender, invalidateSpy } = setup();
+    const flight = launch(result);
+    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(1));
+    rerender(OTHER);
+    await act(async () => {
+      gates[0].resolve(
+        entry({ reference_name: "good", display_name: "good", source_path: "/src/good.csv" }),
+      );
+    });
+    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      gates[1].reject({ kind: "Io", data: "disk full" });
+    });
+    await act(async () => {
+      await flight;
+    });
+    // The landed leg: the origin's listing refreshed, never the foreign
+    // panel's.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["workspace-datasets", "/ws"] });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["workspace-datasets", "/other"] });
+    // The failed leg: one toast, attributed to the origin.
+    expect(toast).toHaveBeenCalledTimes(1);
+    expect(toast).toHaveBeenCalledWith({
+      variant: "destructive",
+      title: "上传到 Demo 失败",
+      description: "disk full",
+    });
+    // The offsite face: the banner stays clean.
     expect(result.current.error).toBeNull();
   });
 
