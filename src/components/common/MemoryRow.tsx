@@ -6,6 +6,7 @@
 // memory file. The non-component list tokens live in memory-list.ts
 // (react-refresh: a component file only exports components).
 
+import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { FolderSearch } from "lucide-react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -13,6 +14,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Badge } from "../ui/badge";
 import { HeaderActionButton } from "../settings/settings-chrome";
 import { log } from "../../lib/log";
+import { describeError } from "../../lib/error-presentation";
 import type { ListedMemory, MemoryType } from "../../types/workspace-memory";
 
 /** The category badge: four STATIC branches (the i18n catalog guard reads
@@ -38,6 +40,11 @@ function TypeBadge({ type }: { type: MemoryType }) {
  * button (the row's only action). */
 export function MemoryRow({ memory }: { memory: ListedMemory }) {
   const intl = useIntl();
+  // A refused reveal (#1543): the opener can refuse (a file deleted after
+  // the listing). Row-local state -- the two hosts (the workspace panel and
+  // the settings pane) get the same face by construction, and a successful
+  // retry clears it.
+  const [revealFailure, setRevealFailure] = useState<string | null>(null);
   const revealLabel = intl.formatMessage({
     id: "workspace.memory.reveal",
     defaultMessage: "Reveal in folder",
@@ -54,16 +61,23 @@ export function MemoryRow({ memory }: { memory: ListedMemory }) {
             {memory.hook}
           </p>
         )}
+        {revealFailure !== null && (
+          <p className="m-0 text-xs text-destructive" role="alert">
+            {revealFailure}
+          </p>
+        )}
       </div>
       <HeaderActionButton
         label={revealLabel}
         icon={FolderSearch}
-        // The opener can refuse (a file deleted after the listing): log it
-        // -- the ArtifactHeader posture (the action is simply retryable).
-        onClick={() =>
-          revealItemInDir(memory.file_path).catch((e: unknown) =>
-            log.warn("MemoryRow", "revealItemInDir failed", e),
-          )}
+        onClick={() => {
+          revealItemInDir(memory.file_path)
+            .then(() => setRevealFailure(null))
+            .catch((e: unknown) => {
+              log.warn("MemoryRow", "revealItemInDir failed", e);
+              setRevealFailure(describeError(e, intl));
+            });
+        }}
       />
     </li>
   );
