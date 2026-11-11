@@ -59,8 +59,9 @@ export function MemorySection() {
 
   // The searchable projection (the skills/agents pane posture): title +
   // hook joined by a newline so a title tail can't concatenate with a
-  // hook head into a false match. An empty query matches everything
-  // (the shared matcher's contract), so no guard wraps the filter.
+  // hook head into a false match. An empty (or whitespace-only) query
+  // matches everything (the shared matcher's contract), so no guard
+  // wraps the filter.
   const filteredRows = rows.filter((m) =>
     matchesSearch(searchableText(m.title, m.hook), search),
   );
@@ -102,7 +103,11 @@ export function MemorySection() {
           {openFailure}
         </p>
       )}
-      {!listing.isPending && (
+      {/* A dataless error renders the error face alone: the empty guide
+          and the search bar must not claim an unknown layer while the
+          alert renders below (a failed poll with rows on screen keeps
+          the card, the correct stale-while-error posture). */}
+      {!listing.isPending && listing.data !== undefined && (
         <>
           <PaneFilterBar
             idPrefix="memory"

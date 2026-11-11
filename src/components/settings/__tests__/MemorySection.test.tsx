@@ -67,9 +67,11 @@ describe("MemorySection", () => {
     expect(screen.getByText("User")).toBeInTheDocument();
     // The pane title is the static nav name; the count rides the MCP-style
     // line above the card (the count digit sits in a nested span, so the
-    // matcher rides the line's own text node -- exact: false).
+    // loose matcher rides the whole line element -- exact: false).
     expect(screen.getByText("Memory")).toBeInTheDocument();
     expect(screen.getByText("User memories", { exact: false })).toBeInTheDocument();
+    // The digit itself: an exact match pins the nested span's text node.
+    expect(screen.getByText("1")).toBeInTheDocument();
     // The read-only layer has no enabled axis: search box only, no Select.
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
   });
@@ -91,6 +93,11 @@ describe("MemorySection", () => {
     fireEvent.change(box, { target: { value: "pinned" } });
     expect(screen.queryByText("Reply in Simplified Chinese")).not.toBeInTheDocument();
     expect(screen.getByText("Pinned projects")).toBeInTheDocument();
+    // The hook half of the projection: "always zh" rides no title, so the
+    // hit must come through searchableText's hook leg.
+    fireEvent.change(box, { target: { value: "always zh" } });
+    expect(screen.getByText("Reply in Simplified Chinese")).toBeInTheDocument();
+    expect(screen.queryByText("Pinned projects")).not.toBeInTheDocument();
     fireEvent.change(box, { target: { value: "zzz" } });
     expect(screen.getByText(/No memories match the current search/)).toBeInTheDocument();
   });
@@ -112,6 +119,12 @@ describe("MemorySection", () => {
     expect(
       await screen.findByText(/No user memories yet/),
     ).toBeInTheDocument();
+    // The count line gates on a non-empty layer: no zero line above
+    // the empty guide (case-sensitive anchor -- a loose substring would
+    // hit the guide's own "user memories yet").
+    expect(
+      screen.queryByText(/^User memories/),
+    ).not.toBeInTheDocument();
   });
 
   it("shows only the unreadable tail when every file is unrecognized", async () => {
@@ -125,6 +138,9 @@ describe("MemorySection", () => {
     // failed search -- the tail stands alone (issue #1544 review).
     expect(await screen.findByText(/Unrecognized files/)).toBeInTheDocument();
     expect(screen.queryByText(/No memories match/)).not.toBeInTheDocument();
+    // The empty guide stays away too: unreadable files mean the layer
+    // is not empty, the files are just not memories yet.
+    expect(screen.queryByText(/No user memories yet/)).not.toBeInTheDocument();
   });
 
   it("opens the memory folder through the backend-minted root", async () => {
@@ -157,6 +173,9 @@ describe("MemorySection", () => {
     mockedList.mockRejectedValue(new Error("boom"));
     renderSettings(<MemorySection />);
     expect(await screen.findByRole("alert")).toHaveTextContent("boom");
+    // A dataless failure renders the alert alone: the empty guide must
+    // not claim an unknown layer (issue #1544 review).
+    expect(screen.queryByText(/No user memories yet/)).not.toBeInTheDocument();
   });
 
   it("shows the red usage band at the cap", async () => {
