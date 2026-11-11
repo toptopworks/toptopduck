@@ -344,11 +344,17 @@ describe("App guided-load flow", () => {
       capturedComposerFields!.handleIngestFiles(["/x/m.xlsx"]);
     });
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
-    expect(screen.getByText(/引导加载：m/)).toBeInTheDocument();
+    expect(screen.getByText(/导入 Excel：m/)).toBeInTheDocument();
 
-    // Choose the real header (row 2) and submit -> guided ingest (AC3/AC7 seam).
-    // The mocked header-row Select is the only combobox INSIDE the dialog (the
-    // composer's mocked selects live outside it).
+    // The deferred sheet starts unticked (ADR-0148 default selection): tick
+    // it, choose the real header (row 2), and submit -> guided ingest (AC3/AC7
+    // seam). The mocked header-row Select is the only combobox INSIDE the
+    // dialog (the composer's mocked selects live outside it).
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("checkbox", {
+        name: "导入 people",
+      }),
+    );
     fireEvent.change(
       within(screen.getByRole("dialog")).getByRole("combobox"),
       { target: { value: "2" } },
@@ -1571,6 +1577,13 @@ describe("SessionPane pending-payload consumption (#500)", () => {
 
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
     expect(askQuestion).not.toHaveBeenCalled();
+    // The deferred sheet starts unticked (ADR-0148): tick it before the submit
+    // -- the dialog refuses an empty selection.
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("checkbox", {
+        name: "导入 Sheet1",
+      }),
+    );
     fireEvent.click(
       within(screen.getByRole("dialog")).getByRole("button", { name: "加载" }),
     );

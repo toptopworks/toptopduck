@@ -36,6 +36,11 @@ use crate::model::{
 /// and every fetched window are the same height.
 const GUIDANCE_PREVIEW_ROWS: usize = 12;
 
+/// The defensive floor for a guided commit that selects nothing (ADR-0148):
+/// shared wording for the empty-selection guard and the all-unknown-names
+/// guard, so the two rejects can never drift apart.
+const NO_SHEET_SELECTED: &str = "未选择任何 sheet";
+
 /// The parsed sheets of a workbook parked on the guided-load dialog (issue
 /// #750): `read_non_empty_sheets` already parsed the workbook fully for the
 /// `NeedsGuidance` outcome, and holding that parse until the dialog resolves
@@ -227,86 +232,77 @@ impl super::Session {
         Ok(sheets)
     }
 
-    /// Ingest a .xlsx workbook (slice 3b, issue #10): best-effort auto-tidy each
-    /// sheet (ADR-0015) -- forward-fill merged cells + single-header detection.
-    /// If every sheet tidies confidently, each becomes a Dataset (`rectify =
-    /// Auto`: the auto algorithm's choices aren't recorded, ADR-0042). If *any*
-    /// sheet can't be confidently tidied, NO sheet is loaded -- the working set
-    /// stays untouched and a [`LoadOutcome::NeedsGuidance`] carries each sheet's
-    /// raw preview so the UI can gather explicit header/skip choices. Formula
-    /// cells use their cached value (ADR-0015). Transactional: on any failure
-    /// already-attached snapshots roll back (AC6/AC7).
+    /// Ingest a .xlsx workbook (ADR-0148): best-effort auto-tidy each sheet
+    /// (ADR-0015) for its two-state -- the detected header row as the dialog's
+    /// pre-fill guess (AutoTidied), or the failure reason (NeedsGuidance) --
+    /// then park the WHOLE workbook on [`LoadOutcome::NeedsGuidance`] no matter
+    /// the tidy outcome. Every import goes through the confirmation dialog and
+    /// commits only via [`Self::ingest_guided`] with the user's per-sheet
+    /// acceptance; the old full-green direct-commit branch is gone (a tidy
+    /// guess is never confirmation -- ADR-0015's trust baseline). The payload
+    /// carries each sheet's raw preview so the dialog renders without a second
+    /// parse. Formula cells use their cached value (ADR-0015). The working set
+    /// stays untouched here.
     fn ingest_excel(&mut self, path: &Path) -> LoadOutcome {
         let sheets = match Self::read_non_empty_sheets(path) {
             Ok(s) => s,
             Err(e) => return LoadOutcome::Error(e),
         };
 
-        // Auto-tidy EVERY sheet (issue #750): any sheet that can't be
-        // confidently tidied sends the whole workbook to guided loading (no
-        // partial load -- transactional). Each sheet's two-state rides the
-        // guidance: the failure reason (surfaced under the sheet heading) or,
-        // for the resolved sheets, the detected header row as a pre-fill guess
-        // (issue #751).
-        let mut entries: Vec<(String, Vec<Vec<Data>>, RectifyProvenance)> =
-            Vec::with_capacity(sheets.len());
-        let mut states: Vec<GuidanceSheetState> = Vec::with_capacity(sheets.len());
-        let mut needs_guidance = false;
-        for sheet in &sheets {
-            match auto_tidy(sheet) {
-                TidyOutcome::Tidied(t) => {
-                    states.push(GuidanceSheetState::AutoTidied {
-                        header_row: t.header_row,
-                    });
-                    entries.push((sheet.name.clone(), t.rows, RectifyProvenance::Auto));
-                }
-                TidyOutcome::NeedsGuidance(reason) => {
-                    needs_guidance = true;
-                    states.push(GuidanceSheetState::NeedsGuidance { reason });
-                }
-            }
-        }
-        if needs_guidance {
-            let request = Self::build_guidance(path, &sheets, &states);
-            // Retain the parse for zero-reparse preview paging (issue #750);
-            // dropped on guided commit / dialog cancel (see GuidanceRetention).
-            self.guidance_retained = Some(GuidanceRetention {
-                source_path: path.to_string_lossy().to_string(),
-                sheets,
-            });
-            return LoadOutcome::NeedsGuidance(request);
-        }
-
-        match self.commit_excel(path, entries) {
-            Ok(active) => LoadOutcome::Loaded(active),
-            Err(e) => LoadOutcome::Error(e),
-        }
+        let states: Vec<GuidanceSheetState> = sheets
+            .iter()
+            .map(|sheet| match auto_tidy(sheet) {
+                TidyOutcome::Tidied(t) => GuidanceSheetState::AutoTidied {
+                    header_row: t.header_row,
+                },
+                TidyOutcome::NeedsGuidance(reason) => GuidanceSheetState::NeedsGuidance { reason },
+            })
+            .collect();
+        let request = Self::build_guidance(path, &sheets, &states);
+        // Retain the parse for zero-reparse preview paging (issue #750);
+        // dropped on guided commit / dialog cancel (see GuidanceRetention).
+        self.guidance_retained = Some(GuidanceRetention {
+            source_path: path.to_string_lossy().to_string(),
+            sheets,
+        });
+        LoadOutcome::NeedsGuidance(request)
     }
 
-    /// Re-ingest an Excel workbook with the user's explicit rectify choices
-    /// (ADR-0015 guided fallback / ADR-0042 user decisions). Each sheet is
-    /// rectified by its [`SheetRectify`] (header row + skipped rows) and
-    /// forward-filled over merged cells, then loaded with `rectify = User(...)`
-    /// recorded on the descriptor. Transactional like [`Self::ingest`].
+    /// Commit an Excel workbook the user confirmed on the dialog (ADR-0015
+    /// guided path / ADR-0148 per-sheet confirmation / ADR-0042 user
+    /// decisions). ONLY sheets with a guidance entry load -- the dialog sends
+    /// one entry per CHECKED sheet, so an absent entry means the user left
+    /// that sheet unticked and it is skipped. An empty selection is rejected
+    /// as a defensive floor (the dialog disables its submit; this catches any
+    /// client that bypasses it). Each loaded sheet is rectified by its
+    /// [`SheetRectify`] (header row + skipped rows) and forward-filled over
+    /// merged cells, then loaded with `rectify = User(...)` recorded on the
+    /// descriptor. Transactional like [`Self::ingest`].
     pub fn ingest_guided(&mut self, path: &Path, guidance: &[SheetGuidance]) -> LoadOutcome {
         let sheets = match Self::read_non_empty_sheets(path) {
             Ok(s) => s,
             Err(e) => return LoadOutcome::Error(e),
         };
+        if guidance.is_empty() {
+            return LoadOutcome::Error(LoadError::Parse {
+                detail: NO_SHEET_SELECTED.into(),
+            });
+        }
 
-        // Apply each sheet's user rectify. A sheet with no guidance entry
-        // defaults to a plain single-header rectify (header_row 1, no skips) --
-        // the dialog sends one entry per visible sheet, this just stays safe.
-        // Any out-of-range header_row aborts before copy-in so no partial load
-        // escapes (transactional -- ADR-0042).
+        // Apply each checked sheet's user rectify; skip the rest. Guidance
+        // entries naming a sheet the workbook doesn't have are ignored (the
+        // lookup keys off the workbook's sheets). Any out-of-range header_row
+        // aborts before copy-in so no partial load escapes (transactional --
+        // ADR-0042).
         let entries: Vec<(String, Vec<Vec<Data>>, RectifyProvenance)> = match sheets
             .iter()
-            .map(|sheet| {
-                let rectify = guidance
+            .filter_map(|sheet| {
+                guidance
                     .iter()
                     .find(|g| g.name == sheet.name)
-                    .map(|g| g.rectify.clone())
-                    .unwrap_or_default();
+                    .map(|g| (sheet, g.rectify.clone()))
+            })
+            .map(|(sheet, rectify)| {
                 let rows = Self::apply_rectify(sheet, &rectify)?;
                 Ok::<_, LoadError>((sheet.name.clone(), rows, RectifyProvenance::User(rectify)))
             })
@@ -315,6 +311,13 @@ impl super::Session {
             Ok(e) => e,
             Err(e) => return LoadOutcome::Error(e),
         };
+        // Every entry named a sheet the workbook doesn't have: same defensive
+        // floor as the empty-selection guard above.
+        if entries.is_empty() {
+            return LoadOutcome::Error(LoadError::Parse {
+                detail: NO_SHEET_SELECTED.into(),
+            });
+        }
 
         match self.commit_excel(path, entries) {
             Ok(active) => {
@@ -428,7 +431,7 @@ impl super::Session {
         }
 
         // All attached: commit atomically. Callers guard entries non-empty
-        // (read_non_empty_sheets rejects an empty workbook before reaching here),
+        // (the guided path rejects an empty selection before reaching here),
         // but prefer a returned error over a reachable panic regardless.
         let Some(active) = descriptors.last().cloned() else {
             return Err(LoadError::Parse {

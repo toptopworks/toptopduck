@@ -52,9 +52,10 @@ describe("GuidedLoadDialog control systematization (issue #749)", () => {
     expect(dialog.querySelector("input[type=\"checkbox\"]")).toBeNull();
     // Header row = Select primitive (combobox trigger).
     expect(screen.getByRole("combobox")).toBeInTheDocument();
-    // Skip toggles = Checkbox primitives, one per preview row.
+    // Checkbox primitives: one import toggle in the sheet list (master pane)
+    // plus one skip toggle per preview row in the detail pane.
     expect(screen.getAllByRole("checkbox")).toHaveLength(
-      request.sheets[0]!.preview.length,
+      request.sheets[0]!.preview.length + 1,
     );
   });
 

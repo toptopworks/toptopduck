@@ -49,8 +49,9 @@ impl Default for SheetRectify {
 ///
 /// - [`RectifyProvenance::NotApplicable`]: the format has no rectify step
 ///   (CSV / Parquet / JSON).
-/// - [`RectifyProvenance::Auto`]: an Excel sheet auto-tidied confidently; the
-///   algorithm's choices aren't carried, so resume re-runs the current version.
+/// - [`RectifyProvenance::Auto`]: LEGACY -- no longer produced (every Excel
+///   commit is user-confirmed since ADR-0148, so the variant would lie). Kept
+///   only so persisted descriptors from before the flip still deserialize.
 /// - [`RectifyProvenance::User`]: the user supplied explicit header/skip choices
 ///   via the guided path; the params ride the descriptor so a future recipe can
 ///   persist them.
@@ -378,10 +379,10 @@ impl std::error::Error for LoadError {}
 #[allow(clippy::large_enum_variant)]
 pub enum LoadOutcome {
     Loaded(DatasetDescriptor),
-    /// Auto-tidy couldn't confidently rectify an Excel sheet (ADR-0015): the
-    /// load is *not* an error -- the UI must gather explicit header/skip choices
-    /// (ADR-0042 user decisions) and re-ingest via the guided path. The working
-    /// set is unchanged.
+    /// An Excel workbook parked on the confirmation dialog (ADR-0148): the
+    /// load is *not* an error -- the UI gathers per-sheet acceptance (checked
+    /// sheets + header/skip choices, ADR-0042 user decisions) and commits via
+    /// the guided path. The working set is unchanged.
     NeedsGuidance(GuidanceRequest),
     Error(LoadError),
 }
