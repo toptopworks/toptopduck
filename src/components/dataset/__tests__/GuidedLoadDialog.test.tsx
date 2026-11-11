@@ -431,6 +431,9 @@ describe("GuidedLoadDialog", () => {
       fireEvent.click(screen.getByRole("button", { name: /far/ }));
       const detail = document.querySelector("[data-slot=\"sheet-detail\"]")!;
       expect(detail).toHaveTextContent("表头第 15 行（自动检测）");
+      // The resolved face paginates like the deferred one (30 rows over a
+      // 12-row window): the pager rides here too, not just on NeedsGuidance.
+      expect(screen.getByRole("dialog")).toHaveTextContent("第 1–12 行 / 共 30 行");
       // Row 15 is not rendered in window 1, so it carries no checkbox.
       expect(screen.queryByRole("checkbox", { name: "跳过 far 第 15 行" })).toBeNull();
       fireEvent.click(screen.getByRole("button", { name: "加载" }));
@@ -493,6 +496,65 @@ describe("GuidedLoadDialog", () => {
       expect(onSubmit).toHaveBeenCalledWith([
         { name: "clean", rectify: { header_row: 1, skip_rows: [] } },
         { name: "added", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+    });
+
+    it("a same-path re-route moves an existing sheet's pre-fill guess", () => {
+      // The re-derive must refresh the GUESS too, not just the checks: a
+      // workbook re-tidied on disk can move a still-clean sheet's detected
+      // header, and the payload must ride the new row -- the old re-track
+      // pin died with the Adjust form.
+      const onSubmit = vi.fn();
+      const props = {
+        loading: false,
+        error: null as AppError | null,
+        onSubmit,
+        onCancel: () => {},
+        onFetchWindow: vi.fn().mockResolvedValue([]),
+      };
+      const sheetWith = (headerRow: number) => [
+        {
+          name: "clean",
+          preview: [
+            ["meta"],
+            ["id", "name"],
+            ["1", "Alice"],
+          ],
+          total_rows: 3,
+          state: autoTidied(headerRow),
+        },
+      ];
+      const view = renderI18n(
+        <GuidedLoadDialog
+          request={{
+            source_path: "/x/moved.xlsx",
+            workbook_name: "moved",
+            sheets: sheetWith(2),
+          }}
+          {...props}
+        />,
+      );
+      expect(screen.getByRole("dialog")).toHaveTextContent("已选 1 / 1");
+      view.rerender(
+        withIntl(
+          <GuidedLoadDialog
+            request={{
+              source_path: "/x/moved.xlsx",
+              workbook_name: "moved",
+              sheets: sheetWith(3),
+            }}
+            {...props}
+          />,
+        ),
+      );
+      // Still pre-checked; activate it to read the moved guess.
+      expect(screen.getByRole("dialog")).toHaveTextContent("已选 1 / 1");
+      fireEvent.click(screen.getByRole("button", { name: /clean/ }));
+      const detail = document.querySelector("[data-slot=\"sheet-detail\"]")!;
+      expect(detail).toHaveTextContent("表头第 3 行（自动检测）");
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "clean", rectify: { header_row: 3, skip_rows: [] } },
       ]);
     });
   });

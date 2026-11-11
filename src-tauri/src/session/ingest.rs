@@ -218,7 +218,8 @@ impl super::Session {
     }
 
     /// Read a workbook's visible sheets and drop blank ones -- the shared
-    /// preamble for both Excel ingest paths (auto-tidy and guided). Returns
+    /// preamble for both legs of the Excel ingest flow: the confirmation
+    /// park and the guided commit. Returns
     /// `Err` with a single shared message when no sheet carries data, so the
     /// "工作簿不含任何含数据的 sheet" wording lives in one place.
     fn read_non_empty_sheets(path: &Path) -> Result<Vec<ingest::excel::SheetRows>, LoadError> {
@@ -317,6 +318,22 @@ impl super::Session {
             return LoadOutcome::Error(LoadError::Parse {
                 detail: NO_SHEET_SELECTED.into(),
             });
+        }
+        // A checked entry that missed every workbook sheet means the file
+        // changed under the open dialog (the lookup above keys off the
+        // workbook's sheets): the survivors still commit, but the dropped
+        // picks get a trace instead of vanishing silently.
+        let missed: Vec<&str> = guidance
+            .iter()
+            .map(|g| g.name.as_str())
+            .filter(|name| {
+                !entries
+                    .iter()
+                    .any(|(matched, _, _)| matched.as_str() == *name)
+            })
+            .collect();
+        if !missed.is_empty() {
+            log::warn!("guided commit ignored checked sheets absent from the workbook: {missed:?}");
         }
 
         match self.commit_excel(path, entries) {

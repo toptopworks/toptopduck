@@ -16,30 +16,20 @@ pub struct ColumnSchema {
 /// explicit choices enter the recipe; the deterministic auto-tidy algorithm
 /// itself never does -- resume re-runs the current version. Recorded on the
 /// descriptor so a future recipe (ADR-0034) can persist it. CSV / Parquet /
-/// JSON and Excel sheets that auto-tidied without a user override carry `None`.
+/// JSON sheets carry `NotApplicable`; a committed Excel sheet always carries
+/// an explicit `User` choice (ADR-0148) -- the pre-flip auto-tidied variant is
+/// legacy, kept only so old descriptors still deserialize.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SheetRectify {
     /// 1-based index of the row whose cells become the column header. Rows
-    /// above it (titles, blanks) are skipped. `1` = the first row is the header,
-    /// which is also the [`Default`] (a plain single-header rectify).
+    /// above it (titles, blanks) are skipped. `1` = the first row is the
+    /// header (the plain single-header shape).
     pub header_row: u32,
     /// 1-based absolute row indices *below* the header row to drop when
     /// materializing (separator / sub-header / footer rows). Data rows are
     /// every non-header, non-skipped row from the header down to the last
     /// non-empty row. Empty by default (skip nothing).
     pub skip_rows: Vec<u32>,
-}
-
-impl Default for SheetRectify {
-    /// A plain single-header rectify: row 1 is the header, nothing skipped.
-    /// Used when a guided ingest receives no entry for a sheet, so the default
-    /// matches the documented `1` instead of the raw `u32::default()` of `0`.
-    fn default() -> Self {
-        Self {
-            header_row: 1,
-            skip_rows: Vec::new(),
-        }
-    }
 }
 
 /// Provenance of a dataset's rectify state (ADR-0042): turns the rule "only the
@@ -262,11 +252,12 @@ pub enum GuidanceReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum GuidanceSheetState {
-    /// Auto-tidy succeeded (issue #751): this sheet only rides the request
-    /// because ANOTHER sheet in the workbook deferred (transactional
-    /// no-partial-load, ADR-0015). Carries the detected header row -- 1-based
-    /// absolute, [`SheetRectify::header_row`] semantics -- as the dialog's
-    /// pre-fill guess.
+    /// Auto-tidy succeeded (issue #751): every workbook parks on the
+    /// confirmation dialog regardless of the tidy outcome (ADR-0148), so a
+    /// full-green workbook's sheets all land here too. Carries the detected
+    /// header row -- 1-based absolute, [`SheetRectify::header_row`]
+    /// semantics -- as the dialog's pre-fill guess, which never commits
+    /// without the user's tick.
     AutoTidied { header_row: u32 },
     /// Auto-tidy gave up on this sheet (issue #750); carries WHY, so the
     /// dialog can surface it under the sheet heading.
@@ -293,9 +284,10 @@ pub struct GuidanceSheet {
     pub state: GuidanceSheetState,
 }
 
-/// A workbook the auto-tidy could not confidently rectify (ADR-0015 guided
-/// fallback). No sheet is loaded -- the working set is untouched (AC6/AC7) --
-/// and the user's guided choices re-enter via [`LoadOutcome`] -> guided ingest.
+/// Every Excel workbook's confirmation request (ADR-0148; supersedes the
+/// ADR-0015 failure-only trigger): no sheet is loaded -- the working set is
+/// untouched (AC6/AC7) -- and the user's per-sheet choices re-enter via
+/// [`LoadOutcome`] -> guided ingest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuidanceRequest {
     pub source_path: String,

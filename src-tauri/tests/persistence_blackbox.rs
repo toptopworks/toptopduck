@@ -331,7 +331,10 @@ fn resume_after_a_partial_excel_confirmation_restores_only_the_checked_sheets() 
         .filter(|s| s.name == "people")
         .map(|s| SheetGuidance {
             name: s.name.clone(),
-            rectify: SheetRectify::default(),
+            rectify: SheetRectify {
+                header_row: 1,
+                skip_rows: vec![],
+            },
         })
         .collect();
     match session.ingest_guided(&xlsx, &checked) {

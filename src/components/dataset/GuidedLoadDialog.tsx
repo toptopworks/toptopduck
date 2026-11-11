@@ -449,7 +449,6 @@ function SheetListRow({
   onActivate: () => void;
 }) {
   const intl = useIntl();
-  const checkboxId = useId();
   const { isAutoTidied } = decodeSheetState(sheet.state);
   return (
     <li>
@@ -460,7 +459,6 @@ function SheetListRow({
         )}
       >
         <Checkbox
-          id={checkboxId}
           checked={isChecked}
           disabled={loading}
           onCheckedChange={() => onToggle()}
