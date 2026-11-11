@@ -38,7 +38,8 @@ export interface SheetRectify {
 // (serde adjacently-tagged). The type makes "only user choices are recorded,
 // never the auto algorithm" explicit.
 // - "NotApplicable": CSV/Parquet/JSON (no rectify step).
-// - "Auto": Excel auto-tidy chose confidently; no params ride the descriptor.
+// - "Auto": legacy (pre-ADR-0148) -- no longer produced; kept only so old
+//   persisted descriptors still deserialize.
 // - { User: SheetRectify }: the user supplied explicit header/skip choices.
 export type RectifyProvenance =
   | { kind: "NotApplicable" }

@@ -31,6 +31,37 @@ fn load_ok(session: &mut Session, path: &Path) -> DatasetDescriptor {
     }
 }
 
+/// The xlsx twin of [`load_ok`] post-ADR-0148: every Excel ingest parks on the
+/// confirmation dialog, so "load this workbook" means ingest -> accept every
+/// sheet -> guided commit. Acceptance mirrors the dialog's all-green default:
+/// a resolved sheet submits its detected header guess, a deferred one the
+/// blind row-1 default (the old pre-flip behavior, now always user-confirmed).
+fn confirm_all(session: &mut Session, path: &Path) -> DatasetDescriptor {
+    let guidance_request = match session.ingest(path) {
+        LoadOutcome::NeedsGuidance(g) => g,
+        LoadOutcome::Loaded(d) => panic!("excel ingest must park on confirmation, got {d:?}"),
+        LoadOutcome::Error(e) => panic!("expected confirmable load, got: {e}"),
+    };
+    let guidance: Vec<SheetGuidance> = guidance_request
+        .sheets
+        .iter()
+        .map(|s| SheetGuidance {
+            name: s.name.clone(),
+            rectify: SheetRectify {
+                header_row: match &s.state {
+                    GuidanceSheetState::AutoTidied { header_row } => *header_row,
+                    GuidanceSheetState::NeedsGuidance { .. } => 1,
+                },
+                skip_rows: vec![],
+            },
+        })
+        .collect();
+    match session.ingest_guided(path, &guidance) {
+        LoadOutcome::Loaded(d) => d,
+        other => panic!("expected guided load to succeed, got {other:?}"),
+    }
+}
+
 #[test]
 fn loads_csv_into_working_set_as_active() {
     // AC1: pick a CSV -> one Dataset, named after the file stem, becomes active.
@@ -405,7 +436,7 @@ fn loads_single_sheet_xlsx_named_after_sheet() {
     // AC2: pick a single-sheet .xlsx -> one Dataset named after the sheet, active.
     let (xlsx, _dir) = people_xlsx();
     let mut session = Session::new().expect("session");
-    let d = load_ok(&mut session, &xlsx);
+    let d = confirm_all(&mut session, &xlsx);
     assert_eq!(d.reference_name, "people"); // named after the sheet, not the file
     assert_eq!(d.display_name, "people");
     assert_eq!(session.list().len(), 1);
@@ -418,7 +449,7 @@ fn xlsx_shares_type_contract_with_csv() {
     // ADR-0032) -- the calamine -> CSV -> read_csv_auto path re-infers in DuckDB.
     let (xlsx, _dir) = people_xlsx();
     let mut session = Session::new().expect("session");
-    let d = load_ok(&mut session, &xlsx);
+    let d = confirm_all(&mut session, &xlsx);
     assert_eq!(
         column_types(&d),
         vec![
@@ -451,7 +482,7 @@ fn loads_multi_sheet_xlsx_each_sheet_a_dataset() {
     let (xlsx, _dir) = save_xlsx(wb, "multi.xlsx");
 
     let mut session = Session::new().expect("session");
-    let d = load_ok(&mut session, &xlsx);
+    let d = confirm_all(&mut session, &xlsx);
     // active points at the last sheet (ADR-0022: active = most recent source).
     assert_eq!(d.reference_name, "orders");
     assert_eq!(session.list().len(), 2);
@@ -481,7 +512,7 @@ fn xlsx_hidden_sheets_are_skipped() {
     let (xlsx, _dir) = save_xlsx(wb, "hidden.xlsx");
 
     let mut session = Session::new().expect("session");
-    let d = load_ok(&mut session, &xlsx);
+    let d = confirm_all(&mut session, &xlsx);
     assert_eq!(d.reference_name, "visible");
     assert_eq!(session.list().len(), 1);
     assert!(session.get("hidden").is_none());
@@ -506,7 +537,7 @@ fn xlsx_formula_cells_use_cached_values() {
     let (xlsx, _dir) = save_xlsx(wb, "calc.xlsx");
 
     let mut session = Session::new().expect("session");
-    let d = load_ok(&mut session, &xlsx);
+    let d = confirm_all(&mut session, &xlsx);
     assert_eq!(d.reference_name, "calc");
     assert_eq!(d.sample[0], vec!["1", "2"]); // cached "2", not "=1+1"
     assert_eq!(d.sample[1], vec!["2", "10"]); // cached "10", not "B2*5"
@@ -517,7 +548,7 @@ fn xlsx_snapshot_is_read_only() {
     // AC5: per-sheet snapshots are engine-level read-only (ADR-0005).
     let (xlsx, _dir) = people_xlsx();
     let mut session = Session::new().expect("session");
-    load_ok(&mut session, &xlsx);
+    confirm_all(&mut session, &xlsx);
     let writes = [
         r#"INSERT INTO "people".data VALUES (99,'X',true,1.0)"#,
         r#"DROP TABLE "people".data"#,
@@ -535,8 +566,8 @@ fn reloading_xlsx_is_deterministic() {
     // AC5: reload the same xlsx -> structurally identical descriptor per sheet.
     let (xlsx, _dir) = people_xlsx();
     let mut session = Session::new().expect("session");
-    let d1 = load_ok(&mut session, &xlsx);
-    let d2 = load_ok(&mut session, &xlsx);
+    let d1 = confirm_all(&mut session, &xlsx);
+    let d2 = confirm_all(&mut session, &xlsx);
     assert_eq!(d2.reference_name, "people_2"); // de-conflicted
     assert_eq!(d1.columns, d2.columns);
     assert_eq!(d1.row_count, d2.row_count);
@@ -557,7 +588,7 @@ fn xlsx_empty_sheets_are_skipped() {
     let (xlsx, _dir) = save_xlsx(wb, "mixed.xlsx");
 
     let mut session = Session::new().expect("session");
-    let d = load_ok(&mut session, &xlsx);
+    let d = confirm_all(&mut session, &xlsx);
     assert_eq!(d.reference_name, "data");
     assert_eq!(session.list().len(), 1);
     assert!(session.get("blank").is_none());
@@ -622,7 +653,7 @@ fn auto_tidy_skips_title_and_unmerges_data_cells() {
     // table (title dropped, region forward-filled).
     let (xlsx, _dir) = messy_xlsx();
     let mut session = Session::new().expect("session");
-    let d = load_ok(&mut session, &xlsx);
+    let d = confirm_all(&mut session, &xlsx);
     assert_eq!(d.reference_name, "report");
     assert_eq!(
         column_types(&d),
@@ -637,7 +668,16 @@ fn auto_tidy_skips_title_and_unmerges_data_cells() {
     assert_eq!(d.sample[0], vec!["1", "North", "100"]);
     assert_eq!(d.sample[1], vec!["2", "East", "200"]);
     assert_eq!(d.sample[2], vec!["3", "East", "300"]);
-    assert_eq!(d.rectify, RectifyProvenance::Auto); // auto-tidy: Auto provenance, no user params (ADR-0042)
+    // Post-ADR-0148 the confirmed guess submits as an explicit rectify: the
+    // User provenance (ADR-0042), never Auto -- the confirmation dialog is the
+    // only commit path, so the user's acceptance IS the recorded decision.
+    assert_eq!(
+        d.rectify,
+        RectifyProvenance::User(SheetRectify {
+            header_row: 2,
+            skip_rows: vec![]
+        })
+    );
 }
 
 #[test]
@@ -678,6 +718,113 @@ fn multi_row_header_requests_guidance() {
             reason: GuidanceReason::MultipleHeaderRows
         }
     );
+}
+
+#[test]
+fn full_green_workbook_also_parks_on_confirmation() {
+    // ADR-0148 flip: a workbook auto-tidy resolves confidently does NOT commit
+    // directly anymore -- it parks on the confirmation dialog with every sheet
+    // carrying its AutoTidied state + header guess, and the working set stays
+    // untouched until the user accepts.
+    let (xlsx, _dir) = people_xlsx();
+    let mut session = Session::new().expect("session");
+    let guidance = match session.ingest(&xlsx) {
+        LoadOutcome::NeedsGuidance(g) => g,
+        other => panic!("expected NeedsGuidance, got {other:?}"),
+    };
+    assert_eq!(session.list().len(), 0); // nothing loaded pre-confirmation
+    assert_eq!(guidance.sheets.len(), 1);
+    assert_eq!(
+        guidance.sheets[0].state,
+        GuidanceSheetState::AutoTidied { header_row: 1 }
+    );
+    // The payload shape is unchanged by the flip: raw preview + row count ride
+    // along so the dialog can render the sheet without a second parse.
+    assert!(!guidance.sheets[0].preview.is_empty());
+    assert_eq!(guidance.sheets[0].total_rows, 6);
+}
+
+#[test]
+fn guided_commit_loads_only_sheets_with_guidance_entries() {
+    // ADR-0148 skip semantics: the dialog submits one entry per CHECKED sheet,
+    // so a sheet without a guidance entry is SKIPPED -- not default-imported
+    // with a row-1 header. Only the checked sheet lands in the working set.
+    let mut wb = Workbook::new();
+    let people = wb.add_worksheet();
+    people.set_name("people").expect("name");
+    people.write_string(0, 0, "id").unwrap();
+    people.write_number(1, 0, 1.0).unwrap();
+    let orders = wb.add_worksheet();
+    orders.set_name("orders").expect("name");
+    orders.write_string(0, 0, "order_id").unwrap();
+    orders.write_number(1, 0, 100.0).unwrap();
+    let (xlsx, _dir) = save_xlsx(wb, "skip_semantics.xlsx");
+
+    let mut session = Session::new().expect("session");
+    assert!(matches!(
+        session.ingest(&xlsx),
+        LoadOutcome::NeedsGuidance(_)
+    ));
+    let d = match session.ingest_guided(
+        &xlsx,
+        &[SheetGuidance {
+            name: "people".into(),
+            rectify: SheetRectify {
+                header_row: 1,
+                skip_rows: vec![],
+            },
+        }],
+    ) {
+        LoadOutcome::Loaded(d) => d,
+        other => panic!("expected guided load to succeed, got {other:?}"),
+    };
+    assert_eq!(d.reference_name, "people");
+    assert_eq!(session.list().len(), 1);
+    assert!(session.get("orders").is_none()); // unchecked -> skipped, not default-loaded
+}
+
+#[test]
+fn empty_guidance_selection_is_rejected() {
+    // ADR-0148 defensive floor: a client bypassing the dialog's disabled
+    // submit (or any future caller) sending an empty selection gets a clear
+    // parse error instead of a silent no-op commit, and the working set stays
+    // empty.
+    let (xlsx, _dir) = people_xlsx();
+    let mut session = Session::new().expect("session");
+    let outcome = session.ingest_guided(&xlsx, &[]);
+    match outcome {
+        LoadOutcome::Error(LoadError::Parse { detail }) => {
+            assert!(detail.contains("未选择任何 sheet"), "got: {detail}");
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    assert_eq!(session.list().len(), 0);
+}
+
+#[test]
+fn guidance_naming_no_known_sheet_is_rejected() {
+    // The other leg of the ADR-0148 defensive floor: a non-empty selection
+    // that names only sheets the workbook doesn't have selects nothing -- the
+    // same clear rejection instead of a silent no-op commit.
+    let (xlsx, _dir) = people_xlsx();
+    let mut session = Session::new().expect("session");
+    let outcome = session.ingest_guided(
+        &xlsx,
+        &[SheetGuidance {
+            name: "nonexistent".into(),
+            rectify: SheetRectify {
+                header_row: 1,
+                skip_rows: vec![],
+            },
+        }],
+    );
+    match outcome {
+        LoadOutcome::Error(LoadError::Parse { detail }) => {
+            assert!(detail.contains("未选择任何 sheet"), "got: {detail}");
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    assert_eq!(session.list().len(), 0);
 }
 
 #[test]
@@ -873,7 +1020,7 @@ fn xlsx_sheets_carry_distinct_v2_fingerprints() {
 
     let fps = {
         let mut s = Session::new().expect("session");
-        load_ok(&mut s, &xlsx);
+        confirm_all(&mut s, &xlsx);
         (
             s.get("people").expect("people").fingerprint,
             s.get("orders").expect("orders").fingerprint,
@@ -890,7 +1037,7 @@ fn xlsx_sheets_carry_distinct_v2_fingerprints() {
 
     let fps_again = {
         let mut s = Session::new().expect("session");
-        load_ok(&mut s, &xlsx);
+        confirm_all(&mut s, &xlsx);
         (
             s.get("people").expect("people").fingerprint,
             s.get("orders").expect("orders").fingerprint,
@@ -945,8 +1092,8 @@ fn auto_tidy_reload_is_deterministic() {
     // AC5: reloading the same messy workbook -> identical descriptor.
     let (xlsx, _dir) = messy_xlsx();
     let mut session = Session::new().expect("session");
-    let d1 = load_ok(&mut session, &xlsx);
-    let d2 = load_ok(&mut session, &xlsx);
+    let d1 = confirm_all(&mut session, &xlsx);
+    let d2 = confirm_all(&mut session, &xlsx);
     assert_eq!(d2.reference_name, "report_2");
     assert_eq!(d1.columns, d2.columns);
     assert_eq!(d1.row_count, d2.row_count);
@@ -1079,8 +1226,8 @@ fn xlsx_sheets_deconflict_display_labels_on_reload() {
     // the same label in the UI. Reference names de-conflict in parallel.
     let (xlsx, _dir) = people_xlsx();
     let mut session = Session::new().expect("session");
-    let d1 = load_ok(&mut session, &xlsx);
-    let d2 = load_ok(&mut session, &xlsx);
+    let d1 = confirm_all(&mut session, &xlsx);
+    let d2 = confirm_all(&mut session, &xlsx);
     assert_eq!(d1.reference_name, "people");
     assert_eq!(d2.reference_name, "people_2");
     assert_eq!(d1.display_name, "people");

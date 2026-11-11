@@ -16,6 +16,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use rust_xlsxwriter::Workbook;
 use serde_json::json;
 use toptopduck_lib::model::SkillLifecycleActor;
 use toptopduck_lib::persistence::{LoadError, SaveError};
@@ -24,8 +25,8 @@ use toptopduck_lib::provider::tool_calling::{
 };
 use toptopduck_lib::{
     is_resuming, ActiveAbandoned, ActiveResolution, CancelToken, FakeProvider, LoadOutcome,
-    PendingConflict, Provider, ProviderError, ResumeError, ResumeEvent, Session, SourceIssue,
-    SourceResolution, ThreadEntry, TurnOutcome, UnwiredProvider,
+    PendingConflict, Provider, ProviderError, ResumeError, ResumeEvent, Session, SheetGuidance,
+    SheetRectify, SourceIssue, SourceResolution, ThreadEntry, TurnOutcome, UnwiredProvider,
 };
 
 /// Resume with default Abort callbacks for the issue #49 interactive decision
@@ -284,6 +285,73 @@ fn resume_restores_working_set_history_and_active() {
         !viz_persisted,
         "viz must not survive resume (ADR-0036); reopened charts render as tables"
     );
+}
+
+/// ADR-0148: a partially-confirmed workbook's snapshot-hit resume restores
+/// exactly the checked sheets -- unchecked sheets have no snapshot and no
+/// recipe entry, so neither resume leg can resurrect them.
+#[test]
+fn resume_after_a_partial_excel_confirmation_restores_only_the_checked_sheets() {
+    // ADR-0148 AC: a partially-confirmed workbook leaves the unchecked sheets
+    // entirely outside the working set -- no snapshot, no recipe entry -- so
+    // the snapshot-hit resume leg (the normal path, zero source re-read)
+    // restores exactly the checked sheet and cannot resurrect the unticked
+    // one.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    let xlsx = dir.path().join("two.xlsx");
+    let mut wb = Workbook::new();
+    let people = wb.add_worksheet();
+    people.set_name("people").expect("name");
+    people.write_string(0, 0, "id").unwrap();
+    people.write_number(1, 0, 1.0).unwrap();
+    let orders = wb.add_worksheet();
+    orders.set_name("orders").expect("name");
+    orders.write_string(0, 0, "sku").unwrap();
+    orders.write_number(1, 0, 7.0).unwrap();
+    wb.save(&xlsx).expect("save xlsx fixture");
+
+    // Bind FIRST so the confirmed sheet's snapshot lands in the tree's
+    // snapshots/ dir (ADR-0136 D1) -- the probe validates tree snapshots, and
+    // an unbound session's snapshots live in the temp dir. The explicit
+    // persist stamps the companion watermark (no turn runs in this session to
+    // trigger the per-turn write).
+    let mut session = Session::new().expect("session");
+    session
+        .bind_recipe(duck.to_path_buf(), "分析 B".into())
+        .expect("bind");
+    let guidance = match session.ingest(&xlsx) {
+        LoadOutcome::NeedsGuidance(g) => g,
+        other => panic!("expected NeedsGuidance, got {other:?}"),
+    };
+    // The user confirms only "people"; "orders" stays unticked.
+    let checked: Vec<SheetGuidance> = guidance
+        .sheets
+        .iter()
+        .filter(|s| s.name == "people")
+        .map(|s| SheetGuidance {
+            name: s.name.clone(),
+            rectify: SheetRectify {
+                header_row: 1,
+                skip_rows: vec![],
+            },
+        })
+        .collect();
+    match session.ingest_guided(&xlsx, &checked) {
+        LoadOutcome::Loaded(d) => assert_eq!(d.reference_name, "people"),
+        other => panic!("expected guided load, got {other:?}"),
+    }
+    session.persist_if_bound();
+    drop(session);
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    let names: Vec<String> = resumed
+        .list()
+        .iter()
+        .map(|d| d.reference_name.clone())
+        .collect();
+    assert_eq!(names, vec!["people".to_string()]);
+    assert!(resumed.get("orders").is_none());
 }
 
 /// ADR-0102 (issue #589): the recipe-header `last_runtime` is stamped by
