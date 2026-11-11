@@ -679,8 +679,10 @@ export function PaneFilterBar({
   placeholder: string;
   search: string;
   onSearchChange: (value: string) => void;
-  filter: EnabledFilter;
-  onFilterChange: (value: EnabledFilter) => void;
+  /** Omit the pair (filter + onFilterChange) on a list with no enabled axis
+   *  (the read-only memory pane): the bar renders the search box only. */
+  filter?: EnabledFilter;
+  onFilterChange?: (value: EnabledFilter) => void;
 }) {
   const intl = useIntl();
   const filterId = `${idPrefix}-enabled-filter`;
@@ -690,6 +692,7 @@ export function PaneFilterBar({
     id: "settings.filter.label",
     defaultMessage: "Filter by status",
   });
+  const withFilter = filter !== undefined && onFilterChange !== undefined;
   return (
     <div className="mb-3 flex items-center gap-2">
       <Input
@@ -699,36 +702,40 @@ export function PaneFilterBar({
         placeholder={placeholder}
         className="max-w-xs"
       />
-      <Label htmlFor={filterId} className="sr-only">
-        {filterLabel}
-      </Label>
-      <Select
-        value={filter}
-        onValueChange={(v) => onFilterChange(v as EnabledFilter)}
-      >
-        <SelectTrigger id={filterId} aria-label={filterLabel}>
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {FILTER_OPTIONS.map((opt) => (
-            <SelectItem key={opt} value={opt}>
-              {opt === "all" ? (
-                <FormattedMessage id="settings.filter.all" defaultMessage="All" />
-              ) : opt === "enabled" ? (
-                <FormattedMessage
-                  id="settings.filter.enabled"
-                  defaultMessage="Enabled"
-                />
-              ) : (
-                <FormattedMessage
-                  id="settings.filter.disabled"
-                  defaultMessage="Disabled"
-                />
-              )}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      {withFilter && (
+        <>
+          <Label htmlFor={filterId} className="sr-only">
+            {filterLabel}
+          </Label>
+          <Select
+            value={filter}
+            onValueChange={(v) => onFilterChange(v as EnabledFilter)}
+          >
+            <SelectTrigger id={filterId} aria-label={filterLabel}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {FILTER_OPTIONS.map((opt) => (
+                <SelectItem key={opt} value={opt}>
+                  {opt === "all" ? (
+                    <FormattedMessage id="settings.filter.all" defaultMessage="All" />
+                  ) : opt === "enabled" ? (
+                    <FormattedMessage
+                      id="settings.filter.enabled"
+                      defaultMessage="Enabled"
+                    />
+                  ) : (
+                    <FormattedMessage
+                      id="settings.filter.disabled"
+                      defaultMessage="Disabled"
+                    />
+                  )}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </>
+      )}
     </div>
   );
 }

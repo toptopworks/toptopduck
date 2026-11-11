@@ -19,7 +19,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
   ChevronRight,
-  FileClock,
+  Brain,
   FolderClosed,
   FolderOpen,
   FolderX,
@@ -880,7 +880,7 @@ function WorkspaceGroupMenu({
         {/* Issue #1529: the workspace memory panel's entry. A missing
             directory has no memories to list (and no toggle target). */}
         <DropdownMenuItem disabled={group.missing} onSelect={onViewMemory}>
-          <FileClock aria-hidden />
+          <Brain aria-hidden />
           <FormattedMessage id="sidebar.workspace.memory" defaultMessage="Memory" />
         </DropdownMenuItem>
         <DropdownMenuSeparator />
