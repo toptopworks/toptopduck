@@ -24,6 +24,10 @@ colors:
   warning: "#b45309"
   info: "#1d4ed8"
   border: "#e3e3e8"
+  # Control boundary/fill token: light matches the hairline; dark lifts to
+  # #606a60 so a bare radio/checkbox circle holds 3:1 without any text or
+  # hover to compensate (large controls ride it at 60%/20% alpha instead).
+  input: "#e3e3e8"
   # Grey = transit (hover/focus feedback), teal = committed (selected/active).
   # Accent is never a hover face; every hover rides this ramp. One exemption:
   # a two-option contrast pair (the auth-mode chip) previews each option's
@@ -37,7 +41,7 @@ colors:
   card-dark: "#181b18"
   popover-dark: "#181b18"
   secondary-dark: "#232723"
-  secondary-foreground-dark: "#e8eae8"
+  secondary-foreground-dark: "#d5d9d5"
   muted-dark: "#232723"
   muted-foreground-dark: "#9ca3af"
   accent-dark: "#143833"
@@ -46,6 +50,7 @@ colors:
   warning-dark: "#f59e0b"
   info-dark: "#60a5fa"
   border-dark: "#2a2f2a"
+  input-dark: "#606a60"
   transit-dark: "#343a34"
 
 typography:
@@ -176,12 +181,12 @@ components:
 
   # --- Conversation rail + workspace ---
   conversation-rail:
-    backgroundColor: "{colors.card}"
+    backgroundColor: "{colors.canvas}"
     textColor: "{colors.ink}"
     typography: "{typography.body-sm}"
     width: 460px
   conversation-rail-dark:
-    backgroundColor: "{colors.card-dark}"
+    backgroundColor: "{colors.canvas-dark}"
     textColor: "{colors.ink-dark}"
 
   # --- Chat exchange (ADR-0103; full recipe under Components > Conversation
@@ -397,7 +402,7 @@ The structural signature is a **three-column shell**: session sidebar (280px) + 
 - **Border Dark** (`{colors.border-dark}` — #2a2f2a): Hairline color in dark mode. Greenish gray.
 
 ### Dark Mode Text
-- **Ink Dark** (`{colors.ink-dark}` — #e8eae8): Primary text in dark mode. Soft off-white (not pure #ffffff — reduces eye strain).
+- **Ink Dark** (`{colors.ink-dark}` — #d5d9d5): Primary text in dark mode. Soft off-white (not pure #ffffff — reduces eye strain).
 - **Muted Foreground Dark** (`{colors.muted-foreground-dark}` — #9ca3af): Captions, metadata.
 - **Accent Foreground Dark** (`{colors.accent-foreground-dark}` — #5eead4): Text on dark accent tints. Brighter teal than the brand color — lifts visibility on dark surfaces.
 
@@ -406,6 +411,10 @@ The structural signature is a **three-column shell**: session sidebar (280px) + 
 - **Destructive Dark** (`{colors.destructive-dark}` — #ef4444): Error alerts in dark mode. Brighter red than light mode for visibility on dark canvas.
 - **Warning Dark** (`{colors.warning-dark}` — #f59e0b): Warning indicators in dark mode. Brighter amber than light mode.
 - **Info Dark** (`{colors.info-dark}` — #60a5fa): Info tints in dark mode. Brighter blue than light mode.
+
+### Transit & the Control Tiers
+
+**Transit** (`{colors.transit}` / `{colors.transit-dark}` — light `rgb(0 0 0 / 4%)`, dark `#343a34`) is the single hover/focus face: grey means passing over; teal (`{colors.accent}`) means committed — selected, active, checked. A committed face re-asserts accent on hover and never greys out. Two exemptions: the select dropdown marks its selected row with the check glyph alone (no committed face — every row, selected included, highlights transit), and the two-option contrast pair (the auth-mode chip) previews each option's own commitment hue on hover. The dark control boundary rides a three-tier ladder: large form controls (inputs, textareas, select triggers, outline buttons) fill `bg-input/20` over a `border-input/60` boundary (~1.9:1); radios and checkboxes keep the full 3:1 `{colors.input-dark}` border, since a bare 16px circle has no label or hover affordance to compensate; the composer's quiet chip tier stays as-is. Hover tuning changes the token value, never the per-site classes.
 
 ### Mode Mapping Principle
 Light and dark tokens share semantic names but carry different hex values. The mapping is 1:1 — `{colors.canvas}` in light mode becomes `{colors.canvas-dark}` in dark mode. The `primary` and `primary-foreground` tokens are mode-invariant. Focus rings always use `{colors.primary}` (teal) in both modes. In production, the same CSS variable (`--background`, `--card`, etc.) carries different values under the `.dark` class — the DESIGN.md `-dark` suffix is a documentation convention, not a separate variable name.
@@ -486,7 +495,7 @@ These ride the Tailwind shadow scale directly (no custom `--shadow-*` token per 
 | Level | Light Treatment | Dark Treatment | Use |
 |---|---|---|---|
 | Canvas | `{colors.canvas}` (#ffffff) | `{colors.canvas-dark}` (#0f1410) | Page floor, topbar, sidebar |
-| Card | `{colors.card}` (#ffffff) | `{colors.card-dark}` (#181b18) | Conversation rail, result tables, cards |
+| Card | `{colors.card}` (#ffffff) | `{colors.card-dark}` (#181b18) | Result tables, cards |
 | Popover | `{colors.popover}` (#ffffff) | `{colors.popover-dark}` (#181b18) | Dialogs, dropdown menus |
 | Hairline | 1px `{colors.border}` (#e3e3e8) | 1px `{colors.border-dark}` (#2a2f2a) | All visual separation |
 
@@ -525,11 +534,11 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 **`topbar` / `topbar-dark`** — Thin 40px strip spanning the full viewport width. Background `{colors.muted}` / `{colors.muted-dark}` — the topbar and sidebar form ONE continuous muted rail against the content field, separated tonally with no divider lines. Houses the sidebar toggle, header actions, and window controls; session-scoped chrome (the 64px session name row) lives inside the session pane's conversation column so the column divider runs unbroken from the pane top. Height is deliberately compact — this is chrome, not content. Header-chrome icon buttons sharing the topbar ghost style (sidebar toggle, back/forward nav, workspace toggle, session-actions menu trigger) carry a 28px hit area (`h-7 w-7`) with a 14px glyph (`h-3.5 w-3.5`) — the WCAG 2.5.8 24px minimum plus margin. The window controls are a separate titlebar family (Windows-style 32px × 44px hit) and are not bound by this note.
 
-**`sidebar` / `sidebar-dark`** — Session sidebar at a 280px default width (user-resizable). Background `{colors.muted}` / `{colors.muted-dark}` — the same muted rail the topbar rides, one continuous L-shaped chrome surface. Uses `{typography.nav-link}` for session entries. Collapsible to 0 width with a 180ms grid-template-columns animation.
+**`sidebar` / `sidebar-dark`** — Session sidebar at a 280px default width (user-resizable). Background `{colors.muted}` / `{colors.muted-dark}` — the same muted rail the topbar rides, one continuous L-shaped chrome surface. Uses `{typography.nav-link}` for session entries. Collapsible to 0 width with a 280ms grid-template-columns animation.
 
 ### Conversation Surfaces
 
-**`conversation-rail` / `conversation-rail-dark`** — The thread rail at a 460px default width (user-resizable). Background `{colors.card}` / `{colors.card-dark}` (one brightness step above canvas). Houses turn cards and source lifecycle markers. Uses `{typography.body-sm}` as default text size.
+**`conversation-rail` / `conversation-rail-dark`** — The thread rail at a 460px default width (user-resizable). Background `{colors.canvas}` / `{colors.canvas-dark}` — the rail carries no surface of its own; the column reads by tone alone under the borderless shell topology (no divider, no card step). Houses turn cards and source lifecycle markers. Uses `{typography.body-sm}` as default text size.
 
 **`chat-exchange`** — One turn rendered as a chat exchange (ADR-0103), live and settled in the same form: the in-flight streaming exchange and the settled card share every piece of chrome, so the settle swap moves nothing. The user side is the **user bubble** — right-aligned, `{colors.secondary}` surface + `{colors.secondary-foreground}` text, type `{typography.body-md}`, rounded `{rounded.lg}` with the top-right corner stepped to `{rounded.sm}` (the bubble points at the user's side), max-width 85% of the rail, padding 8px × 12px, full-text wrap; the ask stamp and the copy affordance ride a hover-revealed `{typography.caption}` `{colors.muted-foreground}` meta row under the bubble. The assistant side is a left-aligned stream of, in reading order: the runtime attribution marker (a muted `{typography.caption}` `{colors.muted-foreground}` line with a terminal glyph naming the external adapter, per turn — built-in and unrecorded turns stay silent, so an unmarked stretch reads as the default runtime, issue #818 — same slot live and settled, so the settle swap moves nothing); the agent-activation head (the turn's agent-initiated skill activations as bare tone-colored lifecycle glyphs, issues #722/#727 — same slot live and settled, so the settle swap moves nothing); the stream header (the active-dataset chip — `badge-primary` — plus skill-drift notes, `{typography.caption}` `{colors.muted-foreground}`); per-round blocks — a thinking fold (chevron toggle + honest duration label in `{typography.caption}` `{colors.muted-foreground}`; the expanded block is a `{colors.muted}`-surfaced, `{rounded.md}` 8px-padded, height-capped scroll box), connective prose (`{typography.body-md}` `{colors.ink}`) rendered as markdown (issue #746) — body line-height floats a step above the body-md token at 1.75 (`leading-[1.75]`, issue #828), since CJK discourse reads cramped at the token's 1.5 once answers run long; blocks sit on a 16px rhythm owned outright by the prose root's `space-y-4` — the mapped blocks that sit directly under the root carry no margins of their own, since any `m-0` would outrank the selector and flatten the rhythm back to flush blocks; while a round streams, a block caret trails its last block (the " ▋" glyph set through the streamdown caret token `--streamdown-caret`, suppressed while the last block is an unclosed fence, issue #1128), and the streaming prose's words cascade in — the streamdown animate pass wraps each newly arrived word in a 150ms opacity fade (word separation, the library's stagger defaults; issue #1137), skipping code blocks and the chart fence (inline code chips do cascade), with `prefers-reduced-motion` cutting the cascade off (the library ships no such handling of its own); headings compress to a compact ladder instead of full-size document headings (h1 at 17px stepping down 1px per level, h4 and below at body size gaining weight only; weight caps at 600), bullet/numbered lists, left-ruled blockquotes, GFM pipe tables in a hairline-bordered horizontal-scroll container, inline code as `code-inline` chips, fenced code as `code-block` surfaces, embedded HTML shown as raw tag text (never rendered), images degraded to their alt text with the URL beside it (the CSP blocks remote fetches), and http(s) links opened in the OS default browser — an opener failure surfaces a caption-sized live note beside the link — while every other scheme degrades to plain text with its surviving target — and the round's call rows on a 1px `{colors.border}` left rail (tool name + operation badge + a truncated monospace summary); then the outcome body — on Textual turns it renders through the same markdown pipeline as the connective prose (issue #827), with the Clarify/Refuse kind badge standing on its own `{typography.caption}` row ahead of the prose (the Agent kind carries no badge — its body is the reply); on Materialized turns the terminal text rides the same pipeline (issue #847) between the result link row and the inline preview card, in the same link-row, prose, note rhythm the Textual face uses; on either face the assumption note trails the prose when the turn carries one (a reserved slot — no live agent source emits one, so it renders only on turns persisted before #847) — and the closing meta row (the always-visible usage pill when the turn carries usage — a muted `{rounded.pill}` pill naming the turn's derived total (input + output) as a fixed-scale K/M absolute number, opening a popover whose bucket rows read muted labels against tabular-nums foreground figures (input with its cache-read split and hit rate, cache write, output, reasoning), ADR-0129/0130; the delegation sub-trace's inline expansion head carries the sub-agent's subtotal — hover-revealed reply copy + settle stamp, plus the outcome glyph on Materialized/Textual turns; Failed/Cancelled turns instead close on one content-width tinted outcome card — `border-destructive/40` + `bg-destructive/10` with the glyph + reason on the card head and the technical-details fold inside for Failed, the same shape over `{colors.muted}` for Cancelled). Live rounds stream their rows unfurled on the shared rail chrome; the settled card tucks its whole process face — the per-round thinking folds, connective prose, and call rows — behind one collapsed turn-level process fold head (the outcome word + the turn's frozen wall-clock duration, `{typography.caption}` `{colors.muted-foreground}`; no head when the trace carries nothing at all), so the settled card reads question → one process head → answer, while expanding mounts the incumbent per-round blocks verbatim (the long-rail posture, ADR-0078, issue #1282).
 
@@ -545,11 +554,11 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 **`button-secondary` / `button-secondary-dark`** — Secondary surface button. Background `{colors.secondary}` / `{colors.secondary-dark}`, text matches ink. Same shape as primary.
 
-**`button-outline` / `button-outline-dark`** — Transparent with 1px `{colors.border}` hairline. Text `{colors.ink}` / `{colors.ink-dark}`. Used for cancel, secondary actions.
+**`button-outline` / `button-outline-dark`** — Light mode: transparent with a 1px `{colors.border}` hairline. Dark mode: the soft large-control tier — `bg-input/20` fill over a `border-input/60` boundary. Text `{colors.ink}` / `{colors.ink-dark}`. Hover rides the transit ramp in both themes. Used for cancel, secondary actions.
 
 ### Inputs
 
-**`text-input` / `text-input-dark`** — Transparent background, 1px `{colors.border}` hairline, text `{colors.ink}` / `{colors.ink-dark}`, type `{typography.body-md}`, rounded `{rounded.md}` (6px), padding 8px × 12px, height 36px. Focus state leaves the border unchanged — the text caret is the focus indicator; the only ring is the `aria-invalid` error ring. The shadcn Input/Textarea copy-in carries a mobile-first `text-base md:text-sm` responsive override (16px below the `md` breakpoint, then 14px) — a vestigial Safari auto-zoom prevention idiom from the shadcn default; Tauri desktop ignores the mobile breakpoint.
+**`text-input` / `text-input-dark`** — Light mode: transparent background with a 1px `{colors.border}` hairline; dark mode: the soft large-control tier — `bg-input/20` fill over a `border-input/60` boundary (`{colors.input-dark}` at 60% alpha, ~1.9:1). Text `{colors.ink}` / `{colors.ink-dark}`, type `{typography.body-md}`, rounded `{rounded.md}` (6px), padding 8px × 12px, height 36px. Focus state leaves the border unchanged — the text caret is the focus indicator; the only ring is the `aria-invalid` error ring. The shadcn Input/Textarea copy-in carries a mobile-first `text-base md:text-sm` responsive override (16px below the `md` breakpoint, then 14px) — a vestigial Safari auto-zoom prevention idiom from the shadcn default; Tauri desktop ignores the mobile breakpoint.
 
 ### Badges
 
@@ -589,7 +598,7 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 - Use 1px hairlines (`{colors.border}` / `{colors.border-dark}`) for all visual separation.
 - Support both light and dark modes as equals. Neither is the "default."
 - Apply `{typography.label-caps}` with CSS `text-transform: uppercase` for badges and section labels.
-- Collapse shell panels with animated grid-template-columns transitions (180ms ease), not display:none.
+- Collapse shell panels with animated grid-template-columns transitions (280ms ease), not display:none.
 - Gate all motion behind `prefers-reduced-motion: reduce`. The global cutoff block in `app.css` cuts every animation family to instant: the streamdown word cascade, the dialog enter/exit utilities, the loading spinners and the status pulse, and the shell fold transitions. Spinners and status pulses keep their glyphs under reduce — the static shape still reads as loading/state; only the motion stops. Shell folds cut to instant rather than selectively keeping color/opacity micro-fades, because the fold chain is orchestration-coupled (delayed fades park on the fold finishing) and a partial cut would desync it. New motion stays inside this block's coverage: the wildcard selectors (`*`, `::before`/`::after`, `::marker`) cut anything animated on an element or a pseudo-element automatically — bare `*` does not match pseudo-elements, which is why `::marker` is named explicitly.
 
 ### Don't
@@ -600,6 +609,6 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 - Don't ship motion that escapes the reduced-motion cutoff, and don't build state signals that depend on animation timing — under reduce every animation and transition is instant, so a paused spinner or a snapped fold must still read as its terminal state.
 - Don't use `{colors.warning}` as a solid fill for alert backgrounds. Use tinted backgrounds (`bg-warning/10`) with warning indicator dots.
 - Don't use pure `#000000` for dark canvas. `{colors.canvas-dark}` (#0f1410) carries a green undertone that distinguishes the dark palette from neutral gray-black.
-- Don't use pure `#ffffff` for dark-mode text. `{colors.ink-dark}` (#e8eae8) is softer for long sessions.
+- Don't use pure `#ffffff` for dark-mode text. `{colors.ink-dark}` (#d5d9d5) is softer for long sessions.
 - Don't create new radius values. All corners derive from the 6px `{rounded.md}` token.
 - Don't place large areas of white body text on teal `{colors.primary}` (#0d9488). The contrast ratio is 3.74:1 — passes WCAG AA Large (3:1, suitable for button labels and short badges at 14px/500) but not AA normal text (4.5:1). For body text on teal surfaces, use `{colors.ink-dark}` on a darker teal tint instead.

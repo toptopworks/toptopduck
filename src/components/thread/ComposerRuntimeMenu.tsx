@@ -359,17 +359,16 @@ function RuntimeSelectItem({
       value={value}
       disabled={disabled}
       className={cn(
-        // Grey = transit, teal = committed pinned via :has on the
-        // ItemIndicator -- same pattern as the shared SelectItem: the teal
-        // face stays on the selected row through pointer moves; hover/focus
-        // ride transit on the other rows only.
-        "[&:has(.select-item-check)]:bg-accent [&:has(.select-item-check)]:text-accent-foreground [&:not(:has(.select-item-check))]:hover:bg-transit [&:not(:has(.select-item-check))]:focus:bg-transit relative flex items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none",
+        // Grey = transit on every row -- same posture as the shared
+        // SelectItem: the selected row is marked by the check glyph alone,
+        // no committed face.
+        "hover:bg-transit focus:bg-transit relative flex items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none",
         "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
       )}
     >
       <span className="absolute right-2 flex size-3.5 items-center justify-center">
-        <SelectPrimitive.ItemIndicator className="select-item-check">
+        <SelectPrimitive.ItemIndicator>
           <Check className="size-4" />
         </SelectPrimitive.ItemIndicator>
       </span>
