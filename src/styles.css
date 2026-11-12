@@ -238,7 +238,7 @@
    * scrollbar width when applied, so overlay environments relax nothing
    * and keep column and card flush. */
   --rail-col-relax: 10px;
-  /* Session header height (issue #782): single 40px source shared by
+  /* Session header height (issue #782): single 64px source shared by
    * .session-header (height/min-height) and .rail-resize-handle (top) so the
    * drag line stops exactly at the header's bottom edge — ADR-0092 lifted
    * the handle to .main-area with top:0, which let it span the header strip
@@ -299,12 +299,10 @@
 .shell.sidebar-dragging .sidebar-resize-handle::before {
   background-color: var(--border);
 }
-/* Suppress the sidebar's border-r under the handle so hover/drag shows a
-   single 1px line instead of a doubled 2px. */
-.shell:has(.sidebar-resize-handle:hover) .session-sidebar,
-.shell.sidebar-dragging .session-sidebar {
-  border-right-color: transparent;
-}
+/* The sidebar's suppress rule retired: the session sidebar carries no
+   border-right anymore (the borderless muted rail topology), so there is
+   nothing left for the handle hover to suppress. The handle's own ::before
+   hover line (above) is the only line in play. */
 .shell.sidebar-collapsed .sidebar-resize-handle,
 .shell.settings-mode .sidebar-resize-handle {
   display: none;
@@ -726,6 +724,21 @@
   opacity: 0;
   transition: opacity 200ms ease;
 }
+/* Fold direction: the header fallback toggle mounts in the same commit that
+   starts the 280ms column slide (React swaps the two conditional mounts in
+   one paint), so unstaged it pops into the header mid-slide as a flicker.
+   A short mount-only fade turns the pop into a ramp: the button solidifies
+   while the panel is still closing, arriving with the slide rather than
+   after it. The expand direction needs no staging: its toggle rides the
+   column in. The mount also fires on cold start and session switches, where
+   a 150ms first-paint fade reads as instant. The reduced-motion cutoff
+   zeroes the duration, restoring the immediate face. */
+@keyframes session-header-toggle-in {
+  from { opacity: 0; }
+}
+.session-header .workspace-toggle {
+  animation: session-header-toggle-in 150ms ease-out backwards;
+}
 /* Session header (row 1): the session name + the workspace toggle. Moved out
    of the global topbar so session-scoped chrome
    lives with the session pane; the topbar keeps only shell-wide controls
@@ -815,11 +828,17 @@
   touch-action: none;
 }
 /* Thin 2px visual line inside the 6px hit area. Fixed left:2px (not 50%)
-   to avoid sub-pixel rounding that thins the line on high-DPI displays. */
+   to avoid sub-pixel rounding that thins the line on headless displays.
+   The line extends UP through the header strip (top rides above the handle
+   box by the header height): the hit area still starts at the header's
+   bottom edge (ADR-0092 -- col-resize must not steal header pointer
+   events), but the suppressed column border takes the whole column with
+   it, so the visual line has to cover the header segment too or the
+   divider-runs-unbroken topology breaks while hovering/dragging. */
 .rail-resize-handle::before {
   content: "";
   position: absolute;
-  top: 0;
+  top: calc(-1 * var(--session-header-height));
   bottom: 0;
   left: 2px;
   width: 2px;
@@ -830,8 +849,8 @@
 .shell.rail-dragging .rail-resize-handle::before {
   background-color: var(--border);
 }
-/* Suppress the .session-rail permanent border-right under the handle so
-   hover/drag shows a single 1px line instead of a doubled 2px. */
+/* Suppress the .session-conversation permanent border-right under the handle
+   so hover/drag shows a single 1px line instead of a doubled 2px. */
 .main-area:has(.rail-resize-handle:hover) .session-conversation,
 .shell.rail-dragging .session-conversation {
   border-right-color: transparent;
@@ -861,6 +880,11 @@
      the same field as the rail. */
   border-right: 1px solid var(--border);
   background: var(--background);
+  /* The fold fade for the divider: the collapsed rule flips the color to
+     transparent, so the line fades out over the slide instead of popping
+     off in the first frame (the twin of the 200ms opacity fade the
+     workspace column rides). */
+  transition: border-right-color 200ms ease;
 }
 
 .session-rail {
@@ -899,8 +923,10 @@
   transition: opacity 200ms ease,
     padding 200ms ease;
 }
-/* The Thread rail section does not carry a `.panel` hook -- the .session-rail
-   rule above supplies bg-card + 0.5rem padding directly. ADR-0067 (issue
+/* The Thread rail section does not carry a `.panel` hook and no longer
+   carries a surface of its own -- the floor rides the .session-conversation
+   column's var(--background) (the canvas ground of the shell topology).
+   ADR-0067 (issue
    #185): the scattered .rail-empty empty-state rule (font-size + padding)
    retired onto the SessionPane rail-empty <p> as utility (text-[0.85rem] +
    p-2); the class hook had no selector / test dependent and is dropped. */

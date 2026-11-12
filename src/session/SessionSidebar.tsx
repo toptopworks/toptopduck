@@ -677,7 +677,7 @@ function SidebarRow({
           {...bridge.liProps}
           className={cn(
             ROW_SHELL_CLASS,
-            entry.active && "active bg-accent",
+            entry.active && "active bg-accent hover:bg-accent",
             entry.sid && "open",
             hasPendingApproval && "pending-approval",
             hasTurnFailed && "turn-failed",

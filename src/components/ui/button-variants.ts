@@ -24,7 +24,7 @@ export const buttonVariants = cva(
           // Hover is the transit hue in BOTH themes -- the same grey as
           // ghost/nav/row hovers, one knob. Filled commitment buttons keep
           // their darken press semantics; grey buttons lift to transit.
-          "border bg-background shadow-xs hover:bg-transit dark:bg-input/20 dark:border-input/60 dark:hover:bg-transit",
+          "border bg-background shadow-xs hover:bg-transit dark:bg-input/20 dark:border-input/60",
         secondary:
           "bg-secondary text-secondary-foreground shadow-xs hover:bg-secondary/80",
         ghost:

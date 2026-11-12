@@ -14,9 +14,13 @@ import { PanelRightClose, PanelRightOpen } from "lucide-react";
 export function WorkspaceToggle({
   collapsed,
   onToggle,
+  ref,
 }: {
   collapsed: boolean;
   onToggle: () => void;
+  // React 19 ref-as-prop: the pane hands each mount a ref so a keyboard
+  // toggle can hand focus to the surviving instance across the swap.
+  ref?: React.Ref<HTMLButtonElement>;
 }) {
   const intl = useIntl();
   const label = collapsed
@@ -24,6 +28,7 @@ export function WorkspaceToggle({
     : intl.formatMessage({ id: "workspace.collapse", defaultMessage: "Collapse right sidebar" });
   return (
     <button
+      ref={ref}
       type="button"
       // Ghost icon button (ADR-0067 #171 visual rule): h-7 w-7 + h-3.5 w-3.5
       // glyph + text-foreground/70, matching the sidebar/nav topbar family

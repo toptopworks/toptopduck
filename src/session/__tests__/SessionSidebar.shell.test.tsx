@@ -416,9 +416,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
   // retired — the ⋯ context menu moved to .session-header (slice 2, #512).
 
   // ADR-0072 (issue #250): brand title row (product name left + circular
-  // search magnifier right) + fused bg-secondary New icon button replace the
-  // ADR-0060 full-width solid teal New button. ADR-0072 (issue
-  // #252) wires the magnifier to the Ctrl/⌘+K modal.
+  // search magnifier right) replaces the ADR-0060 full-width solid teal New
+  // button; the New button itself de-surfaced to ghost in the transit-shell
+  // calibration (the bg-secondary fill sat same-value on the muted rail).
+  // ADR-0072 (issue #252) wires the magnifier to the Ctrl/⌘+K modal.
   it("sidebar-brand-row shows TOPTOPDuck brand + circular search button that opens the modal on click (ADR-0072, issue #250/#252)", () => {
     const onOpenSearch = vi.fn();
     const { container } = renderShell(
@@ -506,7 +507,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(onOpenSearch).not.toHaveBeenCalled();
   });
 
-  it("sidebar-new-button is a fused bg-secondary SquarePen + text button, not solid primary (ADR-0072, issue #250)", () => {
+  it("sidebar-new-button is a surface-less ghost SquarePen with the transit hover, not solid primary (ADR-0072, issue #250)", () => {
     const { container } = renderShell(
       <SessionSidebar
         collapsed={false}

@@ -351,6 +351,13 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // (selection follows focus); Home/End jump to the first/last tab. Roving
   // tabindex -- only the active tab holds tabIndex 0 -- is set in the JSX.
   function handleTabKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    // The tablist owns ONLY the two tabs (the toggle cluster lives on a
+    // sibling inside the same visual row), so the guard below is
+    // belt-and-suspenders -- but a future child must not silently re-arm
+    // the arrow-key hijack: the handler preventDefaults and steals focus
+    // on every Arrow/Home/End press, which is correct for a tab and a
+    // no-op violation on anything else.
+    if (!(e.target instanceof HTMLElement) || e.target.closest("[role='tab']") === null) return;
     const idx = WORKSPACE_TABS.indexOf(tab);
     let next: WorkspaceTab | null = null;
     if (e.key === "ArrowRight") next = WORKSPACE_TABS[(idx + 1) % WORKSPACE_TABS.length];
@@ -365,6 +372,22 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
       // next tab is not guaranteed to be the event target.
       document.getElementById(next === "result" ? resultTabId : workingSetTabId)?.focus();
     }
+  }
+
+  // The toggle lives at two mutually-exclusive mount sites (header while
+  // folded, tab-row cluster while expanded -- see the JSX); activating it
+  // always unmounts the focused instance. Handing focus to the surviving
+  // instance keeps a keyboard toggle in place (the pre-diff single mount
+  // never dropped focus). The swap commits after the handler returns, so
+  // the focus hand-off waits one frame for the new mount.
+  const headerToggleRef = useRef<HTMLButtonElement | null>(null);
+  const workspaceToggleRef = useRef<HTMLButtonElement | null>(null);
+  function handleToggleWorkspace() {
+    s.handleToggleWorkspace();
+    // s.workspaceCollapsed is the pre-toggle render value: folded means the
+    // expansion just started, so the tab-row instance is the survivor.
+    const survivor = s.workspaceCollapsed ? workspaceToggleRef : headerToggleRef;
+    requestAnimationFrame(() => survivor.current?.focus());
   }
 
   // ADR-0058 L2 partition retry: each region's onReset RESETS its slice of the
@@ -545,7 +568,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             />
             <div className="flex-1" data-tauri-drag-region />
             {s.workspaceCollapsed && (
-              <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={s.handleToggleWorkspace} />
+              <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={handleToggleWorkspace} ref={headerToggleRef} />
             )}
           </div>
           {s.queryErrors.length > 0 && (
@@ -666,41 +689,47 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             utility + ADR-0050 token. The .workspace-tabs hook + bare "active"
             class stay for selector / test stability; twMerge picks
             border-b-primary over border-b-transparent when the tab is active. */}
-          <div
-            className="workspace-tabs flex h-(--session-header-height) items-center gap-2 px-4 border-b"
-            role="tablist"
-            onKeyDown={handleTabKeyDown}
-          >
-            <button
-              type="button"
-              role="tab"
-              id={resultTabId}
-              aria-selected={tab === "result"}
-              aria-controls={resultPanelId}
-              tabIndex={tab === "result" ? 0 : -1}
-              className={cn(
-                "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
-                tab === "result" && "active text-primary border-b-primary font-semibold",
-              )}
-              onClick={() => setTab("result")}
+          <div className="workspace-tabs flex h-(--session-header-height) items-center gap-2 px-4 border-b">
+            {/* The tablist owns ONLY the two tabs (APG required ownership):
+                the badge + toggle cluster is a sibling inside the same
+                visual row, so arrows on the toggle stay a no-op instead of
+                bubbling into the tab activation handler. */}
+            <div
+              role="tablist"
+              onKeyDown={handleTabKeyDown}
+              className="flex items-center gap-2"
             >
-              <FormattedMessage id="session.tab.result" defaultMessage="Results" />
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id={workingSetTabId}
-              aria-selected={tab === "workingSet"}
-              aria-controls={workingSetPanelId}
-              tabIndex={tab === "workingSet" ? 0 : -1}
-              className={cn(
-                "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
-                tab === "workingSet" && "active text-primary border-b-primary font-semibold",
-              )}
-              onClick={() => setTab("workingSet")}
-            >
-              <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
-            </button>
+              <button
+                type="button"
+                role="tab"
+                id={resultTabId}
+                aria-selected={tab === "result"}
+                aria-controls={resultPanelId}
+                tabIndex={tab === "result" ? 0 : -1}
+                className={cn(
+                  "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
+                  tab === "result" && "active text-primary border-b-primary font-semibold",
+                )}
+                onClick={() => setTab("result")}
+              >
+                <FormattedMessage id="session.tab.result" defaultMessage="Results" />
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id={workingSetTabId}
+                aria-selected={tab === "workingSet"}
+                aria-controls={workingSetPanelId}
+                tabIndex={tab === "workingSet" ? 0 : -1}
+                className={cn(
+                  "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
+                  tab === "workingSet" && "active text-primary border-b-primary font-semibold",
+                )}
+                onClick={() => setTab("workingSet")}
+              >
+                <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
+              </button>
+            </div>
             {/* active (server truth, ADR-0051/0060) shown read-only here so the
                 user sees what the next question targets by default. Naming it
                 here, not in QuestionBar, keeps QuestionBar presentational. */}
@@ -732,7 +761,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 </Badge>
               )}
               {!s.workspaceCollapsed && (
-                <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={s.handleToggleWorkspace} />
+                <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={handleToggleWorkspace} ref={workspaceToggleRef} />
               )}
             </div>
           </div>

@@ -683,7 +683,7 @@ export function ProfilesSection({
                           "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-foreground",
                           "hover:bg-transit/50",
                           "focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
-                          isSelected && "selected bg-accent",
+                          isSelected && "selected bg-accent hover:bg-accent",
                         )}
                         onClick={() => handleSelectProfile(p.id)}
                         aria-current={isSelected ? "true" : undefined}

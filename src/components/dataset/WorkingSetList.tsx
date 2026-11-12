@@ -216,7 +216,7 @@ function DatasetRow({
       className={cn(
         "group relative flex items-center gap-1 rounded-md py-[0.1rem] bg-clip-content hover:bg-transit",
         isActive && "active",
-        isSelected && "selected bg-accent",
+        isSelected && "selected bg-accent hover:bg-accent",
         d.stale && "stale",
       )}
     >
