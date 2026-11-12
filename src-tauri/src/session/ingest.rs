@@ -42,8 +42,17 @@ use crate::model::{
 /// gone on session drop; the lifecycle is set-on-NeedsGuidance /
 /// drop-on-guided-commit / drop-on-dialog-cancel.
 pub(super) struct GuidanceRetention {
-    pub(super) source_path: String,
-    pub(super) sheets: Arc<Vec<ingest::excel::SheetRows>>,
+    source_path: String,
+    sheets: Arc<Vec<ingest::excel::SheetRows>>,
+}
+
+impl GuidanceRetention {
+    /// Path-key match shared by the peek, the post-commit drop, and the
+    /// preview window -- one derivation, so the three call sites can never
+    /// drift apart.
+    fn is_for(&self, path: impl AsRef<Path>) -> bool {
+        self.source_path == path.as_ref().to_string_lossy()
+    }
 }
 
 impl super::Session {
@@ -254,14 +263,10 @@ impl super::Session {
     /// miss (a fresh session committing without a preview, or a superseded
     /// parse) re-parses the workbook.
     pub fn ingest_guided(&mut self, path: &Path, guidance: &[SheetGuidance]) -> LoadOutcome {
-        // Peek (never take); the lookup predicate matches the drop logic
-        // below, so a retention for another path is never served here.
-        let path_key = path.to_string_lossy();
-        let sheets = match self
-            .guidance_retained
-            .as_ref()
-            .filter(|retained| retained.source_path == path_key)
-        {
+        // Peek (never take): is_for keys the peek, the post-commit drop,
+        // and the window alike, so a retention for another path is never
+        // served here.
+        let sheets = match self.guidance_retained.as_ref().filter(|r| r.is_for(path)) {
             Some(retained) => Arc::clone(&retained.sheets),
             None => match ingest::excel::read_non_empty_sheets(path) {
                 Ok(s) => Arc::new(s),
@@ -303,9 +308,11 @@ impl super::Session {
                 detail: ingest::excel::NO_SHEET_SELECTED.into(),
             });
         }
-        // A checked entry that missed every workbook sheet means the file
-        // changed under the open dialog (the lookup above keys off the
-        // workbook's sheets): the survivors still commit, but the dropped
+        // A checked entry that missed every workbook sheet means the checked
+        // names and the workbook's sheets disagree: on the fresh-parse leg
+        // that is the file changing under the open dialog (a peek hit can
+        // only get here via a fabricated payload -- the guidance was built
+        // from the same parse). The survivors still commit, but the dropped
         // picks get a trace instead of vanishing silently.
         let missed: Vec<&str> = guidance
             .iter()
@@ -325,11 +332,10 @@ impl super::Session {
                 // The dialog resolves on a successful commit: drop THIS path's
                 // retained parse (issue #750). A failed commit keeps it -- the
                 // dialog stays open for retry and its paging must keep working.
-                let path_key = path.to_string_lossy();
                 if self
                     .guidance_retained
                     .as_ref()
-                    .is_some_and(|r| r.source_path == path_key)
+                    .is_some_and(|r| r.is_for(path))
                 {
                     self.guidance_retained = None;
                 }
@@ -355,10 +361,7 @@ impl super::Session {
         offset: usize,
         limit: usize,
     ) -> Option<Vec<Vec<String>>> {
-        let retained = self.guidance_retained.as_ref()?;
-        if retained.source_path != path {
-            return None;
-        }
+        let retained = self.guidance_retained.as_ref().filter(|r| r.is_for(path))?;
         let sheet = retained.sheets.iter().find(|s| s.name == sheet_name)?;
         Some(ingest::excel::render_preview_window(
             sheet,

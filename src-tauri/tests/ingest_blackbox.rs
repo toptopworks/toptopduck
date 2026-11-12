@@ -1947,3 +1947,57 @@ fn a_second_needs_guidance_supersedes_the_first_retention() {
         Some(12)
     );
 }
+
+#[test]
+fn guided_commit_for_another_path_falls_back_to_that_files_parse() {
+    // The peek's path predicate (issue #1558): a retention parked for one
+    // workbook must never serve a commit for another. Park the tall
+    // workbook, supersede it with the mixed workbook, then commit the TALL
+    // path -- the lookup must miss the mixed retention on the path key and
+    // fall back to a fresh parse of the tall file. With the predicate
+    // deleted, the mixed park would serve the commit and the tall guidance
+    // would name no sheet it holds (NO_SHEET_SELECTED).
+    let (tall, _tall_dir) = tall_guided_xlsx();
+    let (mixed, _mixed_dir) = mixed_guided_xlsx();
+    let mut session = Session::new().expect("session");
+    expect_guidance(&mut session, &tall);
+    expect_guidance(&mut session, &mixed); // supersedes the tall retention
+
+    let picks = vec![SheetGuidance {
+        name: "tall".into(),
+        rectify: SheetRectify {
+            header_row: 2,
+            skip_rows: vec![],
+        },
+    }];
+    match session.ingest_guided(&tall, &picks) {
+        LoadOutcome::Loaded(active) => assert_eq!(active.row_count, 28),
+        other => panic!("expected the tall file's fresh parse, got {other:?}"),
+    }
+    // The mixed park outlives the tall commit: the drop is path-guarded.
+    assert!(session
+        .guidance_window(&mixed.to_string_lossy(), "clean", 0, 12)
+        .is_some());
+}
+
+#[test]
+fn guided_commit_without_a_preview_surfaces_a_corrupted_source_error() {
+    // The fresh-parse leg's error face (issue #1558): no retention
+    // parked and the file is garbage -- the fallback parse error must
+    // surface, not be swallowed by any retention path.
+    let (xlsx, dir) = tall_guided_xlsx();
+    let mut session = Session::new().expect("session");
+    fs::write(dir.path().join("tall.xlsx"), b"not a workbook anymore").expect("overwrite fixture");
+
+    let picks = vec![SheetGuidance {
+        name: "tall".into(),
+        rectify: SheetRectify {
+            header_row: 2,
+            skip_rows: vec![],
+        },
+    }];
+    match session.ingest_guided(&xlsx, &picks) {
+        LoadOutcome::Error(_) => {}
+        other => panic!("expected the parse error to surface, got {other:?}"),
+    }
+}
