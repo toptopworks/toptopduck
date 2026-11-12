@@ -475,16 +475,17 @@ function PostureRadioItem({
         // and needed no such reset.
         "relative flex flex-col gap-0.5 items-start rounded-sm py-1.5 pr-8 pl-2 text-left text-sm outline-none select-none",
         "focus-visible:ring-ring/50 focus-visible:ring-[3px] focus-visible:border-ring",
-        // A two-option CONTRAST pair: each option's faces all ride its own
-        // hue -- hover PREVIEWS the commitment color instead of walking a
-        // neutral transit ramp (deliberate exception to grey = transit;
-        // this is a mode pair, not a walk list).
-        // per_call: teal wash + teal text on hover/focus, pinned while
-        // checked via data-state. no_confirmation: the --warning orange
-        // ground on the same channels.
+        // A two-option CONTRAST pair: each option's hover PREVIEWS its
+        // commitment hue instead of walking a neutral transit ramp
+        // (deliberate exception to grey = transit; this is a mode pair, not
+        // a walk list). The checked state carries NO face -- the Check
+        // indicator alone marks it, the select dropdown's posture -- and the
+        // focus face stays off too: the popover auto-focuses the checked
+        // option on open, so a focus face would be a permanent block on the
+        // selected row. Keyboard focus rides the focus-visible ring only.
         warning
-          ? "text-warning data-[state=checked]:bg-warning/10 hover:bg-warning/10 focus:bg-warning/10"
-          : "hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground data-[state=checked]:bg-accent data-[state=checked]:text-accent-foreground",
+          ? "text-warning hover:bg-warning/10"
+          : "hover:bg-accent hover:text-accent-foreground",
         "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
       )}
