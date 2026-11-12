@@ -167,7 +167,7 @@ export function VizExportFrame({
             <Button
               type="button"
               variant="ghost"
-              className="size-7 text-foreground/70 dark:hover:bg-accent"
+              className="size-7 text-foreground/70"
             >
               <Download aria-hidden="true" className="size-3.5" />
               <span className="sr-only">{menuLabel}</span>

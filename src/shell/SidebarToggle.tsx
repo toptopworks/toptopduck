@@ -36,7 +36,7 @@ export function SidebarToggle({
       // Ghost icon button (codex-style, aligns dannysmith/tauri-template):
       // h-7 w-7 button + h-3.5 w-3.5 glyph + text-foreground/70, hover tint
       // only (issue #774: 28px hit area, DESIGN.md topbar icon-button note).
-      className="sidebar-toggle inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      className="sidebar-toggle inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-transit hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       aria-label={collapsed ? expandLabel : collapseLabel}
       aria-expanded={!collapsed}
       onClick={onToggle}

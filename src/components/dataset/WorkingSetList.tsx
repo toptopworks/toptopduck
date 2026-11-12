@@ -47,7 +47,7 @@ const BUTTON_CHROME = "appearance-none border-0 rounded-md";
 // cn() at the call site. The selection band and the hover tint are NOT here:
 // both live on the row <li> (see DatasetRow) so the pointer anywhere on the
 // row -- the action pill included -- lights the same full-height band.
-const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left`;
+const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left pr-24`;
 // The row-actions overlay: the rename/replace/delete actions sit in an
 // absolutely-positioned pill anchored inside the label-tail wrapper (the
 // flow child holding the select button, see DatasetRow), floating ABOVE the
@@ -61,11 +61,13 @@ const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 fl
 // compact bar (the glyphs keep ~7px of visual air inside their own hit
 // areas). The wrapper spans exactly the row's bg-clip-content band (the li's
 // py frames it), so inset-y-0 puts hover band, selected band and action
-// strip all at one height. The pill's ground is bg-accent -- the same tint a
-// hovered or selected row carries -- so the strip reads as part of the row
-// rather than a floating widget (a border/shadow card form would read as a
-// separate widget on this ground); being opaque, it still keeps the label
-// underneath from bleeding through. Visibility is the #865 hover-reveal
+// strip all at one height. The pill carries NO ground of its own: the
+// hover band underneath (the li's transit tint) shows straight through, so
+// the strip reads as part of the row rather than a floating widget -- a
+// translucent pill would double-tint over the band, and an opaque one can
+// never match an alpha band. The label keeps clear of the icons via the
+// select button's static pr-24 reserve (the truncate point retreats before
+// the pill's footprint; no hover reflow). Visibility is the #865 hover-reveal
 // contract moved one
 // level up: the CONTAINER owns opacity-0 + pointer-events-none, restored on
 // row hover (group-hover) or keyboard focus-visible -- any tabbed-into
@@ -80,13 +82,13 @@ const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 fl
 // the buttons from the a11y tree). Show/hide snaps (no transition): a
 // per-row 150ms fade cross-fades the outgoing row's icons with the incoming
 // row's on every row-to-row sweep, which reads as the strip flashing.
-const ROW_ACTIONS_OVERLAY = `absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md bg-accent opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto`;
+const ROW_ACTIONS_OVERLAY = `absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto`;
 // The per-row icon actions (issue #790): a 28px square hit area (h-7 w-7)
 // wrapping a 14px glyph -- the #774 header-chrome spec. Visibility is owned
 // by the ROW_ACTIONS_OVERLAY container (see above); the buttons carry only
 // the per-icon emphasis: the glyph rests muted and highlights to foreground
-// on hover / keyboard focus -- on the pill's accent ground there is no
-// further background tint to layer (a hover:bg-accent would be invisible
+// on hover / keyboard focus -- on the pill's transit ground there is no
+// further background tint to layer (a hover:bg-transit would be invisible
 // against it), so color alone marks the hot icon. The hand rides the
 // app.css base rule; the loading state dims like every
 // other action surface (disabled:opacity-50, the sidebar / result forms) --
@@ -212,9 +214,9 @@ function DatasetRow({
   return (
     <li
       className={cn(
-        "group relative flex items-center gap-1 rounded-md py-[0.1rem] bg-clip-content hover:bg-accent",
+        "group relative flex items-center gap-1 rounded-md py-[0.1rem] bg-clip-content hover:bg-transit",
         isActive && "active",
-        isSelected && "selected bg-accent",
+        isSelected && "selected bg-accent hover:bg-accent",
         d.stale && "stale",
       )}
     >

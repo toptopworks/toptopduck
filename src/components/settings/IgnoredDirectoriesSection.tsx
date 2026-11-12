@@ -23,7 +23,7 @@ export function IgnoredDirectoriesSection({ skipped }: IgnoredDirectoriesSection
       data-testid="skills-ignored-details"
       className="border-border mt-3 rounded-lg border"
     >
-      <summary className="hover:bg-accent flex cursor-pointer items-center gap-2 px-4 py-3 text-sm font-medium select-none">
+      <summary className="hover:bg-transit flex cursor-pointer items-center gap-2 px-4 py-3 text-sm font-medium select-none">
         <span>
           <FormattedMessage
             id="settings.skills.ignoredTitle"

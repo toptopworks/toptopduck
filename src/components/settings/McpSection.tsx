@@ -570,7 +570,7 @@ function McpServerRow({
   return (
     <div
       data-testid={`mcp-server-row-${server.id}`}
-      className="hover:bg-accent px-4 py-3"
+      className="hover:bg-transit px-4 py-3"
     >
       <div className="flex items-center gap-3">
         <RowFoldChevron

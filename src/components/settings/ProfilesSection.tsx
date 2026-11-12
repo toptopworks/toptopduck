@@ -681,9 +681,9 @@ export function ProfilesSection({
                           bareButtonReset,
                           "profiles-list-item-select w-full",
                           "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-foreground",
-                          "hover:bg-accent/50",
+                          "hover:bg-transit",
                           "focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
-                          isSelected && "selected bg-accent",
+                          isSelected && "selected bg-accent hover:bg-accent",
                         )}
                         onClick={() => handleSelectProfile(p.id)}
                         aria-current={isSelected ? "true" : undefined}

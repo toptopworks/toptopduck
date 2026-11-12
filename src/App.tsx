@@ -979,7 +979,7 @@ export default function App() {
               chrome (the dual-state gear lives at the left columns' bottoms,
               issue #282 -- the topbar carries no settings entry). */}
                 <header
-                  className="topbar gap-3 px-4 border-b border-border bg-background"
+                  className="topbar gap-3 px-4 bg-muted"
                   data-tauri-drag-region
                 >
                   {platform === "macos" && (

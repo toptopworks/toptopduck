@@ -12,7 +12,12 @@ function Input({ className, type, ...props }: ComponentProps<"input">) {
       type={type}
       data-slot="input"
       className={cn(
-        "file:text-foreground placeholder:text-muted-foreground selection:bg-primary selection:text-primary-foreground border-input flex h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-base shadow-xs transition-[color,box-shadow] outline-none file:inline-flex file:h-7 file:border-0 file:bg-transparent file:text-sm file:font-medium disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm dark:bg-input/30",
+        // dark:border-input/60: large-control boundary rides the soft ~1.9:1
+        // tier (radio/checkbox keep the full 3:1 --input border).
+        // dark:bg-input/10: the fill stays a whisper off the card -- the
+        // opaque #2C2C2C competitor tier read as a bright patch on the
+        // dark card, so the boundary hairline does the separating.
+        "file:text-foreground placeholder:text-muted-foreground selection:bg-primary selection:text-primary-foreground border-input flex h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-base shadow-xs transition-[color,box-shadow] outline-none file:inline-flex file:h-7 file:border-0 file:bg-transparent file:text-sm file:font-medium disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm dark:bg-input/10 dark:border-input/60",
         // No focus-visible ring/border: the caret is the focus indicator (the
         // composer textarea's border-0 posture); the aria-invalid error ring
         // below stays -- width and color ride the same variant, since a v4

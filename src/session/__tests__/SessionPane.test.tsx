@@ -771,3 +771,38 @@ describe("SessionPane ask-again fire path (#1503)", () => {
     expect(view.getComposerFields()!.queued).toBe(false);
   });
 });
+
+// The toggle's two posture mounts (the transit-shell PR's core conditional
+// rendering): folded -> the session header's right edge; expanded -> the
+// tab-row's right cluster. Exactly one instance exists at any time, and a
+// keyboard toggle keeps focus across the swap (the focus hand-off to the
+// surviving instance) -- the pre-calibration single mount never dropped it.
+// Placement pins ride document order, the same shape as the error-banner
+// relocation pin in App.test.tsx.
+describe("workspace toggle placement", () => {
+  it("mounts in the session header while folded and moves into the tab row when expanded, exactly one at a time, keeping focus", async () => {
+    const { container } = renderPane();
+    const header = container.querySelector(".session-header");
+    const tabRow = container.querySelector(".workspace-tabs");
+    expect(header).not.toBeNull();
+    expect(tabRow).not.toBeNull();
+
+    // Folded cold start: the toggle lives in the header.
+    const foldedToggle = screen.getByRole("button", { name: "Expand right sidebar" });
+    expect(header!.contains(foldedToggle)).toBe(true);
+    expect(tabRow!.contains(foldedToggle)).toBe(false);
+
+    // Expand: the fresh instance lands in the tab-row cluster.
+    fireEvent.click(foldedToggle);
+    const expandedToggle = await screen.findByRole("button", { name: "Collapse right sidebar" });
+    expect(tabRow!.contains(expandedToggle)).toBe(true);
+    expect(header!.contains(expandedToggle)).toBe(false);
+    expect(container.querySelectorAll(".workspace-toggle")).toHaveLength(1);
+
+    // Fold back: the focus follows the surviving header instance.
+    fireEvent.click(expandedToggle);
+    const refoldedToggle = await screen.findByRole("button", { name: "Expand right sidebar" });
+    await waitFor(() => expect(refoldedToggle).toHaveFocus());
+    expect(container.querySelectorAll(".workspace-toggle")).toHaveLength(1);
+  });
+});

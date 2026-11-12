@@ -55,9 +55,20 @@
   --secondary-foreground: #1a1a1a;
   --muted: #f0f0f3;
   --muted-foreground: #6b7280;
-  /* teal-tinted accent survives from the v0 active-source highlight. */
+  /* teal-tinted accent survives from the v0 active-source highlight.
+     Accent is the COMMITTED hue (selected / active / checked) only -- never
+     a hover face, except a two-option contrast pair (the auth-mode chip)
+     whose hover previews each option's own commitment hue. */
   --accent: #e6f4f1;
   --accent-foreground: #0d9488;
+  /* The transit hue (grey = transit, teal = committed): the hover/focus
+     feedback ramp. Both themes ride an alpha TINT -- alpha makes the step
+     ground-relative, so the same token reads as the WorkBuddy-tier #F5F5F5
+     band on white/card grounds and still lifts one visible step off the
+     muted sidebar panel (opaque values cannot serve both grounds; equal to
+     muted rendered the rail hover invisible, and the dark opaque #343a34
+     rode a 3-4x too bright step on the canvas). */
+  --transit: rgb(0 0 0 / 4%);
   --destructive: #b00020;
   --destructive-foreground: #ffffff;
   /* warning amber (ADR-0050, issue #108): the cautionary disclosure semantic
@@ -82,20 +93,31 @@
 /* --- shadcn token set, dark (ADR-0050) ----------------------------------- */
 .dark {
   --background: #0f1410;
-  --foreground: #e8eae8;
+  /* Ink calibrated down from #e8eae8 (15.2:1 vs canvas) to sit near the
+     Zed-tier soft-dark readability band (~13:1); all consumers stay far
+     above the WCAG 4.5:1 text floor. Foreground pairings follow the ink. */
+  --foreground: #d5d9d5;
   --card: #181b18;
-  --card-foreground: #e8eae8;
+  --card-foreground: #d5d9d5;
   --popover: #181b18;
-  --popover-foreground: #e8eae8;
+  --popover-foreground: #d5d9d5;
   /* teal primary stays -- the brand color does not flip with mode. */
   --primary: #0d9488;
   --primary-foreground: #ffffff;
   --secondary: #232723;
-  --secondary-foreground: #e8eae8;
+  --secondary-foreground: #d5d9d5;
   --muted: #232723;
   --muted-foreground: #9ca3af;
   --accent: #143833;
   --accent-foreground: #5eead4;
+  /* DARK mirrors the light token's alpha posture: a 5% white tint keeps the
+     step ground-relative -- one subtle WorkBuddy-tier step on the canvas
+     (#0f1410 -> ~#1c201d) and the same perceived lift on the muted rail
+     (#232723 -> ~#2e322f). The calibrated opaque #343a34 rode a ~37/255
+     step on the canvas, three to four times the reference hover, and read
+     as a bright patch; an opaque single value cannot serve both grounds
+     (the same lesson the light token's 4% black alpha settled). */
+  --transit: rgb(255 255 255 / 5%);
   --destructive: #ef4444;
   --destructive-foreground: #ffffff;
   /* warning amber flips lighter in dark mode for readable text on the tint. */
@@ -103,7 +125,11 @@
   /* info blue flips lighter in dark mode for readable text on the tint. */
   --info: #60a5fa;
   --border: #2a2f2a;
-  --input: #2a2f2a;
+  /* Form-control boundary only (border-input): 3.08:1 vs card / 3.31:1 vs
+     canvas, the WCAG 1.4.11 minimum -- the old #2a2f2a sat at ~1.3:1 and the
+     unchecked radio/checkbox family was effectively invisible. --border stays
+     at #2a2f2a: separators are decorative and must not darken this much. */
+  --input: #606a60;
   --ring: #0d9488;
 }
 
@@ -125,6 +151,7 @@
   --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --color-transit: var(--transit);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-warning: var(--warning);

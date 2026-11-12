@@ -428,7 +428,7 @@ function BuiltinRow({ entry }: { entry: BuiltinScanEntry }) {
   return (
     <div
       data-testid={`builtin-cli-row-${entry.name}`}
-      className="hover:bg-accent flex items-center gap-3 px-4 py-3"
+      className="hover:bg-transit flex items-center gap-3 px-4 py-3"
     >
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
@@ -521,7 +521,7 @@ function CliToolRow({
   return (
     <div
       data-testid={`cli-tool-row-${tool.name}`}
-      className="hover:bg-accent flex items-center gap-3 px-4 py-3"
+      className="hover:bg-transit flex items-center gap-3 px-4 py-3"
     >
       <Terminal
         className={cn(

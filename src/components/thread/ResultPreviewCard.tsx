@@ -49,7 +49,7 @@ export function ResultPreviewCard({
         // The bare border rides the app.css base layer's var(--border) (same
         // as shadcn card / badge chrome); active flips it to --primary.
         "rounded-md border bg-background text-left text-xs transition-colors",
-        "hover:bg-accent",
+        "hover:bg-transit",
         // active (viewed in the workspace) = primary border (ADR-0050 active
         // semantic, mirroring the result-link's active state); stale = dashed
         // + muted like the result-link's stale state (the card's opacity dims

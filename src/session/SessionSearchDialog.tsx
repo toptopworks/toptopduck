@@ -309,11 +309,13 @@ function SearchRow({
       onMouseEnter={onMouseEnter}
       className={cn(
         "session-search-option flex items-center gap-2 rounded-md px-2 py-1.5 text-sm",
-        "hover:bg-accent",
-        // The selected (keyboard-highlighted) row carries the accent tint; a
-        // hovered row gets it via hover:bg-accent. Mouse-enter syncs `selected`
-        // so the tint follows the pointer too, matching native select behavior.
-        selected && "bg-accent",
+        "hover:bg-transit",
+        // The selected (keyboard-highlighted) row carries the accent tint, and
+        // the committed face re-asserts on hover (`hover:bg-accent`) so the
+        // teal never greys out under the pointer -- hover drives the transit
+        // band on unselected rows only. Mouse-enter syncs `selected` so
+        // keyboard and pointer share one face, matching native select behavior.
+        selected && "bg-accent hover:bg-accent",
       )}
     >
       <MessageSquare className="size-4 shrink-0 text-muted-foreground" aria-hidden />

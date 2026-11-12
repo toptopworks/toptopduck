@@ -280,7 +280,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
             type="button"
             data-testid="import-add-custom-path"
             onClick={() => void addCustomPath()}
-            className="hover:bg-accent focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2 flex items-center gap-2 rounded-md px-3 py-2.5 text-sm outline-none"
+            className="hover:bg-transit focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2 flex items-center gap-2 rounded-md px-3 py-2.5 text-sm outline-none"
           >
             <Plus className="size-4" aria-hidden />
             <FormattedMessage
@@ -480,7 +480,7 @@ function SkillRow({ skill, checked, onToggle }: SkillRowProps) {
       title={skill.reason ?? undefined}
       className={cn(
         "flex min-w-0 items-center gap-2 rounded px-2 py-1.5 text-sm",
-        disabled ? "opacity-60" : "hover:bg-accent",
+        disabled ? "opacity-60" : "hover:bg-transit",
       )}
     >
       <input

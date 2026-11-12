@@ -351,6 +351,13 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // (selection follows focus); Home/End jump to the first/last tab. Roving
   // tabindex -- only the active tab holds tabIndex 0 -- is set in the JSX.
   function handleTabKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    // The tablist owns ONLY the two tabs (the toggle cluster lives on a
+    // sibling inside the same visual row), so the guard below is
+    // belt-and-suspenders -- but a future child must not silently re-arm
+    // the arrow-key hijack: the handler preventDefaults and steals focus
+    // on every Arrow/Home/End press, which is correct for a tab and a
+    // no-op violation on anything else.
+    if (!(e.target instanceof HTMLElement) || e.target.closest("[role='tab']") === null) return;
     const idx = WORKSPACE_TABS.indexOf(tab);
     let next: WorkspaceTab | null = null;
     if (e.key === "ArrowRight") next = WORKSPACE_TABS[(idx + 1) % WORKSPACE_TABS.length];
@@ -365,6 +372,22 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
       // next tab is not guaranteed to be the event target.
       document.getElementById(next === "result" ? resultTabId : workingSetTabId)?.focus();
     }
+  }
+
+  // The toggle lives at two mutually-exclusive mount sites (header while
+  // folded, tab-row cluster while expanded -- see the JSX); activating it
+  // always unmounts the focused instance. Handing focus to the surviving
+  // instance keeps a keyboard toggle in place (the pre-diff single mount
+  // never dropped focus). The swap commits after the handler returns, so
+  // the focus hand-off waits one frame for the new mount.
+  const headerToggleRef = useRef<HTMLButtonElement | null>(null);
+  const workspaceToggleRef = useRef<HTMLButtonElement | null>(null);
+  function handleToggleWorkspace() {
+    s.handleToggleWorkspace();
+    // s.workspaceCollapsed is the pre-toggle render value: folded means the
+    // expansion just started, so the tab-row instance is the survivor.
+    const survivor = s.workspaceCollapsed ? workspaceToggleRef : headerToggleRef;
+    requestAnimationFrame(() => survivor.current?.focus());
   }
 
   // ADR-0058 L2 partition retry: each region's onReset RESETS its slice of the
@@ -493,65 +516,15 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
         s.workspaceCollapsed && "workspace-collapsed",
       )}
     >
-      {/* Session header (row 1): session name + management menu + workspace
-          toggle. Moved here from the global topbar so session-scoped chrome
-          lives with the pane. ADR-0093 (issue #512): the `⋯` management menu
-          (Rename / Close / Delete) sits between the name and the
-          workspace toggle. The workspace toggle (ADR-0083, issue #298) stays at
-          the header's right edge: the panel defaults to collapsed and this is
-          its manual open/close path. */}
-      <div className="session-header" data-tauri-drag-region>
-        <span className="min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
-          {sessionName ||
-            intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" })}
-        </span>
-        <SessionHeaderMenu
-          sessionName={sessionName}
-          recipePath={recipePath}
-          sessionId={sessionId}
-          onRename={onRename}
-          onClose={onClose}
-          onDelete={onDelete}
-          disabled={disabled}
-        />
-        <div className="flex-1" data-tauri-drag-region />
-        <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={s.handleToggleWorkspace} />
-      </div>
-      {s.queryErrors.length > 0 && (
-        // Issue #763: the session-level data-channel error face, below the
-        // session header and spanning the conversation + workspace columns
-        // (the pane column's full width, inset to the header's rhythm). The
-        // three session queries coalesce through `data ??` empty fallbacks,
-        // so a failed fetch or refetch (reachable via an ADR-0058 region
-        // retry's resetQueries) used to render as a pristine empty session.
-        // This is a NON-BLOCKING disclosure: cached data keeps rendering,
-        // absent data keeps the empty-state derivations, the composer stays
-        // live; Retry refetches only the errored queries (useSessionState).
-        // Destructive variant keeps the Alert's assertive "alert" role
-        // default (alert-variants.ts).
-        <Alert variant="destructive" className="mx-3 my-2">
-          <AlertTitle>
-            <FormattedMessage
-              id="session.queries.errorTitle"
-              defaultMessage="Session data failed to load"
-            />
-          </AlertTitle>
-          <AlertDescription className="flex items-center justify-between gap-3">
-            <p className="m-0">
-              <FormattedMessage
-                id="session.queries.errorDescription"
-                defaultMessage="Some session data could not be loaded; what is shown may be incomplete."
-              />
-            </p>
-            <Button variant="outline" size="sm" onClick={s.handleRetryQueries}>
-              <FormattedMessage
-                id="common.retry"
-                defaultMessage="Retry"
-              />
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
+      {/* Session header (row 1): session name + management menu. ADR-0093
+          (issue #512): the `⋯` management menu (Rename / Close / Delete)
+          follows the name. The header now lives INSIDE the conversation
+          column (see session-body below) so the column divider runs
+          unbroken from the pane top -- WorkBuddy topology, no line break
+          at the header row. The workspace toggle (ADR-0083, issue #298)
+          rides the workspace tab row's far edge while the panel is
+          expanded, and falls back to this header's right edge while folded
+          -- a folded panel cannot host its own reopen control. */}
       {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get
           their own ErrorBoundary so a render crash in one degrades only that
           block (the shell-level QuestionBar -- a session-skeleton element,
@@ -579,6 +552,61 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           last element readable above it). */}
       <div className="session-body">
         <div className="session-conversation">
+          <div className="session-header" data-tauri-drag-region>
+            <span className="min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
+              {sessionName ||
+                intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" })}
+            </span>
+            <SessionHeaderMenu
+              sessionName={sessionName}
+              recipePath={recipePath}
+              sessionId={sessionId}
+              onRename={onRename}
+              onClose={onClose}
+              onDelete={onDelete}
+              disabled={disabled}
+            />
+            <div className="flex-1" data-tauri-drag-region />
+            {s.workspaceCollapsed && (
+              <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={handleToggleWorkspace} ref={headerToggleRef} />
+            )}
+          </div>
+          {s.queryErrors.length > 0 && (
+            // Issue #763: the session-level data-channel error face, inside
+            // the conversation column between the session header and the
+            // rail (the disclosure follows the header into the column). The
+            // three session queries coalesce through `data ??` empty
+            // fallbacks, so a failed fetch or refetch (reachable via an
+            // ADR-0058 region retry's resetQueries) used to render as a
+            // pristine empty session. This is a NON-BLOCKING disclosure:
+            // cached data keeps rendering, absent data keeps the
+            // empty-state derivations, the composer stays live; Retry
+            // refetches only the errored queries (useSessionState).
+            // Destructive variant keeps the Alert's assertive "alert" role
+            // default (alert-variants.ts).
+            <Alert variant="destructive" className="mx-3 my-2">
+              <AlertTitle>
+                <FormattedMessage
+                  id="session.queries.errorTitle"
+                  defaultMessage="Session data failed to load"
+                />
+              </AlertTitle>
+              <AlertDescription className="flex items-center justify-between gap-3">
+                <p className="m-0">
+                  <FormattedMessage
+                    id="session.queries.errorDescription"
+                    defaultMessage="Some session data could not be loaded; what is shown may be incomplete."
+                  />
+                </p>
+                <Button variant="outline" size="sm" onClick={s.handleRetryQueries}>
+                  <FormattedMessage
+                    id="common.retry"
+                    defaultMessage="Retry"
+                  />
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
           {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
           {/* Issue #829: the rail ref feeds useRailFollow's stick-to-bottom
               machine; the section itself is unconditional within the pane, so
@@ -661,64 +689,81 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             utility + ADR-0050 token. The .workspace-tabs hook + bare "active"
             class stay for selector / test stability; twMerge picks
             border-b-primary over border-b-transparent when the tab is active. */}
-          <div
-            className="workspace-tabs flex items-center gap-2 px-4 py-1.5 border-b"
-            role="tablist"
-            onKeyDown={handleTabKeyDown}
-          >
-            <button
-              type="button"
-              role="tab"
-              id={resultTabId}
-              aria-selected={tab === "result"}
-              aria-controls={resultPanelId}
-              tabIndex={tab === "result" ? 0 : -1}
-              className={cn(
-                "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
-                tab === "result" && "active text-primary border-b-primary font-semibold",
-              )}
-              onClick={() => setTab("result")}
+          <div className="workspace-tabs flex h-(--session-header-height) items-center gap-2 px-4 border-b">
+            {/* The tablist owns ONLY the two tabs (APG required ownership):
+                the badge + toggle cluster is a sibling inside the same
+                visual row, so arrows on the toggle stay a no-op instead of
+                bubbling into the tab activation handler. */}
+            <div
+              role="tablist"
+              onKeyDown={handleTabKeyDown}
+              className="flex items-center gap-2"
             >
-              <FormattedMessage id="session.tab.result" defaultMessage="Results" />
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id={workingSetTabId}
-              aria-selected={tab === "workingSet"}
-              aria-controls={workingSetPanelId}
-              tabIndex={tab === "workingSet" ? 0 : -1}
-              className={cn(
-                "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
-                tab === "workingSet" && "active text-primary border-b-primary font-semibold",
-              )}
-              onClick={() => setTab("workingSet")}
-            >
-              <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
-            </button>
+              <button
+                type="button"
+                role="tab"
+                id={resultTabId}
+                aria-selected={tab === "result"}
+                aria-controls={resultPanelId}
+                tabIndex={tab === "result" ? 0 : -1}
+                className={cn(
+                  "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
+                  tab === "result" && "active text-primary border-b-primary font-semibold",
+                )}
+                onClick={() => setTab("result")}
+              >
+                <FormattedMessage id="session.tab.result" defaultMessage="Results" />
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id={workingSetTabId}
+                aria-selected={tab === "workingSet"}
+                aria-controls={workingSetPanelId}
+                tabIndex={tab === "workingSet" ? 0 : -1}
+                className={cn(
+                  "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
+                  tab === "workingSet" && "active text-primary border-b-primary font-semibold",
+                )}
+                onClick={() => setTab("workingSet")}
+              >
+                <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
+              </button>
+            </div>
             {/* active (server truth, ADR-0051/0060) shown read-only here so the
                 user sees what the next question targets by default. Naming it
                 here, not in QuestionBar, keeps QuestionBar presentational. */}
-            {s.activeName && (
-              <Badge
-                variant="default"
-                className="active-chip"
-                title={intl.formatMessage({
-                  id: "session.activeChip.title",
-                  defaultMessage: "The next question targets this table by default",
-                })}
-              >
-                <FormattedMessage
-                  id="session.activeChip.label"
-                  defaultMessage="Targets {name}"
-                  values={{
-                    name:
-                    s.datasets.find((d) => d.reference_name === s.activeName)?.display_name ??
-                    s.activeName,
-                  }}
-                />
-              </Badge>
-            )}
+            {/* The right cluster: the active chip ahead of the workspace
+                toggle, parked at the row's far edge by the container's single
+                ml-auto -- the toggle stays pinned whether or not the chip
+                renders. While the panel is folded the toggle falls back to
+                the session header (see the conversation column's header), so
+                only the chip rides this cluster. */}
+            <div className="ml-auto flex items-center gap-2">
+              {s.activeName && (
+                <Badge
+                  variant="default"
+                  className="active-chip"
+                  title={intl.formatMessage({
+                    id: "session.activeChip.title",
+                    defaultMessage: "The next question targets this table by default",
+                  })}
+                >
+                  <FormattedMessage
+                    id="session.activeChip.label"
+                    defaultMessage="Targets {name}"
+                    values={{
+                      name:
+                      s.datasets.find((d) => d.reference_name === s.activeName)?.display_name ??
+                      s.activeName,
+                    }}
+                  />
+                </Badge>
+              )}
+              {!s.workspaceCollapsed && (
+                <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={handleToggleWorkspace} ref={workspaceToggleRef} />
+              )}
+            </div>
           </div>
 
           {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)

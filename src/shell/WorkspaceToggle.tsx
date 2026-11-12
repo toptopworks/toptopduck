@@ -14,9 +14,13 @@ import { PanelRightClose, PanelRightOpen } from "lucide-react";
 export function WorkspaceToggle({
   collapsed,
   onToggle,
+  ref,
 }: {
   collapsed: boolean;
   onToggle: () => void;
+  // React 19 ref-as-prop: the pane hands each mount a ref so a keyboard
+  // toggle can hand focus to the surviving instance across the swap.
+  ref?: React.Ref<HTMLButtonElement>;
 }) {
   const intl = useIntl();
   const label = collapsed
@@ -24,11 +28,12 @@ export function WorkspaceToggle({
     : intl.formatMessage({ id: "workspace.collapse", defaultMessage: "Collapse right sidebar" });
   return (
     <button
+      ref={ref}
       type="button"
       // Ghost icon button (ADR-0067 #171 visual rule): h-7 w-7 + h-3.5 w-3.5
       // glyph + text-foreground/70, matching the sidebar/nav topbar family
       // (issue #774: 28px hit area).
-      className="workspace-toggle inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      className="workspace-toggle inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-transit hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       aria-label={label}
       aria-expanded={!collapsed}
       onClick={onToggle}

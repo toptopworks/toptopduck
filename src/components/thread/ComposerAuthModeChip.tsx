@@ -78,7 +78,7 @@ export type ComposerAuthModeChipProps = {
 // Trigger face chrome. The neutral face rides the composer chrome tokens
 // (matching the ComposerProviderPicker trigger beside it); the no-confirmation
 // face consumes the --warning token (border / fill / text).
-const TRIGGER_NEUTRAL = "border-border bg-card hover:bg-muted";
+const TRIGGER_NEUTRAL = "border-border bg-card hover:bg-transit";
 const TRIGGER_WARNING =
   "border-warning/40 bg-warning/10 text-warning hover:bg-warning/20";
 
@@ -411,7 +411,7 @@ export function ComposerAuthModeChip({ sessionId, pendingMode, onPendingModeChan
                       type="button"
                       disabled={revokingKey === rowKey}
                       onClick={() => void handleRevoke(toolKey)}
-                      className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-muted-foreground transition-colors outline-none hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring/50 focus-visible:ring-[3px] focus-visible:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-xs text-muted-foreground transition-colors outline-none hover:bg-transit hover:text-foreground focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {intl.formatMessage({
                         id: "composer.authMode.trust.revoke",
@@ -475,13 +475,17 @@ function PostureRadioItem({
         // and needed no such reset.
         "relative flex flex-col gap-0.5 items-start rounded-sm py-1.5 pr-8 pl-2 text-left text-sm outline-none select-none",
         "focus-visible:ring-ring/50 focus-visible:ring-[3px] focus-visible:border-ring",
-        // The warning item keeps its --warning text on hover (only the
-        // background shifts); the neutral item follows the standard accent
-        // text swap. The roving focus highlight (focus:bg-accent) matches the
-        // former SelectItem's arrow-walk face.
+        // A two-option CONTRAST pair: each option's hover PREVIEWS its
+        // commitment hue instead of walking a neutral transit ramp
+        // (deliberate exception to grey = transit; this is a mode pair, not
+        // a walk list). The checked state carries NO face -- the Check
+        // indicator alone marks it, the select dropdown's posture -- and the
+        // focus face stays off too: the popover auto-focuses the checked
+        // option on open, so a focus face would be a permanent block on the
+        // selected row. Keyboard focus rides the focus-visible ring only.
         warning
-          ? "text-warning hover:bg-warning/10 focus:bg-warning/10"
-          : "hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground",
+          ? "text-warning hover:bg-warning/10"
+          : "hover:bg-accent hover:text-accent-foreground",
         "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
       )}

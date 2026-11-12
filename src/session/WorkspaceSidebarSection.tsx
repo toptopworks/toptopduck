@@ -88,13 +88,13 @@ import type { SessionMetadata } from "../types/session";
  *  hand-synced copies (the marker names carry no CSS of their own; this
  *  string IS the style). */
 export const ROW_SHELL_CLASS =
-  "session-entry group/row relative my-0.5 flex items-stretch rounded-md hover:bg-accent";
+  "session-entry group/row relative my-0.5 flex items-stretch rounded-md hover:bg-transit";
 
 /** The row-end pill container, shared VERBATIM with the recent body's
  *  rows: the opacity + pointer-events reveal pair keyed on the row hover
  *  / focus-inside. */
 export const PILL_CLASS =
-  "session-entry-actions absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md bg-accent opacity-0 pointer-events-none group-hover/row:opacity-100 group-hover/row:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto";
+  "session-entry-actions absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md opacity-0 pointer-events-none group-hover/row:opacity-100 group-hover/row:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto";
 
 /** The pill's trigger face: the RowActionsMenu trigger posture (the bare
  *  reset + the size-7 hit area + the focus ring + the busy dim). */
@@ -104,7 +104,7 @@ const PILL_TRIGGER_CLASS = `session-row-action ${bareButtonReset} flex size-7 it
  *  entry): the ArchivedToggle posture -- hover-revealed, focus-visible
  *  kept, busy-dimmed. Show/hide snaps (no transition): a fade lags fast
  *  pointer sweeps, the same ruling the working-set row pill carries. */
-const HEAD_ACTION_CLASS = `sidebar-archived-toggle ${bareButtonReset} rounded-md p-1 text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
+const HEAD_ACTION_CLASS = `sidebar-archived-toggle ${bareButtonReset} rounded-md p-1 text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-transit hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
 
 /** The "Show more (N)" tail button, shared with the parent's section
  *  renderer (the recent body mounts its own instances). */

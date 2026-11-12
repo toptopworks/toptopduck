@@ -722,7 +722,6 @@
   "thread.staleChip.deleted": "Upstream deleted",
   "thread.staleChip.noTarget": "Source event no longer in the timeline",
   "thread.staleChip.replaced": "Source updated",
-  "thread.title": "Conversation",
   "thread.trace.failureAria": "Call failed",
   "thread.trace.op.execute": "execute",
   "thread.trace.op.network": "network",

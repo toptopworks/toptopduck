@@ -508,9 +508,9 @@ export function SettingsView({
               className={cn(
                 bareButtonReset,
                 "settings-nav-button text-foreground flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm",
-                "hover:bg-accent",
+                "hover:bg-transit",
                 "focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
-                section === s && "bg-accent text-accent-foreground font-medium",
+                section === s && "bg-accent text-accent-foreground font-medium hover:bg-accent",
               )}
               aria-current={section === s ? "page" : undefined}
               onClick={() => onSectionChange(s)}
