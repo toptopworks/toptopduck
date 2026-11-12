@@ -348,8 +348,10 @@ fn type_from_file_name(name: &str) -> Option<MemoryType> {
 /// parseable file, then reconcile `MEMORY.md` -- rewritten when missing or
 /// drifted. NEVER fails and never creates the DIRECTORY family: a missing
 /// directory is the empty set and stays missing (zero footprint), a
-/// corrupt file is skipped + logged. The index reconcile is the one write
-/// a read performs, and only when the memory directory already exists.
+/// corrupt file is skipped + logged, and an unlistable directory is the
+/// empty set + a warn with the index left untouched (#1560). The index
+/// reconcile is the one write a read performs, and only when the memory
+/// directory already exists AND listed successfully.
 pub fn load_rows(dir: &Path) -> Vec<MemoryIndexRow> {
     let (rows, _unreadable) = scan_and_reconcile(dir);
     rows
@@ -360,9 +362,25 @@ pub fn load_rows(dir: &Path) -> Vec<MemoryIndexRow> {
 /// fence or are unreadable -- the panel's unreadable list (#1538: a
 /// hand-written file with a missing fence must never vanish silently).
 /// `MEMORY.md` and non-`.md` files are not memories and never surface.
-fn scan_memory_files(dir: &Path) -> (Vec<MemoryIndexRow>, Vec<String>) {
-    let Ok(read_dir) = std::fs::read_dir(dir) else {
-        return (Vec::new(), Vec::new());
+/// A missing directory is the legal zero footprint (`Some` of empty); any
+/// other listing failure (permission denial, AV lock, ...) is a FAILED
+/// scan (`None`) -- never a fake empty set (#1560).
+fn scan_memory_files(dir: &Path) -> Option<(Vec<MemoryIndexRow>, Vec<String>)> {
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(read_dir) => read_dir,
+        // A never-minted root: the zero-footprint contract (a read
+        // creates no directory family) holds for the caller.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Some((Vec::new(), Vec::new()));
+        }
+        Err(e) => {
+            log::warn!(
+                target: "toptopduck::memory",
+                "memory directory unreadable, scan skipped: {} ({e})",
+                dir.display()
+            );
+            return None;
+        }
     };
     let mut rows = Vec::new();
     let mut unreadable = Vec::new();
@@ -395,13 +413,19 @@ fn scan_memory_files(dir: &Path) -> (Vec<MemoryIndexRow>, Vec<String>) {
     }
     rows.sort_by(|a, b| a.file.cmp(&b.file));
     unreadable.sort();
-    (rows, unreadable)
+    Some((rows, unreadable))
 }
 
 /// The read-path scan: the files' rows + the unreadable names, with the
-/// derived index reconciled from the files (the one read that writes).
+/// derived index reconciled from the files (the one read that writes). A
+/// failed scan (`None`) skips the reconcile: a directory that could not
+/// be listed must not have its derived index rewritten from a fake empty
+/// set -- the files stay the truth and the next successful read retries
+/// the rewrite (#1560).
 fn scan_and_reconcile(dir: &Path) -> (Vec<MemoryIndexRow>, Vec<String>) {
-    let (rows, unreadable) = scan_memory_files(dir);
+    let Some((rows, unreadable)) = scan_memory_files(dir) else {
+        return (Vec::new(), Vec::new());
+    };
     reconcile_index(dir, &rows);
     (rows, unreadable)
 }
@@ -906,6 +930,42 @@ mod tests {
         std::fs::remove_file(index_path(dir.path())).unwrap();
         load_rows(dir.path());
         assert!(index_path(dir.path()).is_file());
+    }
+
+    /// A regular file where the directory should be: `read_dir` fails
+    /// with a deterministic non-NotFound error on both platforms (ENOTDIR
+    /// on unix, ERROR_DIRECTORY on Windows) -- the scan must fail closed
+    /// (None), never report a fake empty memory set (#1560).
+    #[test]
+    fn a_regular_file_path_scans_to_none() {
+        let root = mem_dir();
+        let file = root.path().join("not-a-dir");
+        std::fs::write(&file, "x").unwrap();
+        assert!(scan_memory_files(&file).is_none());
+    }
+
+    /// #1560's end-to-end leg: a directory that cannot be listed. The
+    /// lock keeps traversal + write and denies only listing, so a buggy
+    /// reconcile WOULD clobber the index -- the byte-identical assertion
+    /// has teeth. The scan degrades to the empty set for the turn, and
+    /// the derived MEMORY.md is left exactly as it was. Unix-only: the
+    /// lock is chmod; the GitHub runner is not root, so the mode bites
+    /// the owner too.
+    #[cfg(unix)]
+    #[test]
+    fn a_locked_directory_scans_empty_and_leaves_the_index_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = mem_dir();
+        save_entry(dir.path(), &entry("fact a"), "b\n").expect("save");
+        let index = index_path(dir.path());
+        let before = std::fs::read(&index).expect("index on disk");
+        let mode = std::fs::metadata(dir.path()).unwrap().permissions();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+        let rows = load_rows(dir.path());
+        std::fs::set_permissions(dir.path(), mode).unwrap();
+        assert!(rows.is_empty(), "the failed scan degrades to the empty set");
+        let after = std::fs::read(&index).expect("index on disk");
+        assert_eq!(before, after, "a failed scan must not rewrite the index");
     }
 
     /// A corrupt file (unreadable UTF-8 / no frontmatter) is skipped +
