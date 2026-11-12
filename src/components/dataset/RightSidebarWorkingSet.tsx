@@ -31,7 +31,7 @@ import { DatasetDetail } from "./DatasetDetail";
 // shadow-sm, the system's light depth method).
 const PANEL_CARD_BASE = "panel bg-card border rounded-lg shadow-sm p-4";
 
-export function WorkspaceWorkingSet({
+export function RightSidebarWorkingSet({
   sessionId,
   busy,
   onAddFiles,

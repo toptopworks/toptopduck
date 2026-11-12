@@ -17,7 +17,7 @@ const SESSION_FIELDS: ComposerSessionFields = {
   handleAsk: vi.fn(),
   handleCancel: vi.fn(),
   handleIngestFiles: vi.fn(),
-  workspaceCollapsed: false,
+  rightSidebarCollapsed: false,
 };
 
 // Wrapper that always passes both args. The `as string` cast bypasses the
@@ -107,9 +107,9 @@ describe("useComposerState (ADR-0092 per-session drafts)", () => {
     // No throw = pass.
   });
 
-  it("idle fields report workspaceCollapsed false", () => {
+  it("idle fields report rightSidebarCollapsed false", () => {
     const { result } = renderHook(() => useComposerState(null));
-    expect(result.current.workspaceCollapsed).toBe(false);
+    expect(result.current.rightSidebarCollapsed).toBe(false);
   });
 
   it("dropDraft removes a closed session's draft without touching other slots", () => {

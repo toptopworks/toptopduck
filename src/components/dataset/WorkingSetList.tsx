@@ -596,7 +596,7 @@ export function WorkingSetList({
     setDeleteTarget(d);
   };
 
-  // The empty set never reaches this list: WorkspaceWorkingSet renders the
+  // The empty set never reaches this list: RightSidebarWorkingSet renders the
   // single empty-state card instead (issue #792), so the two-column shell and
   // this list mount only for a non-empty set.
 

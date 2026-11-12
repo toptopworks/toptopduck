@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { WorkspaceWorkingSet } from "../WorkspaceWorkingSet";
+import { RightSidebarWorkingSet } from "../RightSidebarWorkingSet";
 import {
   listWorkingSet,
   activeDataset,
@@ -95,7 +95,7 @@ function renderSet(
   );
   const view = render(
     wrap(
-      <WorkspaceWorkingSet
+      <RightSidebarWorkingSet
         sessionId={SESSION}
         busy={false}
         onAddFiles={NOOP_ADD}
@@ -111,7 +111,7 @@ beforeEach(() => {
   vi.mocked(readRows).mockResolvedValue(EMPTY_PAGE);
 });
 
-describe("WorkspaceWorkingSet", () => {
+describe("RightSidebarWorkingSet", () => {
   it("renders a single empty-state card when the set is empty (issue #792)", () => {
     const { container } = renderSet([], null);
     // The two-column master/detail shell does not mount at all -- one panel

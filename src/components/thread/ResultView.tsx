@@ -29,7 +29,7 @@ const DEFAULT_PAGE_SIZE = 100;
 // retired from styles.css's .page-info.sticky button rule onto utility +
 // ADR-0050 token (ADR-0067, issue #173). Shared so prev/next stay in sync;
 // padding / font snap to the Tailwind scale per ADR-0067 (2), matching the
-// workspace tab buttons.
+// right-sidebar tab buttons.
 const PAGE_BTN =
   "px-3 py-1.5 text-sm border border-border bg-card rounded-md disabled:opacity-50 disabled:cursor-progress";
 
@@ -96,7 +96,7 @@ interface ResultViewProps {
   referenceName: string;
   /** Issue #772: the question that produced this result -- the pane title's
    * text, rendered verbatim (user data, never the catalog). Required like its
-   * domain source (WorkspaceContent.result.question, itself derived from the
+   * domain source (RightSidebarContent.result.question, itself derived from the
    * required persisted turn field); an empty string (the only degenerate form
    * -- an ask IPC caller bypassing the composer's trim guard) falls back to
    * the reference-name title, never an empty heading. */
@@ -107,7 +107,7 @@ interface ResultViewProps {
    * to the table with a disclosure when malformed or failing to render. */
   viz: VizSpec | null;
   /** ADR-0047 stage-stale: when the viewed result has been invalidated by a
-   * source removal/replacement (issue #40/#41), the workspace shows the old
+   * source removal/replacement (issue #40/#41), the right sidebar shows the old
    * rows PLUS this honest disclosure. null = the result is live. Derived by
    * the caller from the working-set descriptor (runtime truth), NOT the thread. */
   staleAnchor?: StaleAnchor | null;
@@ -123,7 +123,7 @@ interface ResultViewProps {
   pageSize?: number;
 }
 
-// The workspace "result" pane (ADR-0045/0062 R4). Layout order is fixed:
+// The right sidebar's "result" pane (ADR-0045/0062 R4). Layout order is fixed:
 // assumption -> Vega chart -> table, all in one scroll; the table is ALWAYS
 // present (it is the evidence layer), the chart sits above it as the "answer".
 // An emitted viz that fails to decode/render REPLACES the chart slot with a
@@ -498,7 +498,7 @@ export function ResultView({
         class is the Tailwind position utility (position: sticky); `page-info`
         stays as a semantic hook. The button padding / font-size snap to the
         Tailwind scale (PAGE_BTN: px-3 / py-1.5 / text-sm) per ADR-0067 (2),
-        matching the workspace tab buttons; the sub-pixel shift from the
+        matching the right-sidebar tab buttons; the sub-pixel shift from the
         retired 0.3rem 0.8rem / 0.88rem is imperceptible.
       */}
       <div className="page-info sticky bottom-0 bg-background border-t border-border py-2 m-0 flex gap-2 items-center">

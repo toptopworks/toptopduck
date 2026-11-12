@@ -12,7 +12,7 @@ import type { ThreadEntry } from "../types/thread";
 // (R5 init + handleAsk suppress) stays inside one hook.
 //
 // `thread` is injected: R5 scans it for the last Materialized on resume.
-// The workspaceContent derivation stays in the parent (it fuses thread +
+// The rightSidebarContent derivation stays in the parent (it fuses thread +
 // viewed + the working-set stale map), so this hook takes no staleByReference.
 
 export interface UseViewedResult {
@@ -67,7 +67,7 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
   }, [thread]);
 
   // ADR-0047 + ADR-0114 (rail click): moves ONLY viewedResult (never the
-  // backend active). No pin flag anymore -- the workspace is inert to
+  // backend active). No pin flag anymore -- the right sidebar is inert to
   // non-materialized turns, so a history view holds on its own until a new
   // Materialized or another selection moves it.
   const selectResult = useCallback((referenceName: string) => {

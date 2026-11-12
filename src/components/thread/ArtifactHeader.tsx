@@ -83,11 +83,11 @@ export function ArtifactHeader({
   }, []);
   const intl = useIntl();
   const openLabel = intl.formatMessage({
-    id: "workspace.artifact.openExternal",
+    id: "rightSidebar.artifact.openExternal",
     defaultMessage: "Open externally",
   });
   const moreLabel = intl.formatMessage({
-    id: "workspace.artifact.moreActions",
+    id: "rightSidebar.artifact.moreActions",
     defaultMessage: "More actions",
   });
   const handleOpen = () => {
@@ -213,21 +213,21 @@ export function ArtifactHeader({
                 <DropdownMenuItem onSelect={handleRefresh}>
                   <RefreshCw aria-hidden />
                   <FormattedMessage
-                    id="workspace.artifact.refresh"
+                    id="rightSidebar.artifact.refresh"
                     defaultMessage="Refresh"
                   />
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={handleOpenFolder}>
                   <FolderOpen aria-hidden />
                   <FormattedMessage
-                    id="workspace.artifact.openFolder"
+                    id="rightSidebar.artifact.openFolder"
                     defaultMessage="Show in folder"
                   />
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={handleSaveAs}>
                   <Save aria-hidden />
                   <FormattedMessage
-                    id="workspace.artifact.saveAs"
+                    id="rightSidebar.artifact.saveAs"
                     defaultMessage="Save as…"
                   />
                 </DropdownMenuItem>
@@ -237,7 +237,7 @@ export function ArtifactHeader({
         ) : (
           <p className="m-0 text-xs text-muted-foreground">
             <FormattedMessage
-              id="workspace.artifact.missing"
+              id="rightSidebar.artifact.missing"
               defaultMessage="This file is no longer on disk"
             />
           </p>
@@ -245,7 +245,7 @@ export function ArtifactHeader({
         {failure === "open" && (
           <p className="text-destructive m-0 text-xs" role="alert">
             <FormattedMessage
-              id="workspace.artifact.openFailed"
+              id="rightSidebar.artifact.openFailed"
               defaultMessage="Could not open the file externally"
             />
           </p>
@@ -253,7 +253,7 @@ export function ArtifactHeader({
         {failure === "folder" && (
           <p className="text-destructive m-0 text-xs" role="alert">
             <FormattedMessage
-              id="workspace.artifact.folderFailed"
+              id="rightSidebar.artifact.folderFailed"
               defaultMessage="Could not locate the file in the folder"
             />
           </p>
@@ -261,7 +261,7 @@ export function ArtifactHeader({
         {failure === "save" && (
           <p className="text-destructive m-0 text-xs" role="alert">
             <FormattedMessage
-              id="workspace.artifact.saveFailed"
+              id="rightSidebar.artifact.saveFailed"
               defaultMessage="Could not save a copy of the file"
             />
           </p>

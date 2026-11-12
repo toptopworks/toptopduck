@@ -107,7 +107,7 @@ describe("ResultView", () => {
     const titleText = within(heading).getByText(QUESTION);
     expect(titleText).toHaveClass("block", "truncate");
     // Issue #864: the pane title carries headline-sm (16px/600) explicitly --
-    // the workspace-body 14px baseline inherits into a bare h2, which would
+    // the right-sidebar-body 14px baseline inherits into a bare h2, which would
     // flatten the result title to body size with zero hierarchy.
     expect(heading).toHaveClass("text-base", "font-semibold");
     // Hover recovery (ADR-0050): the truncated trigger opens the tooltip with
@@ -919,8 +919,8 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     // key ResultView by reference name -- a result switch is a prop change, not
     // a remount, and a session switch keeps panes alive (ADR-0060 CSS-hidden
     // keep-alive) -- so this cleanup fires on true unmounts (pane close, the
-    // workspace tab switching away from result, the region-retry epoch bump
-    // that re-keys the workspace result region); leaving it unguarded would
+    // right-sidebar tab switching away from result, the region-retry epoch bump
+    // that re-keys the right-sidebar result region); leaving it unguarded would
     // leak views silently.
     const finalize = vi.fn();
     vi.mocked(embed).mockResolvedValue(

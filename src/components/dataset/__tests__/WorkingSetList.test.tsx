@@ -144,7 +144,7 @@ describe("WorkingSetList", () => {
     expect(peopleRow.className.split(/\s+/)).toContain("active");
   });
 
-  // The empty-set face is no longer this list's concern: WorkspaceWorkingSet
+  // The empty-set face is no longer this list's concern: RightSidebarWorkingSet
   // renders the single empty-state card instead (issue #792), so the list
   // mounts only for a non-empty set -- its empty-branch test moved to the
   // WorkingSetEmptyState suite.
