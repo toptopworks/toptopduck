@@ -19,12 +19,13 @@ export const buttonVariants = cva(
         outline:
           // dark:border-input/60: large-control boundary rides the soft ~1.9:1
           // tier (radio/checkbox keep the full 3:1 --input border).
-          // dark:bg-input/20: field fill matches the competitor-tier #2C2C2C
-          // body; /30 over the raised --input ran bright.
+          // dark:bg-input/10: the fill stays a whisper off the card -- the
+          // opaque #2C2C2C competitor tier read as a bright patch on the
+          // dark card, so the boundary hairline does the separating.
           // Hover is the transit hue in BOTH themes -- the same grey as
           // ghost/nav/row hovers, one knob. Filled commitment buttons keep
           // their darken press semantics; grey buttons lift to transit.
-          "border bg-background shadow-xs hover:bg-transit dark:bg-input/20 dark:border-input/60",
+          "border bg-background shadow-xs hover:bg-transit dark:bg-input/10 dark:border-input/60",
         secondary:
           "bg-secondary text-secondary-foreground shadow-xs hover:bg-secondary/80",
         ghost:
