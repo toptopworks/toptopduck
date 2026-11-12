@@ -71,7 +71,7 @@ export function WindowsWindowControls(): ReactElement {
         type="button"
         aria-label={intl.formatMessage({ id: "window.minimize", defaultMessage: "Minimize" })}
         onClick={() => fireWindowAction("minimize")}
-        className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-transit hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         <Minus className="h-3 w-3" aria-hidden />
       </button>
@@ -83,7 +83,7 @@ export function WindowsWindowControls(): ReactElement {
             : intl.formatMessage({ id: "window.maximize", defaultMessage: "Maximize" })
         }
         onClick={() => fireWindowAction("toggleMaximize")}
-        className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        className="inline-flex h-8 w-11 items-center justify-center text-foreground/70 transition-colors hover:bg-transit hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         {maximized ? (
           <Copy className="h-3 w-3" aria-hidden />

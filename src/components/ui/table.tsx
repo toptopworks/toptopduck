@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 // shadcn/ui v4 new-york copy-in (ADR-0049/0050, issue #109): a presentational
 // styled HTML table primitive set. Table wraps the <table> in an overflow-x-
 // auto container (ADR-0057 full-column horizontal scroll, no virtualization).
-// TableRow carries a token-based hover highlight (hover:bg-muted/50) + row
+// TableRow carries a token-based hover highlight (hover:bg-transit) + row
 // border.
 //
 // Self-contained (ADR-0067, issue #168): each primitive carries its own
@@ -80,7 +80,7 @@ function TableRow({ className, ...props }: ComponentProps<"tr">) {
     <tr
       data-slot="table-row"
       className={cn(
-        "border-b transition-colors hover:bg-muted/50 has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted",
+        "border-b transition-colors hover:bg-transit has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted",
         className,
       )}
       {...props}

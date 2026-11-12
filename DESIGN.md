@@ -24,10 +24,16 @@ colors:
   warning: "#b45309"
   info: "#1d4ed8"
   border: "#e3e3e8"
+  # Grey = transit (hover/focus feedback), teal = committed (selected/active).
+  # Accent is never a hover face; every hover rides this ramp. One exemption:
+  # a two-option contrast pair (the auth-mode chip) previews each option's
+  # own commitment hue on hover — teal option hovers teal, warning hovers
+  # warning.
+  transit: "rgb(0 0 0 / 4%)"
 
   # --- Dark surfaces ---
   canvas-dark: "#0f1410"
-  ink-dark: "#e8eae8"
+  ink-dark: "#d5d9d5"
   card-dark: "#181b18"
   popover-dark: "#181b18"
   secondary-dark: "#232723"
@@ -40,6 +46,7 @@ colors:
   warning-dark: "#f59e0b"
   info-dark: "#60a5fa"
   border-dark: "#2a2f2a"
+  transit-dark: "#343a34"
 
 typography:
   display:
@@ -137,15 +144,18 @@ spacing:
 
 components:
   # --- App shell (light) ---
+  # Chrome topology: topbar + sidebar form ONE continuous muted rail (an L
+  # against the white content field); separation from content is tonal only
+  # -- no border/shadow lines on rail edges.
   app-shell:
     backgroundColor: "{colors.canvas}"
     textColor: "{colors.ink}"
   topbar:
-    backgroundColor: "{colors.canvas}"
+    backgroundColor: "{colors.muted}"
     textColor: "{colors.ink}"
     height: 40px
   sidebar:
-    backgroundColor: "{colors.canvas}"
+    backgroundColor: "{colors.muted}"
     textColor: "{colors.ink}"
     typography: "{typography.nav-link}"
     width: 280px
@@ -155,11 +165,11 @@ components:
     backgroundColor: "{colors.canvas-dark}"
     textColor: "{colors.ink-dark}"
   topbar-dark:
-    backgroundColor: "{colors.canvas-dark}"
+    backgroundColor: "{colors.muted-dark}"
     textColor: "{colors.ink-dark}"
     height: 40px
   sidebar-dark:
-    backgroundColor: "{colors.canvas-dark}"
+    backgroundColor: "{colors.muted-dark}"
     textColor: "{colors.ink-dark}"
     typography: "{typography.nav-link}"
     width: 280px
@@ -513,9 +523,9 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 **`app-shell` / `app-shell-dark`** — The window background. Background `{colors.canvas}` / `{colors.canvas-dark}`, text `{colors.ink}` / `{colors.ink-dark}`. In production this maps to the Tailwind `bg-background text-foreground` utilities.
 
-**`topbar` / `topbar-dark`** — Thin 40px strip spanning the full viewport width. Same background as the shell. Houses the sidebar toggle, session name, and window controls. Height is deliberately compact — this is chrome, not content. Header-chrome icon buttons sharing the topbar ghost style (sidebar toggle, back/forward nav, workspace toggle, session-actions menu trigger) carry a 28px hit area (`h-7 w-7`) with a 14px glyph (`h-3.5 w-3.5`) — the WCAG 2.5.8 24px minimum plus margin. The window controls are a separate titlebar family (Windows-style 32px × 44px hit) and are not bound by this note.
+**`topbar` / `topbar-dark`** — Thin 40px strip spanning the full viewport width. Background `{colors.muted}` / `{colors.muted-dark}` — the topbar and sidebar form ONE continuous muted rail against the content field, separated tonally with no divider lines. Houses the sidebar toggle, header actions, and window controls; session-scoped chrome (the 64px session name row) lives inside the session pane's conversation column so the column divider runs unbroken from the pane top. Height is deliberately compact — this is chrome, not content. Header-chrome icon buttons sharing the topbar ghost style (sidebar toggle, back/forward nav, workspace toggle, session-actions menu trigger) carry a 28px hit area (`h-7 w-7`) with a 14px glyph (`h-3.5 w-3.5`) — the WCAG 2.5.8 24px minimum plus margin. The window controls are a separate titlebar family (Windows-style 32px × 44px hit) and are not bound by this note.
 
-**`sidebar` / `sidebar-dark`** — Session sidebar at a 280px default width (user-resizable). Same background as the shell. Uses `{typography.nav-link}` for session entries. Collapsible to 0 width with a 180ms grid-template-columns animation.
+**`sidebar` / `sidebar-dark`** — Session sidebar at a 280px default width (user-resizable). Background `{colors.muted}` / `{colors.muted-dark}` — the same muted rail the topbar rides, one continuous L-shaped chrome surface. Uses `{typography.nav-link}` for session entries. Collapsible to 0 width with a 180ms grid-template-columns animation.
 
 ### Conversation Surfaces
 

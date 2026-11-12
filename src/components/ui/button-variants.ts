@@ -17,15 +17,23 @@ export const buttonVariants = cva(
         destructive:
           "bg-destructive text-white shadow-xs hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40",
         outline:
-          "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:bg-input/30 dark:border-input dark:hover:bg-input/50",
+          // dark:border-input/60: large-control boundary rides the soft ~1.9:1
+          // tier (radio/checkbox keep the full 3:1 --input border).
+          // dark:bg-input/20: field fill matches the competitor-tier #2C2C2C
+          // body; /30 over the raised --input ran bright.
+          // Hover is the transit hue in BOTH themes -- the same grey as
+          // ghost/nav/row hovers, one knob. Filled commitment buttons keep
+          // their darken press semantics; grey buttons lift to transit.
+          "border bg-background shadow-xs hover:bg-transit dark:bg-input/20 dark:border-input/60 dark:hover:bg-transit",
         secondary:
           "bg-secondary text-secondary-foreground shadow-xs hover:bg-secondary/80",
         ghost:
-          // Hover lifts the glyph to the foreground (the brightness axis) --
-          // the codebase-wide posture every call site used to re-declare.
-          // teal (accent-foreground) stays the SELECTED/ACTIVE hue, not the
-          // hover hue; a hover-teal intent overrides explicitly.
-          "hover:bg-accent hover:text-foreground dark:hover:bg-accent/50",
+          // Grey = transit, teal = committed: hover rides the --transit ramp
+          // (bg-transit covers both themes -- dark transit lifts off card
+          // exactly one composer-magnitude step); accent stays reserved for
+          // selected/active states. The glyph lift to foreground is the
+          // brightness axis, independent of the hover hue.
+          "hover:bg-transit hover:text-foreground",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {

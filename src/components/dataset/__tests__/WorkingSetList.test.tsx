@@ -1109,10 +1109,12 @@ describe("WorkingSetList", () => {
     // flow (see the DOM-order pin in the stale-chip layout test).
     expect(classes).toContain("right-1");
     expect(classes).toContain("z-10");
-    // The pill's ground is the row-hover tint itself (bg-accent) -- it reads
-    // as part of the row, not a floating widget; opaque, it also keeps the
-    // label underneath from bleeding through.
-    expect(classes).toContain("bg-accent");
+    // The pill carries no ground: the hover band underneath (the li's
+    // transit tint) shows straight through, so the strip reads as part of
+    // the row -- a translucent pill would double-tint the band, an opaque
+    // one can never match an alpha band. The label keeps clear via the
+    // select button's static pr-24 reserve.
+    expect(classes).not.toContain("bg-transit");
     expect(classes).not.toContain("bg-card");
     expect(classes).not.toContain("shadow-md");
     expect(classes).toContain("opacity-0");
@@ -1147,20 +1149,20 @@ describe("WorkingSetList", () => {
     );
     const select = screen.getByRole("button", { name: /^people/ });
     const rowClasses = select.closest("li")!.className.split(/\s+/);
-    expect(rowClasses).toContain("hover:bg-accent");
+    expect(rowClasses).toContain("hover:bg-transit");
     // bg-clip-content keeps a py-gutter between adjacent rows' bands (padding
     // carries the gap, not margin -- a margin gap is a hover dead zone).
     expect(rowClasses).toContain("bg-clip-content");
     expect(rowClasses).not.toContain("transition-colors");
     expect(rowClasses).toContain("rounded-md");
-    expect(select.className.split(/\s+/)).not.toContain("hover:bg-accent");
+    expect(select.className.split(/\s+/)).not.toContain("hover:bg-transit");
   });
 
   it("rests the icon glyphs muted, highlights the hot icon, and stays clear of per-site cursor classes", () => {
     // The icon strip reads like the reference session list: each glyph rests
-    // muted on the pill's accent ground and the hovered / keyboard-focused
+    // muted on the pill's transit ground and the hovered / keyboard-focused
     // icon highlights to foreground -- color alone marks the hot icon (a
-    // background tint would be invisible on the pill's own accent). The hand
+    // background tint would be invisible on the pill's own transit). The hand
     // comes from the app.css base rule (button:not(:disabled)), so no row
     // button carries a per-site cursor class -- the not.toContain pins that
     // no scattered cursor-pointer patch creeps back in.
@@ -1192,7 +1194,7 @@ describe("WorkingSetList", () => {
       // would be a per-site cursor-default class, so absence is pinned both
       // ways (the base rule is the hand, not any local class).
       expect(classes).not.toContain("cursor-default");
-      expect(classes).not.toContain("hover:bg-accent");
+      expect(classes).not.toContain("hover:bg-transit");
     }
     // The select button takes the same base hand as the strip -- its click
     // is the row's selection. The label's truncation-recovery affordance is

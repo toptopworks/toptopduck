@@ -20,7 +20,7 @@ import { Select, SelectContent, SelectTrigger, SelectValue } from "../ui/select"
 // The two level-2 selects' shared trigger classes: indented under the level-1
 // group row and inset to the remaining width (the dot column).
 const LEVEL2_SELECT_TRIGGER_CLASS =
-  "ml-6 w-[calc(100%-1.5rem)] border-border bg-card hover:bg-muted";
+  "ml-6 w-[calc(100%-1.5rem)] border-border bg-card hover:bg-transit";
 
 export type ComposerRuntimeMenuProps = {
   // Whether the session runs an external adapter (the Local CLI group is the
@@ -300,7 +300,7 @@ function RuntimeGroupRow({
       disabled={disabled}
       onClick={onClick}
       aria-pressed={selected}
-      className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
+      className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium hover:bg-transit disabled:pointer-events-none disabled:opacity-50"
     >
       <RuntimeDot selected={selected} />
       {children}
@@ -359,14 +359,17 @@ function RuntimeSelectItem({
       value={value}
       disabled={disabled}
       className={cn(
-        "focus:bg-accent hover:bg-accent relative flex items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none",
-        "focus:text-accent-foreground",
+        // Grey = transit, teal = committed pinned via :has on the
+        // ItemIndicator -- same pattern as the shared SelectItem: the teal
+        // face stays on the selected row through pointer moves; hover/focus
+        // ride transit on the other rows only.
+        "[&:has(.select-item-check)]:bg-accent [&:has(.select-item-check)]:text-accent-foreground [&:not(:has(.select-item-check))]:hover:bg-transit [&:not(:has(.select-item-check))]:focus:bg-transit relative flex items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none",
         "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
       )}
     >
       <span className="absolute right-2 flex size-3.5 items-center justify-center">
-        <SelectPrimitive.ItemIndicator>
+        <SelectPrimitive.ItemIndicator className="select-item-check">
           <Check className="size-4" />
         </SelectPrimitive.ItemIndicator>
       </span>

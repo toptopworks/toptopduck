@@ -352,7 +352,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(container.querySelector(".sidebar-status-dot")).toBeNull();
   });
 
-  it("session-entry-main keeps appearance-none reset + hover:bg-accent + rounded-md on the default row", () => {
+  it("session-entry-main keeps appearance-none reset + hover:bg-transit + rounded-md on the default row", () => {
     const persisted: SessionMetadata = {
       recipe_path: "/x/default.json",
       display_name: "Default",
@@ -390,7 +390,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       />,
     );
     const row = container.querySelector(".session-entry");
-    expect(row?.className.split(/\s+/)).toContain("hover:bg-accent");
+    expect(row?.className.split(/\s+/)).toContain("hover:bg-transit");
     expect(row?.className.split(/\s+/)).toContain("rounded-md");
     const main = container.querySelector(".session-entry-main");
     expect(main).not.toBeNull();
@@ -399,7 +399,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     // The row li owns the hover background + radius (the absolute action
     // pill intercepts the pointer over the row tail); the main button keeps
     // only the reset + busy gating.
-    expect(classes).not.toContain("hover:bg-accent");
+    expect(classes).not.toContain("hover:bg-transit");
     expect(classes).not.toContain("rounded-md");
     expect(classes).toContain("disabled:opacity-50");
     expect(classes).toContain("disabled:cursor-progress");
@@ -536,10 +536,11 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     const newBtn = container.querySelector(".sidebar-new-button");
     expect(newBtn).not.toBeNull();
     const classes = newBtn?.className.split(/\s+/);
-    // ADR-0072 retires the ADR-0060 solid primary look: fused bg-secondary
-    // (no border, no primary fill) + hover:bg-accent.
-    expect(classes).toContain("bg-secondary");
-    expect(classes).toContain("hover:bg-accent");
+    // ADR-0072 retires the ADR-0060 solid primary look; the surface-less
+    // ghost form (no resting fill -- it sat same-value on the muted rail
+    // anyway) + the shared transit hover band.
+    expect(classes).not.toContain("bg-secondary");
+    expect(classes).toContain("hover:bg-transit");
     expect(classes).not.toContain("bg-primary");
     expect(classes).not.toContain("text-primary-foreground");
     expect(classes).not.toContain("border-primary");

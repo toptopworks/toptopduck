@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 // export is a component (no cva variant map), so react-refresh/only-export-
 // components stays clean without a variants split (cf. button/button-variants).
 // The trigger + content ride the app.css token system via var-based utilities
-// (bg-popover / border-input / focus:bg-accent), so a select recolors with the
+// (bg-popover / border-input / focus:bg-transit), so a select recolors with the
 // .dark class. The trigger accepts an optional leading icon slot (the theme
 // select shows a Sun/Moon/Monitor glyph) passed as part of children alongside
 // <SelectValue/>; the chevron is appended by the trigger itself. The upstream
@@ -42,7 +42,13 @@ function SelectTrigger({
       data-slot="select-trigger"
       data-size={size}
       className={cn(
-        "border-input data-[placeholder]:text-muted-foreground [&_svg:not([class*='text-'])]:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:bg-input/30 dark:hover:bg-input/50 flex w-fit items-center justify-between gap-2 rounded-md border bg-transparent px-3 py-2 text-sm whitespace-nowrap shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 data-[size=default]:h-9 data-[size=sm]:h-8 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        // dark:border-input/60: large-control boundary rides the soft ~1.9:1
+        // tier (radio/checkbox keep the full 3:1 --input border).
+        // dark:bg-input/20: field fill matches the competitor-tier #2C2C2C
+        // body; /30 over the raised --input ran bright.
+        // hover:bg-transit: hover feedback in BOTH themes on the shared
+        // transit ramp -- the same grey as the outline Button, one knob.
+        "border-input data-[placeholder]:text-muted-foreground [&_svg:not([class*='text-'])]:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive hover:bg-transit dark:bg-input/20 dark:border-input/60 dark:hover:bg-transit flex w-fit items-center justify-between gap-2 rounded-md border bg-transparent px-3 py-2 text-sm whitespace-nowrap shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 data-[size=default]:h-9 data-[size=sm]:h-8 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
         className,
       )}
       {...props}
@@ -112,13 +118,18 @@ function SelectItem({
     <SelectPrimitive.Item
       data-slot="select-item"
       className={cn(
-        "focus:bg-accent focus:text-accent-foreground hover:bg-accent hover:text-accent-foreground [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
+        // Grey = transit, teal = committed, pinned to the selected FACT: the
+        // teal face keys off :has on the ItemIndicator (Radix renders it only
+        // on the selected row), so it survives pointer moves -- hover/focus
+        // highlight only the unselected rows with transit, and hovering the
+        // selected row keeps the teal (a committed face never greys out).
+        "[&:has(.select-item-check)]:bg-accent [&:has(.select-item-check)]:text-accent-foreground [&:not(:has(.select-item-check))]:hover:bg-transit [&:not(:has(.select-item-check))]:focus:bg-transit [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
         className,
       )}
       {...props}
     >
       <span className="absolute right-2 flex size-3.5 items-center justify-center">
-        <SelectPrimitive.ItemIndicator>
+        <SelectPrimitive.ItemIndicator className="select-item-check">
           <Check className="size-4" />
         </SelectPrimitive.ItemIndicator>
       </span>

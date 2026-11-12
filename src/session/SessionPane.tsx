@@ -493,65 +493,15 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
         s.workspaceCollapsed && "workspace-collapsed",
       )}
     >
-      {/* Session header (row 1): session name + management menu + workspace
-          toggle. Moved here from the global topbar so session-scoped chrome
-          lives with the pane. ADR-0093 (issue #512): the `⋯` management menu
-          (Rename / Close / Delete) sits between the name and the
-          workspace toggle. The workspace toggle (ADR-0083, issue #298) stays at
-          the header's right edge: the panel defaults to collapsed and this is
-          its manual open/close path. */}
-      <div className="session-header" data-tauri-drag-region>
-        <span className="min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
-          {sessionName ||
-            intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" })}
-        </span>
-        <SessionHeaderMenu
-          sessionName={sessionName}
-          recipePath={recipePath}
-          sessionId={sessionId}
-          onRename={onRename}
-          onClose={onClose}
-          onDelete={onDelete}
-          disabled={disabled}
-        />
-        <div className="flex-1" data-tauri-drag-region />
-        <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={s.handleToggleWorkspace} />
-      </div>
-      {s.queryErrors.length > 0 && (
-        // Issue #763: the session-level data-channel error face, below the
-        // session header and spanning the conversation + workspace columns
-        // (the pane column's full width, inset to the header's rhythm). The
-        // three session queries coalesce through `data ??` empty fallbacks,
-        // so a failed fetch or refetch (reachable via an ADR-0058 region
-        // retry's resetQueries) used to render as a pristine empty session.
-        // This is a NON-BLOCKING disclosure: cached data keeps rendering,
-        // absent data keeps the empty-state derivations, the composer stays
-        // live; Retry refetches only the errored queries (useSessionState).
-        // Destructive variant keeps the Alert's assertive "alert" role
-        // default (alert-variants.ts).
-        <Alert variant="destructive" className="mx-3 my-2">
-          <AlertTitle>
-            <FormattedMessage
-              id="session.queries.errorTitle"
-              defaultMessage="Session data failed to load"
-            />
-          </AlertTitle>
-          <AlertDescription className="flex items-center justify-between gap-3">
-            <p className="m-0">
-              <FormattedMessage
-                id="session.queries.errorDescription"
-                defaultMessage="Some session data could not be loaded; what is shown may be incomplete."
-              />
-            </p>
-            <Button variant="outline" size="sm" onClick={s.handleRetryQueries}>
-              <FormattedMessage
-                id="common.retry"
-                defaultMessage="Retry"
-              />
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
+      {/* Session header (row 1): session name + management menu. ADR-0093
+          (issue #512): the `⋯` management menu (Rename / Close / Delete)
+          follows the name. The header now lives INSIDE the conversation
+          column (see session-body below) so the column divider runs
+          unbroken from the pane top -- WorkBuddy topology, no line break
+          at the header row. The workspace toggle (ADR-0083, issue #298)
+          rides the workspace tab row's far edge while the panel is
+          expanded, and falls back to this header's right edge while folded
+          -- a folded panel cannot host its own reopen control. */}
       {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get
           their own ErrorBoundary so a render crash in one degrades only that
           block (the shell-level QuestionBar -- a session-skeleton element,
@@ -579,6 +529,61 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           last element readable above it). */}
       <div className="session-body">
         <div className="session-conversation">
+          <div className="session-header" data-tauri-drag-region>
+            <span className="min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
+              {sessionName ||
+                intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" })}
+            </span>
+            <SessionHeaderMenu
+              sessionName={sessionName}
+              recipePath={recipePath}
+              sessionId={sessionId}
+              onRename={onRename}
+              onClose={onClose}
+              onDelete={onDelete}
+              disabled={disabled}
+            />
+            <div className="flex-1" data-tauri-drag-region />
+            {s.workspaceCollapsed && (
+              <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={s.handleToggleWorkspace} />
+            )}
+          </div>
+          {s.queryErrors.length > 0 && (
+            // Issue #763: the session-level data-channel error face, inside
+            // the conversation column between the session header and the
+            // rail (the disclosure follows the header into the column). The
+            // three session queries coalesce through `data ??` empty
+            // fallbacks, so a failed fetch or refetch (reachable via an
+            // ADR-0058 region retry's resetQueries) used to render as a
+            // pristine empty session. This is a NON-BLOCKING disclosure:
+            // cached data keeps rendering, absent data keeps the
+            // empty-state derivations, the composer stays live; Retry
+            // refetches only the errored queries (useSessionState).
+            // Destructive variant keeps the Alert's assertive "alert" role
+            // default (alert-variants.ts).
+            <Alert variant="destructive" className="mx-3 my-2">
+              <AlertTitle>
+                <FormattedMessage
+                  id="session.queries.errorTitle"
+                  defaultMessage="Session data failed to load"
+                />
+              </AlertTitle>
+              <AlertDescription className="flex items-center justify-between gap-3">
+                <p className="m-0">
+                  <FormattedMessage
+                    id="session.queries.errorDescription"
+                    defaultMessage="Some session data could not be loaded; what is shown may be incomplete."
+                  />
+                </p>
+                <Button variant="outline" size="sm" onClick={s.handleRetryQueries}>
+                  <FormattedMessage
+                    id="common.retry"
+                    defaultMessage="Retry"
+                  />
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
           {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
           {/* Issue #829: the rail ref feeds useRailFollow's stick-to-bottom
               machine; the section itself is unconditional within the pane, so
@@ -662,7 +667,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             class stay for selector / test stability; twMerge picks
             border-b-primary over border-b-transparent when the tab is active. */}
           <div
-            className="workspace-tabs flex items-center gap-2 px-4 py-1.5 border-b"
+            className="workspace-tabs flex h-(--session-header-height) items-center gap-2 px-4 border-b"
             role="tablist"
             onKeyDown={handleTabKeyDown}
           >
@@ -699,26 +704,37 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             {/* active (server truth, ADR-0051/0060) shown read-only here so the
                 user sees what the next question targets by default. Naming it
                 here, not in QuestionBar, keeps QuestionBar presentational. */}
-            {s.activeName && (
-              <Badge
-                variant="default"
-                className="active-chip"
-                title={intl.formatMessage({
-                  id: "session.activeChip.title",
-                  defaultMessage: "The next question targets this table by default",
-                })}
-              >
-                <FormattedMessage
-                  id="session.activeChip.label"
-                  defaultMessage="Targets {name}"
-                  values={{
-                    name:
-                    s.datasets.find((d) => d.reference_name === s.activeName)?.display_name ??
-                    s.activeName,
-                  }}
-                />
-              </Badge>
-            )}
+            {/* The right cluster: the active chip ahead of the workspace
+                toggle, parked at the row's far edge by the container's single
+                ml-auto -- the toggle stays pinned whether or not the chip
+                renders. While the panel is folded the toggle falls back to
+                the session header (see the conversation column's header), so
+                only the chip rides this cluster. */}
+            <div className="ml-auto flex items-center gap-2">
+              {s.activeName && (
+                <Badge
+                  variant="default"
+                  className="active-chip"
+                  title={intl.formatMessage({
+                    id: "session.activeChip.title",
+                    defaultMessage: "The next question targets this table by default",
+                  })}
+                >
+                  <FormattedMessage
+                    id="session.activeChip.label"
+                    defaultMessage="Targets {name}"
+                    values={{
+                      name:
+                      s.datasets.find((d) => d.reference_name === s.activeName)?.display_name ??
+                      s.activeName,
+                    }}
+                  />
+                </Badge>
+              )}
+              {!s.workspaceCollapsed && (
+                <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={s.handleToggleWorkspace} />
+              )}
+            </div>
           </div>
 
           {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)

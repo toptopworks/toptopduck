@@ -62,7 +62,7 @@ export function SessionHeaderMenu({
         <DropdownMenuTrigger
           // Mirrors WorkspaceToggle's ghost-icon rule (ADR-0067 #171).
           disabled={disabled}
-          className="session-header-menu inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          className="session-header-menu inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-transit hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           aria-label={intl.formatMessage({
             id: "session.headerMenu.ariaLabel",
             defaultMessage: "Session actions",

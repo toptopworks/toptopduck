@@ -1722,16 +1722,17 @@ describe("SessionPane session-query error banner (#763)", () => {
     expect(banner).toHaveTextContent(BANNER_TITLE);
     expect(document.querySelectorAll("[data-slot=\"alert\"]")).toHaveLength(1);
     expect(screen.getByRole("button", { name: RETRY_LABEL })).toBeEnabled();
-    // The disclosure's slot and severity: between the session header and the
-    // session body (the pane column's conditional banner slot), in the
-    // destructive variant.
+    // The disclosure's slot and severity: inside the conversation column,
+    // between the session header and the rail, in the destructive variant.
     const header = document.querySelector(".session-header")!;
-    const body = document.querySelector(".session-body")!;
+    const rail = document.querySelector(".session-rail")!;
     expect(
       banner.compareDocumentPosition(header) & Node.DOCUMENT_POSITION_PRECEDING,
     ).toBeTruthy();
+    // banner precedes the rail: rail compared against the banner yields the
+    // PRECEDING bit for the banner.
     expect(
-      body.compareDocumentPosition(banner) & Node.DOCUMENT_POSITION_PRECEDING,
+      rail.compareDocumentPosition(banner) & Node.DOCUMENT_POSITION_PRECEDING,
     ).toBeTruthy();
     expect(banner.className).toContain("border-destructive/40");
     // Non-blocking: the thread fell back to EMPTY_THREAD, so the rail keeps

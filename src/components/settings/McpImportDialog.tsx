@@ -521,7 +521,7 @@ function ServerRow({ server, checked, onToggle }: ServerRowProps) {
       data-testid="import-server-row"
       className={cn(
         "flex min-w-0 items-center gap-2 rounded px-2 py-1.5 text-sm",
-        checked ? "bg-accent" : "hover:bg-accent",
+        checked ? "bg-accent" : "hover:bg-transit",
       )}
     >
       <input

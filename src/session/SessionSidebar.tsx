@@ -460,7 +460,7 @@ export function SessionSidebar({
     // the semantic class hooks are kept on every element for selector / test
     // stability.
     <aside
-      className="session-sidebar bg-muted border-r border-border p-2"
+      className="session-sidebar bg-muted p-2"
       aria-label={intl.formatMessage({ id: "sidebar.ariaLabel", defaultMessage: "Sessions" })}
       inert={collapsed}
     >
@@ -478,7 +478,7 @@ export function SessionSidebar({
           type="button"
           disabled={disabled}
           onClick={onOpenSearch}
-          className="sidebar-search-button inline-flex size-7 items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50"
+          className="sidebar-search-button inline-flex size-7 items-center justify-center rounded-full text-muted-foreground hover:bg-transit hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50"
           aria-label={intl.formatMessage({
             id: "sidebar.search.ariaLabel",
             defaultMessage: "Search sessions",
@@ -489,7 +489,7 @@ export function SessionSidebar({
       </header>
       <button
         type="button"
-        className="sidebar-new-button mb-2 flex w-full items-center gap-1.5 rounded-md bg-secondary px-2 py-1 text-sm text-secondary-foreground hover:bg-accent disabled:opacity-60 disabled:cursor-progress"
+        className="sidebar-new-button mb-2 flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-foreground hover:bg-transit disabled:opacity-60 disabled:cursor-progress"
         disabled={disabled}
         onClick={onNew}
       >
@@ -569,7 +569,7 @@ function ArchivedToggle({
             `sidebar-archived-toggle ${bareButtonReset} rounded-md p-1 text-muted-foreground`,
             "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
             "aria-pressed:opacity-100 aria-pressed:text-foreground",
-            "hover:bg-accent hover:text-foreground",
+            "hover:bg-transit hover:text-foreground",
             "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
             "disabled:cursor-progress disabled:opacity-50",
           )}
@@ -695,7 +695,7 @@ function SidebarRow({
               // absolute action pill intercepts the pointer over the row
               // tail, so a button-level :hover would drop the background the
               // moment the cursor reaches the pill (same posture as
-              // WorkingSetList's row-level hover:bg-accent).
+              // WorkingSetList's row-level hover:bg-transit).
               !archived && "disabled:cursor-progress",
               archived && "cursor-default text-muted-foreground",
               entry.active && "text-accent-foreground",

@@ -384,9 +384,6 @@ export function Thread({
           retired in turn with the pill -- the session total has no
           standalone display surface; the turn's usage pill is the billing
           display. */}
-      <h2 className="m-0 mb-1.5 text-xs text-muted-foreground uppercase tracking-wider">
-        <FormattedMessage id="thread.title" defaultMessage="Conversation" />
-      </h2>
       <ol className="list-none m-0 p-0">
         {visualRows.map((row, vi) => {
           // The turn branch works on the entry the row points at; the guard

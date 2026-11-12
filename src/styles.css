@@ -244,7 +244,7 @@
    * the handle to .main-area with top:0, which let it span the header strip
    * (drag line bleeding over the header + col-resize hit area stealing
    * pointer events there). */
-  --session-header-height: 40px;
+  --session-header-height: 64px;
   /* Codex-style collapse: animate the first column var(--sidebar-width) <-> 0
    * so the main region slides instead of snapping. grid-template-columns
    * interpolation needs the column to actually shrink, which in turn needs
@@ -696,7 +696,7 @@
 .shell .session-pane.workspace-collapsed .session-body {
   grid-template-columns: var(--track-grid-collapsed);
 }
-.shell .session-pane.workspace-collapsed .session-rail { border-right-color: transparent; }
+.shell .session-pane.workspace-collapsed .session-conversation { border-right-color: transparent; }
 .shell .session-pane.workspace-collapsed .session-workspace {
   opacity: 0;
 }
@@ -729,15 +729,14 @@
 /* Session header (row 1): the session name + the workspace toggle. Moved out
    of the global topbar so session-scoped chrome
    lives with the session pane; the topbar keeps only shell-wide controls
-   (sidebar toggle + header actions + window controls). Layout-only -- visual
-   chrome (height/padding/border) mirrors the topbar so the two bars read as
-   one continuous strip across the viewport. */
+   (sidebar toggle + header actions + window controls). The title row floats
+   directly on the content ground -- no border, no own surface: per the
+   shell topology (DESIGN.md components/app-shell) rail edges carry no
+   divider lines, the white field reads by tone alone. */
 .session-header {
   display: flex; align-items: center; gap: 0.5rem;
   height: var(--session-header-height); min-height: var(--session-header-height);
   padding: 0 1rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--background);
 }
 /* Grid row: conversation + workspace. Same grid-template-columns slide
  * pattern as the shell sidebar -- the transition on grid-template-columns
@@ -833,8 +832,8 @@
 }
 /* Suppress the .session-rail permanent border-right under the handle so
    hover/drag shows a single 1px line instead of a doubled 2px. */
-.main-area:has(.rail-resize-handle:hover) .session-rail,
-.shell.rail-dragging .session-rail {
+.main-area:has(.rail-resize-handle:hover) .session-conversation,
+.shell.rail-dragging .session-conversation {
   border-right-color: transparent;
 }
 /* Hide the rail handle when there is no active session (cold start), in
@@ -855,6 +854,13 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* The column divider lives HERE, not on the scroll container: the header
+     row sits inside this column (WorkBuddy topology), so the line runs
+     unbroken from the pane top through the header to the rail's tail. The
+     white ground rides the column too, so the relocated header floats on
+     the same field as the rail. */
+  border-right: 1px solid var(--border);
+  background: var(--background);
 }
 
 .session-rail {
@@ -872,8 +878,6 @@
      overlay scrollbars reserve nothing and the property is a no-op
      there. */
   scrollbar-gutter: stable both-edges;
-  border-right: 1px solid var(--border);
-  background: var(--background);
   /* Issue #839: the horizontal padding relaxes up to the measured scrollbar
      width (--rail-col-relax cap) below the gutter, so the reading column's
      edges sit close to the bar card's -- under classic scrollbars the card
@@ -893,9 +897,7 @@
      200ms rather than jumping. */
   padding-bottom: calc(var(--shell-bar-h, 0px) + 0.5rem);
   transition: opacity 200ms ease,
-    padding 200ms ease,
-    border-right-width 200ms ease,
-    border-right-color 200ms ease;
+    padding 200ms ease;
 }
 /* The Thread rail section does not carry a `.panel` hook -- the .session-rail
    rule above supplies bg-card + 0.5rem padding directly. ADR-0067 (issue

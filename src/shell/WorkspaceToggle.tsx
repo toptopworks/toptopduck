@@ -28,7 +28,7 @@ export function WorkspaceToggle({
       // Ghost icon button (ADR-0067 #171 visual rule): h-7 w-7 + h-3.5 w-3.5
       // glyph + text-foreground/70, matching the sidebar/nav topbar family
       // (issue #774: 28px hit area).
-      className="workspace-toggle inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      className="workspace-toggle inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-transit hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       aria-label={label}
       aria-expanded={!collapsed}
       onClick={onToggle}

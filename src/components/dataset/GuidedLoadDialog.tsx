@@ -678,9 +678,9 @@ function GuidedSheetPane({
                 key={rowNo}
                 className={
                   isHeader
-                    ? "group bg-accent text-accent-foreground hover:bg-accent"
+                    ? "group bg-accent text-accent-foreground"
                     : isSkip
-                      ? "group bg-muted text-muted-foreground hover:bg-muted"
+                      ? "group bg-muted text-muted-foreground hover:bg-transit"
                       : "group"
                 }
               >
