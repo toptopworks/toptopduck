@@ -19,6 +19,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use calamine::Data;
 
@@ -32,14 +33,17 @@ use crate::model::{
 /// The parsed sheets of a workbook parked on the guided-load dialog (issue
 /// #750): `read_non_empty_sheets` already parsed the workbook fully for the
 /// `NeedsGuidance` outcome, and holding that parse until the dialog resolves
-/// makes preview-window paging zero-reparse. Keyed by the source path the
-/// guidance was built from, so a superseding ingest's retention can never
-/// serve a stale dialog's window request (the lookup misses instead).
-/// Ephemeral -- never persisted, gone on session drop; the lifecycle is
-/// set-on-NeedsGuidance / drop-on-guided-commit / drop-on-dialog-cancel.
+/// serves two duty faces -- preview-window paging is zero-reparse, and the
+/// guided commit lands exactly the parse the dialog showed
+/// (land-what-was-shown, never a re-read of a file that may have changed
+/// under the open dialog). Keyed by the source path the guidance was built
+/// from, so a superseding ingest's retention can never serve a stale dialog's
+/// window request (the lookup misses instead). Ephemeral -- never persisted,
+/// gone on session drop; the lifecycle is set-on-NeedsGuidance /
+/// drop-on-guided-commit / drop-on-dialog-cancel.
 pub(super) struct GuidanceRetention {
     pub(super) source_path: String,
-    pub(super) sheets: Vec<ingest::excel::SheetRows>,
+    pub(super) sheets: Arc<Vec<ingest::excel::SheetRows>>,
 }
 
 impl super::Session {
@@ -224,11 +228,12 @@ impl super::Session {
 
         let states = ingest::excel::guidance_states(&sheets);
         let request = ingest::excel::build_guidance(path, &sheets, &states);
-        // Retain the parse for zero-reparse preview paging (issue #750);
-        // dropped on guided commit / dialog cancel (see GuidanceRetention).
+        // Retain the parse for zero-reparse preview paging (issue #750) and
+        // the commit's land-what-was-shown reuse; dropped on guided commit /
+        // dialog cancel (see GuidanceRetention).
         self.guidance_retained = Some(GuidanceRetention {
             source_path: path.to_string_lossy().to_string(),
-            sheets,
+            sheets: Arc::new(sheets),
         });
         LoadOutcome::NeedsGuidance(request)
     }
@@ -242,11 +247,26 @@ impl super::Session {
     /// client that bypasses it). Each loaded sheet is rectified by its
     /// [`SheetRectify`] (header row + skipped rows) and forward-filled over
     /// merged cells, then loaded with `rectify = User(...)` recorded on the
-    /// descriptor. Transactional like [`Self::ingest`].
+    /// descriptor. Transactional like [`Self::ingest`]. When the path matches
+    /// the [`GuidanceRetention`] parked at NeedsGuidance time, the commit
+    /// reuses that parse -- land-what-was-shown, mirroring the shared face's
+    /// `add_guided` peek of its parked preview (`workspace/datasets.rs`); a
+    /// miss (a fresh session committing without a preview, or a superseded
+    /// parse) re-parses the workbook.
     pub fn ingest_guided(&mut self, path: &Path, guidance: &[SheetGuidance]) -> LoadOutcome {
-        let sheets = match ingest::excel::read_non_empty_sheets(path) {
-            Ok(s) => s,
-            Err(e) => return LoadOutcome::Error(e),
+        // Peek (never take); the lookup predicate matches the drop logic
+        // below, so a retention for another path is never served here.
+        let path_key = path.to_string_lossy();
+        let sheets = match self
+            .guidance_retained
+            .as_ref()
+            .filter(|retained| retained.source_path == path_key)
+        {
+            Some(retained) => Arc::clone(&retained.sheets),
+            None => match ingest::excel::read_non_empty_sheets(path) {
+                Ok(s) => Arc::new(s),
+                Err(e) => return LoadOutcome::Error(e),
+            },
         };
         if guidance.is_empty() {
             return LoadOutcome::Error(LoadError::Parse {
