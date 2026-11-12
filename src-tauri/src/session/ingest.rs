@@ -19,6 +19,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use calamine::Data;
 
@@ -32,14 +33,26 @@ use crate::model::{
 /// The parsed sheets of a workbook parked on the guided-load dialog (issue
 /// #750): `read_non_empty_sheets` already parsed the workbook fully for the
 /// `NeedsGuidance` outcome, and holding that parse until the dialog resolves
-/// makes preview-window paging zero-reparse. Keyed by the source path the
-/// guidance was built from, so a superseding ingest's retention can never
-/// serve a stale dialog's window request (the lookup misses instead).
-/// Ephemeral -- never persisted, gone on session drop; the lifecycle is
-/// set-on-NeedsGuidance / drop-on-guided-commit / drop-on-dialog-cancel.
+/// serves two duty faces -- preview-window paging is zero-reparse, and the
+/// guided commit lands exactly the parse the dialog showed
+/// (land-what-was-shown, never a re-read of a file that may have changed
+/// under the open dialog). Keyed by the source path the guidance was built
+/// from, so a superseding ingest's retention can never serve a stale dialog's
+/// window request (the lookup misses instead). Ephemeral -- never persisted,
+/// gone on session drop; the lifecycle is set-on-NeedsGuidance /
+/// drop-on-guided-commit / drop-on-dialog-cancel.
 pub(super) struct GuidanceRetention {
-    pub(super) source_path: String,
-    pub(super) sheets: Vec<ingest::excel::SheetRows>,
+    source_path: String,
+    sheets: Arc<Vec<ingest::excel::SheetRows>>,
+}
+
+impl GuidanceRetention {
+    /// Path-key match shared by the peek, the post-commit drop, and the
+    /// preview window -- one derivation, so the three call sites can never
+    /// drift apart.
+    fn is_for(&self, path: impl AsRef<Path>) -> bool {
+        self.source_path == path.as_ref().to_string_lossy()
+    }
 }
 
 impl super::Session {
@@ -224,11 +237,12 @@ impl super::Session {
 
         let states = ingest::excel::guidance_states(&sheets);
         let request = ingest::excel::build_guidance(path, &sheets, &states);
-        // Retain the parse for zero-reparse preview paging (issue #750);
-        // dropped on guided commit / dialog cancel (see GuidanceRetention).
+        // Retain the parse for zero-reparse preview paging (issue #750) and
+        // the commit's land-what-was-shown reuse; dropped on guided commit /
+        // dialog cancel (see GuidanceRetention).
         self.guidance_retained = Some(GuidanceRetention {
             source_path: path.to_string_lossy().to_string(),
-            sheets,
+            sheets: Arc::new(sheets),
         });
         LoadOutcome::NeedsGuidance(request)
     }
@@ -242,11 +256,22 @@ impl super::Session {
     /// client that bypasses it). Each loaded sheet is rectified by its
     /// [`SheetRectify`] (header row + skipped rows) and forward-filled over
     /// merged cells, then loaded with `rectify = User(...)` recorded on the
-    /// descriptor. Transactional like [`Self::ingest`].
+    /// descriptor. Transactional like [`Self::ingest`]. When the path matches
+    /// the [`GuidanceRetention`] parked at NeedsGuidance time, the commit
+    /// reuses that parse -- land-what-was-shown, mirroring the shared face's
+    /// `add_guided` peek of its parked preview (`workspace/datasets.rs`); a
+    /// miss (a fresh session committing without a preview, or a superseded
+    /// parse) re-parses the workbook.
     pub fn ingest_guided(&mut self, path: &Path, guidance: &[SheetGuidance]) -> LoadOutcome {
-        let sheets = match ingest::excel::read_non_empty_sheets(path) {
-            Ok(s) => s,
-            Err(e) => return LoadOutcome::Error(e),
+        // Peek (never take): is_for keys the peek, the post-commit drop,
+        // and the window alike, so a retention for another path is never
+        // served here.
+        let sheets = match self.guidance_retained.as_ref().filter(|r| r.is_for(path)) {
+            Some(retained) => Arc::clone(&retained.sheets),
+            None => match ingest::excel::read_non_empty_sheets(path) {
+                Ok(s) => Arc::new(s),
+                Err(e) => return LoadOutcome::Error(e),
+            },
         };
         if guidance.is_empty() {
             return LoadOutcome::Error(LoadError::Parse {
@@ -283,9 +308,11 @@ impl super::Session {
                 detail: ingest::excel::NO_SHEET_SELECTED.into(),
             });
         }
-        // A checked entry that missed every workbook sheet means the file
-        // changed under the open dialog (the lookup above keys off the
-        // workbook's sheets): the survivors still commit, but the dropped
+        // A checked entry that missed every workbook sheet means the checked
+        // names and the workbook's sheets disagree: on the fresh-parse leg
+        // that is the file changing under the open dialog (a peek hit can
+        // only get here via a fabricated payload -- the guidance was built
+        // from the same parse). The survivors still commit, but the dropped
         // picks get a trace instead of vanishing silently.
         let missed: Vec<&str> = guidance
             .iter()
@@ -305,11 +332,10 @@ impl super::Session {
                 // The dialog resolves on a successful commit: drop THIS path's
                 // retained parse (issue #750). A failed commit keeps it -- the
                 // dialog stays open for retry and its paging must keep working.
-                let path_key = path.to_string_lossy();
                 if self
                     .guidance_retained
                     .as_ref()
-                    .is_some_and(|r| r.source_path == path_key)
+                    .is_some_and(|r| r.is_for(path))
                 {
                     self.guidance_retained = None;
                 }
@@ -335,10 +361,7 @@ impl super::Session {
         offset: usize,
         limit: usize,
     ) -> Option<Vec<Vec<String>>> {
-        let retained = self.guidance_retained.as_ref()?;
-        if retained.source_path != path {
-            return None;
-        }
+        let retained = self.guidance_retained.as_ref().filter(|r| r.is_for(path))?;
         let sheet = retained.sheets.iter().find(|s| s.name == sheet_name)?;
         Some(ingest::excel::render_preview_window(
             sheet,
