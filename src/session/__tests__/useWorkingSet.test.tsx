@@ -6,11 +6,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Tests for useWorkingSet (the working-set seam, ADR-0123) -- the AUTHORITY
 // layer for the domain knowledge that previously lived dispersed through
-// useSessionState / SessionPane / WorkspaceWorkingSet: the invalidation
+// useSessionState / SessionPane / RightSidebarWorkingSet: the invalidation
 // cascade (three-key fan-out + previewRows nested-prefix inheritance), the
 // active-source delete state machine, and the detail-pick resolution +
 // preview gating. The component layer keeps only the render contract
-// (WorkspaceWorkingSet.test). Runs offline via vi.mock on the api entries.
+// (RightSidebarWorkingSet.test). Runs offline via vi.mock on the api entries.
 
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();

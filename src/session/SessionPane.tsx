@@ -5,7 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail } from "../lib/error-presentation";
 import { log } from "../lib/log";
 import { getApprovalAttachments } from "../api";
-import { WorkspaceToggle } from "../shell/WorkspaceToggle";
+import { RightSidebarToggle } from "../shell/RightSidebarToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useRailFollow } from "./useRailFollow";
 import { useSessionState } from "./useSessionState";
@@ -24,7 +24,7 @@ import { Thread } from "../components/thread/Thread";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
-import { WorkspaceWorkingSet } from "../components/dataset/WorkspaceWorkingSet";
+import { RightSidebarWorkingSet } from "../components/dataset/RightSidebarWorkingSet";
 import {
   type ReplaceFlightInfo,
   type ReplaceProgress,
@@ -32,7 +32,7 @@ import {
 } from "./useWorkingSet";
 import { cn } from "@/lib/utils";
 import type { ThreadEntry } from "../types/thread";
-import type { WorkspaceContent } from "./workspace";
+import type { RightSidebarContent } from "./workspace";
 import { VizStageView } from "../components/viz/VizStageView";
 import { artifactKeys, sessionKeys } from "./queryKeys";
 import { useSkillsRegistry } from "../skills/registry";
@@ -40,7 +40,7 @@ import { useSkillsRegistry } from "../skills/registry";
 // The per-session pane (ADR-0051/0092). One `<SessionPane key={sid} sessionId={sid} />`
 // owns ALL of a session's server state (via useSessionState -> TanStack Query)
 // and client UI state (viewedResult / loading / dialogs).
-// The shell (<App>) places this as the right grid block (rail + workspace);
+// The shell (<App>) places this as the right grid block (rail + right sidebar);
 // the session sidebar is a separate, full-height column (R1).
 //
 // ADR-0092: QuestionBar moved to the shell level. SessionPane no longer owns
@@ -141,15 +141,15 @@ interface SessionPaneProps {
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-// The workspace tab order (ADR-0045): result first, working set second.
+// The right-sidebar tab order (ADR-0045): result first, working set second.
 // Module-level so the APG keyboard handler can index/wrap it (issue #760).
-const WORKSPACE_TABS = ["result", "workingSet"] as const;
-type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
+const RIGHT_SIDEBAR_TABS = ["result", "workingSet"] as const;
+type RightSidebarTab = (typeof RIGHT_SIDEBAR_TABS)[number];
 
 // #1323 edge-docked scroll containers: both postures break the tabpanel out
-// of the workspace-body's p-4 (the host flex column is not a scroll
+// of the right-sidebar-body's p-4 (the host flex column is not a scroll
 // container, so nothing enters a scrollable overflow region) so the
-// scrollbars dock to the workspace edges; the breathing-room padding rides
+// scrollbars dock to the right-sidebar edges; the breathing-room padding rides
 // the panel itself -- padding sits inside the scrollbar.
 /** The scrolling posture, broken out on all four sides -- all four, or the
  * panel's pt stacks on the host's for a doubled 32px. */
@@ -265,7 +265,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // The payload is the pane-side selection: the TURN-domain turnLoading /
   // phase, NOT the union `loading` (turn OR mutation, ADR-0040) -- a dataset
   // mutation's in-flight window must not flip the bar's Ask/Stop button (the
-  // reported flicker). workspaceCollapsed (bar-shaping, ADR-0083 fold)
+  // reported flicker). rightSidebarCollapsed (bar-shaping, ADR-0083 fold)
   // changes on the fold toggle + the one-shot first-Materialized expansion;
   // the effect fires on those changes so the shell's registry entry stays
   // fresh for the active session.
@@ -279,7 +279,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
       handleAsk: queuedHandleAsk,
       handleCancel: s.handleCancel,
       handleIngestFiles: ingestMany,
-      workspaceCollapsed: s.workspaceCollapsed,
+      rightSidebarCollapsed: s.rightSidebarCollapsed,
     });
   }, [
     sessionId,
@@ -291,7 +291,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     queuedHandleAsk,
     s.handleCancel,
     ingestMany,
-    s.workspaceCollapsed,
+    s.rightSidebarCollapsed,
     onComposerFields,
   ]);
 
@@ -327,11 +327,11 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: the tracked ingestMany / hold / s.handleAsk are stable inside useSessionState + useComposerQueue, the consumed callbacks are useCallback-stable in useShellSessions
   }, [pendingIngestPaths, pendingQuestion, pendingSkillInvocations, sessionId, onSeedDraft, onSeedInvocations]);
 
-  // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
+  // Right-sidebar tab (ADR-0045: 工作集 is a right-sidebar tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
-  const [tab, setTab] = useState<WorkspaceTab>("result");
+  const [tab, setTab] = useState<RightSidebarTab>("result");
 
-  // Issue #760: the WAI-ARIA APG tabs contract for the workspace tab row.
+  // Issue #760: the WAI-ARIA APG tabs contract for the right-sidebar tab row.
   // useId-scoped stable ids wire each tab's aria-controls to its own panel.
   // Issue #1060: both panels stay mounted and the inactive one carries the
   // `hidden` attribute, so the working set's detail pick and the result view
@@ -358,12 +358,12 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     // on every Arrow/Home/End press, which is correct for a tab and a
     // no-op violation on anything else.
     if (!(e.target instanceof HTMLElement) || e.target.closest("[role='tab']") === null) return;
-    const idx = WORKSPACE_TABS.indexOf(tab);
-    let next: WorkspaceTab | null = null;
-    if (e.key === "ArrowRight") next = WORKSPACE_TABS[(idx + 1) % WORKSPACE_TABS.length];
-    else if (e.key === "ArrowLeft") next = WORKSPACE_TABS[(idx - 1 + WORKSPACE_TABS.length) % WORKSPACE_TABS.length];
-    else if (e.key === "Home") next = WORKSPACE_TABS[0];
-    else if (e.key === "End") next = WORKSPACE_TABS[WORKSPACE_TABS.length - 1];
+    const idx = RIGHT_SIDEBAR_TABS.indexOf(tab);
+    let next: RightSidebarTab | null = null;
+    if (e.key === "ArrowRight") next = RIGHT_SIDEBAR_TABS[(idx + 1) % RIGHT_SIDEBAR_TABS.length];
+    else if (e.key === "ArrowLeft") next = RIGHT_SIDEBAR_TABS[(idx - 1 + RIGHT_SIDEBAR_TABS.length) % RIGHT_SIDEBAR_TABS.length];
+    else if (e.key === "Home") next = RIGHT_SIDEBAR_TABS[0];
+    else if (e.key === "End") next = RIGHT_SIDEBAR_TABS[RIGHT_SIDEBAR_TABS.length - 1];
 
     if (next) {
       e.preventDefault();
@@ -381,12 +381,12 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // never dropped focus). The swap commits after the handler returns, so
   // the focus hand-off waits one frame for the new mount.
   const headerToggleRef = useRef<HTMLButtonElement | null>(null);
-  const workspaceToggleRef = useRef<HTMLButtonElement | null>(null);
-  function handleToggleWorkspace() {
-    s.handleToggleWorkspace();
-    // s.workspaceCollapsed is the pre-toggle render value: folded means the
+  const rightSidebarToggleRef = useRef<HTMLButtonElement | null>(null);
+  function handleToggleRightSidebar() {
+    s.handleToggleRightSidebar();
+    // s.rightSidebarCollapsed is the pre-toggle render value: folded means the
     // expansion just started, so the tab-row instance is the survivor.
-    const survivor = s.workspaceCollapsed ? workspaceToggleRef : headerToggleRef;
+    const survivor = s.rightSidebarCollapsed ? rightSidebarToggleRef : headerToggleRef;
     requestAnimationFrame(() => survivor.current?.focus());
   }
 
@@ -513,7 +513,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     <div
       className={cn(
         "session-pane",
-        s.workspaceCollapsed && "workspace-collapsed",
+        s.rightSidebarCollapsed && "right-sidebar-collapsed",
       )}
     >
       {/* Session header (row 1): session name + management menu. ADR-0093
@@ -521,8 +521,8 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           follows the name. The header now lives INSIDE the conversation
           column (see session-body below) so the column divider runs
           unbroken from the pane top -- WorkBuddy topology, no line break
-          at the header row. The workspace toggle (ADR-0083, issue #298)
-          rides the workspace tab row's far edge while the panel is
+          at the header row. The right-sidebar toggle (ADR-0083, issue #298)
+          rides the right-sidebar tab row's far edge while the panel is
           expanded, and falls back to this header's right edge while folded
           -- a folded panel cannot host its own reopen control. */}
       {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get
@@ -543,7 +543,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           visible + session isolated + retry" rather than "region boundary
           catches precisely". See memory: react19-nested-errorboundary-outer-
           catches. */}
-      {/* session-body: grid container for the conversation column + workspace
+      {/* session-body: grid container for the conversation column + right sidebar
           so both collapses animate via grid-template-columns (interpolatable).
           ADR-0092: the QuestionBar no longer lives inside session-conversation
           — it is a shell-level overlay above the pane host (issue #836), so
@@ -567,8 +567,8 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               disabled={disabled}
             />
             <div className="flex-1" data-tauri-drag-region />
-            {s.workspaceCollapsed && (
-              <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={handleToggleWorkspace} ref={headerToggleRef} />
+            {s.rightSidebarCollapsed && (
+              <RightSidebarToggle collapsed={s.rightSidebarCollapsed} onToggle={handleToggleRightSidebar} ref={headerToggleRef} />
             )}
           </div>
           {s.queryErrors.length > 0 && (
@@ -617,7 +617,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             aria-label={intl.formatMessage({ id: "session.rail.ariaLabel", defaultMessage: "Conversation timeline" })}
           >
             {/* Issue #833: the rail is the full-width scroll container while the
-                workspace is folded; this wrapper is the centered reading
+                right sidebar is folded; this wrapper is the centered reading
                 column that caps the thread's measure (.rail-reading-column in
                 styles.css, capped at --reading-column-cap).
                 useRailFollow's range observer watches this node as the rail's
@@ -677,19 +677,19 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           </section>
         </div>
 
-        {/* --- Workspace (ADR-0045/0062 R2) -------------------------------- */}
+        {/* --- Right sidebar (ADR-0045/0062 R2) ---------------------------- */}
         <section
-          className="session-workspace"
-          aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Right sidebar" })}
-          inert={s.workspaceCollapsed}
+          className="session-right-sidebar"
+          aria-label={intl.formatMessage({ id: "session.rightSidebar.ariaLabel", defaultMessage: "Right sidebar" })}
+          inert={s.rightSidebarCollapsed}
         >
-          {/* ADR-0067 (issue #173): the .workspace-tabs visual chrome (padding,
+          {/* ADR-0067 (issue #173): the .right-sidebar-tabs visual chrome (padding,
             border-bottom, background) + the [role=tab] base + .active
             primary-underline retired from styles.css onto this component as
-            utility + ADR-0050 token. The .workspace-tabs hook + bare "active"
+            utility + ADR-0050 token. The .right-sidebar-tabs hook + bare "active"
             class stay for selector / test stability; twMerge picks
             border-b-primary over border-b-transparent when the tab is active. */}
-          <div className="workspace-tabs flex h-(--session-header-height) items-center gap-2 px-4 border-b">
+          <div className="right-sidebar-tabs flex h-(--session-header-height) items-center gap-2 px-4 border-b">
             {/* The tablist owns ONLY the two tabs (APG required ownership):
                 the badge + toggle cluster is a sibling inside the same
                 visual row, so arrows on the toggle stay a no-op instead of
@@ -733,7 +733,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             {/* active (server truth, ADR-0051/0060) shown read-only here so the
                 user sees what the next question targets by default. Naming it
                 here, not in QuestionBar, keeps QuestionBar presentational. */}
-            {/* The right cluster: the active chip ahead of the workspace
+            {/* The right cluster: the active chip ahead of the right-sidebar
                 toggle, parked at the row's far edge by the container's single
                 ml-auto -- the toggle stays pinned whether or not the chip
                 renders. While the panel is folded the toggle falls back to
@@ -760,13 +760,13 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   />
                 </Badge>
               )}
-              {!s.workspaceCollapsed && (
-                <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={handleToggleWorkspace} ref={workspaceToggleRef} />
+              {!s.rightSidebarCollapsed && (
+                <RightSidebarToggle collapsed={s.rightSidebarCollapsed} onToggle={handleToggleRightSidebar} ref={rightSidebarToggleRef} />
               )}
             </div>
           </div>
 
-          {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)
+          {/* ADR-0067 (issue #173): the .right-sidebar-body visual rule (padding)
             retired from styles.css; the hook stays for selector / test
             stability AND as the staged fold/expand fade anchor (the
             transition + collapsed rules in styles.css). Issue #1060: the
@@ -775,10 +775,10 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             mounted (contract at the tab-id comment above). overflow-y-auto
             rides the panels so each tab keeps its own scroll offset instead
             of clamping against the other tab's height on a shared container.
-            The panels carry text-sm themselves -- they are the workspace's
+            The panels carry text-sm themselves -- they are the right sidebar's
             type roots (issue #864); the container keeps its own for the
             banner strip above them. */}
-          <div className="workspace-body flex min-h-0 flex-1 flex-col p-4 text-sm">
+          <div className="right-sidebar-body flex min-h-0 flex-1 flex-col p-4 text-sm">
             {s.error && <ErrorBanner error={s.error} />}
             {s.haltedRemaining !== null && (
               // Issue #748: a terminally halted batch (user cancelled the
@@ -850,14 +850,14 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               hidden={tab !== "result"}
               className={cn(
                 "min-h-0 flex-1 text-sm",
-                s.workspaceContent.kind === "file"
+                s.rightSidebarContent.kind === "file"
                   ? FILE_STAGE_CLASS
                   : EDGE_DOCKED_SCROLL_CLASS,
               )}
             >
-              <WorkspaceResult
+              <RightSidebarResult
                 key={`result-${regionRetryEpoch}`}
-                content={s.workspaceContent}
+                content={s.rightSidebarContent}
                 sessionId={sessionId}
                 hasData={s.datasets.length > 0}
                 onResetRegion={resetSessionCache}
@@ -882,7 +882,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   pane-level union), the empty card's ingest entry (issue #792:
                   it rides the same pipeline as the composer's + entry), and
                   the session-level mutation reporting surfaces. */}
-              <WorkspaceWorkingSet
+              <RightSidebarWorkingSet
                 sessionId={sessionId}
                 busy={s.loading}
                 onAddFiles={ingestMany}
@@ -931,9 +931,9 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
 }
 
 // The "结果" tab content: derived from (viewedResult, thread) via
-// workspaceContent. Two states per ADR-0062 R2 (calibrated by ADR-0114):
+// rightSidebarContent. Two states per ADR-0062 R2 (calibrated by ADR-0114):
 // a resolving viewed result, or the hero.
-function WorkspaceResult({
+function RightSidebarResult({
   content,
   sessionId,
   hasData,
@@ -943,7 +943,7 @@ function WorkspaceResult({
   onRerun,
   busy,
 }: {
-  content: WorkspaceContent;
+  content: RightSidebarContent;
   sessionId: string;
   hasData: boolean;
   /** ADR-0058 L2 result-partition retry: remove the session slice so a
@@ -970,11 +970,11 @@ function WorkspaceResult({
       // (ADR-0083, issue #351); window-level drag-and-drop stays the shortcut
       // path, so the hero is now the drop hint + the ask-a-question pivot once
       // a source is loaded (hasData).
-      // ADR-0067 (issue #173): the .workspace-hero visual rule (flex column,
+      // ADR-0067 (issue #173): the .right-sidebar-hero visual rule (flex column,
       // centered, gap, padding, text-align) retired from styles.css onto
-      // utility; the .workspace-hero hook stays for selector stability.
+      // utility; the .right-sidebar-hero hook stays for selector stability.
       return (
-        <div className="workspace-hero flex flex-col items-center gap-4 p-8 text-center">
+        <div className="right-sidebar-hero flex flex-col items-center gap-4 p-8 text-center">
           <p className="text-muted-foreground">
             {hasData ? (
               <FormattedMessage
@@ -998,7 +998,7 @@ function WorkspaceResult({
       return (
         <>
           {content.viewingHistory && (
-            // Issue #757: the workspace is showing a past result, not the
+            // Issue #757: the right sidebar is showing a past result, not the
             // latest Materialized primary -- a derived fact (ADR-0114), so the
             // indicator rides the derivation and adds no state. Informational,
             // not cautionary (the stale disclosure owns the warning surface),
@@ -1072,7 +1072,7 @@ function WorkspaceResult({
       return <VizStageView spec={content.spec} />;
     default: {
       const unhandled: never = content;
-      throw new Error(`unhandled workspace content: ${JSON.stringify(unhandled)}`);
+      throw new Error(`unhandled right-sidebar content: ${JSON.stringify(unhandled)}`);
     }
   }
 }

@@ -1,5 +1,5 @@
-// The workspace's artifact stage (ADR-0124 Decision 4, issue #1088): the
-// file branch of the single-stage workspace, two-part under a persistent
+// The right sidebar's artifact stage (ADR-0124 Decision 4, issue #1088): the
+// file branch of the single-stage right sidebar, two-part under a persistent
 // file header (issue #1199) -- the header (file name, external-open
 // action, more menu, failure slot) is the stage's chrome and survives
 // every degrade; the body renders per the matrix. The matrix keys off
@@ -43,7 +43,7 @@ export function ArtifactView({
   /** The manifest entry the view resolves (thread-derived, settle-frozen):
    *  the path (identity) + file_name (display) the derivation carries. */
   artifact: { path: string; file_name: string };
-  /** The derived render matrix branch (deriveWorkspaceContent's output). */
+  /** The derived render matrix branch (deriveRightSidebarContent's output). */
   render: ArtifactRenderKind;
 }) {
   // One existence read for the whole stage: the header's action gate and the
@@ -116,7 +116,7 @@ function ArtifactStageBody({
     return <PdfArtifactShell path={artifact.path} fileName={artifact.file_name} />;
   }
   if (render === "markdown") {
-    // The file panel breaks out of the workspace-body's p-4 (SessionPane), so
+    // The file panel breaks out of the right-sidebar-body's p-4 (SessionPane), so
     // the prose re-wraps its own padding: the scrollbar docks to the pane edge
     // while the text keeps its breathing room. The iframe branches stay
     // full-bleed -- the frame's own document scrolls inside its viewport edge
@@ -164,7 +164,7 @@ function ArtifactFrame({
         <div
           role="status"
           aria-label={intl.formatMessage({
-            id: "workspace.artifact.loading",
+            id: "rightSidebar.artifact.loading",
             defaultMessage: "Loading document",
           })}
           className="absolute inset-0 flex items-center justify-center bg-background text-muted-foreground"

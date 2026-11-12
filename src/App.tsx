@@ -208,7 +208,7 @@ export default function App() {
   // custom properties on .shell so the grid + resize handles consume them
   // without a hardcoded px value. The rail width is declared first so the
   // sidebar hook can compensate it (sidebar grows -> rail shrinks by the same
-  // delta, keeping the workspace visually fixed). The rail handle is
+  // delta, keeping the right sidebar visually fixed). The rail handle is
   // per-SessionPane but the width is global so it stays consistent across
   // keep-alive session switches.
   //
@@ -218,8 +218,8 @@ export default function App() {
   // tracks). Non-positive measurements (jsdom has no layout) read as "no
   // dynamic constraint" and fall back to the hooks' static ceilings. The
   // sidebar's ceiling is deliberately NOT fold-gated: a sidebar dragged wide
-  // while the workspace is folded must not crush the rail below its floor
-  // once the workspace is expanded again.
+  // while the right sidebar is folded must not crush the rail below its floor
+  // once the right sidebar is expanded again.
   const shellRef = useRef<HTMLDivElement>(null);
   const mainAreaRef = useRef<HTMLElement>(null);
   const getSidebarMaxWidth = useCallback((): number | undefined => {
@@ -389,15 +389,15 @@ export default function App() {
   // setter itself (the composer object rebuilds every render, issue #229 idiom).
   const { setDraft: setComposerDraft } = composer;
   // The active pane's fold mirrored onto the shell-level layout (.main-area
-  // class + the bar slot's ws-collapsed). Defaults to COLLAPSED while the
+  // class + the bar slot's right-sidebar-collapsed). Defaults to COLLAPSED while the
   // pane has not reported its fields yet (the activation -> mount-report
-  // window): every SessionPane mount path starts folded (useWorkspaceCollapse
+  // window): every SessionPane mount path starts folded (useRightSidebarCollapse
   // initial state), so the mirrors render the folded geometry from the entry
   // frame instead of one frame at rail-width geometry followed by a 280ms
   // slide into the collapsed track.
-  const activeWsCollapsed =
+  const activeRightSidebarCollapsed =
     activeSessionId !== null &&
-    (readFields(activeSessionId)?.workspaceCollapsed ?? true);
+    (readFields(activeSessionId)?.rightSidebarCollapsed ?? true);
 
   // ADR-0092 Decision 6 (#500): shell-level pending composer posture for the
   // cold-start bar. Every composer control renders on the centered bar with
@@ -965,7 +965,7 @@ export default function App() {
               Windows/Linux; macOS rides the native Overlay titlebar).
               Shell-wide controls only: the sidebar collapse toggle (left) +
               nav buttons + window controls (right, Windows/Linux). The
-              session name + workspace toggle
+              session name + right-sidebar toggle
               live in each SessionPane's own header (session-scoped chrome
               lives with the session). The Open / Save recipe.json buttons live in
               the session sidebar (below New session). ADR-0067 (#171): visual
@@ -1047,7 +1047,7 @@ export default function App() {
                     host. */}
                 <main
                   ref={mainAreaRef}
-                  className={`main-area${activeWsCollapsed ? " workspace-collapsed" : ""}`}
+                  className={`main-area${activeRightSidebarCollapsed ? " right-sidebar-collapsed" : ""}`}
                 >
                   <div className="session-pane-host">
                     {openSessions.map((s) => (
@@ -1109,12 +1109,12 @@ export default function App() {
 
                   {/* ADR-0092: shell-level QuestionBar — single instance, never
                       unmount/remount. Centered when cold-start (no active
-                      session), bottom when a session is active. The ws-collapsed
-                      hook mirrors the active pane's workspace fold so the bar
+                      session), bottom when a session is active. The right-sidebar-collapsed
+                      hook mirrors the active pane's right-sidebar fold so the bar
                       width tracks the conversation column in both postures. */}
                   <div
                     ref={shellBarSlotRef}
-                    className={`shell-bar-slot${isColdStart ? " centered" : " bottom"}${activeWsCollapsed ? " ws-collapsed" : ""}`}
+                    className={`shell-bar-slot${isColdStart ? " centered" : " bottom"}${activeRightSidebarCollapsed ? " right-sidebar-collapsed" : ""}`}
                     onWheel={handleBarWheel}
                   >
                     {isColdStart && (
@@ -1232,12 +1232,12 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Draggable rail resize handle at the conversation/workspace
+                  {/* Draggable rail resize handle at the conversation/right-sidebar
                       boundary. Hoisted to .main-area (ADR-0092) so it spans the
                       full height — including the shell-level QuestionBar overlay
                       (z-index 10 keeps it grabbable across the bar strip) —
                       matching the sidebar handle's reach. Hidden via CSS when
-                      cold-start, settings mode, or workspace folded. */}
+                      cold-start, settings mode, or right-sidebar folded. */}
                   <div
                     className="rail-resize-handle"
                     onPointerDown={onRailResizeStart}

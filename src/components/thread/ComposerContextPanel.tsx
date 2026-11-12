@@ -9,7 +9,7 @@ import { pickDataFiles } from "../dataset/pickDataFiles";
 // popover (#962 -- the "/" and "$" pickers stay the only explicit skill
 // channels).
 //
-// The retired standalone source entry (the workspace-hero FileDropzone button)
+// The retired standalone source entry (the right-sidebar-hero FileDropzone button)
 // moved here; window-level drag-and-drop stays untouched (App's single
 // listener, ADR-0061), and the ingest pipeline + source lifecycle events
 // (ADR-0040) are unchanged -- onIngestFiles routes through useIngestFlow's

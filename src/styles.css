@@ -6,7 +6,7 @@
  * soft-cap) moved to shadcn Alert variants in issue #108; QuestionBar's
  * input/buttons, FileDropzone's button, ErrorBanner, and the session-pane
  * persist-warning moved to shadcn Input/Button/Alert variants in issue #172
- * (ADR-0067); the Workspace tabs/body/hero, and the
+ * (ADR-0067); the right-sidebar tabs/body/hero, and the
  * ResultView container + sticky pagination moved to Tailwind utility +
  * ADR-0050 token in issue #173 (ADR-0067); the ErrorBoundary DegradeCard moved
  * to shadcn Card + Button + TechnicalDetailsFold in issue #181 (ADR-0067); the
@@ -19,7 +19,7 @@
  * caller-scoped width/nowrap/center, the .disclosure-summary info blue tint,
  * and the .privacy .muted typography moved to Tailwind utility + the Table
  * primitive's last-cell className in issue #183 (ADR-0067); the cross-component
- * .panel card chrome (SessionPane WorkspaceWorkingSet sections + Thread rail
+ * .panel card chrome (SessionPane RightSidebarWorkingSet sections + Thread rail
  * container), the DatasetDetail caller-scoped typography (.dataset-detail
  * h2/small, .meta, .source, .schema td code word-wrap), and the WorkingSetList
  * list/button/active-state/small rules moved to Tailwind utility + conditional
@@ -95,7 +95,7 @@
    "container", #1245), so for those this is a guard rail rather than the
    primary sizing: it keeps the async follow chain (ResizeObserver -> width
    signal -> runAsync) from flashing a horizontal scrollbar during layout
-   transitions (workspace fold/unfold, window maximize/restore). Faceted and
+   transitions (right-sidebar fold/unfold, window maximize/restore). Faceted and
    concat layouts keep vega's default per-band width and never receive the
    keyword, so for them this clamp is the sizing, in place of scrolling: a
    chart that outdraws its host scales down proportionally. Paint-only: the
@@ -105,11 +105,11 @@
 /* Working-set tab grid (legacy .layout). ADR-0067 Decision 1: a 280px/1fr
    two-column master-detail grid is layout semantics, not a utility long-string,
    so the grid stays here; per-consumer margins live on the consumer
-   (SessionPane WorkspaceWorkingSet) as utility. Single consumer. The detail
+   (SessionPane RightSidebarWorkingSet) as utility. Single consumer. The detail
    track is minmax(0, 1fr) and the panels carry min-width: 0 -- a bare 1fr
    track resolves its automatic minimum to the content's min-content, so a
    wide dataset (a 40-column preview table) re-widens the column into
-   workspace-body overflow instead of scrolling inside the Table primitive's
+   right-sidebar-body overflow instead of scrolling inside the Table primitive's
    overflow-x-auto container (ADR-0057). Same pin the narrow fallback below
    carries. */
 .layout {
@@ -119,8 +119,8 @@
 }
 .layout > .panel { min-width: 0; }
 
-/* Narrow-workspace fallback (issue #791): .session-workspace is an
-   inline-size container (rule with .session-workspace below); when the
+/* Narrow-right-sidebar fallback (issue #791): .session-right-sidebar is an
+   inline-size container (rule with .session-right-sidebar below); when the
    panel lands in the 320px track floor (issue #770) to 600px band, the
    280px/1fr pair starves the detail column (280px list + 1.25rem gap), so
    the grid stacks one column -- list first, detail below (DOM order).
@@ -131,10 +131,10 @@
    ADR-0057). Container query rather than a media query: the panel width
    comes from the shell grid + the draggable rail, not the viewport. The
    fold/expand slide crosses 600px mid-flight; that transient reflow is
-   the already-handled class (fold: clipped by the workspace-collapsed
-   overflow rules below; expand: masked by the .workspace-body staged
+   the already-handled class (fold: clipped by the right-sidebar-collapsed
+   overflow rules below; expand: masked by the .right-sidebar-body staged
    fade-in below). */
-@container workspace (max-width: 600px) {
+@container right-sidebar (max-width: 600px) {
   .layout { grid-template-columns: minmax(0, 1fr); }
 }
 
@@ -159,7 +159,7 @@
  * ADR-0083, issue #298). Replaced the v0 single-column `main` scaffold. The
  * session sidebar is col 1 (full height, independent -- R1: QuestionBar does
  * NOT span over it); the right block holds the thin top bar + the session
- * pane (in-rail QuestionBar + a workspace panel that defaults to collapsed,
+ * pane (in-rail QuestionBar + a right-sidebar panel that defaults to collapsed,
  * ADR-0083).
  *
  * ADR-0067 (issue #171): the shell-skeleton VISUAL rules -- .session-sidebar
@@ -193,7 +193,7 @@
   overflow: hidden;
   /* Shared 4-track conversation grid (ADR-0083/0090). Both .session-body and
    * .shell-bar-track reference these so the bar sits exactly under the
-   * conversation column. Default: rail open. Collapsed: workspace folded,
+   * conversation column. Default: rail open. Collapsed: right sidebar folded,
    * the conversation track takes the container's full width -- the rail is
    * the scroll container, so its scrollbar hugs the window edge and the old
    * empty flank tracks cease to exist as dead spacer areas (wheel over them
@@ -201,11 +201,12 @@
    * .rail-reading-column wrapper inside the rail plus the bar mirror below
    * (--reading-column-cap).
    *
-   * Workspace floor (issue #770): the workspace track's 320px min mirrors
-   * WORKSPACE_MIN_WIDTH in src/shell/layoutBounds.ts -- the grid-level
-   * guarantee that the expanded workspace never resolves below 320px (the
-   * rail track yields first via its minmax(0, ·) min). The minmax-bearing
-   * tracks (conversation/workspace) keep a matching minmax() structure in
+   * Right-sidebar floor (issue #770): the right-sidebar track's 320px min
+   * mirrors RIGHT_SIDEBAR_MIN_WIDTH in src/shell/layoutBounds.ts -- the
+   * grid-level guarantee that the expanded right sidebar never resolves
+   * below 320px (the rail track yields first via its minmax(0, ·) min). The
+   * minmax-bearing tracks (conversation/right sidebar) keep a matching
+   * minmax() structure in
    * both lists and the bare-flex spacers pair fr↔fr, so the fold animation's
    * grid-template-columns interpolation stays smooth (a bare 0fr in the
    * collapsed list would pair a length min against auto and snap). The
@@ -213,9 +214,9 @@
    * length vs percentage, both resolving against the same definite container
    * width -- so the fold slide interpolates as smoothly as the retired
    * px ↔ px pair did. */
-  --workspace-min-width: 320px;
+  --right-sidebar-min-width: 320px;
   --track-grid:
-    0fr minmax(0, var(--rail-width, 460px)) minmax(var(--workspace-min-width), 1fr) 0fr;
+    0fr minmax(0, var(--rail-width, 460px)) minmax(var(--right-sidebar-min-width), 1fr) 0fr;
   --track-grid-collapsed: 0fr minmax(0, 100%) minmax(0, 0fr) 0fr;
   /* Collapsed reading column cap (issue #833; recalibrated for the 1200px
    * default window, issue #1286): the folded conversation track reads
@@ -439,7 +440,7 @@
  * inert attribute (issue #287), which drops the subtree from the Tab sequence
  * + blocks pointer events + hides it from the a11y tree (replacing the prior
  * pointer-events:none). The modifier sits on .shell so it scopes exactly like
- * the workspace sidebar-collapsed classes (harmless outside
+ * the right-sidebar-collapsed classes (harmless outside
  * settings-mode: the overlay mounts only while settings are open). */
 .shell.settings-nav-collapsed .settings-overlay { grid-template-columns: 0 1fr; }
 .shell.settings-nav-collapsed .settings-nav { opacity: 0; }
@@ -524,12 +525,12 @@
  * startup), so scrolling content -- including content that overflows the
  * reading column into the rail's padding -- never peeks around the
  * floating card, while the scrollbar itself stays visible down to the
- * window's bottom edge. The workspace column is NOT covered (issue #863
+ * window's bottom edge. The right-sidebar column is NOT covered (issue #863
  * retired the track's ::before card fill): over col 3 the strip is
- * transparent and hit-inert, so the workspace column owns its bottom
+ * transparent and hit-inert, so the right-sidebar column owns its bottom
  * edge -- content, its scrollbar, and the sticky result pagination all
  * reach the app's bottom edge, visible and clickable (wheel scrolls the
- * workspace natively; the strip's forwarding never sees it). The slot
+ * right sidebar natively; the strip's forwarding never sees it). The slot
  * itself is pointer-events:none in the bottom posture, so hits over the
  * reserved band fall through to the rail's native scrollbar (draggable
  * again); the card and the backdrop re-enable pointer-events, keeping the
@@ -539,15 +540,15 @@
  * Bottom width tracking (ADR-0090 calibration, ADR-0092): the
  * .shell-bar-track mirrors the pane's 4-track .session-body grid so the bar
  * sits exactly under the conversation column — rail width (--rail-width)
- * when the workspace is open, the full-width conversation track when the
- * active pane is workspace-collapsed (App mirrors the fold via .ws-collapsed,
+ * when the right sidebar is open, the full-width conversation track when the
+ * active pane is right-sidebar-collapsed (App mirrors the fold via .right-sidebar-collapsed,
  * reported upward through the composer fields). The track's
  * grid-template-columns transition matches the pane's so the bar follows the
  * fold animation + rail drag.
  *
  * Centered: shrink-wrapped at the main area's midline, holding the greeting
  * + bar. The track caps the bar at a readable width (no conversation column
- * exists in cold start — session header / rail / workspace are all hidden). */
+ * exists in cold start — session header / rail / right sidebar are all hidden). */
 .shell-bar-slot {
   position: absolute;
   left: 0;
@@ -611,7 +612,7 @@
   grid-template-columns: var(--track-grid);
   transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-/* Workspace folded (ADR-0083): mirror the pane's fold tracks so the bar's
+/* Right sidebar folded (ADR-0083): mirror the pane's fold tracks so the bar's
  * track spans the same full-width conversation column. Both selectors
  * reference the shared custom properties on .shell so the two surfaces never
  * drift. The bar card carries the reading-column inset unconditionally:
@@ -628,7 +629,7 @@
  * AND unfold slides without its own transition (a fold-scoped rule
  * would drop the cap at unfold start and snap one frame on panes wider
  * than the cap). */
-.shell-bar-slot.bottom.ws-collapsed .shell-bar-track {
+.shell-bar-slot.bottom.right-sidebar-collapsed .shell-bar-track {
   grid-template-columns: var(--track-grid-collapsed);
 }
 .shell-bar-slot.bottom .question-bar {
@@ -664,63 +665,63 @@
  * this is a flex column rather than the original two-row grid: auto-placement
  * would shift the body out of its positional 1fr row whenever the banner
  * mounts. The session-body is the 4-track
- * grid carrying the conversation column + the workspace. ADR-0092: the
+ * grid carrying the conversation column + the right sidebar. ADR-0092: the
  * QuestionBar moved to the shell level — it overlays the pane host from
  * .main-area (issue #836), so the pane keeps its full height behind the
  * bar and the rail's bottom padding compensates (--shell-bar-h).
  *
- * ADR-0083 workspace fold (issue #298): the pane carries .workspace-collapsed
+ * ADR-0083 right-sidebar fold (issue #298): the pane carries .right-sidebar-collapsed
  * while the panel is folded away (cold-start default, session-ephemeral) --
  * the rail owns the released space (the rail-as-primary form). The rail's
  * floors live in useRailResize (350 direct-drag / 280 compensated); the
- * 320px minimum-usable-column floor is the workspace track's
- * (--workspace-min-width, issue #770). */
+ * 320px minimum-usable-column floor is the right-sidebar track's
+ * (--right-sidebar-min-width, issue #770). */
 .session-pane {
   height: 100%;
   display: flex;
   flex-direction: column;
 }
-/* Workspace folded (ADR-0083, issue #298): 4-track grid hands the container's
- * full width to the conversation track when the workspace folds. Tracks:
- * [spacer 0fr] [conversation minmax(0, 100%)] [workspace minmax(0, 0fr)]
+/* Right sidebar folded (ADR-0083, issue #298): 4-track grid hands the container's
+ * full width to the conversation track when the right sidebar folds. Tracks:
+ * [spacer 0fr] [conversation minmax(0, 100%)] [right sidebar minmax(0, 0fr)]
  * [spacer 0fr] -- the rail scroll container spans the pane's full width
  * (scrollbar pinned to the window edge, wheel over the old empty flanks
  * scrolls because that surface is rail now, not dead spacer grid area), and
  * the .rail-reading-column wrapper inside the rail caps the reading measure.
- * The workspace column shrinks minmax(min, 1fr) -> minmax(0, 0fr). Every
+ * The right-sidebar column shrinks minmax(min, 1fr) -> minmax(0, 0fr). Every
  * track interpolates (minmax<->minmax length-vs-percentage on the
- * conversation max, px-by-px on the workspace min, bare fr<->fr on the
+ * conversation max, px-by-px on the right-sidebar min, bare fr<->fr on the
  * spacers) so no jitter. */
-.shell .session-pane.workspace-collapsed .session-body {
+.shell .session-pane.right-sidebar-collapsed .session-body {
   grid-template-columns: var(--track-grid-collapsed);
 }
-.shell .session-pane.workspace-collapsed .session-conversation { border-right-color: transparent; }
-.shell .session-pane.workspace-collapsed .session-workspace {
+.shell .session-pane.right-sidebar-collapsed .session-conversation { border-right-color: transparent; }
+.shell .session-pane.right-sidebar-collapsed .session-right-sidebar {
   opacity: 0;
 }
-/* Clip the workspace AND every descendant scroll container while folded.
+/* Clip the right sidebar AND every descendant scroll container while folded.
    The shrinking column reflows the rich content (tables / charts / wrapping
    text), which summons transient scrollbars on every overflow:auto
-   descendant (.workspace-body's two tabpanel children first of all) --
+   descendant (.right-sidebar-body's two tabpanel children first of all) --
    opacity does not hide scrollbars, so they flicker during the fade.
    Specificity (0,4,0) beats the utility overflow classes without
    !important. The class applies the instant the fold begins, so the clip
    precedes the first reflow frame. */
-.shell .session-pane.workspace-collapsed .session-workspace,
-.shell .session-pane.workspace-collapsed .session-workspace * {
+.shell .session-pane.right-sidebar-collapsed .session-right-sidebar,
+.shell .session-pane.right-sidebar-collapsed .session-right-sidebar * {
   overflow: hidden;
 }
-/* Expand direction: the workspace BODY waits for the grid slide (280ms) to
+/* Expand direction: the right-sidebar BODY waits for the grid slide (280ms) to
    settle before fading in -- at intermediate widths the content wraps taller
    than its final layout and the panels' scrollbars would flicker in with
-   the fade. The workspace card surface itself keeps the normal 200ms fade
+   the fade. The right-sidebar card surface itself keeps the normal 200ms fade
    so the panel still glides with the column (the sidebar fold parity); only
    the inner body is staged. The collapsed rule overrides the delay so the
    fold fades out immediately. */
-.workspace-body {
+.right-sidebar-body {
   transition: opacity 150ms ease 280ms;
 }
-.shell .session-pane.workspace-collapsed .workspace-body {
+.shell .session-pane.right-sidebar-collapsed .right-sidebar-body {
   opacity: 0;
   transition: opacity 200ms ease;
 }
@@ -736,10 +737,10 @@
 @keyframes session-header-toggle-in {
   from { opacity: 0; }
 }
-.session-header .workspace-toggle {
+.session-header .right-sidebar-toggle {
   animation: session-header-toggle-in 150ms ease-out backwards;
 }
-/* Session header (row 1): the session name + the workspace toggle. Moved out
+/* Session header (row 1): the session name + the right-sidebar toggle. Moved out
    of the global topbar so session-scoped chrome
    lives with the session pane; the topbar keeps only shell-wide controls
    (sidebar toggle + header actions + window controls). The title row floats
@@ -751,7 +752,7 @@
   height: var(--session-header-height); min-height: var(--session-header-height);
   padding: 0 1rem;
 }
-/* Grid row: conversation + workspace. Same grid-template-columns slide
+/* Grid row: conversation + right sidebar. Same grid-template-columns slide
  * pattern as the shell sidebar -- the transition on grid-template-columns
  * makes the column boundary slide smoothly (expanded rail track <-> the
  * full-width fold track).
@@ -759,7 +760,7 @@
  *
  * --rail-width (set inline on .shell by useRailResize) drives the
  * conversation column's max width so the user can drag-resize the
- * conversation/workspace boundary, mirroring the sidebar resize pattern.
+ * conversation/right-sidebar boundary, mirroring the sidebar resize pattern.
  * position:relative anchors the absolutely-positioned .rail-resize-handle. */
 .session-body {
   flex: 1;
@@ -781,7 +782,7 @@
    session-body: it takes no track space (the scroll extent never swells for
    it), but grid placement still applies -- column 2 is the conversation
    column in BOTH track postures (the fold only reshapes the third), so one
-   rule carries the workspace fold, and the fully-placed grid column
+   rule carries the right-sidebar fold, and the fully-placed grid column
    (start AND end non-auto -- an auto end line leaves the area as the whole
    container) makes the column the containing block. Centering rides the
    CSS2 abspos route (inset-inline 0 + auto margins), NOT justify-self:
@@ -802,8 +803,8 @@
   bottom: calc(var(--shell-bar-h, 0px) + 0.5rem);
   z-index: 5;
 }
-/* Draggable rail resize handle (conversation/workspace boundary). A thin
-   strip straddling the conversation/workspace column boundary; absolutely
+/* Draggable rail resize handle (conversation/right-sidebar boundary). A thin
+   strip straddling the conversation/right-sidebar column boundary; absolutely
    positioned within .main-area so its bottom spans the shell-level
    QuestionBar (ADR-0092) while its top stops at the session header's bottom
    edge (issue #782) -- the boundary is meaningless inside the full-width
@@ -811,8 +812,8 @@
    handle's top and the header's height share --session-header-height. The
    --rail-width variable (set
    inline on .shell by useRailResize) drives left placement. Hidden when
-   cold-start, settings mode, or the workspace is folded
-   (.workspace-collapsed) -- the 4-track grid hands the conversation track
+   cold-start, settings mode, or the right sidebar is folded
+   (.right-sidebar-collapsed) -- the 4-track grid hands the conversation track
    the full width and the boundary no longer maps to --rail-width.
    touch-action:none prevents the
    browser from interpreting the drag as a pan/zoom. */
@@ -856,10 +857,10 @@
   border-right-color: transparent;
 }
 /* Hide the rail handle when there is no active session (cold start), in
-   settings mode, or when the active session's workspace is folded. */
+   settings mode, or when the active session's right sidebar is folded. */
 .shell.cold-start-mode .rail-resize-handle,
 .shell.settings-mode .rail-resize-handle,
-.main-area.workspace-collapsed .rail-resize-handle {
+.main-area.right-sidebar-collapsed .rail-resize-handle {
   display: none;
 }
 /* Conversation column: the thread rail (ADR-0092: the QuestionBar moved to
@@ -883,7 +884,7 @@
   /* The fold fade for the divider: the collapsed rule flips the color to
      transparent, so the line fades out over the slide instead of popping
      off in the first frame (the twin of the 200ms opacity fade the
-     workspace column rides). */
+     right-sidebar column rides). */
   transition: border-right-color 200ms ease;
 }
 
@@ -951,12 +952,12 @@
   max-width: var(--reading-column-cap);
 }
 
-.session-workspace {
+.session-right-sidebar {
   grid-column: 3;
   min-width: 0;
   overflow: hidden auto;
   display: flex; flex-direction: column;
-  /* Page-floor surface (issue #865): the workspace column rides the canvas
+  /* Page-floor surface (issue #865): the right-sidebar column rides the canvas
      (--background), not card, so in-content card surfaces that sit directly on
      it (the working-set panels) read as a layer above the floor
      per the DESIGN.md surface levels -- dark mode gains the brightness step
@@ -975,14 +976,14 @@
      (minmax(320px, 1fr) ignores intrinsic sizes), and the subtree is
      already clipped by this rule's own overflow and self-contained by
      its flex formatting context. */
-  container: workspace / inline-size;
+  container: right-sidebar / inline-size;
 }
-/* ADR-0067 (issue #173): the workspace + textual-card VISUAL rules retired
+/* ADR-0067 (issue #173): the right-sidebar + textual-card VISUAL rules retired
  * into SessionPane.tsx + App.tsx as Tailwind utility + ADR-0050 token. The
  * rule-by-rule retirement lives on each component's ADR-0067 inline comment
  * (not re-listed here -- a hand-kept copy drifts on the next slice, per the
- * retire-scope convention above). The semantic class hooks (.workspace-tabs /
- * .workspace-body / .workspace-hero) stay on the components for
+ * retire-scope convention above). The semantic class hooks (.right-sidebar-tabs /
+ * .right-sidebar-body / .right-sidebar-hero) stay on the components for
  * selector / test stability; the textual-card hooks retired with the card
  * itself (ADR-0114). The bare "active" class on the tab button is kept
  * as a state marker. The .active-chip rule below is layout-only (pushing the

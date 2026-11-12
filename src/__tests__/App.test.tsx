@@ -686,7 +686,7 @@ describe("App ask flow", () => {
     );
     // the materialized result pane appears (ResultView heading, titled with
     // the producing question, issue #772). The rail's turn card also shows the
-    // question text, so target the heading role to assert the workspace
+    // question text, so target the heading role to assert the right sidebar
     // ResultView specifically.
     await waitFor(() =>
       expect(
@@ -766,13 +766,13 @@ describe("App ask flow", () => {
   });
 });
 
-describe("App workspace history indicator (issue #757)", () => {
+describe("App right-sidebar history indicator (issue #757)", () => {
   // The zh-CN catalog strings for the indicator + its exit (renderPane's
   // default locale), resolved from the catalog so the assertions track the
   // wording instead of duplicating literals (issue #139 convention).
   const HISTORY_MESSAGE = catalogFor("zh-CN")["session.historyResult.message"];
   const BACK_TO_LATEST = catalogFor("zh-CN")["session.historyResult.backToLatest"];
-  const EXPAND_WORKSPACE = catalogFor("zh-CN")["workspace.expand"];
+  const EXPAND_RIGHT_SIDEBAR = catalogFor("zh-CN")["rightSidebar.expand"];
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -788,7 +788,7 @@ describe("App workspace history indicator (issue #757)", () => {
     });
     // A resumed session's thread: two Materialized turns (the session
     // fixtures mint them). R5 lands the view on the latest primary
-    // (result_2); the workspace starts folded (ADR-0083), so each flow
+    // (result_2); the right sidebar starts folded (ADR-0083), so each flow
     // opens it via the header toggle or a rail selection. Seeded on
     // state.thread (not a frozen mockResolvedValue) so an ask-flow test's
     // turn-end refetch can return the recorded row too (issue #1088). The
@@ -801,9 +801,9 @@ describe("App workspace history indicator (issue #757)", () => {
 
   it("shows no indicator when the viewed result is the latest one", async () => {
     renderPane();
-    // Open the folded workspace (ADR-0083 cold-start posture) to reveal the R5
+    // Open the folded right sidebar (ADR-0083 cold-start posture) to reveal the R5
     // resume landing on the latest result.
-    fireEvent.click(screen.getByRole("button", { name: EXPAND_WORKSPACE }));
+    fireEvent.click(screen.getByRole("button", { name: EXPAND_RIGHT_SIDEBAR }));
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument(),
     );
@@ -811,11 +811,11 @@ describe("App workspace history indicator (issue #757)", () => {
   });
 
   it("shows no indicator on the hero when there is no result", async () => {
-    // AC "(no result)": the hero owns the workspace and the indicator has no
+    // AC "(no result)": the hero owns the right sidebar and the indicator has no
     // surface there (it rides the result branch of the derivation only).
     vi.mocked(conversation).mockResolvedValue([]);
     renderPane();
-    fireEvent.click(screen.getByRole("button", { name: EXPAND_WORKSPACE }));
+    fireEvent.click(screen.getByRole("button", { name: EXPAND_RIGHT_SIDEBAR }));
     await waitFor(() =>
       expect(
         screen.getByText(catalogFor("zh-CN")["session.hero.hasData"]),
@@ -827,7 +827,7 @@ describe("App workspace history indicator (issue #757)", () => {
   it("flags a history selection and the exit returns to the latest primary", async () => {
     renderPane();
     // Rail result-link click: moves the view onto the older result and opens
-    // the workspace (dual-view linkage, ADR-0083).
+    // the right sidebar (dual-view linkage, ADR-0083).
     await clickRailResultLink("result_1");
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
@@ -861,15 +861,15 @@ describe("App workspace history indicator (issue #757)", () => {
   });
 });
 
-describe("App workspace rerun/retry actions (issue #758)", () => {
+describe("App right-sidebar rerun/retry actions (issue #758)", () => {
   // The zh-CN catalog accessible names for the three action buttons (issue
   // #139 convention: resolve from the catalog, never duplicate literals).
   const RERUN_LABEL = catalogFor("zh-CN")["disclosure.result.staleRerunLabel"];
   const RETRY_LABEL = catalogFor("zh-CN")["thread.outcome.retryLabel"];
-  const EXPAND_WORKSPACE = catalogFor("zh-CN")["workspace.expand"];
+  const EXPAND_RIGHT_SIDEBAR = catalogFor("zh-CN")["rightSidebar.expand"];
 
   // A working-set result descriptor marked stale by a source deletion (the
-  // stale cascade). The workspace's stale anchor derives from this runtime
+  // stale cascade). The right sidebar's stale anchor derives from this runtime
   // truth (ADR-0051), never from the thread snapshot.
   function staleResult(referenceName: string): DatasetDescriptor {
     return {
@@ -916,7 +916,7 @@ describe("App workspace rerun/retry actions (issue #758)", () => {
       () => new Promise<TurnOutcome>((resolve) => { settleAsk = resolve; }),
     );
     renderPane();
-    fireEvent.click(screen.getByRole("button", { name: EXPAND_WORKSPACE }));
+    fireEvent.click(screen.getByRole("button", { name: EXPAND_RIGHT_SIDEBAR }));
     const rerun = await screen.findByRole("button", { name: RERUN_LABEL });
     fireEvent.click(rerun);
     await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q:result_1", []));
@@ -951,7 +951,7 @@ describe("App workspace rerun/retry actions (issue #758)", () => {
   });
 
   it("the history-viewed stale banner's rerun fires the VIEWED result's question", async () => {
-    // #757 x #758: the two features interleave at WorkspaceResult -- viewing
+    // #757 x #758: the two features interleave at RightSidebarResult -- viewing
     // an older (stale) result must rerun THAT result's producing question,
     // never the latest turn's. The single-thread test above cannot tell the
     // two apart; this pins the provenance.
@@ -989,10 +989,10 @@ describe("App workspace rerun/retry actions (issue #758)", () => {
   });
 });
 
-describe("App workspace tab keyboard contract (issue #760)", () => {
+describe("App right-sidebar tab keyboard contract (issue #760)", () => {
   // The zh-CN catalog accessible names (issue #139 convention: resolve from
   // the catalog, never duplicate literals).
-  const EXPAND_WORKSPACE = catalogFor("zh-CN")["workspace.expand"];
+  const EXPAND_RIGHT_SIDEBAR = catalogFor("zh-CN")["rightSidebar.expand"];
   const RESULT_TAB = catalogFor("zh-CN")["session.tab.result"];
   const WORKING_SET_TAB = catalogFor("zh-CN")["session.tab.workingSet"];
   const HERO_HAS_DATA = catalogFor("zh-CN")["session.hero.hasData"];
@@ -1012,26 +1012,26 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
     vi.mocked(conversation).mockResolvedValue([]);
   });
 
-  /** Expand the folded workspace (ADR-0083 cold-start posture), await the tab row. */
-  async function openWorkspaceTabs(): Promise<{
+  /** Expand the folded right sidebar (ADR-0083 cold-start posture), await the tab row. */
+  async function openRightSidebarTabs(): Promise<{
     resultTab: HTMLElement;
     workingSetTab: HTMLElement;
   }> {
-    fireEvent.click(screen.getByRole("button", { name: EXPAND_WORKSPACE }));
+    fireEvent.click(screen.getByRole("button", { name: EXPAND_RIGHT_SIDEBAR }));
     const resultTab = await screen.findByRole("tab", { name: RESULT_TAB });
     const workingSetTab = screen.getByRole("tab", { name: WORKING_SET_TAB });
     return { resultTab, workingSetTab };
   }
 
   /** The per-tab tabpanel the tab's aria-controls points at (a child of
-   *  .workspace-body, issue #1060 keep-alive). */
+   *  .right-sidebar-body, issue #1060 keep-alive). */
   function panelOf(tab: HTMLElement): HTMLElement {
     return document.getElementById(tab.getAttribute("aria-controls")!)!;
   }
 
   it("keeps only the selected tab in the tab sequence (roving tabindex)", async () => {
     renderPane();
-    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    const { resultTab, workingSetTab } = await openRightSidebarTabs();
     // The active tab stays in the Tab sequence; the inactive one is skipped.
     expect(resultTab).toHaveAttribute("tabindex", "0");
     expect(workingSetTab).toHaveAttribute("tabindex", "-1");
@@ -1039,7 +1039,7 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
 
   it("ArrowRight activates the working-set tab, moves focus, and the content follows", async () => {
     renderPane();
-    const { resultTab } = await openWorkspaceTabs();
+    const { resultTab } = await openRightSidebarTabs();
     resultTab.focus();
     fireEvent.keyDown(resultTab, { key: "ArrowRight" });
 
@@ -1056,7 +1056,7 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
 
   it("ArrowLeft wraps from the first tab back to the last", async () => {
     renderPane();
-    const { resultTab } = await openWorkspaceTabs();
+    const { resultTab } = await openRightSidebarTabs();
     resultTab.focus();
     fireEvent.keyDown(resultTab, { key: "ArrowLeft" });
 
@@ -1067,7 +1067,7 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
 
   it("ArrowRight wraps from the last tab back to the first", async () => {
     renderPane();
-    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    const { resultTab, workingSetTab } = await openRightSidebarTabs();
     resultTab.focus();
     // Two consecutive ArrowRights: the first activates the working-set tab,
     // the second wraps from the last tab back to the first (a bare focus()
@@ -1085,7 +1085,7 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
 
   it("Home and End jump to the first and last tab", async () => {
     renderPane();
-    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    const { resultTab, workingSetTab } = await openRightSidebarTabs();
     workingSetTab.focus();
     fireEvent.keyDown(workingSetTab, { key: "Home" });
     expect(resultTab).toHaveAttribute("aria-selected", "true");
@@ -1097,7 +1097,7 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
 
   it("each tab owns its own always-mounted panel (issue #1060 keep-alive)", async () => {
     renderPane();
-    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    const { resultTab, workingSetTab } = await openRightSidebarTabs();
     // Distinct panels, each permanently labelled by its own tab -- the
     // keep-alive shape (issue #1060) replaced #760's shared panel, whose
     // label used to track the active tab.
@@ -1118,7 +1118,7 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
 
   it("keeps both panels mounted, hiding the inactive one (issue #1060)", async () => {
     renderPane();
-    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    const { resultTab, workingSetTab } = await openRightSidebarTabs();
     const resultPanel = panelOf(resultTab);
     const workingSetPanel = panelOf(workingSetTab);
     // Wait for the working set to land: the hero flips to its hasData copy.
@@ -1150,7 +1150,7 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
   it("the working-set detail pick survives a tab roundtrip (issue #1060)", async () => {
     // A second source so the pick has somewhere to go; row_count 9
     // distinguishes its detail line (行数：9) from people's (行数：1) -- the
-    // anchor convention the WorkspaceWorkingSet tests use. Set before
+    // anchor convention the RightSidebarWorkingSet tests use. Set before
     // renderPane: the listWorkingSet mock reads state lazily.
     const orders: DatasetDescriptor = {
       ...guidedDataset,
@@ -1161,7 +1161,7 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
     };
     state.workingSet = [guidedDataset, orders];
     renderPane();
-    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    const { resultTab, workingSetTab } = await openRightSidebarTabs();
     const workingSetPanel = panelOf(workingSetTab);
     // The initial pick seeds from the active dataset (people, 行数：1);
     // findBy* -- the working set query resolves a beat after the tabs.
@@ -1187,13 +1187,13 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
     // The banners live ABOVE both panels -- they belong to the session, not
     // either tab -- so hiding a panel must never hide them. A rename
     // rejection surfaces through s.error (runSimpleMutation -> setError)
-    // as the pane's workspace ErrorBanner, rendered outside the tabpanels.
+    // as the pane's right-sidebar ErrorBanner, rendered outside the tabpanels.
     vi.mocked(renameDataset).mockRejectedValueOnce({
       kind: "RenameDataset",
       data: { kind: "DisplayTaken", data: "员工表" },
     });
     renderPane();
-    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    const { resultTab, workingSetTab } = await openRightSidebarTabs();
     fireEvent.click(workingSetTab);
     // The rename trigger lives on the working-set row -- the same door
     // production uses (and only reachable in the visible panel).
@@ -1225,7 +1225,7 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
       data: { kind: "NotFound", data: "people" },
     });
     renderPane();
-    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    const { resultTab, workingSetTab } = await openRightSidebarTabs();
     fireEvent.click(workingSetTab);
     await waitFor(() =>
       expect(
@@ -1253,7 +1253,7 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
 
   it("mouse clicks still switch tabs", async () => {
     renderPane();
-    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    const { resultTab, workingSetTab } = await openRightSidebarTabs();
     fireEvent.click(workingSetTab);
     expect(workingSetTab).toHaveAttribute("aria-selected", "true");
     expect(resultTab).toHaveAttribute("aria-selected", "false");
@@ -1262,13 +1262,13 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
     ).toBeInTheDocument();
   });
 
-  it("pins the workspace tabpanel base type to 14px (issue #864)", async () => {
-    // The panel is the workspace's type root: every text node that does not
+  it("pins the right-sidebar tabpanel base type to 14px (issue #864)", async () => {
+    // The panel is the right sidebar's type root: every text node that does not
     // carry an explicit size inherits from here. Without the text-sm baseline
     // the bare inheritors render at the 16px document default (one step above
     // the body-md token) -- pin it so the baseline cannot silently drop.
     renderPane();
-    const { resultTab } = await openWorkspaceTabs();
+    const { resultTab } = await openRightSidebarTabs();
     expect(panelOf(resultTab).className.split(/\s+/)).toContain("text-sm");
   });
 });

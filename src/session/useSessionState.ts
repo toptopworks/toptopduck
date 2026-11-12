@@ -13,12 +13,12 @@ import {
 import { useTurnFlow, type LiveTurn } from "./useTurnFlow";
 import { useArtifactAutoOpen } from "./useArtifactAutoOpen";
 import { useViewedResult } from "./useViewedResult";
-import { useWorkspaceCollapse } from "./useWorkspaceCollapse";
+import { useRightSidebarCollapse } from "./useRightSidebarCollapse";
 import type { ApprovalEntry } from "./useApprovalEvents";
 import {
-  deriveWorkspaceContent,
+  deriveRightSidebarContent,
   type ViewedResult,
-  type WorkspaceContent,
+  type RightSidebarContent,
 } from "./workspace";
 import type { AppError, SessionFlowKind } from "../types/error";
 import type { DatasetDescriptor, GuidanceRequest, SheetGuidance, StaleAnchor } from "../types/dataset";
@@ -70,12 +70,12 @@ export interface UseSessionState {
   queryErrors: ReadonlyArray<Error>;
   // Client UI state.
   viewedResult: ViewedResult | null;
-  workspaceContent: WorkspaceContent;
-  /** ADR-0083 (issue #298): the workspace panel's fold. Cold-start collapsed;
+  rightSidebarContent: RightSidebarContent;
+  /** ADR-0083 (issue #298): the right sidebar's fold. Cold-start collapsed;
    *  the first result_N promotion auto-expands once, then it is manual. The
    *  one-shot is session-scoped (issue #771): a remount onto an
    *  already-materialized session does not re-arm it. */
-  workspaceCollapsed: boolean;
+  rightSidebarCollapsed: boolean;
   /** Derived union (turnLoading || mutationLoading): the pane-consumption
    *  ADR-0040 execution-window gate -- either domain in flight disables. */
   loading: boolean;
@@ -111,16 +111,16 @@ export interface UseSessionState {
   persistError: SaveError | null;
   /** ADR-0136: source status notices from a watermark-hit resume -- the open
    *  succeeded but a source file is missing / changed since settle. Drained
-   *  once per pane mount; rendered as a workspace notice. */
+   *  once per pane mount; rendered as a right-sidebar notice. */
   sourceNotices: SourceNotice[];
   guidance: { request: GuidanceRequest; path: string } | null;
   /** Issue #748: the guided-submit failure rendered inline inside the
-   *  GuidedLoadDialog (the workspace banner would sit behind the modal
+   *  GuidedLoadDialog (the right-sidebar banner would sit behind the modal
    *  scrim). null outside a failed guided submit; cleared on re-submit /
    *  cancel / a freshly routed guidance. */
   guidanceError: AppError | null;
   /** Issue #748: files left unprocessed by a terminally halted batch
-   *  (cancel-halt / Error-halt), rendered as a workspace notice; null
+   *  (cancel-halt / Error-halt), rendered as a right-sidebar notice; null
    *  otherwise and cleared at the start of the next ingest. */
   haltedRemaining: number | null;
   /** The in-flight ingest's progress block (issue #1485), or null -- the
@@ -153,21 +153,21 @@ export interface UseSessionState {
   fetchGuidanceWindow: (sheetName: string, offset: number, limit: number) => Promise<string[][]>;
   handleSelectResult: (referenceName: string) => void;
   /** ADR-0124 Decision 3 (issue #1088): rail artifact-card row click --
-   *  moves viewedResult onto the file view and opens the workspace (the
+   *  moves viewedResult onto the file view and opens the right sidebar (the
    *  handleSelectResult twin, keyed by the manifest entry's path). */
   handleSelectFile: (path: string) => void;
   /** Issue #1093: an in-stream fence chart click -- moves viewedResult onto
-   *  the viz view and opens the workspace (the handleSelectFile twin, keyed
+   *  the viz view and opens the right sidebar (the handleSelectFile twin, keyed
    *  by the fence's raw spec text). */
   handleSelectViz: (spec: string) => void;
   /** Issue #757: the history indicator's "back to latest" exit -- moves
    *  viewedResult to the latest Materialized turn's primary (hero fallback
    *  when the thread materialized none). The exit only renders while a result
-   *  is showing, so the workspace is already expanded: a plain passthrough,
+   *  is showing, so the right sidebar is already expanded: a plain passthrough,
    *  no fold composition. */
   handleJumpToLatest: () => void;
-  /** The session header's workspace fold toggle (ADR-0083, issue #298). */
-  handleToggleWorkspace: () => void;
+  /** The session header's right-sidebar fold toggle (ADR-0083, issue #298). */
+  handleToggleRightSidebar: () => void;
   clearError: () => void;
   /** Issue #763: refetch every session query currently in error state (the
    *  banner's Retry). Healthy queries keep their cached data untouched -- a
@@ -240,7 +240,7 @@ export function useSessionState(
 
   // --- Client UI state -----------------------------------------------------
   // viewedResult domain lives in useViewedResult (issue #229) -- see its header
-  // for the boundary. workspaceContent derivation stays here (fusion below).
+  // for the boundary. rightSidebarContent derivation stays here (fusion below).
   const {
     viewedResult,
     selectResult,
@@ -251,23 +251,23 @@ export function useSessionState(
     suppressInit,
     jumpToLatest,
   } = useViewedResult(thread);
-  // Workspace fold (ADR-0083, issue #298): cold-start collapsed, the first
+  // Right-sidebar fold (ADR-0083, issue #298): cold-start collapsed, the first
   // promotion auto-expands once, then purely manual. Session-ephemeral plain
   // state -- never persisted, reset on every pane mount (new / resume); the
   // one-shot consumption derives from the thread (issue #771), so a remount
   // onto an already-materialized session stays spent.
   const {
-    workspaceCollapsed,
-    expandWorkspace,
-    toggleWorkspace,
+    rightSidebarCollapsed,
+    expandRightSidebar,
+    toggleRightSidebar,
     notePromotion,
-  } = useWorkspaceCollapse(thread);
+  } = useRightSidebarCollapse(thread);
   // ADR-0124 Decision 3 (issue #1088): the artifact auto-open one-shot.
   // Composed here (like markProducedWithExpand below) so each hook keeps
   // owning exactly one state domain: this fusion watches the thread for a
   // freshly delivered manifest and moves the view + fold through the two
   // semantic methods above.
-  useArtifactAutoOpen(thread, selectFile, expandWorkspace);
+  useArtifactAutoOpen(thread, selectFile, expandRightSidebar);
   // Two loading domains (kept apart so the shell bar keys off the turn domain
   // only -- a dataset mutation's loading flag leaking into the shell bar made
   // the Ask/Stop button flip for the mutation's whole in-flight window):
@@ -319,9 +319,9 @@ export function useSessionState(
       });
   }, [sessionId]);
 
-  // --- Derived: workspace content ------------------------------------------
-  const workspaceContent = useMemo(
-    () => deriveWorkspaceContent(thread, viewedResult, staleByReference),
+  // --- Derived: right sidebar content --------------------------------------
+  const rightSidebarContent = useMemo(
+    () => deriveRightSidebarContent(thread, viewedResult, staleByReference),
     [thread, viewedResult, staleByReference],
   );
 
@@ -357,14 +357,14 @@ export function useSessionState(
   // Driven through injected deps; this hook never reaches for
   // the raw queryClient / viewed setters for turn work.
   // A settled Materialized turn moves viewedResult (the useViewedResult seam)
-  // AND spends the workspace's auto-expand one-shot (ADR-0083, issue #298):
+  // AND spends the right sidebar's auto-expand one-shot (ADR-0083, issue #298):
   // the session's first result_N opens the panel with the produced dataset,
   // later promotions never steal focus. Composed here (not inside either
   // hook) so each hook keeps owning exactly one state domain.
   // INVARIANT: markProduced must run unconditionally before notePromotion --
   // notePromotion spends the one-shot whether or not viewedResult actually
   // moved, so any future guard inside markProduced would desync the two
-  // ("one-shot spent but the workspace points nowhere"). useViewedResult's
+  // ("one-shot spent but the panel points nowhere"). useViewedResult's
   // markProduced is unconditional by contract; keep it so.
   const markProducedWithExpand = useCallback(
     (referenceName: string) => {
@@ -457,19 +457,19 @@ export function useSessionState(
 
   // Rail result selection (preview card / result link, ADR-0083 issue #298):
   // moves viewedResult (the move rule lives in useViewedResult) AND opens the
-  // workspace when folded -- the rail and the panel are dual views of the same
-  // dataset, so a rail selection must surface its panel half.
+  // right sidebar when folded -- the rail and the panel are dual views of the
+  // same dataset, so a rail selection must surface its panel half.
   // INVARIANT: callers must pass a referenceName that exists in the thread --
   // selectResult is unconditional, so a stale / foreign name would expand the
-  // panel onto an empty workspace. Both current callers (result-link +
+  // panel onto an empty right sidebar. Both current callers (result-link +
   // preview card) source the name from primary.dataset.reference_name, which
   // is always in-thread; add a guard here if that ever changes.
   const handleSelectResult = useCallback(
     (referenceName: string) => {
       selectResult(referenceName);
-      expandWorkspace();
+      expandRightSidebar();
     },
-    [selectResult, expandWorkspace],
+    [selectResult, expandRightSidebar],
   );
 
   // The artifact twin (ADR-0124 Decision 3): a rail artifact-card row moves
@@ -480,9 +480,9 @@ export function useSessionState(
   const handleSelectFile = useCallback(
     (path: string) => {
       selectFile(path);
-      expandWorkspace();
+      expandRightSidebar();
     },
-    [selectFile, expandWorkspace],
+    [selectFile, expandRightSidebar],
   );
 
   // The viz twin (issue #1093): an in-stream fence click moves the view onto
@@ -493,9 +493,9 @@ export function useSessionState(
   const handleSelectViz = useCallback(
     (spec: string) => {
       selectViz(spec);
-      expandWorkspace();
+      expandRightSidebar();
     },
-    [selectViz, expandWorkspace],
+    [selectViz, expandRightSidebar],
   );
 
   const clearError = useCallback(() => setError(null), []);
@@ -513,8 +513,8 @@ export function useSessionState(
     staleByReference,
     queryErrors,
     viewedResult,
-    workspaceContent,
-    workspaceCollapsed,
+    rightSidebarContent,
+    rightSidebarCollapsed,
     loading,
     turnLoading,
     phase,
@@ -541,7 +541,7 @@ export function useSessionState(
     handleSelectFile,
     handleSelectViz,
     handleJumpToLatest: jumpToLatest,
-    handleToggleWorkspace: toggleWorkspace,
+    handleToggleRightSidebar: toggleRightSidebar,
     clearError,
     handleRetryQueries,
     mutationSurfaces,

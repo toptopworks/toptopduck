@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   artifactRenderKind,
-  deriveWorkspaceContent,
+  deriveRightSidebarContent,
   findArtifact,
   findLatestMaterializedPrimary,
   findMaterializedPayload,
@@ -12,9 +12,9 @@ import { artifactTurn, materialized, src, textual } from "./fixtures";
 import type { DatasetDescriptor } from "../../types/dataset";
 import type { ThreadEntry, TurnRecord } from "../../types/thread";
 
-// Unit tests for the pure workspace-derivation helpers (ADR-0051 / ADR-0062
+// Unit tests for the pure right-sidebar-derivation helpers (ADR-0051 / ADR-0062
 // R2, calibrated by ADR-0114). These are the architectural invariants the
-// shell's "what does the workspace show right now?" decision hinges on --
+// shell's "what does the right sidebar show right now?" decision hinges on --
 // testing them in isolation (without React / the IPC mock layer) pins the
 // two-state rule + the truth-source split (thread = turn payload truth)
 // precisely.
@@ -80,7 +80,7 @@ describe("findLatestMaterializedPrimary (issue #757)", () => {
 
   it("skips trailing non-materialized turns", () => {
     // "Latest" means the latest MATERIALIZED turn: B/C/D turns appended after
-    // it never reach the workspace (ADR-0114), so they never age the view.
+    // it never reach the right sidebar (ADR-0114), so they never age the view.
     expect(
       findLatestMaterializedPrimary([materialized("result_1"), textual("which?")]),
     ).toBe("result_1");
@@ -98,20 +98,20 @@ describe("findLatestMaterializedPrimary (issue #757)", () => {
   });
 });
 
-describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
+describe("deriveRightSidebarContent (ADR-0062 R2 two-state, ADR-0114)", () => {
   it("shows hero when there is no viewed result", () => {
-    expect(deriveWorkspaceContent([], null, new Map())).toEqual({ kind: "hero" });
+    expect(deriveRightSidebarContent([], null, new Map())).toEqual({ kind: "hero" });
     // A last Materialized turn with viewedResult null also -> hero (the user
     // has not opened the result pane).
-    expect(deriveWorkspaceContent([materialized("result_1")], null, new Map())).toEqual({
+    expect(deriveRightSidebarContent([materialized("result_1")], null, new Map())).toEqual({
       kind: "hero",
     });
   });
 
-  it("is inert to a non-materialized last turn (B/C/D never reach the workspace)", () => {
+  it("is inert to a non-materialized last turn (B/C/D never reach the right sidebar)", () => {
     // ADR-0114: the rail is the full read surface for turn content. A B/C/D
-    // last turn produces no workspace content -- no viewedResult, hero.
-    expect(deriveWorkspaceContent([textual("which?")], null, new Map())).toEqual({
+    // last turn produces no right-sidebar content -- no viewedResult, hero.
+    expect(deriveRightSidebarContent([textual("which?")], null, new Map())).toEqual({
       kind: "hero",
     });
   });
@@ -120,7 +120,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
     // ADR-0114: non-materialized turns do not disturb the current view; the
     // result stays until a new Materialized or another selection moves it.
     const thread = [materialized("result_1"), textual("which name?")];
-    const content = deriveWorkspaceContent(thread, { kind: "dataset", referenceName: "result_1" }, new Map());
+    const content = deriveRightSidebarContent(thread, { kind: "dataset", referenceName: "result_1" }, new Map());
     expect(content.kind).toBe("result");
     if (content.kind === "result") {
       expect(content.referenceName).toBe("result_1");
@@ -129,7 +129,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
 
   it("shows the viewed result chart + table for a history selection", () => {
     const thread = [materialized("result_1"), materialized("result_2")];
-    const content = deriveWorkspaceContent(thread, { kind: "dataset", referenceName: "result_1" }, new Map());
+    const content = deriveRightSidebarContent(thread, { kind: "dataset", referenceName: "result_1" }, new Map());
     expect(content.kind).toBe("result");
     if (content.kind === "result") {
       expect(content.referenceName).toBe("result_1");
@@ -141,7 +141,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
   it("carries the producing turn's question on the result branch (issue #758)", () => {
     // The rerun button's question rides the derivation so the result pane
     // never re-scans the thread itself (one scan, ADR-0051).
-    const content = deriveWorkspaceContent(
+    const content = deriveRightSidebarContent(
       [materialized("result_1")],
       { kind: "dataset", referenceName: "result_1" },
       new Map(),
@@ -155,7 +155,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
     const staleByReference = new Map([
       ["result_1", { reference_name: "orders", display_name: "orders", reason: "Deleted" as const }],
     ]);
-    const content = deriveWorkspaceContent(thread, { kind: "dataset", referenceName: "result_1" }, staleByReference);
+    const content = deriveRightSidebarContent(thread, { kind: "dataset", referenceName: "result_1" }, staleByReference);
     expect(content.kind).toBe("result");
     if (content.kind === "result") {
       expect(content.staleAnchor?.reason).toBe("Deleted");
@@ -165,12 +165,12 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
 
   it("falls back to hero when viewedResult points at a turn not in the thread", () => {
     // viewedResult set but the producing turn was GC'd / not yet appended.
-    expect(deriveWorkspaceContent([], { kind: "dataset", referenceName: "result_1" }, new Map()).kind).toBe("hero");
+    expect(deriveRightSidebarContent([], { kind: "dataset", referenceName: "result_1" }, new Map()).kind).toBe("hero");
   });
 
   describe("viewingHistory (issue #757 derived fact)", () => {
     it("is false when the viewed result is the latest Materialized primary", () => {
-      const content = deriveWorkspaceContent(
+      const content = deriveRightSidebarContent(
         [materialized("result_1"), materialized("result_2")],
         { kind: "dataset", referenceName: "result_2" },
         new Map(),
@@ -180,7 +180,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
     });
 
     it("is true when the viewed result is an older result", () => {
-      const content = deriveWorkspaceContent(
+      const content = deriveRightSidebarContent(
         [materialized("result_1"), materialized("result_2")],
         { kind: "dataset", referenceName: "result_1" },
         new Map(),
@@ -192,7 +192,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
     it("stays false when a non-materialized turn trails the viewed latest primary", () => {
       // The comparison target is the latest MATERIALIZED turn -- a trailing
       // B/C/D turn leaves the view on the latest result (ADR-0114).
-      const content = deriveWorkspaceContent(
+      const content = deriveRightSidebarContent(
         [materialized("result_1"), textual("which name?")],
         { kind: "dataset", referenceName: "result_1" },
         new Map(),
@@ -205,7 +205,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
       // The promotion-less tail must not flag the still-latest view: the scan
       // skips it and resolves the older turn's primary as the comparison
       // target (pinned here at the derivation level, not just the helper).
-      const content = deriveWorkspaceContent(
+      const content = deriveRightSidebarContent(
         [materialized("result_1"), noPrimaryTurn],
         { kind: "dataset", referenceName: "result_1" },
         new Map(),
@@ -237,10 +237,10 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
           trace: [], provenance: { skills: [] },
         },
       };
-      const antecedent = deriveWorkspaceContent([multiPromotion], { kind: "dataset", referenceName: "scratch_1" }, new Map());
+      const antecedent = deriveRightSidebarContent([multiPromotion], { kind: "dataset", referenceName: "scratch_1" }, new Map());
       expect(antecedent.kind).toBe("result");
       if (antecedent.kind === "result") expect(antecedent.viewingHistory).toBe(true);
-      const tail = deriveWorkspaceContent([multiPromotion], { kind: "dataset", referenceName: "result_1" }, new Map());
+      const tail = deriveRightSidebarContent([multiPromotion], { kind: "dataset", referenceName: "result_1" }, new Map());
       expect(tail.kind).toBe("result");
       if (tail.kind === "result") expect(tail.viewingHistory).toBe(false);
     });
@@ -352,10 +352,10 @@ describe("artifact derivation (ADR-0124, issue #1088)", () => {
     });
   });
 
-  describe("deriveWorkspaceContent file branch (single stage)", () => {
+  describe("deriveRightSidebarContent file branch (single stage)", () => {
     it("a file view resolves its manifest entry and render kind", () => {
       const thread = [artifactTurn([HTML, PDF])];
-      const content = deriveWorkspaceContent(thread, { kind: "file", path: HTML }, new Map());
+      const content = deriveRightSidebarContent(thread, { kind: "file", path: HTML }, new Map());
       expect(content).toEqual({
         kind: "file",
         path: HTML,
@@ -366,10 +366,10 @@ describe("artifact derivation (ADR-0124, issue #1088)", () => {
 
     it("a dataset view and a file view are the same selection domain -- last wins", () => {
       const thread = [artifactTurn([HTML]), materialized("result_1")];
-      const filePick = deriveWorkspaceContent(thread, { kind: "file", path: HTML }, new Map());
+      const filePick = deriveRightSidebarContent(thread, { kind: "file", path: HTML }, new Map());
       expect(filePick?.kind).toBe("file");
       // Re-selecting the dataset moves the SAME slot back -- no tabs, no stack.
-      const datasetPick = deriveWorkspaceContent(
+      const datasetPick = deriveRightSidebarContent(
         thread,
         { kind: "dataset", referenceName: "result_1" },
         new Map(),
@@ -378,7 +378,7 @@ describe("artifact derivation (ADR-0124, issue #1088)", () => {
     });
 
     it("a file view naming a path no turn carries degrades to hero", () => {
-      const content = deriveWorkspaceContent(
+      const content = deriveRightSidebarContent(
         [artifactTurn([HTML])],
         { kind: "file", path: "/a/foreign.pdf" },
         new Map(),
@@ -387,12 +387,12 @@ describe("artifact derivation (ADR-0124, issue #1088)", () => {
     });
   });
 
-  describe("deriveWorkspaceContent viz branch (issue #1093: the fence chart on the stage)", () => {
+  describe("deriveRightSidebarContent viz branch (issue #1093: the fence chart on the stage)", () => {
     it("a viz view resolves straight to the stage -- the spec body is self-contained", () => {
       // The fence body is the whole truth (ADR-0120): no thread resolution is
       // involved, so even an empty thread (or one whose turns moved on) shows
       // the staged chart until another selection displaces it.
-      const content = deriveWorkspaceContent(
+      const content = deriveRightSidebarContent(
         [],
         { kind: "viz", spec: "{\"mark\":\"bar\"}" },
         new Map(),

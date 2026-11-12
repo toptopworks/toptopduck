@@ -56,7 +56,7 @@ export function VizFence({
   selected = false,
 }: {
   spec: string;
-  /** Issue #1093: promotes this fence's body onto the workspace stage. The
+  /** Issue #1093: promotes this fence's body onto the right-sidebar stage. The
    *  handler receives the RAW body text -- the stage view's identity is the
    *  fence's own spec. Absent (the default): the chart renders inert/static,
    *  the posture the delegation sub-trace panel and the md artifact

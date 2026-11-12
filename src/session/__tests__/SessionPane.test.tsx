@@ -219,7 +219,7 @@ function renderPane(opts?: {
 }
 
 // Open a delivered file through its rail artifact card (the real selection
-// path: the click moves viewedResult + expands the workspace).
+// path: the click moves viewedResult + expands the right sidebar).
 async function openArtifact(fileName: string) {
   const name = `Open ${fileName} in the right sidebar`;
   fireEvent.click(await screen.findByRole("button", { name }));
@@ -324,7 +324,7 @@ describe("SessionPane artifact stage boundary", () => {
 // the pill's render gate rides the real rail element -- jsdom has no layout,
 // so the pause is staged by stubbing the rail's geometry and dispatching the
 // scroll event by hand (the same rig the hook suite uses).
-describe("SessionPane workspace panel postures", () => {
+describe("SessionPane right-sidebar panel postures", () => {
   beforeEach(stubSessionApis);
 
   // #1323: the file-kind panel retires as a scroll container (the stage
@@ -779,11 +779,11 @@ describe("SessionPane ask-again fire path (#1503)", () => {
 // surviving instance) -- the pre-calibration single mount never dropped it.
 // Placement pins ride document order, the same shape as the error-banner
 // relocation pin in App.test.tsx.
-describe("workspace toggle placement", () => {
+describe("right-sidebar toggle placement", () => {
   it("mounts in the session header while folded and moves into the tab row when expanded, exactly one at a time, keeping focus", async () => {
     const { container } = renderPane();
     const header = container.querySelector(".session-header");
-    const tabRow = container.querySelector(".workspace-tabs");
+    const tabRow = container.querySelector(".right-sidebar-tabs");
     expect(header).not.toBeNull();
     expect(tabRow).not.toBeNull();
 
@@ -797,12 +797,12 @@ describe("workspace toggle placement", () => {
     const expandedToggle = await screen.findByRole("button", { name: "Collapse right sidebar" });
     expect(tabRow!.contains(expandedToggle)).toBe(true);
     expect(header!.contains(expandedToggle)).toBe(false);
-    expect(container.querySelectorAll(".workspace-toggle")).toHaveLength(1);
+    expect(container.querySelectorAll(".right-sidebar-toggle")).toHaveLength(1);
 
     // Fold back: the focus follows the surviving header instance.
     fireEvent.click(expandedToggle);
     const refoldedToggle = await screen.findByRole("button", { name: "Expand right sidebar" });
     await waitFor(() => expect(refoldedToggle).toHaveFocus());
-    expect(container.querySelectorAll(".workspace-toggle")).toHaveLength(1);
+    expect(container.querySelectorAll(".right-sidebar-toggle")).toHaveLength(1);
   });
 });

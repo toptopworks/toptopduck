@@ -41,13 +41,13 @@ export interface ComposerSessionFields {
    *  Routed through useComposerQueue's tracked ingestMany (wrapping
    *  useIngestFlow's handleIngestMany) inside SessionPane. */
   handleIngestFiles: (paths: string[]) => void;
-  /** The session pane's workspace fold (ADR-0083). Bar-shaping, not
+  /** The session pane's right-sidebar fold (ADR-0083). Bar-shaping, not
    *  turn-flow: the shell-level bar slot mirrors the pane's conversation-column
-   *  geometry (rail width when the workspace is open, the full-width fold
+   *  geometry (rail width when the right sidebar is open, the full-width fold
    *  track when collapsed -- the bar card itself carries the centered
    *  reading-column width), so the bar width tracks the conversation column
    *  (ADR-0090 calibration, ADR-0092). */
-  workspaceCollapsed: boolean;
+  rightSidebarCollapsed: boolean;
 }
 
 export interface ComposerState extends ComposerSessionFields {
@@ -96,7 +96,7 @@ export const IDLE_SESSION_FIELDS: ComposerSessionFields = {
   handleAsk: idleHandleAsk,
   handleCancel: idleHandleCancel,
   handleIngestFiles: idleHandleIngestFiles,
-  workspaceCollapsed: false,
+  rightSidebarCollapsed: false,
 };
 
 // Null-safe hook for the composer bar's QuestionBar-facing state. Owns
