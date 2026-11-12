@@ -150,7 +150,7 @@ describe("WorkingSetList", () => {
   // WorkingSetEmptyState suite.
 
   it("pins the row-count annotation to the 12px caption token (issue #864)", () => {
-    // The workspace body's 14px baseline (issue #864) inherits into the
+    // The right-sidebar body's 14px baseline (issue #864) inherits into the
     // annotation's parent chain, and the preflight small rule (80%) would
     // resolve an unsized small at 11.2px -- below the caption token, the
     // ladder's floor. text-xs pins 12px independent of that chain.

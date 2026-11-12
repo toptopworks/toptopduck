@@ -95,7 +95,7 @@
    "container", #1245), so for those this is a guard rail rather than the
    primary sizing: it keeps the async follow chain (ResizeObserver -> width
    signal -> runAsync) from flashing a horizontal scrollbar during layout
-   transitions (workspace fold/unfold, window maximize/restore). Faceted and
+   transitions (right-sidebar fold/unfold, window maximize/restore). Faceted and
    concat layouts keep vega's default per-band width and never receive the
    keyword, so for them this clamp is the sizing, in place of scrolling: a
    chart that outdraws its host scales down proportionally. Paint-only: the
@@ -440,7 +440,7 @@
  * inert attribute (issue #287), which drops the subtree from the Tab sequence
  * + blocks pointer events + hides it from the a11y tree (replacing the prior
  * pointer-events:none). The modifier sits on .shell so it scopes exactly like
- * the workspace sidebar-collapsed classes (harmless outside
+ * the right-sidebar-collapsed classes (harmless outside
  * settings-mode: the overlay mounts only while settings are open). */
 .shell.settings-nav-collapsed .settings-overlay { grid-template-columns: 0 1fr; }
 .shell.settings-nav-collapsed .settings-nav { opacity: 0; }
@@ -548,7 +548,7 @@
  *
  * Centered: shrink-wrapped at the main area's midline, holding the greeting
  * + bar. The track caps the bar at a readable width (no conversation column
- * exists in cold start — session header / rail / workspace are all hidden). */
+ * exists in cold start — session header / rail / right sidebar are all hidden). */
 .shell-bar-slot {
   position: absolute;
   left: 0;
@@ -612,7 +612,7 @@
   grid-template-columns: var(--track-grid);
   transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-/* Workspace folded (ADR-0083): mirror the pane's fold tracks so the bar's
+/* Right sidebar folded (ADR-0083): mirror the pane's fold tracks so the bar's
  * track spans the same full-width conversation column. Both selectors
  * reference the shared custom properties on .shell so the two surfaces never
  * drift. The bar card carries the reading-column inset unconditionally:
@@ -665,7 +665,7 @@
  * this is a flex column rather than the original two-row grid: auto-placement
  * would shift the body out of its positional 1fr row whenever the banner
  * mounts. The session-body is the 4-track
- * grid carrying the conversation column + the workspace. ADR-0092: the
+ * grid carrying the conversation column + the right sidebar. ADR-0092: the
  * QuestionBar moved to the shell level — it overlays the pane host from
  * .main-area (issue #836), so the pane keeps its full height behind the
  * bar and the rail's bottom padding compensates (--shell-bar-h).
@@ -740,7 +740,7 @@
 .session-header .right-sidebar-toggle {
   animation: session-header-toggle-in 150ms ease-out backwards;
 }
-/* Session header (row 1): the session name + the workspace toggle. Moved out
+/* Session header (row 1): the session name + the right-sidebar toggle. Moved out
    of the global topbar so session-scoped chrome
    lives with the session pane; the topbar keeps only shell-wide controls
    (sidebar toggle + header actions + window controls). The title row floats
@@ -752,7 +752,7 @@
   height: var(--session-header-height); min-height: var(--session-header-height);
   padding: 0 1rem;
 }
-/* Grid row: conversation + workspace. Same grid-template-columns slide
+/* Grid row: conversation + right sidebar. Same grid-template-columns slide
  * pattern as the shell sidebar -- the transition on grid-template-columns
  * makes the column boundary slide smoothly (expanded rail track <-> the
  * full-width fold track).
@@ -782,7 +782,7 @@
    session-body: it takes no track space (the scroll extent never swells for
    it), but grid placement still applies -- column 2 is the conversation
    column in BOTH track postures (the fold only reshapes the third), so one
-   rule carries the workspace fold, and the fully-placed grid column
+   rule carries the right-sidebar fold, and the fully-placed grid column
    (start AND end non-auto -- an auto end line leaves the area as the whole
    container) makes the column the containing block. Centering rides the
    CSS2 abspos route (inset-inline 0 + auto margins), NOT justify-self:
@@ -884,7 +884,7 @@
   /* The fold fade for the divider: the collapsed rule flips the color to
      transparent, so the line fades out over the slide instead of popping
      off in the first frame (the twin of the 200ms opacity fade the
-     workspace column rides). */
+     right-sidebar column rides). */
   transition: border-right-color 200ms ease;
 }
 

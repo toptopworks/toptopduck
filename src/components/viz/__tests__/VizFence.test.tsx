@@ -165,7 +165,7 @@ describe("VizFence (ADR-0120)", () => {
   });
 });
 
-describe("VizFence stage link (issue #1093: the fence chart on the workspace stage)", () => {
+describe("VizFence stage link (issue #1093: the fence chart on the right-sidebar stage)", () => {
   const BODY = JSON.stringify({ mark: "bar", data: { values: [{ a: 1 }] } });
 
   beforeEach(() => {

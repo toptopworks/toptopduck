@@ -149,7 +149,7 @@ describe("RightSidebarWorkingSet", () => {
 
   it("pins the section heading to headline-sm 16px/600 (issue #864)", async () => {
     renderSet([mockDataset]);
-    // The workspace body's 14px baseline (issue #864) inherits into the bare
+    // The right-sidebar body's 14px baseline (issue #864) inherits into the bare
     // h2 unless it carries the headline token explicitly -- dropping the
     // utility would flatten the list section's hierarchy to body size.
     const h2 = await screen.findByRole("heading", { level: 2, name: /工作集 · 1/ });

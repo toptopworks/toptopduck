@@ -1,4 +1,4 @@
-// Tests for the workspace artifact stage (ADR-0124 Decision 4, issue #1088):
+// Tests for the right-sidebar artifact stage (ADR-0124 Decision 4, issue #1088):
 // the render matrix under the persistent file header (issue #1199). The
 // load-bearing pins are the two iframe trust postures -- html sandboxed to
 // exactly "allow-scripts", pdf UNSANDBOXED (the built-in viewer is a document

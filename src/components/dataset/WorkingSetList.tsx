@@ -186,7 +186,7 @@ function DatasetRow({
   isSelected: boolean;
   loading: boolean;
   tip: RowTipControls;
-  // An optional extra marker beside the stale chip's slot (the workspace
+  // An optional extra marker beside the stale chip's slot (the right-sidebar
   // panel flags a missing store file here); the private face passes none.
   extraBadge?: ReactNode;
   onSelect: (referenceName: string) => void;
@@ -444,12 +444,12 @@ function WorkingSetDeleteDialog({
   onCancel,
   onConfirm,
 }: {
-  // Session addressing for the impact preview (issue #1063); the workspace
+  // Session addressing for the impact preview (issue #1063); the right-sidebar
   // panel has no session, and its confirm renders without the preview.
   sessionId?: string;
   target: DatasetDescriptor;
   // The confirm title's copy slot: the private face names the working set,
-  // the workspace panel overrides with its own neutral wording. A renderer
+  // the right-sidebar panel overrides with its own neutral wording. A renderer
   // over the display name -- NOT a {id, defaultMessage} data shape, whose
   // dynamic id is invisible to the formatjs extractor and would leave the
   // catalog entry dangling as `extra` in the CI guard. Both faces therefore
@@ -482,7 +482,7 @@ function WorkingSetDeleteDialog({
           </AlertDialogDescription>
         </AlertDialogHeader>
         {/* The pre-delete impact preview (issue #1063); DeleteImpactList
-            owns the rendering contract. Session-scoped: the workspace
+            owns the rendering contract. Session-scoped: the right-sidebar
             panel's confirm (no session) renders without it. */}
         {sessionId !== undefined && (
           <DeleteImpactList sessionId={sessionId} referenceName={target.reference_name} />
@@ -519,7 +519,7 @@ export function WorkingSetList({
 }: {
   // Session addressing for the delete dialog's impact preview (issue #1063);
   // the rows themselves render from the `datasets` snapshot prop. Optional:
-  // the workspace panel (no session) omits it, and its delete confirm
+  // the right-sidebar panel (no session) omits it, and its delete confirm
   // renders without the impact preview.
   sessionId?: string;
   datasets: DatasetDescriptor[];
@@ -534,7 +534,7 @@ export function WorkingSetList({
   // accent band. The session face passes the RESOLVED pick
   // (resolveWorkingSetDetail output), so the band rides the deleted-pick
   // fallbacks (active, then first) with the pane and never diverges from
-  // what is shown; the workspace panel resolves its own pick-then-first
+  // what is shown; the right-sidebar panel resolves its own pick-then-first
   // chain inline (no active pointer), under the same contract.
   selectedName: string | null;
   onSelect: (referenceName: string) => void;
@@ -552,12 +552,12 @@ export function WorkingSetList({
   // Remove a source from the working set (issue #38, ADR-0040). On the
   // session face the backend detaches the snapshot, deletes its file, drops
   // the reference name, and appends a Deleted source lifecycle event; the
-  // workspace panel's delete is a manifest edit (bound sessions keep their
+  // right-sidebar panel's delete is a manifest edit (bound sessions keep their
   // store links, ADR-0141 D7). Optional only so tests that don't exercise
   // delete can skip it; App always supplies it, and the button is hidden
   // when it is absent (no silent no-op).
   onDelete?: (referenceName: string) => void;
-  // A picker-open failure's error channel: the workspace panel routes it to
+  // A picker-open failure's error channel: the right-sidebar panel routes it to
   // its banner. Absent, the rejection is dropped (the private face's
   // long-standing posture).
   onPickError?: (e: unknown) => void;
@@ -566,7 +566,7 @@ export function WorkingSetList({
   // window: ask in flight -> source management disabled), preventing concurrent
   // IPC and source-vs-turn interleaving.
   loading?: boolean;
-  // An extra per-row marker beside the stale chip's slot: the workspace
+  // An extra per-row marker beside the stale chip's slot: the right-sidebar
   // panel flags a missing store file. Undefined rows render nothing; the
   // private face passes none.
   badgeFor?: (d: DatasetDescriptor) => ReactNode;

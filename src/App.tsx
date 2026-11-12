@@ -1232,7 +1232,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Draggable rail resize handle at the conversation/workspace
+                  {/* Draggable rail resize handle at the conversation/right-sidebar
                       boundary. Hoisted to .main-area (ADR-0092) so it spans the
                       full height — including the shell-level QuestionBar overlay
                       (z-index 10 keeps it grabbable across the bar strip) —

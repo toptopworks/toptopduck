@@ -25,8 +25,8 @@ import { DatasetDetail } from "./DatasetDetail";
 // Shared by the list and detail sections so the pair reads as one surface, and
 // by the empty-state card (issue #792) so the tab reads as one family either
 // way. Issue #865 resolves the same-token card-on-card look (panel bg-card on
-// the workspace column's old var(--card) floor) from the floor side: the
-// workspace column now rides the canvas token, so this card reads as a layer
+// the right-sidebar column's old var(--card) floor) from the floor side: the
+// right-sidebar column now rides the canvas token, so this card reads as a layer
 // above the page floor (dark mode brightness step; light mode hairline +
 // shadow-sm, the system's light depth method).
 const PANEL_CARD_BASE = "panel bg-card border rounded-lg shadow-sm p-4";
@@ -59,7 +59,7 @@ export function RightSidebarWorkingSet({
 }) {
   // The 工作集 tab's own selection (which dataset's detail to show). Kept local
   // and separate from viewedResult: picking a dataset here is a management
-  // action, not a workspace view selection (ADR-0051 active/viewed split).
+  // action, not a right-sidebar view selection (ADR-0051 active/viewed split).
   // ADR-0123 Decision 2: the useState stays HERE, the seam takes it as a
   // parameter and owns the resolution (pick ?? active ?? first). The pick
   // starts unset, so a fresh mount follows the active dataset until the user

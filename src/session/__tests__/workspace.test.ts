@@ -12,9 +12,9 @@ import { artifactTurn, materialized, src, textual } from "./fixtures";
 import type { DatasetDescriptor } from "../../types/dataset";
 import type { ThreadEntry, TurnRecord } from "../../types/thread";
 
-// Unit tests for the pure workspace-derivation helpers (ADR-0051 / ADR-0062
+// Unit tests for the pure right-sidebar-derivation helpers (ADR-0051 / ADR-0062
 // R2, calibrated by ADR-0114). These are the architectural invariants the
-// shell's "what does the workspace show right now?" decision hinges on --
+// shell's "what does the right sidebar show right now?" decision hinges on --
 // testing them in isolation (without React / the IPC mock layer) pins the
 // two-state rule + the truth-source split (thread = turn payload truth)
 // precisely.
@@ -80,7 +80,7 @@ describe("findLatestMaterializedPrimary (issue #757)", () => {
 
   it("skips trailing non-materialized turns", () => {
     // "Latest" means the latest MATERIALIZED turn: B/C/D turns appended after
-    // it never reach the workspace (ADR-0114), so they never age the view.
+    // it never reach the right sidebar (ADR-0114), so they never age the view.
     expect(
       findLatestMaterializedPrimary([materialized("result_1"), textual("which?")]),
     ).toBe("result_1");
@@ -108,9 +108,9 @@ describe("deriveRightSidebarContent (ADR-0062 R2 two-state, ADR-0114)", () => {
     });
   });
 
-  it("is inert to a non-materialized last turn (B/C/D never reach the workspace)", () => {
+  it("is inert to a non-materialized last turn (B/C/D never reach the right sidebar)", () => {
     // ADR-0114: the rail is the full read surface for turn content. A B/C/D
-    // last turn produces no workspace content -- no viewedResult, hero.
+    // last turn produces no right-sidebar content -- no viewedResult, hero.
     expect(deriveRightSidebarContent([textual("which?")], null, new Map())).toEqual({
       kind: "hero",
     });

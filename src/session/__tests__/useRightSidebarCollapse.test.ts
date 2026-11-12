@@ -4,7 +4,7 @@ import { useRightSidebarCollapse } from "../useRightSidebarCollapse";
 import { materialized, textual } from "./fixtures";
 import type { ThreadEntry } from "../../types/thread";
 
-// Tests for useRightSidebarCollapse (issue #298) -- the ADR-0083 workspace
+// Tests for useRightSidebarCollapse (issue #298) -- the ADR-0083 right-sidebar
 // fold state machine: cold-start collapsed, the first result_N promotion
 // auto-expands ONCE, everything after is manual. Issue #771 scopes the
 // one-shot to the session, not the mount: its consumption derives from the
