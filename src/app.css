@@ -62,12 +62,12 @@
   --accent: #e6f4f1;
   --accent-foreground: #0d9488;
   /* The transit hue (grey = transit, teal = committed): the hover/focus
-     feedback ramp. LIGHT is a 4% black TINT -- alpha makes the step
+     feedback ramp. Both themes ride an alpha TINT -- alpha makes the step
      ground-relative, so the same token reads as the WorkBuddy-tier #F5F5F5
      band on white/card grounds and still lifts one visible step off the
      muted sidebar panel (opaque values cannot serve both grounds; equal to
-     muted rendered the rail hover invisible). DARK stays the calibrated
-     opaque #343a34. */
+     muted rendered the rail hover invisible, and the dark opaque #343a34
+     rode a 3-4x too bright step on the canvas). */
   --transit: rgb(0 0 0 / 4%);
   --destructive: #b00020;
   --destructive-foreground: #ffffff;
@@ -110,7 +110,14 @@
   --muted-foreground: #9ca3af;
   --accent: #143833;
   --accent-foreground: #5eead4;
-  --transit: #343a34;
+  /* DARK mirrors the light token's alpha posture: a 5% white tint keeps the
+     step ground-relative -- one subtle WorkBuddy-tier step on the canvas
+     (#0f1410 -> ~#1c201d) and the same perceived lift on the muted rail
+     (#232723 -> ~#2e322f). The calibrated opaque #343a34 rode a ~37/255
+     step on the canvas, three to four times the reference hover, and read
+     as a bright patch; an opaque single value cannot serve both grounds
+     (the same lesson the light token's 4% black alpha settled). */
+  --transit: rgb(255 255 255 / 5%);
   --destructive: #ef4444;
   --destructive-foreground: #ffffff;
   /* warning amber flips lighter in dark mode for readable text on the tint. */

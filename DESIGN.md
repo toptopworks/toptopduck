@@ -51,7 +51,7 @@ colors:
   info-dark: "#60a5fa"
   border-dark: "#2a2f2a"
   input-dark: "#606a60"
-  transit-dark: "#343a34"
+  transit-dark: "rgb(255 255 255 / 5%)"
 
 typography:
   display:
@@ -414,7 +414,7 @@ The structural signature is a **three-column shell**: session sidebar (280px) + 
 
 ### Transit & the Control Tiers
 
-**Transit** (`{colors.transit}` / `{colors.transit-dark}` — light `rgb(0 0 0 / 4%)`, dark `#343a34`) is the single hover/focus face: grey means passing over; teal (`{colors.accent}`) means committed — selected, active, checked. A committed face re-asserts accent on hover and never greys out. Two exemptions: the select dropdown marks its selected row with the check glyph alone (no committed face — every row, selected included, highlights transit), and the two-option contrast pair (the auth-mode chip) previews each option's own commitment hue on hover. The dark control boundary rides a three-tier ladder: large form controls (inputs, textareas, select triggers, outline buttons) fill `bg-input/20` over a `border-input/60` boundary (~1.9:1); radios and checkboxes keep the full 3:1 `{colors.input-dark}` border, since a bare 16px circle has no label or hover affordance to compensate; the composer's quiet chip tier stays as-is. Hover tuning changes the token value, never the per-site classes.
+**Transit** (`{colors.transit}` / `{colors.transit-dark}` — light `rgb(0 0 0 / 4%)`, dark `rgb(255 255 255 / 5%)`) is the single hover/focus face: grey means passing over; teal (`{colors.accent}`) means committed — selected, active, checked. Both are alpha tints, so the step stays ground-relative: one subtle lift on the canvas, the same perceived step on the muted rail. A committed face re-asserts accent on hover and never greys out. Two exemptions: the select dropdown marks its selected row with the check glyph alone (no committed face — every row, selected included, highlights transit), and the two-option contrast pair (the auth-mode chip) previews each option's own commitment hue on hover. The dark control boundary rides a three-tier ladder: large form controls (inputs, textareas, select triggers, outline buttons) fill `bg-input/20` over a `border-input/60` boundary (~1.9:1); radios and checkboxes keep the full 3:1 `{colors.input-dark}` border, since a bare 16px circle has no label or hover affordance to compensate; the composer's quiet chip tier stays as-is. Hover tuning changes the token value, never the per-site classes.
 
 ### Mode Mapping Principle
 Light and dark tokens share semantic names but carry different hex values. The mapping is 1:1 — `{colors.canvas}` in light mode becomes `{colors.canvas-dark}` in dark mode. The `primary` and `primary-foreground` tokens are mode-invariant. Focus rings always use `{colors.primary}` (teal) in both modes. In production, the same CSS variable (`--background`, `--card`, etc.) carries different values under the `.dark` class — the DESIGN.md `-dark` suffix is a documentation convention, not a separate variable name.
