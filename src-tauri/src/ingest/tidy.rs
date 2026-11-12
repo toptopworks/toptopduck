@@ -2,9 +2,9 @@
 //! grid + merged-cell ranges and detects the single header row when the
 //! structure can be read *confidently*; otherwise signals
 //! [`TidyOutcome::NeedsGuidance`] so the UI can gather explicit header/skip
-//! choices (guided fallback). Row selection/materialization lives in the
-//! rectify step, not here. The auto algorithm's own result is never recorded
-//! as rectify params (ADR-0042) -- resume re-runs the current version.
+//! choices (guided fallback). The auto algorithm's own result is never
+//! recorded as rectify params (ADR-0042) -- resume re-runs the current
+//! version.
 //!
 //! Two deterministic transforms, in order:
 //! 1. **Forward-fill merged ranges** -- each merged region's top-left value
@@ -26,7 +26,7 @@ use crate::model::GuidanceReason;
 
 /// Outcome of auto-tidying one sheet: a detection result, not a materialized
 /// table (issue #1554) -- row selection lives in the rectify step
-/// (`apply_rectify`), so detection never clones the grid.
+/// (`apply_rectify`), so the detection result carries no grid.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TidyOutcome {
     /// The sheet read confidently as a single-header table.
@@ -52,8 +52,6 @@ pub enum TidyOutcome {
 /// sheet with merged ranges is detected on a forward-filled copy (issue
 /// #1554 -- no full-grid clone when there is nothing to fill).
 pub fn auto_tidy(sheet: &SheetRows) -> TidyOutcome {
-    // Forward-fill only touches merged ranges, so a merge-free sheet is
-    // detected on a borrow of the caller's grid.
     let mut filled: Vec<Vec<Data>>;
     let rows: &[Vec<Data>] = if sheet.merges.is_empty() {
         &sheet.rows
