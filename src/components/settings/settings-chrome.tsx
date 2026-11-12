@@ -610,7 +610,7 @@ export function SourceFold({
   );
   return (
     <div className="border-border rounded-lg border">
-      <div className="hover:bg-transit/50 flex items-center gap-2 px-3 py-2.5">
+      <div className="hover:bg-transit flex items-center gap-2 px-3 py-2.5">
         <input
           type="checkbox"
           checked={selectAll.checked}
