@@ -850,7 +850,8 @@ pub async fn preview_workspace_dataset(
 
 /// Add a workbook's checked sheets as shared datasets, after a
 /// `preview_workspace_dataset` round trip gathered the user's per-sheet
-/// rectify choices. Runs the copy-in off the async/UI thread.
+/// rectify choices. Reuses the preview's parked parse (issue #1554); a miss
+/// falls back to a fresh parse. Runs the copy-in off the async/UI thread.
 #[tauri::command]
 pub async fn add_workspace_dataset_guided(
     workspace: String,
