@@ -10,6 +10,7 @@ import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions } from "./shell/useShellSessions";
 import { useTrayEvents } from "./shell/useTrayEvents";
+import { useContextMenuPolicy } from "./shell/useContextMenuPolicy";
 import { useAppConfigState } from "./shell/useAppConfigState";
 import {
   ColdStartGuideBanner,
@@ -305,6 +306,11 @@ export default function App() {
     openPersisted,
     goToEmptyState,
   });
+
+  // ADR-0149: one document-level listener keeps the native menu on editing
+  // surfaces and live selections; everywhere else right-click is silent until
+  // a surface mounts its own menu (the defaultPrevented exemption).
+  useContextMenuPolicy();
 
   // Cold start (ADR-0092): no active session -- the centered bar + greeting
   // shell posture, and the composer's pending channels below are live.
