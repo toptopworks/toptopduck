@@ -3,7 +3,10 @@ import { cva } from "class-variance-authority";
 // shadcn radix-toast copy-in (ADR-0142, issue #1494) -- split out of
 // toast.tsx so toast.tsx exports only components, same react-refresh
 // rationale as button/badge/alert variants. Two variants start the set
-// (ADR-0142 Decision 4): default is the neutral face; destructive is the
+// (ADR-0142 Decision 4): default is the inverted face (issue #1568) -- the
+// transient-hint tier that stays dark in both themes (see the --inverted
+// comment in app.css; the page-ground bg-background face drowned against
+// its own ground); destructive is the
 // offscreen-failure attribution variant, taking the solid destructive
 // surface of the DESIGN.md alert-destructive mapping (destructive bg +
 // destructive-foreground text) rather than the tinted /40 shape the
@@ -21,7 +24,7 @@ export const toastVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-background text-foreground",
+        default: "bg-inverted text-inverted-foreground",
         destructive:
           "border-destructive bg-destructive text-destructive-foreground destructive",
       },

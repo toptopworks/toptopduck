@@ -114,13 +114,13 @@ function ToastDescription({
   return (
     <ToastPrimitives.Description
       data-slot="toast-description"
-      // The muted token, not the recipe's opacity-90 dimming: DESIGN.md
-      // routes subdued text through --muted-foreground (the
-      // AlertDescription precedent) -- correct on the neutral surface;
-      // the destructive surface re-tints through the group marker, the
-      // same mechanism ToastClose/ToastAction ride.
+      // Dimmed on the inverted surface through inverted-foreground/75
+      // (issue #1568), not the recipe's opacity-90 nor the muted token:
+      // page-ground grays go muddy on the dark face (issue #1568); the
+      // destructive surface re-tints through the group marker, the same
+      // mechanism ToastClose/ToastAction ride.
       className={cn(
-        "text-muted-foreground text-sm group-[.destructive]:text-destructive-foreground/90",
+        "text-inverted-foreground/75 text-sm group-[.destructive]:text-destructive-foreground/90",
         className,
       )}
       {...props}
@@ -136,7 +136,7 @@ function ToastClose({
     <ToastPrimitives.Close
       data-slot="toast-close"
       className={cn(
-        "ring-offset-background text-foreground/50 hover:text-foreground focus:ring-ring absolute top-1 right-1 rounded-md p-1 opacity-0 transition-opacity focus:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-none group-hover:opacity-100 group-[.destructive]:text-destructive-foreground/70 group-[.destructive]:hover:text-destructive-foreground group-[.destructive]:focus:ring-destructive-foreground/60",
+        "ring-offset-inverted text-inverted-foreground/50 hover:text-inverted-foreground focus:ring-inverted-foreground/60 absolute top-1 right-1 rounded-md p-1 opacity-0 transition-opacity focus:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-none group-hover:opacity-100 group-[.destructive]:text-destructive-foreground/70 group-[.destructive]:hover:text-destructive-foreground group-[.destructive]:focus:ring-destructive-foreground/60",
         className,
       )}
       toast-close=""
@@ -157,7 +157,7 @@ function ToastAction({
     <ToastPrimitives.Action
       data-slot="toast-action"
       className={cn(
-        "focus:ring-ring inline-flex h-8 shrink-0 items-center justify-center rounded-md border bg-transparent px-3 text-sm font-medium transition-colors hover:bg-transit focus:outline-none focus:ring-1 disabled:pointer-events-none disabled:opacity-50 group-[.destructive]:border-muted/40 group-[.destructive]:hover:border-destructive/30 group-[.destructive]:hover:bg-destructive group-[.destructive]:hover:text-destructive-foreground group-[.destructive]:focus:ring-destructive",
+        "focus:ring-inverted-foreground/60 inline-flex h-8 shrink-0 items-center justify-center rounded-md border-inverted-foreground/25 bg-transparent px-3 text-sm font-medium transition-colors hover:bg-inverted-foreground/10 focus:outline-none focus:ring-1 disabled:pointer-events-none disabled:opacity-50 group-[.destructive]:border-muted/40 group-[.destructive]:hover:border-destructive/30 group-[.destructive]:hover:bg-destructive group-[.destructive]:hover:text-destructive-foreground group-[.destructive]:focus:ring-destructive",
         className,
       )}
       {...props}

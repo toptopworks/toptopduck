@@ -88,6 +88,15 @@
   --border: #e3e3e8;
   --input: #e3e3e8;
   --ring: #0d9488;
+  /* The inverted floating-surface tier (issue #1568): the transient-hint face
+     (Tooltip, toast default). Dark in BOTH themes -- a light page gets the
+     dark surface outright, a dark page gets the lighter green-gray step, so
+     the hint always lifts off its ground. The hue follows the family's green
+     cast (#0f1410 lineage), not a neutral gray; brand teal stays off the tier
+     (the teal tooltip face rode 3.75:1 white-text contrast, under the 4.5:1
+     AA floor for the 12px body). */
+  --inverted: #2b2f2c;
+  --inverted-foreground: #ffffff;
 }
 
 /* --- shadcn token set, dark (ADR-0050) ----------------------------------- */
@@ -131,6 +140,11 @@
      at #2a2f2a: separators are decorative and must not darken this much. */
   --input: #606a60;
   --ring: #0d9488;
+  /* Inverted floating-surface tier (issue #1568): dark mode lifts two steps
+     off popover instead of inverting -- the page is already near-black, so
+     the hint reads as the lighter green-gray plane above the ground. */
+  --inverted: #3d433f;
+  --inverted-foreground: #ffffff;
 }
 
 /* Map the shadcn tokens into Tailwind v4 color utilities. `inline` makes each
@@ -159,6 +173,8 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-inverted: var(--inverted);
+  --color-inverted-foreground: var(--inverted-foreground);
 
   /* Radius scale derived from the single compact --radius token. */
   --radius-xs: calc(var(--radius) - 2px);

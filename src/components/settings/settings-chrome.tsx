@@ -28,15 +28,7 @@ import { type EnabledFilter, FILTER_OPTIONS } from "./settings-filters";
 // These are presentational shells over the ADR-0050 token system (bg-card /
 // border / divide-border), so they recolor with the .dark class; they hold no
 // state or IPC. Kept in one file because every export is a component (react-
-// refresh/only-export-components clean, cf. card.tsx) -- the tooltip skin
-// constant rides along under allowConstantExport.
-
-/** The shared settings-panel tooltip skin: a popover surface overriding the
- *  base TooltipContent's teal accent (ADR-0050). The single source for every
- *  settings tooltip (issue #554) -- call sites append their own size caps via
- *  cn(SETTINGS_TOOLTIP_CLASS, "max-w-...") rather than restyling. */
-export const SETTINGS_TOOLTIP_CLASS =
-  "bg-popover text-popover-foreground border shadow-md rounded-lg px-2.5 py-1.5";
+// refresh/only-export-components clean, cf. card.tsx).
 
 /** A field or section hint: an info icon + tooltip anchored after the
  *  label or section title (the ImportSkillsDialog import-mode posture, now
@@ -44,7 +36,7 @@ export const SETTINGS_TOOLTIP_CLASS =
  *  render as the muted body. An optional `title` -- a plain string,
  *  resolved via formatMessage and symmetric with `label` -- promotes the
  *  body to the titled block posture: a medium-weight heading line in the
- *  popover surface foreground, then the muted body below (issue #958). */
+ *  inverted surface foreground, then the dimmed body below (issue #958). */
 export function FieldHint({
   label,
   title,
@@ -65,13 +57,16 @@ export function FieldHint({
         side="top"
         align="start"
         sideOffset={3}
-        className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
+        className="max-w-[15rem]"
       >
         <div
-          className={cn("text-muted-foreground text-sm", title && "space-y-1")}
+          className={cn(
+            "text-inverted-foreground/75 text-sm",
+            title && "space-y-1",
+          )}
         >
           {title && (
-            <p className="text-popover-foreground font-medium">{title}</p>
+            <p className="text-inverted-foreground font-medium">{title}</p>
           )}
           {children}
         </div>
@@ -115,9 +110,7 @@ export function HeaderActionButton({
           <Icon className={cn("size-4", spinning && "animate-spin")} aria-hidden />
         </Button>
       </TooltipTrigger>
-      <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-        {label}
-      </TooltipContent>
+      <TooltipContent side="top">{label}</TooltipContent>
     </Tooltip>
   );
 }
@@ -216,9 +209,8 @@ export function RowActionButton({
   destructive?: boolean;
   spinning?: boolean;
   disabled?: boolean;
-  /** Hover guidance over the bare ghost (#1015); the SETTINGS_TOOLTIP_CLASS
-   *  single source (issue #554). A disabled action carrying one renders
-   *  hoverable-inert (aria-disabled) so the hover can reach it. */
+  /** Hover guidance over the bare ghost (#1015). A disabled action carrying
+   *  one renders hoverable-inert (aria-disabled) so the hover can reach it. */
   tooltip?: string;
   onClick?: () => void;
 }) {
@@ -255,10 +247,7 @@ export function RowActionButton({
   return (
     <Tooltip>
       <TooltipTrigger asChild>{button}</TooltipTrigger>
-      <TooltipContent
-        side="top"
-        className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
-      >
+      <TooltipContent side="top" className="max-w-[15rem]">
         {tooltip}
       </TooltipContent>
     </Tooltip>
