@@ -13,17 +13,13 @@ function normalizeNewlines(text: string): string {
 
 /** The chip's display + accessible-name excerpt: the selection's head,
  *  capped at 30 characters with an ellipsis. A surrogate pair straddling
- *  the cap steps the cap back one so the glyph never splits. */
+ *  the cap leaves the HIGH surrogate as the cap's last unit (its low half
+ *  got cut); stepping back one keeps the glyph whole. */
 export function quoteExcerpt(text: string, cap = 30): string {
   if (text.length <= cap) return text;
   const capped = text.slice(0, cap);
-  const tail = capped[cap - 1];
-  if (
-    tail !== undefined &&
-    String.fromCodePoint(tail.codePointAt(0) ?? 0) !== tail
-  ) {
-    return `${capped.slice(0, -1)}…`;
-  }
+  const tail = capped.charCodeAt(cap - 1);
+  if (tail >= 0xd800 && tail <= 0xdbff) return `${capped.slice(0, -1)}…`;
   return `${capped}…`;
 }
 

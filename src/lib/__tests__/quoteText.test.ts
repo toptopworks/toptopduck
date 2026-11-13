@@ -46,9 +46,9 @@ describe("quoteExcerpt", () => {
   });
 
   it("does not split a surrogate pair at the cap", () => {
-    // "𠮷" is a surrogate pair; the cap must not cut it in half.
-    expect(quoteExcerpt("あああああああああああああああ𠮷".slice(0, 31))).toBe(
-      "あああああああああああああああ𠮷",
-    );
+    // 29 ASCII units + one 2-unit glyph = 31 units: the 30-unit cap would
+    // cut between the pair's halves, leaving an orphan high surrogate.
+    const text = `${"x".repeat(29)}𠮷`;
+    expect(quoteExcerpt(text)).toBe(`${"x".repeat(29)}…`);
   });
 });

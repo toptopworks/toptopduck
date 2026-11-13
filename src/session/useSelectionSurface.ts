@@ -42,6 +42,10 @@ export interface SelectionSurface {
 
 const TOOLBAR_GAP = 8;
 const SCROLL_CLIP_PATTERN = /(auto|scroll|hidden|clip)/u;
+// The composer card's selector hook (QuestionBar keeps the class for
+// selector / test stability): the placement floor's one DOM probe, shared
+// by the placement and the growth observer.
+const COMPOSER_SELECTOR = ".question-bar";
 
 function toRect(rect: DOMRect): Rect {
   return {
@@ -81,43 +85,30 @@ function selectionSourceOf(root: HTMLElement, range: Range): HTMLElement | null 
   return source;
 }
 
-/** The viewport clipped by the root column and every scroll/clip container
- *  between the source element and the root. The composer floor is NOT
- *  applied here -- the placement fn owns that boundary. */
-function visibleBounds(root: HTMLElement, source: HTMLElement, view: Window): Rect {
-  let visible: Rect = {
-    left: 0,
-    top: 0,
-    right: view.innerWidth,
-    bottom: view.innerHeight,
-  };
+/** The clip chain (boundary two): the column root's rect plus every
+ *  scroll/clip container between the source element and the root. The
+ *  placement fn folds these into the viewport -- one intersection fold,
+ *  owned by the pure module. */
+function collectClips(
+  root: HTMLElement,
+  source: HTMLElement,
+  view: Window,
+): Rect[] {
   const clips: Rect[] = [toRect(root.getBoundingClientRect())];
   for (
     let node: HTMLElement | null = source;
-    node !== null;
+    node !== null && node !== root;
     node = node.parentElement
   ) {
-    if (node !== root) {
-      const style = view.getComputedStyle(node);
-      if (
-        SCROLL_CLIP_PATTERN.test(style.overflowX) ||
-        SCROLL_CLIP_PATTERN.test(style.overflowY)
-      ) {
-        clips.push(toRect(node.getBoundingClientRect()));
-      }
-    } else {
-      break;
+    const style = view.getComputedStyle(node);
+    if (
+      SCROLL_CLIP_PATTERN.test(style.overflowX) ||
+      SCROLL_CLIP_PATTERN.test(style.overflowY)
+    ) {
+      clips.push(toRect(node.getBoundingClientRect()));
     }
   }
-  for (const clip of clips) {
-    visible = {
-      left: Math.max(visible.left, clip.left),
-      top: Math.max(visible.top, clip.top),
-      right: Math.min(visible.right, clip.right),
-      bottom: Math.min(visible.bottom, clip.bottom),
-    };
-  }
-  return visible;
+  return clips;
 }
 
 export function useSelectionSurface(
@@ -179,14 +170,17 @@ export function useSelectionSurface(
         : typeof target.range.getBoundingClientRect === "function"
           ? [toRect(target.range.getBoundingClientRect())]
           : [];
-    // Visible area = viewport ∩ column root ∩ scroll/clip containers
-    // (boundaries one and two); the composer floor (boundary three) rides
-    // the placement fn's composerRect.
-    const visible = visibleBounds(root, target.source, view);
-    const composer = root.ownerDocument.querySelector(".question-bar");
+    // Boundaries one and two ride the clip chain; boundary three (the
+    // composer floor) is the placement fn's composerRect.
+    const composer = root.ownerDocument.querySelector(COMPOSER_SELECTOR);
     const placement = computeToolbarPlacement({
-      viewport: visible,
-      clipRects: [],
+      viewport: {
+        left: 0,
+        top: 0,
+        right: view.innerWidth,
+        bottom: view.innerHeight,
+      },
+      clipRects: collectClips(root, target.source, view),
       composerRect:
         composer instanceof HTMLElement
           ? toRect(composer.getBoundingClientRect())
@@ -352,7 +346,7 @@ export function useSelectionSurface(
       resizeObserver = new ResizeObserver(schedule);
       resizeObserver.observe(root);
       resizeObserver.observe(toolbar);
-      const composer = root.ownerDocument.querySelector(".question-bar");
+      const composer = root.ownerDocument.querySelector(COMPOSER_SELECTOR);
       if (composer instanceof HTMLElement) resizeObserver.observe(composer);
     }
     const mutations = new MutationObserver((records) => {
