@@ -24,8 +24,9 @@ export type SessionFlowKind =
  *  reject (createSession / openRecipe / save / delete / rename persisted /
  *  profile switch) -- shell rejects composed through toAppError carry the
  *  same "{verb} failed:" composer with a neutral "Operation" verb (issue
- *  #1563), though a hand-built AppError of this kind (the guidance error in
- *  useWorkspaceDatasets) keeps its own message; "read" tags a ResultView
+ *  #1563), though hand-built AppErrors of this kind (the guidance error in
+ *  useWorkspaceDatasets, the picker persist verdicts in useShellSessions)
+ *  keep their own messages; "read" tags a ResultView
  *  readRows reject and is the only bare, verb-less kind. */
 export type AppErrorKind = SessionFlowKind | "shell" | "read";
 
@@ -36,10 +37,10 @@ export type AppErrorKind = SessionFlowKind | "shell" | "read";
  *  Only `message` and `detail` are rendered by ErrorBanner; `kind` tags the
  *  operation for upstream prefix logic. */
 export interface AppError {
-  /** The locale-rendered banner text. On the verb-prefixed kinds it is the
-   *  composed "{verb} failed: {message}" template, so an empty bare reject
-   *  renders "{verb} failed:"; on "read" toAppError applies the Engine
-   *  fallback, so the text is never blank. */
+  /** The locale-rendered banner text. On the verb-prefixed kinds toAppError
+   *  composes it as the "{verb} failed: {message}" template, so an empty
+   *  bare reject renders "{verb} failed:"; on "read" toAppError applies the
+   *  Engine fallback, so the text is never blank. */
   message: string;
   kind: AppErrorKind;
   /** Technical detail from a typed error reject (SessionError / ResumeError /

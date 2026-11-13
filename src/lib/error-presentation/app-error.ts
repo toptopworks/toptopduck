@@ -70,7 +70,7 @@ function errorVerb(intl: IntlShape, kind: SessionFlowKind | "shell"): string {
       // this regardless of tsconfig flags -- mirror the guard used by
       // loadErrorDisplay + the format core.
       const unhandled: never = kind;
-      throw new Error(`unhandled SessionFlowKind: ${JSON.stringify(unhandled)}`);
+      throw new Error(`unhandled verb kind: ${JSON.stringify(unhandled)}`);
     }
   }
 }

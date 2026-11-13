@@ -369,7 +369,9 @@
  * transition/drag rules copy the bar track's so the fold slide and rail /
  * sidebar drags stay glued. The card itself takes the bar card's geometry
  * from .shell-bar-slot.bottom .question-bar: grid column 2, the
- * min(cap, 100% - 2 * gutter) width with auto-centered margins, so below
+ * min(cap, 100% - 2 * gutter) width with auto-centered margins (only the
+ * horizontal geometry -- margin-block keeps the banner's own 0.4rem inset,
+ * not the bar card's 0.5rem 1rem), so below
  * the cap the card consumes exactly the gutter inset per side and above it
  * both surfaces meet at the cap on one centerline. */
 .shell > .shell-error-track {

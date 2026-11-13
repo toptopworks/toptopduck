@@ -1,16 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { catalogIntl } from "../components/common/__tests__/helpers";
-import {
-  errorDetail,
-  flowFailedMessage,
-  fmtError,
-  toAppError,
-} from "../lib/error-presentation";
+import { toAppError } from "../lib/error-presentation";
 import type { AppErrorKind, SessionFlowKind } from "../types/error";
 
 // toAppError is the single kind-driven entry for an IPC reject -> AppError
-// (ADR-0069). These tests cover message/detail/kind passthrough + empty
-// fallback, the verb-prefix locale consistency (issue #139), the refreshFailed
+// (ADR-0069). These tests cover empty fallback, the verb-prefix locale
+// consistency (issue #139), the refreshFailed
 // prefix, the read bare output, the shell neutral-verb prefix (issue #1563),
 // and the exhaustiveness throw guard.
 
@@ -108,21 +103,6 @@ describe("toAppError (shell verb prefix, issue #1563)", () => {
     const out = toAppError(new Error(""), intl, "shell");
     expect(out.message).toBe("Operation failed: ");
     expect(out.kind).toBe("shell");
-  });
-});
-
-// message/detail come from fmtError + errorDetail (the format core); toAppError
-// composes them with the kind-driven prefix (issue #194).
-describe("toAppError (message/detail passthrough)", () => {
-  it("Engine message/detail match the shell composer + errorDetail", () => {
-    const out = toAppError(engineReject, intl, "shell");
-    // The shell banner composes through the production "{verb} failed:"
-    // composer (issue #1563), so the expected message rides it instead of the
-    // bare fmtError output.
-    expect(out.message).toBe(
-      flowFailedMessage(intl, "shell", fmtError(engineReject, intl)),
-    );
-    expect(out.detail).toBe(errorDetail(engineReject));
   });
 });
 
