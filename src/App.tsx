@@ -123,6 +123,9 @@ export default function App() {
   const [queryClient] = useState(() => createQueryClient());
 
   const { shellError, setShellError } = useShellError();
+  // The shell banner's dismiss handle (issue #1563): the clear's only
+  // production caller -- manual dismiss, plus the next setShellError over.
+  const clearShellError = () => setShellError(null);
 
   // Platform dispatch (ADR-0140 mac / ADR-0074 Windows+Linux): macOS keeps
   // the native Overlay-titlebar traffic lights (the topbar's left edge
@@ -1257,7 +1260,15 @@ export default function App() {
                 </main>
 
                 {shellError && (
-                  <ErrorBanner className="shell-error" error={shellError} />
+                  <div
+                    className={`shell-error-track${activeRightSidebarCollapsed ? " right-sidebar-collapsed" : ""}`}
+                  >
+                    <ErrorBanner
+                      className="shell-error"
+                      error={shellError}
+                      onDismiss={clearShellError}
+                    />
+                  </div>
                 )}
 
                 {settingsView.open && appConfig && (

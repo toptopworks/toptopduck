@@ -182,6 +182,7 @@
   "error.verb.delete": "Delete source",
   "error.verb.privacy": "Privacy update",
   "error.verb.replace": "Replace source",
+  "error.verb.shell": "Operation",
   "errorBoundary.details": "Technical details",
   "errorBoundary.message": "This area couldn’t be displayed.",
   "errorBoundary.reload": "Reload",

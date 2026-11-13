@@ -355,8 +355,55 @@
  * Row 2 formerly also hosted the resume progress strip; that moved to an
  * overlay inside .main-area (see the .main-area > .resume-progress rule in
  * the main-area section below) so its mount/unmount no longer shifts the
- * grid rows. The shell error banner keeps the in-flow row-2 placement. */
-.shell > .shell-error { grid-column: 2; grid-row: 2; margin: 0.4rem 1rem; }
+ * grid rows. The shell error banner keeps the in-flow row-2 placement.
+ *
+ * Issue #1563: the banner rides the SAME track grid as the shell bar
+ * (issue #839/#1286) instead of a margin literal, so its flanks coincide
+ * with the composer card's in both right-sidebar postures. A margin literal
+ * cannot: the composer's axis follows the conversation column (grid column 2
+ * of --track-grid, folded to full width by --track-grid-collapsed) while the
+ * shell's column 2 spans the whole main region. The wrapper is a direct
+ * shell child exactly like the old banner (the settings-mode display rule
+ * therefore treats it identically), the fold class mirrors the bar slot's
+ * (the same activeRightSidebarCollapsed source in App), and the
+ * transition/drag rules copy the bar track's so the fold slide and rail /
+ * sidebar drags stay glued. The card itself takes the bar card's geometry
+ * from .shell-bar-slot.bottom .question-bar: grid column 2, the
+ * min(cap, 100% - 2 * gutter) width with auto-centered margins, so below
+ * the cap the card consumes exactly the gutter inset per side and above it
+ * both surfaces meet at the cap on one centerline. */
+.shell > .shell-error-track {
+  grid-column: 2;
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: var(--track-grid);
+  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.shell > .shell-error-track.right-sidebar-collapsed {
+  grid-template-columns: var(--track-grid-collapsed);
+}
+/* Same drag exception as the bar track: during a rail / sidebar drag the
+ * width must follow the pointer 1:1 instead of lagging a transition. */
+.shell.rail-dragging > .shell-error-track,
+.shell.sidebar-dragging > .shell-error-track { transition: none; }
+.shell > .shell-error-track > .shell-error {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  margin-block: 0.4rem;
+  margin-inline: auto;
+  width: min(var(--reading-column-cap), calc(100% - 2 * var(--rail-gutter)));
+  /* The close affordance (#1563) sits beside the copy instead of over it:
+   * the description flexes + clips, the button holds its 28px hit square
+   * (DESIGN.md icon-button shape) at the card's top-right. */
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+.shell > .shell-error-track > .shell-error > [data-slot="alert-description"] {
+  flex: 1;
+  min-width: 0;
+}
 
 /* --- Settings in-app overlay view (ADR-0065, issue #151) -----------------
  * When settings-mode is on the shell grid collapses to a titlebar row + a
