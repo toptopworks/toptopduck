@@ -25,7 +25,6 @@ import {
   PaneBackLink,
   PaneHeader,
   RowRemoveButton,
-  SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
   SettingsRow,
 } from "./settings-chrome";
@@ -431,7 +430,7 @@ export function CliToolForm({
                         />
                       </span>
                     </TooltipTrigger>
-                    <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                    <TooltipContent side="top">
                       <FormattedMessage
                         id="settings.cli.form.varargsTooltip"
                         defaultMessage="Lets this parameter take multiple values, appended at the end of the command line."

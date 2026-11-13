@@ -523,8 +523,8 @@ export function SettingsView({
 
         {/* Rail bottom: the "back to workspace" gear (issue #282). Intentional
             rail chrome, deliberately not a HeaderActionButton call site
-            (issue #960): a single consumer with its own default-ghost skin
-            (no SETTINGS_TOOLTIP_CLASS), and both slots read the same
+            (issue #960): a single consumer with its own default-ghost skin,
+            and both slots read the same
             backToWorkspaceLabel variable -- there is no descriptor double-write
             to collapse and no second rail consumer to converge. */}
         <div className="settings-footer border-border border-t p-2">

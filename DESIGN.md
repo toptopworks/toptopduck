@@ -34,6 +34,11 @@ colors:
   # own commitment hue on hover — teal option hovers teal, warning hovers
   # warning.
   transit: "rgb(0 0 0 / 4%)"
+  # The inverted floating-surface tier (issue #1568): the transient-hint face
+  # (Tooltip, toast default), dark in both themes -- see The Inverted Floating
+  # Tier section for the rationale.
+  inverted: "#2b2f2c"
+  inverted-foreground: "#ffffff"
 
   # --- Dark surfaces ---
   canvas-dark: "#0f1410"
@@ -52,6 +57,9 @@ colors:
   border-dark: "#2a2f2a"
   input-dark: "#606a60"
   transit-dark: "rgb(255 255 255 / 5%)"
+  # Two brightness steps above popover-dark, so the hint plane lifts off the
+  # near-black ground instead of inverting against it.
+  inverted-dark: "#3d433f"
 
 typography:
   display:
@@ -377,6 +385,7 @@ The structural signature is a **three-column shell**: session sidebar (280px) + 
 - **Canvas** (`{colors.canvas}` — #ffffff): The page floor. Pure white.
 - **Card** (`{colors.card}` — #ffffff): Content card surface. Same white as canvas — cards elevate via hairline borders, not background contrast.
 - **Popover** (`{colors.popover}` — #ffffff): Dialog and dropdown surface. Same white.
+- **Inverted** (`{colors.inverted}` — #2b2f2c): The inverted floating-surface tier — the dark face under transient hints (Tooltip, toast default) in light mode. Green-gray to follow the family hue.
 - **Secondary** (`{colors.secondary}` — #f1f5f4): Secondary button background. Faint green-gray tint.
 - **Muted** (`{colors.muted}` — #f0f0f3): Badge backgrounds, code-inline backgrounds, subdued zones.
 - **Border** (`{colors.border}` — #e3e3e8): The single hairline color for all 1px dividers, card outlines, and input borders.
@@ -397,6 +406,7 @@ The structural signature is a **three-column shell**: session sidebar (280px) + 
 - **Canvas Dark** (`{colors.canvas-dark}` — #0f1410): The dark page floor. RGB 15, 20, 16 — the G channel is highest, giving the surface a subtle green undertone that is visually harmonious with the teal brand.
 - **Card Dark** (`{colors.card-dark}` — #181b18): Content card surface. One brightness step above canvas.
 - **Popover Dark** (`{colors.popover-dark}` — #181b18): Dialog surface. Same as card.
+- **Inverted Dark** (`{colors.inverted-dark}` — #3d433f): The inverted floating-surface tier in dark mode — two brightness steps above popover, so the hint plane lifts off the near-black ground instead of inverting against it.
 - **Secondary Dark** (`{colors.secondary-dark}` — #232723): Secondary button background in dark mode.
 - **Muted Dark** (`{colors.muted-dark}` — #232723): Badge backgrounds, subdued zones. Same value as secondary-dark.
 - **Border Dark** (`{colors.border-dark}` — #2a2f2a): Hairline color in dark mode. Greenish gray.
@@ -416,8 +426,12 @@ The structural signature is a **three-column shell**: session sidebar (280px) + 
 
 **Transit** (`{colors.transit}` / `{colors.transit-dark}` — light `rgb(0 0 0 / 4%)`, dark `rgb(255 255 255 / 5%)`) is the single hover/focus face: grey means passing over; teal (`{colors.accent}`) means committed — selected, active, checked. Both are alpha tints, so the step stays ground-relative: one subtle lift on the canvas, the same perceived step on the muted rail. A committed face re-asserts accent on hover and never greys out. Two exemptions: the select dropdown marks its selected row with the check glyph alone (no committed face — every row, selected included, highlights transit), and the two-option contrast pair (the auth-mode chip) previews each option's own commitment hue on hover. The dark control boundary rides a three-tier ladder: large form controls (inputs, textareas, select triggers, outline buttons) fill a whisper of `bg-input/10` over a `border-input/60` boundary (~1.9:1); radios and checkboxes keep the full 3:1 `{colors.input-dark}` border, since a bare 16px circle has no label or hover affordance to compensate; the composer's quiet chip tier stays as-is. Hover tuning changes the token value, never the per-site classes.
 
+### The Inverted Floating Tier
+
+**Inverted** (`{colors.inverted}` / `{colors.inverted-dark}` — light `#2b2f2c`, dark `#3d433f`) with **Inverted Foreground** (`{colors.inverted-foreground}` — `#ffffff`, mode-invariant) is the third floating surface, between the brand-solid faces and the page-ground cards: the transient-hint face that owns the Tooltip and the toast default variant. The surface stays dark in BOTH themes, in opposite directions — a light page gets the outright inversion, a dark page (already near-black) gets a lighter green-gray plane two steps above popover, so the hint lifts off whichever ground it floats over. The hue follows the family's green cast (`#0f1410` lineage), not a neutral gray. The tier exists because the faces it replaced each failed at their station: the teal tooltip surface read 3.75:1 white-text contrast, under the 4.5:1 AA floor for its 12px body, and put the brand color on every passing hint; the page-ground faces (popover, background) drowned against their own ground. Geometry is one posture: `rounded-md px-3 py-1.5` with `shadow-md`, no border — the dark surface is its own separator in light mode, and the shadow carries elevation. Interior text never rides page-ground grays (`muted-foreground`, `popover-foreground` go muddy on the dark face); it rides an alpha ladder on inverted-foreground instead — titles and short bodies full, long body text `/75`, the toast close `/50` hovering to full, the toast action border `/25` with a `/10` hover fill and a `/60` focus ring. The destructive toast variant keeps its solid destructive surface and its own foreground system. Boundary: the tier is transient hints only — cards, dialogs, and dropdowns stay page-ground.
+
 ### Mode Mapping Principle
-Light and dark tokens share semantic names but carry different hex values. The mapping is 1:1 — `{colors.canvas}` in light mode becomes `{colors.canvas-dark}` in dark mode. The `primary` and `primary-foreground` tokens are mode-invariant. Focus rings always use `{colors.primary}` (teal) in both modes. In production, the same CSS variable (`--background`, `--card`, etc.) carries different values under the `.dark` class — the DESIGN.md `-dark` suffix is a documentation convention, not a separate variable name.
+Light and dark tokens share semantic names but carry different hex values. The mapping is 1:1 — `{colors.canvas}` in light mode becomes `{colors.canvas-dark}` in dark mode. The `primary` and `primary-foreground` tokens are mode-invariant. Focus rings use `{colors.primary}` (teal) in both modes, on page grounds; the inverted floating tier's interior controls (the toast close and action) ring `{colors.inverted-foreground}` at 60% instead — their ground is the dark hint face, where a teal ring would be chromatic noise. In production, the same CSS variable (`--background`, `--card`, etc.) carries different values under the `.dark` class — the DESIGN.md `-dark` suffix is a documentation convention, not a separate variable name.
 
 ## Typography
 
@@ -485,7 +499,7 @@ The system uses **brightness-step elevation** — surfaces step up in luminance 
 | Tier | Utility | Use |
 |---|---|---|
 | In-content | `shadow-sm` | Cards, textual-card outcomes, working-set panels — lifts content above the canvas |
-| Floating popover | `shadow-md` | Menus, dropdowns, select content, session-entry menu |
+| Floating popover | `shadow-md` | Menus, dropdowns, select content, session-entry menu, tooltip, toast |
 | Floating dialog | `shadow-lg` | Modals, alert dialogs, switch thumb |
 
 These ride the Tailwind shadow scale directly (no custom `--shadow-*` token per ADR-0067 "no new elevation tokens"). The shadow serves the same depth purpose as brightness steps — it is functional, not decorative.
@@ -497,6 +511,7 @@ These ride the Tailwind shadow scale directly (no custom `--shadow-*` token per 
 | Canvas | `{colors.canvas}` (#ffffff) | `{colors.canvas-dark}` (#0f1410) | Page floor, topbar, sidebar |
 | Card | `{colors.card}` (#ffffff) | `{colors.card-dark}` (#181b18) | Result tables, cards |
 | Popover | `{colors.popover}` (#ffffff) | `{colors.popover-dark}` (#181b18) | Dialogs, dropdown menus |
+| Inverted | `{colors.inverted}` (#2b2f2c) | `{colors.inverted-dark}` (#3d433f) | Transient hints — tooltip, toast default |
 | Hairline | 1px `{colors.border}` (#e3e3e8) | 1px `{colors.border-dark}` (#2a2f2a) | All visual separation |
 
 ### Depth Principles
@@ -591,7 +606,7 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 ## Do's and Don'ts
 
 ### Do
-- Reserve `{colors.primary}` (teal) for primary CTAs, active states, and focus rings. One accent, used scarcely.
+- Reserve `{colors.primary}` (teal) for primary CTAs, active states, and focus rings — one accent, used scarcely; the inverted floating tier's interior focus rings are the one carve-out (see Colors, The Inverted Floating Tier).
 - Use brightness-step surfaces + functional shadow tiers for depth. In-content cards carry `shadow-sm`; floating popovers carry `shadow-md`; dialogs carry `shadow-lg`.
 - Render every SQL snippet, data value, and file path in the system monospace stack via `{typography.code}`.
 - Keep button height at 36px, topbar at 40px, and header icon-button hit areas at 28px — a 14px glyph on the topbar chrome family (see `topbar`), a 16px glyph on settings-pane header buttons — compact workbench density.
@@ -609,6 +624,6 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 - Don't ship motion that escapes the reduced-motion cutoff, and don't build state signals that depend on animation timing — under reduce every animation and transition is instant, so a paused spinner or a snapped fold must still read as its terminal state.
 - Don't use `{colors.warning}` as a solid fill for alert backgrounds. Use tinted backgrounds (`bg-warning/10`) with warning indicator dots.
 - Don't use pure `#000000` for dark canvas. `{colors.canvas-dark}` (#0f1410) carries a green undertone that distinguishes the dark palette from neutral gray-black.
-- Don't use pure `#ffffff` for dark-mode text. `{colors.ink-dark}` (#d5d9d5) is softer for long sessions.
+- Don't use pure `#ffffff` for dark-mode text. `{colors.ink-dark}` (#d5d9d5) is softer for long sessions. The inverted floating tier's `{colors.inverted-foreground}` is the one exception — its ground is a transient hint surface, not a reading canvas.
 - Don't create new radius values. All corners derive from the 6px `{rounded.md}` token.
-- Don't place large areas of white body text on teal `{colors.primary}` (#0d9488). The contrast ratio is 3.74:1 — passes WCAG AA Large (3:1, suitable for button labels and short badges at 14px/500) but not AA normal text (4.5:1). For body text on teal surfaces, use `{colors.ink-dark}` on a darker teal tint instead.
+- Don't place large areas of white body text on teal `{colors.primary}` (#0d9488). The contrast ratio is 3.75:1 — passes WCAG AA Large (3:1, suitable for button labels and short badges at 14px/500) but not AA normal text (4.5:1). For body text on teal surfaces, use `{colors.ink-dark}` on a darker teal tint instead.

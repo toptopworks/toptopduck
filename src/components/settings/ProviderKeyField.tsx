@@ -11,7 +11,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
-import { SETTINGS_TOOLTIP_CLASS, SettingsRow } from "./settings-chrome";
+import { SettingsRow } from "./settings-chrome";
 import type { ProviderPresetGetKeyLink } from "./provider-presets";
 
 // Per-profile API key field (issue #235, ADR-0071 Consequences). Lifts the key
@@ -216,7 +216,7 @@ export function ProviderKeyField({
                   <ExternalLink className="size-3.5" aria-hidden />
                 </a>
               </TooltipTrigger>
-              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+              <TooltipContent side="top">
                 <FormattedMessage
                   id="settings.profiles.key.getKeyShort"
                   defaultMessage="Get key"

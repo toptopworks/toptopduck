@@ -36,17 +36,13 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "../components/ui/tooltip";
-import {
-  HeaderActionButton,
-  SETTINGS_TOOLTIP_CLASS,
-} from "../components/settings/settings-chrome";
+import { HeaderActionButton } from "../components/settings/settings-chrome";
 import { MemoryRow } from "../components/common/MemoryRow";
 import {
   LIST_MAX_HEIGHT_CLASS,
   USAGE_YELLOW_PERCENT,
   usageTone,
 } from "../components/common/memory-list";
-import { cn } from "../lib/utils";
 import { log } from "../lib/log";
 import { describeError } from "../lib/error-presentation";
 import {
@@ -473,8 +469,8 @@ export function WorkspaceMemoryDialog({
         {/* The extraction pair is the footer's only control, parked on the
             right (#1538 layout): the master switch is up in the header.
             The cost hint hangs straight off the label -- hover the text
-            and the tooltip surfaces (the popover skin matches the settings
-            FieldHint's, the same SETTINGS_TOOLTIP_CLASS source). Off hides
+            and the tooltip surfaces (the same inverted-surface FieldHint
+            posture as the settings chrome). Off hides
             the footer's control (a refused toggle or folder-open write
             keeps the footer for its banner line), and so does the create
             face -- the form
@@ -500,9 +496,9 @@ export function WorkspaceMemoryDialog({
                     side="top"
                     align="start"
                     sideOffset={3}
-                    className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
+                    className="max-w-[15rem]"
                   >
-                    <div className="text-muted-foreground text-sm">
+                    <div className="text-inverted-foreground/75 text-sm">
                       <FormattedMessage
                         id="workspace.memory.extraction.cost"
                         defaultMessage="One model request per reply."
