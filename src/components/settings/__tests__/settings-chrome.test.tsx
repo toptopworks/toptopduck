@@ -282,7 +282,7 @@ describe("FieldHint", () => {
     expect(tooltip.textContent).toContain("Body copy");
     const title = screen.getByText("Import mode");
     expect(title.tagName).toBe("P");
-    expect(title).toHaveClass("text-popover-foreground", "font-medium");
+    expect(title).toHaveClass("text-inverted-foreground", "font-medium");
   });
 });
 
