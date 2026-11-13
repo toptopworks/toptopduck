@@ -686,9 +686,9 @@ describe("useShellSessions", () => {
   });
 
   it("re-arms the guard after a failed resume so the path opens again (#1562)", async () => {
-    // The failure tail (catch) must release the guard like the success tail
-    // does: a rejected openRecipe surfaces the error, then a fresh click
-    // runs the FULL resume again rather than being swallowed forever.
+    // The outer finally releases the guard on both tails: a rejected
+    // openRecipe surfaces the error, then a fresh click runs the FULL
+    // resume again rather than being swallowed forever.
     vi.mocked(createSession).mockResolvedValueOnce(reply("r1"));
     vi.mocked(openRecipe).mockRejectedValueOnce(new Error("boom"));
     const { result, setShellError } = renderSessions();
@@ -711,8 +711,13 @@ describe("useShellSessions", () => {
   it("activates an already-open path even while another resume is in flight (#1562)", async () => {
     // The existing branch precedes the guard: activating an open session is
     // a pure state switch, so it stays available DURING any resume window
-    // instead of being swallowed by the same-path guard.
+    // instead of being swallowed by the resume-window guard. Opening a then
+    // b first parks the active session on p2, so the mid-window click on a
+    // must visibly flip the active id -- a guard hoisted above the existing
+    // branch would swallow the click and leave it parked on p2.
     vi.mocked(createSession).mockResolvedValueOnce(reply("p1"));
+    vi.mocked(openRecipe).mockResolvedValueOnce();
+    vi.mocked(createSession).mockResolvedValueOnce(reply("p2"));
     vi.mocked(openRecipe).mockResolvedValueOnce();
     let resolveOpenRecipe: () => void = () => {};
     vi.mocked(createSession).mockResolvedValueOnce(reply("r1"));
@@ -723,21 +728,25 @@ describe("useShellSessions", () => {
     await act(async () => {
       await result.current.openPersisted("/x/a.json", "a");
     });
-    let second!: Promise<void>;
-    act(() => {
-      second = result.current.openPersisted("/x/b.json", "b");
+    await act(async () => {
+      await result.current.openPersisted("/x/b.json", "b");
     });
-    await waitFor(() => expect(openRecipe).toHaveBeenCalledTimes(2));
+    expect(result.current.activeSessionId).toBe("p2");
+    let third!: Promise<void>;
+    act(() => {
+      third = result.current.openPersisted("/x/c.json", "c");
+    });
+    await waitFor(() => expect(openRecipe).toHaveBeenCalledTimes(3));
     await act(async () => {
       await result.current.openPersisted("/x/a.json", "a");
     });
     expect(result.current.activeSessionId).toBe("p1");
     await act(async () => {
       resolveOpenRecipe();
-      await second;
+      await third;
     });
-    expect(createSession).toHaveBeenCalledTimes(2);
-    expect(openRecipe).toHaveBeenCalledTimes(2);
+    expect(createSession).toHaveBeenCalledTimes(3);
+    expect(openRecipe).toHaveBeenCalledTimes(3);
   });
 
   // --- Issue #204: hook-level coverage gaps --------------------------------

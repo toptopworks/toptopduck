@@ -726,9 +726,9 @@ export function useShellSessions({
         let targetSid: string | null = null;
         const unlisten = await onResumeProgress((ev) => {
           // Defensive try/catch: this callback runs on the Tauri event loop's
-          // microtask, so a throw escapes PAST the outer try/catch -- it surfaces
-          // as an unhandled rejection, busy sticks true (soft-lock), and the
-          // listener leaks. Log and bail; the outer flow still clears
+          // microtask, so a throw escapes PAST openPersisted's try/catch --
+          // it surfaces as an unhandled rejection, busy sticks true (soft-lock),
+          // and the listener leaks. Log and bail; the outer flow still clears
           // resumeStatus when openRecipe resolves/rejects. #83 R5: the targetSid
           // filter below is the multi-session isolation seam (issue #203).
           try {
