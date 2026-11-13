@@ -33,7 +33,7 @@ import { type EnabledFilter, FILTER_OPTIONS } from "./settings-filters";
 /** A field or section hint: an info icon + tooltip anchored after the
  *  label or section title (the ImportSkillsDialog import-mode posture, now
  *  itself a consumer). `label` is the trigger's accessible name; `children`
- *  render as the muted body. An optional `title` -- a plain string,
+ *  render as the dimmed body. An optional `title` -- a plain string,
  *  resolved via formatMessage and symmetric with `label` -- promotes the
  *  body to the titled block posture: a medium-weight heading line in the
  *  inverted surface foreground, then the dimmed body below (issue #958). */

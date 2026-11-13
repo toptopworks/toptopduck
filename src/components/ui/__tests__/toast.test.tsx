@@ -58,7 +58,10 @@ describe("ui toast face (issue #1494)", () => {
   it("renders default and destructive distinguishably", () => {
     fireToast({ title: "Neutral note" });
     fireToast({ title: "Upload failed", variant: "destructive" });
-    expect(toastEl("Neutral note")).toHaveClass("bg-inverted");
+    expect(toastEl("Neutral note")).toHaveClass(
+      "bg-inverted",
+      "text-inverted-foreground",
+    );
     expect(toastEl("Neutral note")).not.toHaveClass("destructive");
     expect(toastEl("Upload failed")).toHaveClass(
       "bg-destructive",

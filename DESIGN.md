@@ -34,6 +34,11 @@ colors:
   # own commitment hue on hover — teal option hovers teal, warning hovers
   # warning.
   transit: "rgb(0 0 0 / 4%)"
+  # The inverted floating-surface tier (issue #1568): the transient-hint face
+  # (Tooltip, toast default), dark in both themes -- see The Inverted Floating
+  # Tier section for the rationale.
+  inverted: "#2b2f2c"
+  inverted-foreground: "#ffffff"
 
   # --- Dark surfaces ---
   canvas-dark: "#0f1410"
@@ -52,6 +57,9 @@ colors:
   border-dark: "#2a2f2a"
   input-dark: "#606a60"
   transit-dark: "rgb(255 255 255 / 5%)"
+  # Two brightness steps above popover-dark, so the hint plane lifts off the
+  # near-black ground instead of inverting against it.
+  inverted-dark: "#3d433f"
 
 typography:
   display:
@@ -491,7 +499,7 @@ The system uses **brightness-step elevation** — surfaces step up in luminance 
 | Tier | Utility | Use |
 |---|---|---|
 | In-content | `shadow-sm` | Cards, textual-card outcomes, working-set panels — lifts content above the canvas |
-| Floating popover | `shadow-md` | Menus, dropdowns, select content, session-entry menu |
+| Floating popover | `shadow-md` | Menus, dropdowns, select content, session-entry menu, tooltip, toast |
 | Floating dialog | `shadow-lg` | Modals, alert dialogs, switch thumb |
 
 These ride the Tailwind shadow scale directly (no custom `--shadow-*` token per ADR-0067 "no new elevation tokens"). The shadow serves the same depth purpose as brightness steps — it is functional, not decorative.
@@ -503,6 +511,7 @@ These ride the Tailwind shadow scale directly (no custom `--shadow-*` token per 
 | Canvas | `{colors.canvas}` (#ffffff) | `{colors.canvas-dark}` (#0f1410) | Page floor, topbar, sidebar |
 | Card | `{colors.card}` (#ffffff) | `{colors.card-dark}` (#181b18) | Result tables, cards |
 | Popover | `{colors.popover}` (#ffffff) | `{colors.popover-dark}` (#181b18) | Dialogs, dropdown menus |
+| Inverted | `{colors.inverted}` (#2b2f2c) | `{colors.inverted-dark}` (#3d433f) | Transient hints — tooltip, toast default |
 | Hairline | 1px `{colors.border}` (#e3e3e8) | 1px `{colors.border-dark}` (#2a2f2a) | All visual separation |
 
 ### Depth Principles
