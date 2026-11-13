@@ -182,6 +182,7 @@
   "error.verb.delete": "删源",
   "error.verb.privacy": "隐私设置",
   "error.verb.replace": "换源",
+  "error.verb.shell": "操作",
   "errorBoundary.details": "技术详情",
   "errorBoundary.message": "此区域无法显示。",
   "errorBoundary.reload": "重载",

@@ -192,7 +192,8 @@ import type { McpServerConfig } from "../types/mcp";
 import { toast, useToast } from "../components/ui/use-toast";
 import { baseAppConfig as sharedBaseAppConfig, skillEntry } from "../test-fixtures";
 import { artifactTurn, recordedTurn, textual } from "../session/__tests__/fixtures";
-import { embedOk } from "../components/common/__tests__/helpers";
+import { catalogIntl, embedOk } from "../components/common/__tests__/helpers";
+import { flowFailedMessage } from "../lib/error-presentation";
 import type { SessionRuntimeChoice } from "../types/runtime";
 import { log } from "../lib/log";
 
@@ -3396,5 +3397,108 @@ describe("App toast viewport mount (ADR-0142, issue #1494)", () => {
     act(() => {
       result.current.dismiss();
     });
+  });
+});
+
+// Issue #1563: the shell banner's lifecycle. A shell-level reject mounts the
+// banner with the neutral verb prefix ("{verb}失败：", the composer reuse from
+// issue #139), and its close affordance clears it -- the only production clear,
+// so a rejected action no longer pins the banner up until a webview reload.
+describe("App shell error banner lifecycle (issue #1563)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("a rejected bar creation mounts the shell banner with the verb prefix, and close clears it", async () => {
+    // The "{verb}失败：" expectation composes through the production composer
+    // (issue #1100 precedent): no mirrored verb map in the test.
+    const bannerText = flowFailedMessage(catalogIntl("zh-CN"), "shell", "内部错误");
+    vi.mocked(createSession).mockRejectedValueOnce({
+      kind: "Engine",
+      data: "close-wait timed out",
+    });
+    render(<App />);
+    // Cold-start bar submit: the createSession reject surfaces through the
+    // shell banner -- a shell-level refusal, attributed to no session (none
+    // opened).
+    fireEvent.change(screen.getByLabelText("提问"), {
+      target: { value: "test question" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    expect(await screen.findByText(bannerText)).toBeInTheDocument();
+    // Expanded posture (no session active): the track wrapper mirrors the
+    // same activeRightSidebarCollapsed source as the session pane and the
+    // bar slot, so the fold class is absent here.
+    expect(
+      document
+        .querySelector(".shell-error-track")
+        ?.classList.contains("right-sidebar-collapsed"),
+    ).toBe(false);
+    // The close affordance clears the banner: it leaves the grid entirely,
+    // and the shell falls back to the plain cold-start face.
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    await waitFor(() =>
+      expect(screen.queryByText(bannerText)).not.toBeInTheDocument(),
+    );
+    // Dismiss clears the slot, it does not retire the surface: a second
+    // reject mounts a fresh banner through the same path.
+    vi.mocked(createSession).mockRejectedValueOnce({
+      kind: "Engine",
+      data: "close-wait timed out",
+    });
+    fireEvent.change(screen.getByLabelText("提问"), {
+      target: { value: "second question" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    expect(await screen.findByText(bannerText)).toBeInTheDocument();
+  });
+
+  it("mirrors the folded posture on the track wrapper while a session is active", async () => {
+    // The wrapper's fold class rides the same activeRightSidebarCollapsed
+    // source as the pane and the bar slot (#1563): with an active session and
+    // nothing auto-opened the right sidebar is folded, so the banner track
+    // must carry the collapsed class for the banner to ride the collapsed
+    // grid. Without this pin, deleting the conditional in App passes the
+    // whole suite green.
+    const bannerText = flowFailedMessage(catalogIntl("zh-CN"), "shell", "内部错误");
+    vi.mocked(listSessions).mockResolvedValue([
+      {
+        recipe_path: "/x/persisted.json",
+        display_name: "季报",
+        last_modified_at: Date.now(),
+        source_summary: { first_source_name: "people", source_count: 1, turn_count: 2 },
+        format_version: 1,
+        pinned: false,
+        archived: false,
+        workspace: null,
+      },
+    ]);
+    render(<App />);
+    await openSession();
+    // Posture precondition: an active session with nothing auto-opened keeps
+    // the right sidebar folded (the #771 resume-posture mirror).
+    expect(
+      document
+        .querySelector(".session-pane")
+        ?.classList.contains("right-sidebar-collapsed"),
+    ).toBe(true);
+    // A shell-level reject while the session stays active: resuming the
+    // persisted entry with its open rejecting surfaces the shell banner
+    // without tearing the active session down.
+    vi.mocked(openRecipe).mockRejectedValueOnce({
+      kind: "Engine",
+      data: "close-wait timed out",
+    });
+    fireEvent.click(screen.getByText("季报"));
+    expect(await screen.findByText(bannerText)).toBeInTheDocument();
+    expect(
+      document
+        .querySelector(".shell-error-track")
+        ?.classList.contains("right-sidebar-collapsed"),
+    ).toBe(true);
   });
 });
