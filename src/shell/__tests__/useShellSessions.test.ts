@@ -648,6 +648,107 @@ describe("useShellSessions", () => {
     expect(refreshSessions).not.toHaveBeenCalled();
   });
 
+  // --- Issue #1562: openPersisted resume-window reentry guard --------------
+
+  it("ignores a second openPersisted on the same path while the resume is in flight (#1562)", async () => {
+    // The open-set entry only lands when the resume SUCCEEDS (registerOpen),
+    // so during the createSession + openRecipe window a second click on the
+    // same path finds no `existing` row and would mint a ghost session that
+    // dies on the backend's AlreadyOpen rejection (ADR-0035 D3) -- surfacing
+    // as a false-error banner. The second call must be a silent no-op: the
+    // first resume's registerOpen activates the session on landing, so
+    // nothing needs queueing.
+    let resolveOpenRecipe: () => void = () => {};
+    vi.mocked(createSession).mockResolvedValueOnce(reply("r1"));
+    vi.mocked(openRecipe).mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveOpenRecipe = resolve; }),
+    );
+    const { result, setShellError } = renderSessions();
+    let first!: Promise<void>;
+    act(() => {
+      first = result.current.openPersisted("/x/a.json", "a");
+    });
+    await waitFor(() => expect(openRecipe).toHaveBeenCalledTimes(1));
+    // Second click inside the resume window: guarded, no second mint.
+    await act(async () => {
+      await result.current.openPersisted("/x/a.json", "a");
+    });
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(openRecipe).toHaveBeenCalledTimes(1);
+    expect(setShellError).not.toHaveBeenCalled();
+    // The first resume still lands normally and clears the indicator.
+    await act(async () => {
+      resolveOpenRecipe();
+      await first;
+    });
+    expect(result.current.activeSessionId).toBe("r1");
+    expect(result.current.resumeStatus).toEqual({ kind: "idle" });
+  });
+
+  it("re-arms the guard after a failed resume so the path opens again (#1562)", async () => {
+    // The outer finally releases the guard on both tails: a rejected
+    // openRecipe surfaces the error, then a fresh click runs the FULL
+    // resume again rather than being swallowed forever.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("r1"));
+    vi.mocked(openRecipe).mockRejectedValueOnce(new Error("boom"));
+    const { result, setShellError } = renderSessions();
+    await act(async () => {
+      await result.current.openPersisted("/x/a.json", "a");
+    });
+    expect(setShellError).toHaveBeenCalledTimes(1);
+    expect(result.current.resumeStatus).toEqual({ kind: "idle" });
+    vi.mocked(createSession).mockResolvedValueOnce(reply("r2"));
+    vi.mocked(openRecipe).mockResolvedValueOnce();
+    await act(async () => {
+      await result.current.openPersisted("/x/a.json", "a");
+    });
+    expect(createSession).toHaveBeenCalledTimes(2);
+    expect(openRecipe).toHaveBeenCalledTimes(2);
+    expect(result.current.activeSessionId).toBe("r2");
+    expect(result.current.resumeStatus).toEqual({ kind: "idle" });
+  });
+
+  it("activates an already-open path even while another resume is in flight (#1562)", async () => {
+    // The existing branch precedes the guard: activating an open session is
+    // a pure state switch, so it stays available DURING any resume window
+    // instead of being swallowed by the resume-window guard. Opening a then
+    // b first parks the active session on p2, so the mid-window click on a
+    // must visibly flip the active id -- a guard hoisted above the existing
+    // branch would swallow the click and leave it parked on p2.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("p1"));
+    vi.mocked(openRecipe).mockResolvedValueOnce();
+    vi.mocked(createSession).mockResolvedValueOnce(reply("p2"));
+    vi.mocked(openRecipe).mockResolvedValueOnce();
+    let resolveOpenRecipe: () => void = () => {};
+    vi.mocked(createSession).mockResolvedValueOnce(reply("r1"));
+    vi.mocked(openRecipe).mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveOpenRecipe = resolve; }),
+    );
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openPersisted("/x/a.json", "a");
+    });
+    await act(async () => {
+      await result.current.openPersisted("/x/b.json", "b");
+    });
+    expect(result.current.activeSessionId).toBe("p2");
+    let third!: Promise<void>;
+    act(() => {
+      third = result.current.openPersisted("/x/c.json", "c");
+    });
+    await waitFor(() => expect(openRecipe).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      await result.current.openPersisted("/x/a.json", "a");
+    });
+    expect(result.current.activeSessionId).toBe("p1");
+    await act(async () => {
+      resolveOpenRecipe();
+      await third;
+    });
+    expect(createSession).toHaveBeenCalledTimes(3);
+    expect(openRecipe).toHaveBeenCalledTimes(3);
+  });
+
   // --- Issue #204: hook-level coverage gaps --------------------------------
   // These pin the concurrency + branch contracts a regression would silently
   // break (no black-box signal): the busy-gated drop listener, the in-flight
