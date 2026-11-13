@@ -1368,3 +1368,140 @@ describe("WorkingSetList", () => {
     expect(classes).not.toContain("bg-accent");
   });
 });
+
+// The row context menu (#1570, ADR-0149): right-click opens the row's
+// management actions (rename / replace / delete) with the TARGET captured at
+// open -- the menu acts on the right-clicked row while the selection (and the
+// detail pane that follows it) stays untouched.
+describe("WorkingSetList context menu", () => {
+  // Spies must not leak between tests; the delete dialog's impact preview
+  // needs the same empty seed as the main suite above.
+  afterEach(() => vi.restoreAllMocks());
+  beforeEach(() => {
+    vi.mocked(previewDeleteImpact).mockResolvedValue([]);
+  });
+
+  const ordersDataset = { ...mockDataset, reference_name: "orders", display_name: "orders" };
+
+  function rightClickRow(name: RegExp): void {
+    fireEvent.contextMenu(screen.getByRole("button", { name }));
+  }
+
+  it("opens the three-action menu on right-click", () => {
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[mockDataset]}
+        activeName="people"
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onReplace={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    rightClickRow(/^people/);
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "重命名" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "换源" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "删除" })).toBeInTheDocument();
+  });
+
+  it("targets the right-clicked row regardless of the selection", () => {
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[mockDataset, ordersDataset]}
+        activeName="people"
+        selectedName="people"
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    rightClickRow(/^orders/);
+    fireEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
+    // The rename dialog carries the CAPTURED target's display name: the
+    // menu opened on the orders row while people held the selection.
+    expect(screen.getByDisplayValue("orders")).toBeInTheDocument();
+  });
+
+  it("leaves the selection untouched on right-click", () => {
+    const onSelect = vi.fn();
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[mockDataset, ordersDataset]}
+        activeName="people"
+        selectedName="people"
+        onSelect={onSelect}
+        onRename={() => {}}
+      />,
+    );
+    // Resolve the rows BEFORE opening the menu: while the modal menu is open
+    // Radix aria-hides the outside tree, so post-open role queries miss.
+    const pickedRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
+    const rightClickedRow = screen.getByRole("button", { name: /^orders/ }).closest("li")!;
+    rightClickRow(/^orders/);
+    expect(onSelect).not.toHaveBeenCalled();
+    // The selection band stays on the picked row.
+    expect(pickedRow.className.split(/\s+/)).toContain("bg-accent");
+    expect(rightClickedRow.className.split(/\s+/)).not.toContain("bg-accent");
+  });
+
+  it("routes delete through the confirm dialog chain", () => {
+    const onDelete = vi.fn();
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[ordersDataset]}
+        activeName="orders"
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    rightClickRow(/^orders/);
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    // Nothing is deleted until the dialog confirms.
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("offers only the actions that have handlers", () => {
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[mockDataset]}
+        activeName="people"
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    rightClickRow(/^people/);
+    expect(screen.getByRole("menuitem", { name: "重命名" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "换源" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "删除" })).not.toBeInTheDocument();
+  });
+
+  it("disables the actions while an operation is in flight", () => {
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[mockDataset]}
+        activeName="people"
+        selectedName={null}
+        loading
+        onSelect={() => {}}
+        onRename={() => {}}
+        onReplace={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    rightClickRow(/^people/);
+    for (const name of ["重命名", "换源", "删除"]) {
+      expect(screen.getByRole("menuitem", { name })).toHaveAttribute("data-disabled");
+    }
+  });
+});

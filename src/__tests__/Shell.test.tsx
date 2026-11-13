@@ -3502,3 +3502,25 @@ describe("App shell error banner lifecycle (issue #1563)", () => {
     ).toBe(true);
   });
 });
+
+describe("App context-menu policy mount (ADR-0149, issue #1570)", () => {
+  it("keeps the native menu off non-editing surfaces once the shell mounts", () => {
+    render(<App />);
+    // A blank surface: the mounted policy's document listener must claim the
+    // event (the WebView's reload / print items never surface in the shell).
+    const plain = document.createElement("div");
+    document.body.appendChild(plain);
+    const onPlain = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    plain.dispatchEvent(onPlain);
+    plain.remove();
+    expect(onPlain.defaultPrevented).toBe(true);
+    // The whitelist arm rides the same mounted listener: an editing surface
+    // keeps the native menu, so a blanket-prevent regression also goes red.
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    const onField = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    field.dispatchEvent(onField);
+    field.remove();
+    expect(onField.defaultPrevented).toBe(false);
+  });
+});
