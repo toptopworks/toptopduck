@@ -214,6 +214,7 @@ function renderPane(
         onQuestionConsumed={() => {}}
         onSeedDraft={() => {}}
         onSeedInvocations={() => {}}
+        onStageQuote={() => {}}
         onComposerFields={(_sid, fields) => {
           capturedComposerFields = fields;
         }}
@@ -1421,6 +1422,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
         onQuestionConsumed={onQuestionConsumed}
         onSeedDraft={onSeedDraft}
         onSeedInvocations={onSeedInvocations}
+        onStageQuote={() => {}}
         onComposerFields={() => {}}
         onComposerFieldsUnmount={() => {}}
         sessionName="pending"
@@ -1449,6 +1451,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
           onQuestionConsumed={onQuestionConsumed}
           onSeedDraft={onSeedDraft}
           onSeedInvocations={onSeedInvocations}
+          onStageQuote={() => {}}
           onComposerFields={() => {}}
           onComposerFieldsUnmount={() => {}}
           sessionName="pending"

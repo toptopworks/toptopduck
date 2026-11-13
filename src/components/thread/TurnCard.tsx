@@ -533,7 +533,11 @@ function TurnBody({
               link row and the preview card, mirroring the Textual branch's
               caption-row -> prose -> note rhythm. */}
           {body && (
-            <RoundProse text={body} onSelectViz={onSelectViz} selectedVizSpec={selectedVizSpec} />
+            // #1573 selection-source: the Materialized turn's prose answer
+            // is a quoting surface like the textual body.
+            <div data-selection-source="">
+              <RoundProse text={body} onSelectViz={onSelectViz} selectedVizSpec={selectedVizSpec} />
+            </div>
           )}
           <AssumptionNote assumption={assumption} />
           {/* ADR-0083 (issue #298): the primary result's inline preview card --
@@ -601,7 +605,10 @@ function TurnBody({
             // instead of riding the conversation tier.
             <p className="textual-kind m-0 text-xs text-muted-foreground">{badge}</p>
           )}
-          <RoundProse text={body} onSelectViz={onSelectViz} selectedVizSpec={selectedVizSpec} />
+          <div data-selection-source="">
+            {/* #1573: the textual outcome's prose is a selection source. */}
+            <RoundProse text={body} onSelectViz={onSelectViz} selectedVizSpec={selectedVizSpec} />
+          </div>
           <AssumptionNote assumption={assumption} />
         </div>
       );

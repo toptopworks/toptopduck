@@ -155,6 +155,7 @@ function renderPane(opts?: {
   pendingIngestPaths?: string[];
   onSeedDraft?: (sid: string, question: string) => void;
   onSeedInvocations?: (sid: string, names: string[]) => void;
+  onStageQuote?: (sid: string, text: string) => void;
 }) {
   if (opts?.thread) {
     vi.mocked(conversation).mockResolvedValue(opts.thread);
@@ -193,6 +194,7 @@ function renderPane(opts?: {
             onQuestionConsumed={noop}
             onSeedDraft={opts?.onSeedDraft ?? noop}
             onSeedInvocations={opts?.onSeedInvocations ?? noop}
+            onStageQuote={opts?.onStageQuote ?? noop}
             onComposerFields={(_sid, fields) => {
               composerFields = fields;
             }}

@@ -389,13 +389,16 @@ describe("TurnCard textual outcome markdown (issue #827)", () => {
       expect(outcome, `kind=${text_kind}`).toHaveClass(text_kind.toLowerCase());
       const prose = outcome?.querySelector(".round-text") ?? null;
       expect(prose, `kind=${text_kind}`).not.toBeNull();
-      // The assumption side note trails the prose as a sibling, not a child.
+      // The assumption side note trails the prose BLOCK as a sibling, not a
+      // child. The block is the #1573 selection-source wrapper (the prose
+      // root rides inside it), so the pin follows the wrapper.
       const note = container.querySelector(".assumption");
       // Guard first: a silently-unrendered note would otherwise satisfy both
       // sibling assertions vacuously (null contains nothing, null === null).
       expect(note).not.toBeNull();
       expect(prose?.contains(note)).toBe(false);
-      expect(prose?.nextElementSibling).toBe(note);
+      const proseBlock = prose?.closest("[data-selection-source]") ?? prose;
+      expect(proseBlock?.nextElementSibling).toBe(note);
     },
   );
 

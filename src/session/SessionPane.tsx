@@ -8,6 +8,7 @@ import { getApprovalAttachments } from "../api";
 import { RightSidebarToggle } from "../shell/RightSidebarToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useRailFollow } from "./useRailFollow";
+import { useSelectionSurface } from "./useSelectionSurface";
 import { useSessionState } from "./useSessionState";
 import { useComposerQueue, type VerdictThunk } from "./useComposerQueue";
 import { consumePendingPayload } from "./pendingPayload";
@@ -19,11 +20,13 @@ import { ErrorBoundary } from "../components/common/ErrorBoundary";
 import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
 import { ArtifactView } from "../components/thread/ArtifactView";
 import { ResultView } from "../components/thread/ResultView";
+import { SelectionToolbar } from "../components/thread/SelectionToolbar";
 import { TechnicalDetailsFold } from "../components/common/TechnicalDetailsFold";
 import { Thread } from "../components/thread/Thread";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
+import { toast } from "../components/ui/use-toast";
 import { RightSidebarWorkingSet } from "../components/dataset/RightSidebarWorkingSet";
 import {
   type ReplaceFlightInfo,
@@ -95,6 +98,11 @@ interface SessionPaneProps {
    *  re-seed -- the staged names go back into the session's composer
    *  staging, so a resubmit carries the pick + question pair whole. */
   onSeedInvocations: (sessionId: string, names: string[]) => void;
+  /** Stage a selection-surface quote onto this session's composer staging
+   *  (#1573): the toolbar's quote action appends to the per-session list the
+   *  shell bar displays as chips and materializes at submit. The seed-prop
+   *  precedent -- identity-stable, sid-addressed. */
+  onStageQuote: (sessionId: string, text: string) => void;
   /** ADR-0092: lifts this session's bar-relevant fields (loading / queued /
    *  phase / handleAsk / handleCancel / handleIngestFiles) to the
    *  shell-level bar. Called via useEffect whenever the fields change. */
@@ -164,7 +172,7 @@ const EDGE_DOCKED_SCROLL_CLASS = "-m-4 overflow-y-auto p-4";
  * padding, or the stage header's border-b sits flush on the tab strip's. */
 const FILE_STAGE_CLASS = "-mx-4 -mb-4 overflow-hidden";
 
-export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, recipePath, onRename, onClose, onDelete, disabled }: SessionPaneProps) {
+export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onStageQuote, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, recipePath, onRename, onClose, onDelete, disabled }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -390,6 +398,44 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     requestAnimationFrame(() => survivor.current?.focus());
   }
 
+  // --- Selection surface (#1573) ------------------------------------------
+  // The conversation column is the surface root: the gesture machine scopes
+  // its selections to the caller-marked prose containers below it, and the
+  // toolbar mounts inside the column (position:fixed, non-portal). The
+  // pane's active posture gates the machine -- a session switch dismisses.
+  const conversationRef = useRef<HTMLDivElement | null>(null);
+  const selection = useSelectionSurface(conversationRef, isActive);
+  const { active: selectionActive, toolbarRef, dismiss: dismissSelection, clearSelection } = selection;
+  const handleQuoteSelection = useCallback(() => {
+    const text = selectionActive?.text;
+    if (text === undefined) return;
+    onStageQuote(sessionId, text);
+    dismissSelection();
+    clearSelection();
+  }, [selectionActive, onStageQuote, sessionId, dismissSelection, clearSelection]);
+  const handleCopySelection = useCallback(() => {
+    const text = selectionActive?.text;
+    if (text === undefined) return;
+    // Success: the toast announces, the toolbar leaves, the selection
+    // clears (the WorkBuddy shape). Failure: log + the toolbar stays put --
+    // nothing was copied, so nothing may close.
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        toast({
+          title: intl.formatMessage({
+            id: "thread.selectionSurface.copied",
+            defaultMessage: "Copied to clipboard",
+          }),
+        });
+        dismissSelection();
+        clearSelection();
+      })
+      .catch((e: unknown) => {
+        log.warn("SessionPane", "selection copy failed", e);
+      });
+  }, [selectionActive, dismissSelection, clearSelection, intl]);
+
   // ADR-0058 L2 partition retry: each region's onReset RESETS its slice of the
   // session query cache so the boundary's error-clear remount renders fresh
   // data -- NOT the stale page that crashed it. invalidateQueries would leave
@@ -551,7 +597,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           scrolls behind the bar (the rail's dynamic bottom padding keeps the
           last element readable above it). */}
       <div className="session-body">
-        <div className="session-conversation">
+        <div className="session-conversation" ref={conversationRef}>
           <div className="session-header" data-tauri-drag-region>
             <span className="min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
               {sessionName ||
@@ -675,6 +721,16 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               )}
             </div>
           </section>
+          {selectionActive !== null && (
+            // #1573: the selection toolbar rides the conversation column
+            // (position:fixed, non-portal) -- it dies with the pane, and the
+            // hook drives its viewport placement.
+            <SelectionToolbar
+              ref={toolbarRef}
+              onQuote={handleQuoteSelection}
+              onCopy={handleCopySelection}
+            />
+          )}
         </div>
 
         {/* --- Right sidebar (ADR-0045/0062 R2) ---------------------------- */}
