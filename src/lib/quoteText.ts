@@ -43,3 +43,54 @@ export function materializeQuotes(quotes: readonly string[]): string {
     )
     .join("\n\n");
 }
+
+/** One quote parsed back out of a submitted question. */
+export interface SplitQuestion {
+  /** The leading blockquote block's quotes, de-prefixed, in order. */
+  quotes: string[];
+  /** Everything after the quote block -- the draft as submitted. Empty
+   *  when the question was the quotes alone; the original question,
+   *  newlines untouched, when nothing parsed as a quote. */
+  draft: string;
+}
+
+/** The submit materialization's inverse, display-side: a question opening
+ *  with '>'-prefixed lines parses back into its quotes and the draft that
+ *  followed. The question text itself is untouched -- the agent received
+ *  the blockquote verbatim; this only drives the bubble's chip rendering.
+ *  A question with no leading '>' round-trips untouched. A hand-typed
+ *  leading blockquote renders as chips too (the bubble's one quote face),
+ *  and a draft that itself opens with '>' right after a quote block reads
+ *  as one more chip -- both display-only; the chip tooltip keeps the full
+ *  text. */
+export function splitQuotedQuestion(question: string): SplitQuestion {
+  const lines = normalizeNewlines(question).split("\n");
+  const quotes: string[][] = [];
+  let current: string[] | null = null;
+  let head = 0;
+  while (head < lines.length) {
+    const line = lines[head];
+    if (line.startsWith(">")) {
+      if (current === null) {
+        current = [];
+        quotes.push(current);
+      }
+      current.push(line.startsWith("> ") ? line.slice(2) : line.slice(1));
+      head += 1;
+    } else if (
+      line === "" &&
+      current !== null &&
+      head + 1 < lines.length &&
+      lines[head + 1].startsWith(">")
+    ) {
+      current = null; // the blank line between two blockquotes
+      head += 1;
+    } else {
+      break;
+    }
+  }
+  if (quotes.length === 0) return { quotes: [], draft: question };
+  const rest = lines.slice(head);
+  if (rest[0] === "") rest.shift(); // the submit-side join's one blank line
+  return { quotes: quotes.map((block) => block.join("\n")), draft: rest.join("\n") };
+}

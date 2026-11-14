@@ -34,6 +34,12 @@ colors:
   # own commitment hue on hover — teal option hovers teal, warning hovers
   # warning.
   transit: "rgb(0 0 0 / 4%)"
+  # The chip face: the quote/skill chips' pill surface (composer and sent
+  # bubble). A static metadata face, not hover feedback -- deeper than the
+  # transit step so the pill reads on both grounds it sits on (the card
+  # composer and the secondary bubble box, whose dark token shares muted's
+  # exact value). Ground-relative alpha, same lesson as transit.
+  chip-surface: "rgb(0 0 0 / 6%)"
   # The inverted floating-surface tier (issue #1568): the transient-hint face
   # (Tooltip, toast default), dark in both themes -- see The Inverted Floating
   # Tier section for the rationale.
@@ -57,6 +63,9 @@ colors:
   border-dark: "#2a2f2a"
   input-dark: "#606a60"
   transit-dark: "rgb(255 255 255 / 5%)"
+  # The reference pill's ~20/255 lift: clearly visible on the card composer
+  # and the secondary bubble box while staying a quiet metadata face.
+  chip-surface-dark: "rgb(255 255 255 / 10%)"
   # Two brightness steps above popover-dark, so the hint plane lifts off the
   # near-black ground instead of inverting against it.
   inverted-dark: "#3d433f"
@@ -582,6 +591,8 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 **`badge-secondary` / `badge-secondary-dark`** — Muted pill. Background `{colors.muted}`, text `{colors.muted-foreground}`. Used for session count, metadata tags.
 
 **`badge-accent` / `badge-accent-dark`** — Teal-tinted pill. Background `{colors.accent}`, text `{colors.accent-foreground}`. Used for highlighted/active states in lists.
+
+**`chip` / `chip-dark`** — Ground-relative metadata pill for the quote and skill chips (the composer's staged chips and the sent bubble's chips alike). Background `{colors.chip-surface}` / `{colors.chip-surface-dark}`, text `{colors.secondary-foreground}` / `{colors.secondary-foreground-dark}`, type 13px / 500 (one step under the 14px body, the `code-inline` size), rounded `{rounded.md}` (6px), padding 6px horizontal; the 20px prose line box (`leading-5`) supplies the height, so the pill matches the first text line exactly. The quote chip boxes its glyph in a 1px `{colors.border}` hairline box at `{rounded.sm}`; the skill chip runs the glyph bare at the same glyph size. phrasing-content spans with list roles — the face hosts inside the question bubble's `<p>`.
 
 ### Alerts
 
