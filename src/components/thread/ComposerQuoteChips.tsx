@@ -9,12 +9,18 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 // staged passages for THIS session, isomorphic with ComposerSkillChips
 // (inline in the input area, the caret seats right after the last chip) and
 // always seated BEFORE the skill chips -- the quote is the question's
-// leading material. The chip is the three-piece reference: icon, an
+// leading material. The chip is the quiet ground-relative pill (the
+// chip-surface token as its face, ink text, badge typography) wearing the boxed
+// glyph: a hairline box, an
 // 8-character excerpt, and the full text on hover (the inverted-tier
 // tooltip). Withdrawal rides the per-chip button and the Backspace
 // at the draft start chain (the shell routes it: the last skill chip first,
 // then the last quote). Duplicated stagings render as separate chips; the
 // key rides the staging id, never the text.
+//
+// The list is phrasing content (span + roles, the #993 invocation-chip
+// precedent) rather than ul/li: the sent bubble hosts the same face inside
+// its question <p>, where flow content may not nest.
 
 export type ComposerQuoteChipsProps = {
   /** The session's staged quotes, in staging order. Empty renders nothing. */
@@ -27,8 +33,9 @@ export function ComposerQuoteChips({ quotes, onRemove }: ComposerQuoteChipsProps
   const intl = useIntl();
   if (quotes.length === 0) return null;
   return (
-    <ul
+    <span
       className="contents"
+      role="list"
       aria-label={intl.formatMessage({
         id: "composer.quoteChips.listAria",
         defaultMessage: "Quoted passages",
@@ -37,8 +44,23 @@ export function ComposerQuoteChips({ quotes, onRemove }: ComposerQuoteChipsProps
       {quotes.map((quote) => (
         <Tooltip key={quote.id}>
           <TooltipTrigger asChild>
-            <li className="inline-flex min-w-0 max-w-full items-center gap-1 text-sm font-medium text-accent-foreground">
-              <SquareLetterT className="size-4 shrink-0" aria-hidden />
+            {/* The face rides the chip-surface token's ground-relative
+                tint, not an opaque fill: the pill must lift a visible step
+                on BOTH grounds it sits on -- the secondary bubble box and
+                the card composer -- which one opaque value cannot serve
+                (the app.css transit token's own lesson). leading-5 pins the
+                pill's box to the prose line-height (20px, the text-sm
+                line): top alignment then reads as center alignment on the
+                first line, in both the composer row and the bubble's inline
+                flow. The glyph rides the reference's boxed face: a hairline
+                4px box one step down from the pill itself. */}
+            <span
+              role="listitem"
+              className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md bg-chip-surface px-1.5 leading-5 text-[13px] font-medium text-secondary-foreground"
+            >
+              <span className="flex size-4 shrink-0 items-center justify-center rounded-sm border border-border">
+                <SquareLetterT className="size-3.5" aria-hidden />
+              </span>
               <span className="truncate">{quoteExcerpt(quote.text)}</span>
               {onRemove && (
                 <button
@@ -56,13 +78,13 @@ export function ComposerQuoteChips({ quotes, onRemove }: ComposerQuoteChipsProps
                   <X className="size-3 shrink-0" aria-hidden />
                 </button>
               )}
-            </li>
+            </span>
           </TooltipTrigger>
           <TooltipContent className="max-w-72 whitespace-pre-wrap">
             {quote.text}
           </TooltipContent>
         </Tooltip>
       ))}
-    </ul>
+    </span>
   );
 }

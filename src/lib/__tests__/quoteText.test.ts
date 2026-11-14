@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   materializeQuotes,
   quoteExcerpt,
+  splitQuotedQuestion,
 } from "../quoteText";
 
 // The quote channel's text shaping (#1573): selections materialize as
 // blockquotes prepended to the draft at the submit boundary; chips carry a
-// capped excerpt for display and the accessible name.
+// capped excerpt for display and the accessible name. The bubble side parses
+// the materialization back out so the sent message renders the same chips
+// the composer staged.
 
 describe("materializeQuotes", () => {
   it("returns an empty string for an empty staging", () => {
@@ -32,6 +35,44 @@ describe("materializeQuotes", () => {
     // A blank line inside the selection keeps its own '> ' prefix so the
     // blockquote never breaks apart at submit.
     expect(materializeQuotes(["a\n\nb"])).toBe("> a\n>\n> b");
+  });
+});
+
+describe("splitQuotedQuestion", () => {
+  it("round-trips a materialized quote ahead of the draft", () => {
+    const question = `${materializeQuotes(["宁德时代300750-估值报"])}\n\n加一张同业 PB-ROE 散点图`;
+    expect(splitQuotedQuestion(question)).toEqual({
+      quotes: ["宁德时代300750-估值报"],
+      draft: "加一张同业 PB-ROE 散点图",
+    });
+  });
+
+  it("returns the question untouched when it has no leading blockquote", () => {
+    expect(splitQuotedQuestion("plain question")).toEqual({
+      quotes: [],
+      draft: "plain question",
+    });
+  });
+
+  it("splits multiple blank-line-separated quotes from the draft", () => {
+    expect(splitQuotedQuestion("> one\n\n> two\n> lines\n\ndraft")).toEqual({
+      quotes: ["one", "two\nlines"],
+      draft: "draft",
+    });
+  });
+
+  it("keeps an interior blank line inside one quote", () => {
+    expect(splitQuotedQuestion("> a\n>\n> b\n\ndraft")).toEqual({
+      quotes: ["a\n\nb"],
+      draft: "draft",
+    });
+  });
+
+  it("yields an empty draft for a quotes-only question", () => {
+    expect(splitQuotedQuestion("> only quoted")).toEqual({
+      quotes: ["only quoted"],
+      draft: "",
+    });
   });
 });
 

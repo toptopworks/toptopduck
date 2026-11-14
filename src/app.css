@@ -69,6 +69,13 @@
      muted rendered the rail hover invisible, and the dark opaque #343a34
      rode a 3-4x too bright step on the canvas). */
   --transit: rgb(0 0 0 / 4%);
+  /* The chip surface: the composer quote/skill chips' and the sent bubble's
+     pill face. A dedicated ground-relative tint rather than the transit
+     ramp -- chips are a STATIC surface, not hover feedback, and need a
+     deeper step than the hover face to read as a pill at all (the hover
+     step's ~12/255 lift vanished against the bubble's secondary box, whose
+     dark token shares muted's exact value). */
+  --chip-surface: rgb(0 0 0 / 6%);
   --destructive: #b00020;
   --destructive-foreground: #ffffff;
   /* warning amber (ADR-0050, issue #108): the cautionary disclosure semantic
@@ -127,6 +134,11 @@
      as a bright patch; an opaque single value cannot serve both grounds
      (the same lesson the light token's 4% black alpha settled). */
   --transit: rgb(255 255 255 / 5%);
+  /* The chip surface, dark: white 10% -- the reference pill's ~20/255 lift,
+     clearly visible on both the card composer and the secondary bubble box
+     while staying a quiet metadata face (the hover step's 5% read as bare
+     ground there). */
+  --chip-surface: rgb(255 255 255 / 10%);
   --destructive: #ef4444;
   --destructive-foreground: #ffffff;
   /* warning amber flips lighter in dark mode for readable text on the tint. */
@@ -166,6 +178,7 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-transit: var(--transit);
+  --color-chip-surface: var(--chip-surface);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-warning: var(--warning);

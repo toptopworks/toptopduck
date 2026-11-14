@@ -5,8 +5,10 @@
 // posture is retired), the asked_at stamp, the copy affordance, and the stale
 // strike-through when the turn's result died. Every app annotation (active
 // chip, skill drift, outcome, failures) lives on the assistant side
-// (TurnCard's stream) -- reading order is the invocation chips, then the
-// question, then the assistant-side annotations, then reply.
+// (TurnCard's stream) -- reading order is the quote chips (#1573, the
+// submit materialization parsed back out of the question), then the
+// invocation chips, then the question, then the assistant-side
+// annotations, then reply.
 //
 // The verbatim question is layer-4 content (ADR-0039) and passes through
 // untranslated; asked_at renders as the Chat-style conversation stamp
@@ -15,7 +17,9 @@
 import { useIntl } from "react-intl";
 import { Puzzle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { splitQuotedQuestion } from "../../lib/quoteText";
 import { CopyButton } from "./CopyButton";
+import { ComposerQuoteChips } from "./ComposerQuoteChips";
 import { HOVER_REVEAL_CLASS } from "./turn-visual";
 import { formatTurnStamp } from "./turnStamp";
 
@@ -46,19 +50,29 @@ export function UserBubble({
 }) {
   const intl = useIntl();
   const hasSkills = invokedSkills.length > 0;
+  // The submit materialization parses back out of the verbatim question:
+  // the leading blockquote block renders as the composer's quote chips
+  // (pure display -- no withdrawal from a sent message), the draft tail is
+  // the question text proper. Copy still carries the full verbatim text.
+  const { quotes, draft } = splitQuotedQuestion(question);
+  const hasQuotes = quotes.length > 0;
+  const quoteEntries = quotes.map((text, index) => ({ id: index, text }));
   return (
     <div className="user-bubble group flex flex-col items-end">
       {/* ADR-0119 Decision 5: the invocation chips share the bubble's inline
           flow (issue #993) -- they read ahead of the question inside the
-          bubble box and the question text wraps naturally after them, with no
-          pill surface: each chip keeps the composer chips' face -- accent
-          color riding the chip container (the glyph tints through
-          currentColor) over medium-weight text -- behind the same Puzzle
-          glyph, DESIGN.md's sole accent system. A <ul> is flow content and
-          may not nest in the <p>, so the list rides phrasing content with
-          list roles; decorative (no interaction), names untranslated. Chip
-          spacing rides the item margin; the literal space after the list is
-          the question's word gap and its wrap point. */}
+          bubble box and the question text wraps naturally after them. The
+          #993 bare-accent face was recalibrated (2026-11-14, the reference
+          alignment) onto the quiet pill the composer chips now wear: the
+          ground-relative chip-surface step (the same face on both the
+          bubble's secondary box and the composer's card), ink text, badge
+          typography
+          -- the chip reads as metadata, not as a highlighted fragment. A
+          <ul> is flow content
+          and may not nest in the <p>, so the list rides phrasing content
+          with list roles; decorative (no interaction), names untranslated.
+          Chip spacing rides the item margin; the literal space after the
+          list is the question's word gap and its wrap point. */}
       {/* The bubble box rides the question element itself (the .turn-question
           hook stays for selector / test stability): secondary surface + lg
           radius per the conversation-surface tokens, the top-right corner
@@ -76,32 +90,45 @@ export function UserBubble({
         className={cn(
           "turn-question m-0 max-w-[85%] rounded-lg rounded-tr-sm bg-secondary px-3 py-2",
           "text-sm text-secondary-foreground whitespace-pre-wrap break-words",
-          isStale && !hasSkills && STALE_STRIKE,
+          // The bubble's inline flow has no flex gap: chips separate by the
+          // literal spaces below (the wrap points), which alone read ~4px --
+          // narrower than the composer row's 8px gap. One arbitrary-variant
+          // rule tops every chip up to the composer's spacing and pins its
+          // vertical alignment; the skills' own mr-1/align-middle retire
+          // into it. The alignment is align-top, not middle: at the chips'
+          // leading-5 (20px) box == the text-sm line box, top alignment
+          // makes the two boxes coincide -- each centers its own content,
+          // and middle's x-height baseline math skews against CJK faces.
+          "[&_[role=listitem]]:mr-1 [&_[role=listitem]]:align-top",
+          isStale && !hasSkills && !hasQuotes && STALE_STRIKE,
         )}
       >
-        {hasSkills ? (
-          <>
-            <span
-              role="list"
-              className="invoked-skills"
-              aria-label={intl.formatMessage({
-                id: "thread.userBubble.invokedSkillsAria",
-                defaultMessage: "Skills invoked with this message",
-              })}
-            >
-              {invokedSkills.map((name) => (
-                <span
-                  key={name}
-                  role="listitem"
-                  className="invoked-skill mr-1 inline-flex max-w-full items-center gap-1 align-baseline font-medium text-accent-foreground"
-                >
-                  <Puzzle className="size-3 shrink-0" aria-hidden="true" />
-                  <span className="truncate">{name}</span>
-                </span>
-              ))}
-            </span>{" "}
-            <span className={cn(isStale && STALE_STRIKE)}>{question}</span>
-          </>
+        {hasQuotes && <ComposerQuoteChips quotes={quoteEntries} />}
+        {hasQuotes && draft !== "" && " "}
+        {hasSkills && (
+          <span
+            role="list"
+            className="invoked-skills"
+            aria-label={intl.formatMessage({
+              id: "thread.userBubble.invokedSkillsAria",
+              defaultMessage: "Skills invoked with this message",
+            })}
+          >
+            {invokedSkills.map((name) => (
+              <span
+                key={name}
+                role="listitem"
+                className="invoked-skill inline-flex max-w-full items-center gap-1 rounded-md bg-chip-surface px-1.5 leading-5 text-[13px] font-medium text-secondary-foreground"
+              >
+                <Puzzle className="size-3.5 shrink-0" aria-hidden="true" />
+                <span className="truncate">{name}</span>
+              </span>
+            ))}
+          </span>
+        )}
+        {hasSkills && " "}
+        {hasSkills || hasQuotes ? (
+          <span className={cn(isStale && STALE_STRIKE)}>{draft}</span>
         ) : (
           question
         )}

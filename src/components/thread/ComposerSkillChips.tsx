@@ -35,9 +35,9 @@ export function ComposerSkillChips({ names, onRemove }: ComposerSkillChipsProps)
       {names.map((name) => (
         <li
           key={name}
-          className="inline-flex min-w-0 max-w-full items-center gap-1 text-sm font-medium text-accent-foreground"
+          className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md bg-chip-surface px-1.5 leading-5 text-[13px] font-medium text-secondary-foreground"
         >
-          <Puzzle className="size-4 shrink-0" aria-hidden />
+          <Puzzle className="size-3.5 shrink-0" aria-hidden />
           <span className="truncate">{name}</span>
           {onRemove && (
             <button

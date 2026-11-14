@@ -177,7 +177,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
           wrap as flex items and the textarea takes the remainder of the last
           row, so the caret seats right after the last chip. With no chips
           the textarea alone fills the row (the plain composer). */}
-      <div className="flex flex-wrap items-start gap-x-3 gap-y-1 px-3 pt-3 pb-2">
+      <div className="flex flex-wrap items-start gap-x-2 gap-y-1 px-3 pt-3 pb-2">
         {quoteChips?.node}
         {skillPicker?.chips.node}
         <textarea
