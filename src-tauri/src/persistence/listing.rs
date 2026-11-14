@@ -99,6 +99,27 @@ pub(crate) fn default_workspaces_root(app: &tauri::AppHandle) -> PathBuf {
     crate::session::workspace::resolve_workspaces_root(&default_sessions_root(app))
 }
 
+/// The user-level memory root (issue #1531, ADR-0147): the `memory`
+/// SIBLING of the DEFAULT sessions root in the product's Documents domain
+/// -- the same fixed placement posture as the workspaces root (user memory
+/// is a user asset; it does NOT follow a `set_sessions_dir` relocation).
+/// Takes the app handle so a caller cannot pass an overridden sessions
+/// root, mirroring [`default_workspaces_root`].
+pub(crate) fn default_user_memory_root(app: &tauri::AppHandle) -> PathBuf {
+    user_memory_root(&default_sessions_root(app))
+}
+
+/// The pure sibling derivation behind [`default_user_memory_root`] (the
+/// `resolve_workspaces_root` split -- testable without an app handle). A
+/// volume-root sessions dir (no parent) falls back to `<root>/memory`, the
+/// workspaces root's fallback posture.
+pub(crate) fn user_memory_root(default_sessions_root: &Path) -> PathBuf {
+    default_sessions_root
+        .parent()
+        .unwrap_or(default_sessions_root)
+        .join("memory")
+}
+
 /// Typed recipe file path — the stable identity of a persisted session
 /// (ADR-0060/0061, issue #462). Distinct from the runtime [`SessionId`] (a
 /// UUID): this is the persisted path the frontend passes back to `open_recipe`.
@@ -948,5 +969,34 @@ mod tests {
         root.set(PathBuf::from("/elsewhere"));
         assert_eq!(cloned, PathBuf::from("/sessions"));
         assert_eq!(root.path(), PathBuf::from("/elsewhere"));
+    }
+
+    /// #1531: the user memory root is the DEFAULT sessions root's sibling
+    /// (the workspaces root's placement posture), and a volume-root
+    /// sessions dir with no parent falls back to `<root>/memory`.
+    #[test]
+    fn user_memory_root_is_the_sessions_roots_sibling() {
+        assert_eq!(
+            user_memory_root(Path::new("/home/u/Documents/TOPTOPDuck/sessions")),
+            PathBuf::from("/home/u/Documents/TOPTOPDuck/memory")
+        );
+    }
+
+    // A volume-root sessions root has no sibling -- the same volume root
+    // hosts the memory directory directly (the workspaces root's per-OS
+    // twin posture: `C:\` on Windows, `/` on Unix).
+    #[test]
+    #[cfg(windows)]
+    fn volume_root_sessions_dir_hosts_user_memory_directly() {
+        assert_eq!(
+            user_memory_root(Path::new("C:\\")),
+            PathBuf::from("C:\\memory")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn volume_root_sessions_dir_hosts_user_memory_directly() {
+        assert_eq!(user_memory_root(Path::new("/")), PathBuf::from("/memory"));
     }
 }

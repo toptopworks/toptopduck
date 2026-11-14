@@ -1,4 +1,5 @@
-//! Egress env-proxy routing pin (issue #1458, ADR-0139).
+//! Egress env-proxy routing pin (issue #1458, ADR-0139) plus the loopback
+//! and credential halves of the bypass overlay (issue #1521).
 //!
 //! An integration-test file is its own process, so the env mutations below
 //! cannot reach other test files' suites -- but they are process-global
@@ -12,6 +13,22 @@
 //! the shared recipe ever stops honoring the env proxy, the request goes
 //! direct, DNS fails fast, and the pin turns red -- no reachable origin
 //! exists in any state.
+//!
+//! The loopback half rides the same frozen snapshot: with the env proxy
+//! set, a request to a loopback origin must dial it DIRECT (the #1521
+//! overlay's unconditional exemption) -- a direct request carries an
+//! origin-form request line (`GET /path`), and a proxied one the absolute
+//! form, so the line shape itself is the assertion material on both ends.
+//! If the exemption ever stops overriding the env proxy, the loopback
+//! requests are misrouted to the closed proxy listener (its thread has
+//! joined and dropped it by then) and die on connection-refused -- the
+//! send's expect turns red fast, no timeout needed.
+//!
+//! The credential half rides the env URL's userinfo (`user:pass`): the
+//! overlay must round-trip the credentials into the proxy URL it returns,
+//! or they vanish at reqwest's re-parse and an authenticated proxy would
+//! answer 407 -- the public half asserts the `Proxy-Authorization` header
+//! arrives, the loopback half asserts it never appears on a direct dial.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -19,15 +36,20 @@ use std::net::TcpListener;
 use toptopduck_lib::egress::{async_client, blocking_client};
 use toptopduck_lib::mcp::client::block_on;
 
-/// Minimal capturing proxy: accepts `count` connections, answers each with
-/// a tiny 200, and returns the collected request lines. An HTTP proxy sees
-/// an http target as an absolute-form request line -- that shape is itself
-/// the assertion material (a direct request would carry only the path).
-fn capturing_proxy(count: usize) -> (u16, std::thread::JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the fake proxy");
-    let port = listener.local_addr().expect("read the proxy port").port();
+/// Minimal capturing HTTP endpoint (proxy or origin): accepts `count`
+/// connections, answers each with a tiny 200, and returns the collected
+/// request heads (request line plus headers). An HTTP proxy sees an http
+/// target as an absolute-form request line, a dialed-direct origin the
+/// origin form -- and the credential half asserts on the
+/// `Proxy-Authorization` header's presence or absence in the same head.
+fn capturing_endpoint(count: usize) -> (u16, std::thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the capturing endpoint");
+    let port = listener
+        .local_addr()
+        .expect("read the endpoint port")
+        .port();
     let handle = std::thread::spawn(move || {
-        let mut request_lines = Vec::new();
+        let mut request_heads = Vec::new();
         for _ in 0..count {
             let (mut stream, _) = listener.accept().expect("the egress face connects");
             let mut buf = Vec::new();
@@ -44,55 +66,58 @@ fn capturing_proxy(count: usize) -> (u16, std::thread::JoinHandle<Vec<String>>) 
                     break;
                 }
             }
-            let head = String::from_utf8_lossy(&buf).into_owned();
-            request_lines.push(
-                head.lines()
-                    .next()
-                    .unwrap_or("(no request line captured)")
-                    .to_string(),
-            );
+            request_heads.push(String::from_utf8_lossy(&buf).into_owned());
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .expect("answer the proxied request");
         }
-        request_lines
+        request_heads
     });
     (port, handle)
 }
 
-/// Point the egress faces' env at the fake proxy. The uppercase name is the
-/// one the env leg resolves (hyper-util reads each proxy variable
-/// upper-then-lower, first set wins), so one write suffices. The `NO_PROXY`
-/// pair is removed in both letter cases: a no-list entry matches the
-/// request's destination host, and the probe's `.invalid` host matches
-/// neither loopback entry -- what the removal actually clears is an
-/// inherited wildcard bypass (`NO_PROXY=*`), which would otherwise exempt
-/// the probe and send it direct.
+/// Point the egress faces' env at the fake proxy, credentials riding the
+/// URL userinfo: the overlay must round-trip them into the proxy URL it
+/// returns (#1521's review) -- `user:pass` base64s to the literal the test
+/// asserts. The uppercase name is the one the env leg resolves (hyper-util
+/// reads each proxy variable upper-then-lower, first set wins), so one
+/// write suffices. The `NO_PROXY` pair is removed in both letter cases: a
+/// no-list entry matches the request's destination host, and the probe's
+/// `.invalid` host matches neither loopback entry -- what the removal
+/// actually clears is an inherited wildcard bypass (`NO_PROXY=*`), which
+/// would otherwise exempt the probe and send it direct.
 fn point_env_at_proxy(port: u16) {
-    let proxy = format!("http://127.0.0.1:{port}");
+    let proxy = format!("http://user:pass@127.0.0.1:{port}");
     std::env::set_var("HTTP_PROXY", &proxy);
     std::env::remove_var("NO_PROXY");
     std::env::remove_var("no_proxy");
 }
 
 /// The shared egress construction recipe routes every outbound face through
-/// the env proxy -- env vars first is the reqwest `system-proxy` posture
-/// ADR-0139 converged all faces on (the retired ureq face's implicit
-/// env-only split is what the ADR closed). A regression that pins
-/// `.no_proxy()` onto the shared builder sends the probe direct, the
-/// reserved `.invalid` host fails DNS, and the send below fails. Both faces
-/// (blocking for the preflight probes, async for the live turns and the MCP
-/// remote transports) draw from one construction seam, so each is proven
-/// once through its own client.
+/// the env proxy for public hosts -- env vars first is the reqwest
+/// `system-proxy` posture ADR-0139 converged all faces on (the retired
+/// ureq face's implicit env-only split is what the ADR closed). A
+/// regression that pins `.no_proxy()` onto the shared builder sends the
+/// probe direct, the reserved `.invalid` host fails DNS, and the send
+/// below fails. The proxied requests must also carry the env URL's
+/// credentials (#1521's review: the overlay round-trips them into the
+/// returned proxy URL), asserted as the `Proxy-Authorization` header.
+/// The same frozen clients then dial a loopback origin, which the #1521
+/// bypass overlay must exempt unconditionally -- even with the env proxy
+/// set -- so the loopback half below asserts origin-form request lines
+/// and no proxy credentials on the origin end. Both faces (blocking for
+/// the preflight probes, async for the live turns and the MCP remote
+/// transports) draw from one construction seam, so each is proven once
+/// through its own client on both halves.
 #[test]
-fn egress_recipe_routes_both_faces_through_the_env_proxy() {
+fn egress_recipe_routes_public_hosts_via_the_credentialed_proxy_and_loopback_direct() {
     const PROBE: &str = "http://egress-proxy-pin.invalid/probe";
     // The face array drives the accept count and the assertions, so a new
     // face cannot extend the one without the other: a drift either way
     // fails the length assert or hangs the join (bounded red by the CI job
     // timeout), never a silently truncated zip.
     let faces = ["blocking", "async"];
-    let (port, proxy) = capturing_proxy(faces.len());
+    let (port, proxy) = capturing_endpoint(faces.len());
     point_env_at_proxy(port);
 
     // Blocking face first: `reqwest::blocking` panics when the calling
@@ -119,17 +144,67 @@ fn egress_recipe_routes_both_faces_through_the_env_proxy() {
         "the fake proxy answers the async face"
     );
 
-    let request_lines = proxy.join().expect("the fake proxy observed both faces");
+    let request_heads = proxy.join().expect("the fake proxy observed both faces");
     assert_eq!(
-        request_lines.len(),
+        request_heads.len(),
         faces.len(),
         "each egress face dials the proxy exactly once"
     );
-    for (face, line) in faces.iter().zip(&request_lines) {
+    // `user:pass` base64s to `dXNlcjpwYXNz`; hyper writes header names
+    // lowercase on the wire, so the match runs on the lowercased head.
+    let auth_header = "proxy-authorization: basic dxnlcjpwyxnz";
+    for (face, head) in faces.iter().zip(&request_heads) {
         assert_eq!(
-            line,
-            &format!("GET {PROBE} HTTP/1.1"),
+            head.lines().next().unwrap_or_default(),
+            format!("GET {PROBE} HTTP/1.1"),
             "the {face} face hands the absolute-form request to the proxy"
+        );
+        assert!(
+            head.to_ascii_lowercase().contains(auth_header),
+            "the {face} face carries the env proxy's credentials through the overlay"
+        );
+    }
+
+    // The loopback half of the #1521 bypass overlay, on the same frozen
+    // clients and the same env proxy: the unconditional exemption must
+    // override the env proxy and dial the loopback origin directly.
+    let (origin_port, origin) = capturing_endpoint(faces.len());
+    let loopback = format!("http://127.0.0.1:{origin_port}/loopback");
+    let response = blocking
+        .get(&loopback)
+        .send()
+        .expect("the blocking face dials the loopback origin direct");
+    assert_eq!(
+        response.status(),
+        200,
+        "the loopback origin answers the blocking face"
+    );
+
+    let response = block_on(async_face.get(&loopback).send())
+        .expect("the async face dials the loopback origin direct");
+    assert_eq!(
+        response.status(),
+        200,
+        "the loopback origin answers the async face"
+    );
+
+    let origin_heads = origin
+        .join()
+        .expect("the loopback origin observed both faces");
+    assert_eq!(
+        origin_heads.len(),
+        faces.len(),
+        "each face dials the loopback origin exactly once"
+    );
+    for (face, head) in faces.iter().zip(&origin_heads) {
+        assert_eq!(
+            head.lines().next().unwrap_or_default(),
+            "GET /loopback HTTP/1.1",
+            "the {face} face sends the origin-form request direct"
+        );
+        assert!(
+            !head.to_ascii_lowercase().contains("proxy-authorization"),
+            "the {face} face dials direct, no proxy credentials involved"
         );
     }
 }

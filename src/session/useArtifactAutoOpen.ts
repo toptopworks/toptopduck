@@ -4,7 +4,7 @@ import type { ThreadEntry } from "../types/thread";
 
 // The artifact auto-open one-shot (ADR-0124 Decision 3, issue #1088): a turn
 // that delivered artifacts but materialized no result has nothing else to
-// show for itself -- the workspace expands and the view moves onto the
+// show for itself -- the right sidebar expands and the view moves onto the
 // manifest's primary. A turn that did BOTH keeps the existing promotion
 // semantics (the view follows the produced dataset, notePromotion expands):
 // the artifact arrives without stealing the stage.
@@ -14,7 +14,7 @@ import type { ThreadEntry } from "../types/thread";
 // rerender, a refetch rebuilding the thread array, a late duplicate arrival
 // -- while a genuinely fresh delivery (a different manifest) re-arms. The
 // consumption ref (not state): nothing renders off it, it only guards the
-// transition -- the same shape as useWorkspaceCollapse's autoExpandedRef.
+// transition -- the same shape as useRightSidebarCollapse's autoExpandedRef.
 //
 // Resume posture mirrors #771: the first time the thread resolves WITH
 // content, a session whose manifest already landed has nothing left to
@@ -26,7 +26,7 @@ import type { ThreadEntry } from "../types/thread";
 export function useArtifactAutoOpen(
   thread: ThreadEntry[],
   selectFile: (path: string) => void,
-  expandWorkspace: () => void,
+  expandRightSidebar: () => void,
 ): void {
   const consumedRef = useRef<string | null>(null);
   const initScanRef = useRef(false);
@@ -50,7 +50,7 @@ export function useArtifactAutoOpen(
     // steal is per-delivery, not a pending state that a later rerender
     // revisits.
     if (candidate.turnMaterialized) return;
-    expandWorkspace();
+    expandRightSidebar();
     selectFile(candidate.primaryPath);
-  }, [thread, selectFile, expandWorkspace]);
+  }, [thread, selectFile, expandRightSidebar]);
 }

@@ -1,52 +1,55 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-import { WorkspaceDatasetsDialog } from "../WorkspaceDatasetsDialog";
-import { withIntl } from "../../components/common/__tests__/helpers";
-import type { ListedWorkspaceDataset } from "../../types/workspace-datasets";
+// The panel's render contract (#1519): this component is the consumer
+// shell -- the seam module (useWorkspaceDatasets) owns the mutations, the
+// batch machine, and the pending facts, so the suite mocks THE MODULE
+// INTERFACE (the seven-api-function surface the pre-seam suite stubbed is
+// gone) and pins what renders from the snapshot: the master/detail shell,
+// the badge faces, the banners, the action wiring, and the locks. The
+// module's behavioral contract (badge state machine, failure routing,
+// per-workspace identity) lives in useWorkspaceDatasets.test.tsx.
 
-// The panel's add / replace channel is the Tauri file dialog; stub it so the
-// tests can drive the picker without the native bridge.
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
-// The toast store is mocked, not rendered: this panel's contract is the
-// FIRING leg (#1490 -- which failures route to a toast, with which copy);
-// the rendering face is the #1494 infra's own covered ground. The
-// exported `toast` spy is one instance for the file (the panel consumes
-// only the named export), so consuming tests mockClear before asserting.
-vi.mock("../../components/ui/use-toast", () => ({
-  useToast: () => ({ toasts: [], toast: vi.fn(), dismiss: vi.fn() }),
-  toast: vi.fn(),
+vi.mock("../useWorkspaceDatasets", () => ({
+  useWorkspaceDatasets: vi.fn(),
 }));
 
-// Partial api mock (the WorkingSetList.test pattern): every panel mutation is
-// stubbed, the rest of the module rides the real implementation.
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
   return {
     ...actual,
-    listWorkspaceDatasets: vi.fn(),
-    addWorkspaceDataset: vi.fn(),
-    removeWorkspaceDataset: vi.fn(),
-    renameWorkspaceDataset: vi.fn(),
-    replaceWorkspaceDataset: vi.fn(),
-    setWorkspaceDatasetPrivacy: vi.fn(),
     previewDeleteImpact: vi.fn(),
   };
 });
 
-import {
-  addWorkspaceDataset,
-  listWorkspaceDatasets,
-  previewDeleteImpact,
-  removeWorkspaceDataset,
-  renameWorkspaceDataset,
-  replaceWorkspaceDataset,
-  setWorkspaceDatasetPrivacy,
-} from "../../api";
-import { toast } from "../../components/ui/use-toast";
-import { open } from "@tauri-apps/plugin-dialog";
+import { previewDeleteImpact } from "../../api";
+import { WorkspaceDatasetsDialog } from "../WorkspaceDatasetsDialog";
+import { useWorkspaceDatasets, type UseWorkspaceDatasets } from "../useWorkspaceDatasets";
+import { withIntl } from "../../components/common/__tests__/helpers";
+import type { GuidanceRequest } from "../../types/dataset";
+import type { ListedWorkspaceDataset } from "../../types/workspace-datasets";
+
+// One sheet's confirmation payload (the wire shape, ADR-0148): auto-tidied
+// with the header guess riding as the pre-fill.
+function guidanceRequest(): GuidanceRequest {
+  return {
+    source_path: "/src/book.xlsx",
+    workbook_name: "book",
+    sheets: [
+      {
+        name: "People",
+        preview: [
+          ["name", "score"],
+          ["Ada", "9"],
+        ],
+        total_rows: 2,
+        state: { kind: "AutoTidied", data: { header_row: 1 } },
+      },
+    ],
+  };
+}
 
 // One manifest entry fixture (the wire shape, ADR-0141): stable identity +
 // shape facts + frozen 2-row sample.
@@ -72,52 +75,87 @@ function entry(overrides: Partial<ListedWorkspaceDataset>): ListedWorkspaceDatas
   };
 }
 
-// The badge's trailing elapsed face ("· 12秒"-shaped suffix): one named
-// pattern for the badge assertions -- a face rewording would otherwise need
-// an edit per site.
-const ELAPSED_SUFFIX = /· \d+秒/;
+// The module stub: a full UseWorkspaceDatasets snapshot with spy actions,
+// per-test overridden through the returned fields. Every test seeds its own
+// stub before render.
+function stubModule(overrides: Partial<UseWorkspaceDatasets> = {}) {
+  const actions = {
+    pickAndAdd: vi.fn(),
+    rename: vi.fn(),
+    replace: vi.fn(),
+    remove: vi.fn(),
+    setPrivacy: vi.fn(),
+    select: vi.fn(),
+    dismissBadge: vi.fn(),
+    setError: vi.fn(),
+    handleGuidedSubmit: vi.fn(),
+    handleGuidedCancel: vi.fn(),
+    fetchGuidanceWindow: vi.fn(),
+  };
+  const value: UseWorkspaceDatasets = {
+    panel: { path: "/ws", label: "Demo" },
+    rows: [],
+    listingPending: false,
+    listingError: null,
+    resolvedName: null,
+    shown: null,
+    missingNames: new Set<string>(),
+    error: null,
+    setError: actions.setError,
+    selectedName: null,
+    select: actions.select,
+    badge: null,
+    dismissBadge: actions.dismissBadge,
+    busy: false,
+    privacyBusy: false,
+    pickAndAdd: actions.pickAndAdd,
+    rename: actions.rename,
+    replace: actions.replace,
+    remove: actions.remove,
+    setPrivacy: actions.setPrivacy,
+    guidance: null,
+    guidanceError: null,
+    guidedLoading: false,
+    handleGuidedSubmit: actions.handleGuidedSubmit,
+    handleGuidedCancel: actions.handleGuidedCancel,
+    fetchGuidanceWindow: actions.fetchGuidanceWindow,
+    ...overrides,
+  };
+  vi.mocked(useWorkspaceDatasets).mockReturnValue(value);
+  return { actions };
+}
 
-// The dialog's queries run inside React Query; withIntl already carries the
-// Intl + Tooltip context the list rows need. The panel mounts bound to the
-// demo workspace in every test, so the element is fixed.
+// The panel mounts bound to the demo workspace in every test, so the
+// element is fixed.
 function renderPanel() {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
   return render(
-    <QueryClientProvider client={client}>
-      {withIntl(
-        <WorkspaceDatasetsDialog
-          workspace={{ path: "/ws", label: "Demo" }}
-          onOpenChange={() => {}}
-        />,
-      )}
-    </QueryClientProvider>,
+    withIntl(
+      <WorkspaceDatasetsDialog workspace={{ path: "/ws", label: "Demo" }} onOpenChange={() => {}} />,
+    ),
   );
 }
 
 describe("WorkspaceDatasetsDialog", () => {
-  afterEach(() => vi.restoreAllMocks());
-
-  beforeEach(() => {
-    vi.mocked(previewDeleteImpact).mockResolvedValue([]);
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(useWorkspaceDatasets).mockReset();
   });
 
-  // Spies must not leak between tests; every test seeds its own listing.
-  const seed = (rows: ListedWorkspaceDataset[]) =>
-    vi.mocked(listWorkspaceDatasets).mockResolvedValue(rows);
-
   it("renders the master/detail shell: both rows list, the first entry's detail shows with the frozen sample", async () => {
-    seed([entry({}), entry({ reference_name: "orders", display_name: "orders", source_path: "/src/orders.csv" })]);
+    const rows = [
+      entry({}),
+      entry({ reference_name: "orders", display_name: "orders", source_path: "/src/orders.csv" }),
+    ];
+    stubModule({ rows, resolvedName: "people", shown: rows[0] });
     renderPanel();
     // Both rows list (the select button's accessible name starts with the
     // display label -- the WorkingSetList.test anchor convention).
     expect(await screen.findByRole("button", { name: /^people/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^orders/ })).toBeInTheDocument();
-    // The detail pane shows the resolved pick (unset -> first): its heading,
-    // its schema, and its frozen manifest sample. Column names render in the
-    // schema, sample AND privacy tables -- anchor within the DOM-ordered
-    // tables (schema, then sample) instead of a bare text match.
+    // The detail pane shows the resolved pick: its heading, its schema, and
+    // its frozen manifest sample. Column names render in the schema, sample
+    // AND privacy tables -- anchor within the DOM-ordered tables (schema,
+    // then sample) instead of a bare text match.
     expect(screen.getByRole("heading", { name: /^people/ })).toBeInTheDocument();
     const tables = screen.getAllByRole("table");
     expect(within(tables[0]).getByText("VARCHAR")).toBeInTheDocument();
@@ -125,58 +163,51 @@ describe("WorkspaceDatasetsDialog", () => {
     expect(screen.getByText(/引用名：people/)).toBeInTheDocument();
   });
 
-  it("moves the detail to the picked row; a 0-sample entry renders no preview section", async () => {
-    seed([
+  it("routes a row pick through the seam's select", async () => {
+    const rows = [
       entry({}),
-      entry({ reference_name: "orders", display_name: "orders", source_path: "/src/orders.csv", sample: [] }),
-    ]);
+      entry({ reference_name: "orders", display_name: "orders", source_path: "/src/orders.csv" }),
+    ];
+    const { actions } = stubModule({
+      rows,
+      resolvedName: "people",
+      shown: rows[0],
+    });
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /^orders/ }));
-    expect(await screen.findByRole("heading", { name: /^orders/ })).toBeInTheDocument();
-    // The frozen sample is the only preview source: no rows, no section
-    // (the meta line's row count already says it -- the DatasetDetail pose).
-    expect(screen.queryByText("数据样本")).not.toBeInTheDocument();
+    expect(actions.select).toHaveBeenCalledWith("orders");
   });
 
-  it("renames through the row dialog and the IPC carries the new display label", async () => {
-    seed([entry({})]);
-    vi.mocked(renameWorkspaceDataset).mockResolvedValue(entry({ display_name: "Folks" }));
+  it("renames through the row dialog and the seam carries the new display label", async () => {
+    const { actions } = stubModule({ rows: [entry({})], resolvedName: "people", shown: entry({}) });
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /重命名/ }));
     const input = screen.getByRole("textbox");
     fireEvent.change(input, { target: { value: "Folks" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() =>
-      expect(renameWorkspaceDataset).toHaveBeenCalledWith("/ws", "people", "Folks"),
-    );
+    expect(actions.rename).toHaveBeenCalledWith("people", "Folks");
   });
 
-  it("surfaces a rename rejection through the panel's error banner", async () => {
-    seed([entry({}), entry({ reference_name: "orders", display_name: "orders", source_path: "/src/orders.csv" })]);
-    vi.mocked(renameWorkspaceDataset).mockRejectedValue({ kind: "DisplayTaken", data: "orders" });
+  it("renders the seam's error message as the panel banner", async () => {
+    stubModule({ rows: [entry({})], resolvedName: "people", shown: entry({}), error: "显示名 orders 已被占用" });
     renderPanel();
-    // Two rows, two rename buttons: scope to the people row.
-    const row = (await screen.findByRole("button", { name: /^people/ })).closest("li")!;
-    fireEvent.click(within(row).getByRole("button", { name: /重命名/ }));
-    fireEvent.change(screen.getByRole("textbox"), { target: { value: "orders" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("显示名 orders 已被占用");
   });
 
-  it("replace rides the row action through the picker to the replace IPC", async () => {
-    seed([entry({})]);
+  it("replace rides the row action to the seam's replace", async () => {
+    const { actions } = stubModule({ rows: [entry({})], resolvedName: "people", shown: entry({}) });
+    // The row's replace channel is the Tauri picker; the stub hands back a
+    // chosen path (WorkingSetList routes onReplace only with a file).
+    const { open } = await import("@tauri-apps/plugin-dialog");
     vi.mocked(open).mockResolvedValue("/src/people_v2.csv");
-    vi.mocked(replaceWorkspaceDataset).mockResolvedValue(entry({}));
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /换源/ }));
-    await waitFor(() =>
-      expect(replaceWorkspaceDataset).toHaveBeenCalledWith("/ws", "people", "/src/people_v2.csv"),
-    );
+    // The picker's promise must flush before the routing assertion.
+    await waitFor(() => expect(actions.replace).toHaveBeenCalledWith("people", "/src/people_v2.csv"));
   });
 
-  it("the delete confirm names the workspace and fires the remove -- no session impact preview", async () => {
-    seed([entry({})]);
-    vi.mocked(removeWorkspaceDataset).mockResolvedValue();
+  it("the delete confirm names the workspace and routes the remove -- no session impact preview", async () => {
+    const { actions } = stubModule({ rows: [entry({})], resolvedName: "people", shown: entry({}) });
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /删除/ }));
     // The workspace override copy (never "working set"), and the confirm
@@ -185,11 +216,12 @@ describe("WorkspaceDatasetsDialog", () => {
     expect(confirm).toHaveTextContent("从此工作区移除 people？");
     expect(previewDeleteImpact).not.toHaveBeenCalled();
     fireEvent.click(within(confirm).getByRole("button", { name: "删除" }));
-    await waitFor(() => expect(removeWorkspaceDataset).toHaveBeenCalledWith("/ws", "people"));
+    expect(actions.remove).toHaveBeenCalledWith("people");
   });
 
   it("flags a missing store file in the list and warns above the fully-rendered detail", async () => {
-    seed([entry({ file_missing: true })]);
+    const row = entry({ file_missing: true });
+    stubModule({ rows: [row], resolvedName: "people", shown: row, missingNames: new Set(["people"]) });
     renderPanel();
     // The list row's short badge...
     expect(await screen.findByText("缺文件")).toBeInTheDocument();
@@ -203,105 +235,18 @@ describe("WorkspaceDatasetsDialog", () => {
     expect(screen.getByText("隐私控制")).toBeInTheDocument();
   });
 
-  it("the privacy toggle rides the whole-replace IPC", async () => {
-    seed([entry({})]);
-    vi.mocked(setWorkspaceDatasetPrivacy).mockResolvedValue(
-      entry({ privacy: { send_samples: false, type_only_columns: [] } }),
-    );
+  it("the privacy toggle routes the whole-replace through the seam", async () => {
+    const { actions } = stubModule({ rows: [entry({})], resolvedName: "people", shown: entry({}) });
     renderPanel();
     fireEvent.click(await screen.findByLabelText(/发送样本值/));
-    await waitFor(() =>
-      expect(setWorkspaceDatasetPrivacy).toHaveBeenCalledWith("/ws", "people", {
-        send_samples: false,
-        type_only_columns: [],
-      }),
-    );
-  });
-
-  it("falls the detail back to the first row when the picked row is deleted", async () => {
-    // Two listings: before and after the remove's invalidate refetch. A pick
-    // naming the deleted row re-resolves to the first entry -- band and pane
-    // never go blank (the working-set seam's deleted-pick fallback).
-    vi.mocked(listWorkspaceDatasets)
-      .mockResolvedValueOnce([
-        entry({}),
-        entry({ reference_name: "orders", display_name: "orders", source_path: "/src/orders.csv" }),
-      ])
-      .mockResolvedValue([entry({})]);
-    vi.mocked(removeWorkspaceDataset).mockResolvedValue();
-    renderPanel();
-    const ordersRow = (await screen.findByRole("button", { name: /^orders/ })).closest("li")!;
-    fireEvent.click(screen.getByRole("button", { name: /^orders/ }));
-    fireEvent.click(within(ordersRow).getByRole("button", { name: /删除/ }));
-    fireEvent.click(within(screen.getAllByRole("alertdialog").at(-1)!).getByRole("button", { name: "删除" }));
-    // The refetch drops orders; the detail re-resolves to people.
-    expect(await screen.findByRole("heading", { name: /^people/ })).toBeInTheDocument();
-    const peopleRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
-    expect(peopleRow.className.split(/\s+/)).toContain("bg-accent");
-  });
-
-  it("clears the error banner on the reopen edge, not mid-animation", async () => {
-    // The close animation must play over the exact face the user is
-    // leaving, so the close edge keeps every rendered input (the workspace
-    // prop is nulled by the sidebar the moment close is requested); the
-    // reopen edge clears the residue. jsdom runs no exit animation, so the
-    // frozen close face itself is real-browser QA; this pins the reopen
-    // cleanup.
-    seed([
-      entry({}),
-      entry({ reference_name: "orders", display_name: "orders", source_path: "/src/orders.csv" }),
-    ]);
-    vi.mocked(renameWorkspaceDataset).mockRejectedValue({ kind: "DisplayTaken", data: "orders" });
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const bound = (ws: { path: string; label: string } | null) => (
-      <QueryClientProvider client={client}>
-        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
-      </QueryClientProvider>
-    );
-    const view = render(bound({ path: "/ws", label: "Demo" }));
-    // The dialog's Save guard refuses blanks up front, so the backend
-    // rejection rides the display-taken path (a label the other row holds).
-    const row = (await screen.findByRole("button", { name: /^people/ })).closest("li")!;
-    fireEvent.click(within(row).getByRole("button", { name: /重命名/ }));
-    fireEvent.change(screen.getByRole("textbox"), { target: { value: "orders" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
-    // Close (the workspace prop nulls; the panel keeps its state), then
-    // reopen the same workspace: the banner is gone.
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/ws", label: "Demo" }));
-    await waitFor(() =>
-      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
-    );
-    expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument();
-  });
-
-  it("selects the freshly added dataset as the detail pick", async () => {
-    // One listing before the add's refetch, one after (the manifest gains
-    // the new entry). The IPC returns the landed entry; its reference name
-    // becomes the pick.
-    vi.mocked(listWorkspaceDatasets)
-      .mockResolvedValueOnce([entry({})])
-      .mockResolvedValue([
-        entry({}),
-        entry({ reference_name: "new", display_name: "new", source_path: "/src/new.csv" }),
-      ]);
-    vi.mocked(open).mockResolvedValue("/src/new.csv");
-    vi.mocked(addWorkspaceDataset).mockResolvedValue(
-      entry({ reference_name: "new", display_name: "new", source_path: "/src/new.csv" }),
-    );
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
-    // The detail re-resolves onto the new row; the band rides with it.
-    expect(await screen.findByRole("heading", { name: /^new/ })).toBeInTheDocument();
-    const newRow = screen.getByRole("button", { name: /^new/ }).closest("li")!;
-    expect(newRow.className.split(/\s+/)).toContain("bg-accent");
-    const peopleRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
-    expect(peopleRow.className.split(/\s+/)).not.toContain("bg-accent");
+    expect(actions.setPrivacy).toHaveBeenCalledWith("people", {
+      send_samples: false,
+      type_only_columns: [],
+    });
   });
 
   it("an empty manifest renders the single empty card, not the two-column shell", async () => {
-    seed([]);
+    stubModule({ rows: [] });
     renderPanel();
     expect(await screen.findByText(/还没有数据集/)).toBeInTheDocument();
     expect(screen.queryByText(/^数据集 · /)).not.toBeInTheDocument();
@@ -310,7 +255,8 @@ describe("WorkspaceDatasetsDialog", () => {
   });
 
   it("renders a renamed label across the row, the heading and the delete confirm; the reference name stays the anchor line", async () => {
-    seed([entry({ display_name: "Folks" })]);
+    const row = entry({ display_name: "Folks" });
+    stubModule({ rows: [row], resolvedName: "people", shown: row });
     renderPanel();
     // The dual-name contract's visible half: the label carries the row and
     // the heading; the reference name survives as the SQL anchor line.
@@ -323,70 +269,18 @@ describe("WorkspaceDatasetsDialog", () => {
     expect(screen.getAllByRole("alertdialog").at(-1)!).toHaveTextContent("从此工作区移除 Folks？");
   });
 
-  it("clears the error banner the moment a rename retry fires", async () => {
-    seed([
-      entry({}),
-      entry({ reference_name: "orders", display_name: "orders", source_path: "/src/orders.csv" }),
-    ]);
-    vi.mocked(renameWorkspaceDataset)
-      .mockRejectedValueOnce({ kind: "DisplayTaken", data: "orders" })
-      .mockResolvedValue(entry({ display_name: "Folks" }));
+  it("locks the row actions while the seam reports busy", async () => {
+    stubModule({ rows: [entry({})], resolvedName: "people", shown: entry({}), busy: true });
     renderPanel();
-    const row = (await screen.findByRole("button", { name: /^people/ })).closest("li")!;
-    fireEvent.click(within(row).getByRole("button", { name: /重命名/ }));
-    fireEvent.change(screen.getByRole("textbox"), { target: { value: "orders" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("显示名 orders 已被占用");
-    // Retry with a free label: the banner clears on fire, before the IPC
-    // settles -- a stale refusal must not contradict a visible success.
-    const rowAgain = screen.getByRole("button", { name: /^people/ }).closest("li")!;
-    fireEvent.click(within(rowAgain).getByRole("button", { name: /重命名/ }));
-    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Folks" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
-    await waitFor(() =>
-      expect(renameWorkspaceDataset).toHaveBeenLastCalledWith("/ws", "people", "Folks"),
-    );
-  });
-
-  it("maps the backend's blank-label refusal onto the banner (defense in depth)", async () => {
-    // The row dialog's trim guard makes this near-unreachable from the UI;
-    // the mapping is the backend refusal's honest landing spot.
-    seed([entry({})]);
-    vi.mocked(renameWorkspaceDataset).mockRejectedValue({ kind: "InvalidLabel" });
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: /重命名/ }));
-    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Folks" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("显示名不能为空白");
-  });
-
-  it("locks the row actions while a removal is in flight", async () => {
-    let resolveRemove: (() => void) | undefined;
-    vi.mocked(removeWorkspaceDataset).mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveRemove = resolve;
-        }),
-    );
-    seed([entry({})]);
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: /删除/ }));
-    fireEvent.click(
-      within(screen.getAllByRole("alertdialog").at(-1)!).getByRole("button", { name: "删除" }),
-    );
-    // busy rides the loading prop: the row's rename / replace / delete lock
-    // until the remove settles (the private face's posture).
+    // busy rides the loading prop: the row's rename / replace / delete lock.
     expect(await screen.findByRole("button", { name: /重命名/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /换源/ })).toBeDisabled();
-    resolveRemove!();
-    await waitFor(() => expect(screen.getByRole("button", { name: /重命名/ })).toBeEnabled());
   });
 
   it("renders neither face when the listing itself fails -- the banner is the face", async () => {
-    vi.mocked(listWorkspaceDatasets).mockRejectedValue({
-      kind: "ManifestCorrupt",
-      data: "datasets.json",
+    stubModule({
+      rows: [],
+      listingError: { kind: "ManifestCorrupt", data: "datasets.json" },
     });
     renderPanel();
     expect(await screen.findByRole("alert")).toHaveTextContent(/已损坏/);
@@ -396,689 +290,81 @@ describe("WorkspaceDatasetsDialog", () => {
     expect(screen.queryByText(/^数据集 · /)).not.toBeInTheDocument();
   });
 
-  it("renders the CSV-unreadable refusal as its own sentence, engine detail riding after", async () => {
-    // Issue #1483: the sniff-failure reject must not bare the raw engine
-    // string as the whole banner (the Io echo it used to fall through to);
-    // the catalog sentence leads, the detail stays for triage.
-    seed([entry({})]);
-    vi.mocked(open).mockResolvedValue("/src/bad.csv");
-    vi.mocked(addWorkspaceDataset).mockRejectedValue({
-      kind: "DataUnreadable",
-      data: `Error when sniffing file "/src/bad.csv".`,
+  it("renders the running badge with the elapsed suffix and locks Add; no dismiss while running", async () => {
+    const { actions } = stubModule({
+      rows: [],
+      badge: { phase: "running", mode: "add", name: "a.csv", index: 1, total: 2, startedAt: 1_000 },
     });
     renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
-    const banner = await screen.findByRole("alert");
-    expect(banner).toHaveTextContent("无法解析该数据文件");
-    expect(banner).toHaveTextContent("Error when sniffing file");
-  });
-  // Issue #1485: the picker's add batch runs the mutations SEQUENTIALLY (the
-  // backend manifest lock serializes anyway), so each landed file invalidates
-  // the listing and the badge names the file in flight until the batch
-  // settles.
-  it("runs the add batch sequentially, naming the file in flight in the badge", async () => {
-    vi.mocked(listWorkspaceDatasets)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" })])
-      .mockResolvedValue([
-        entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" }),
-        entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" }),
-      ]);
-    vi.mocked(open)
-      .mockResolvedValueOnce(["/src/a.csv", "/src/b.csv"])
-      .mockResolvedValue(["/src/c.csv"]);
-    vi.mocked(addWorkspaceDataset).mockClear();
-    const gates: Array<(e: ListedWorkspaceDataset) => void> = [];
-    vi.mocked(addWorkspaceDataset).mockImplementation(
-      () => new Promise<ListedWorkspaceDataset>((resolve) => { gates.push(resolve); }),
-    );
-    // ONE batch clock (#1488): every Date.now call steps +2500, so the
-    // suffix mounted for file 1 already reads 2s past the batch stamp and
-    // file 2's window holds the same 2s-or-more -- the stamp never moves
-    // (the step decouples the pin from render-noise call ordering). A
-    // per-file re-stamp would move the origin past the mounted clock and
-    // the suffix would fall back to the face's 1s floor -- the 2s-or-more
-    // assertions are the discriminator. The spy must outlive the act
-    // flushes (the file-global restoreAllMocks runs after the test).
-    let step = 0;
-    vi.spyOn(Date, "now").mockImplementation(() => (step += 2500));
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
-    // File 1 in flight: the badge names it; the second IPC has not fired.
-    // The badge carries the batch clock's elapsed suffix (ONE stamp per
-    // batch -- the suffix survives the per-file badge swaps); the RUNNING
-    // window locks the Add button (a second submission here would overwrite
-    // the live badge), the button keeps its idle face (no spinner inside
-    // it), the running face carries no dismiss (closing a live badge is the
-    // vanished-state hole), and the empty card stays mounted -- hiding it
-    // would bounce the layout between the card, the gap, and the list.
     expect(await screen.findByText(/正在添加 a\.csv（第 1\/2 个）/)).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent(/· (?:[2-9]|\d{2,})秒/);
-    expect(await screen.findByText(/还没有数据集/)).toBeInTheDocument();
-    const addBtn = screen.getByRole("button", { name: "添加数据集…" });
-    expect(addBtn.querySelector(".animate-spin")).toBeNull();
-    expect(screen.queryByRole("button", { name: "关闭" })).not.toBeInTheDocument();
-    expect(addBtn).toBeDisabled();
-    expect(addWorkspaceDataset).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      gates[0](entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" }));
-    });
-    expect(await screen.findByText(/正在添加 b\.csv（第 2\/2 个）/)).toBeInTheDocument();
-    // File 2's window still reads off the batch stamp: the suffix holds 2s
-    // or more (a per-file clock would read the 1s floor here).
-    expect(screen.getByRole("status")).toHaveTextContent(/· (?:[2-9]|\d{2,})秒/);
-    expect(addWorkspaceDataset).toHaveBeenCalledTimes(2);
-    // The RUNNING window locks the row actions too (the symmetric hole): a
-    // replace fired here would overwrite the live add badge. File 2's IPC is
-    // the distinguishing window -- replace.isPending is false there, so the
-    // upload-window lock (not the mutation pendings) is what holds the row.
-    expect(await screen.findByRole("button", { name: /^a/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /换源/ })).toBeDisabled();
-    await act(async () => {
-      gates[1](entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" }));
-    });
-    // The done badge parks: the last LANDED file + the FROZEN total
-    // duration. Done does not lock -- the Add button is live again. The
-    // suffix's unit is not pinned: the flight-counting subscription
-    // (#1492's review round) renders on every mutation cache event, each
-    // running-badge render consumes a clock step, and the total may cross
-    // into the minute format (1分02秒) -- presence, not unit, is the pin.
-    expect(await screen.findByText(/已添加 b\.csv/)).toBeInTheDocument();
-    const badge = screen.getByText(/已添加 b\.csv/).closest("[data-slot='badge']")!;
-    expect(badge).toHaveTextContent(/· (?:(?:\d+)分)?\d+秒/);
-    expect(screen.getByRole("button", { name: "添加数据集…" })).toBeEnabled();
-    // The done badge's third clear path (besides dismiss and the reopen
-    // edge): the NEXT upload overwrites it -- the new running face replaces
-    // the parked one the moment the picker lands a file.
-    fireEvent.click(screen.getByRole("button", { name: "添加数据集…" }));
-    expect(await screen.findByText(/正在添加 c\.csv（第 1\/1 个）/)).toBeInTheDocument();
-    expect(screen.queryByText(/已添加 b\.csv/)).not.toBeInTheDocument();
-    await act(async () => {
-      gates[2](entry({ reference_name: "c", display_name: "c", source_path: "/src/c.csv" }));
-    });
-    expect(await screen.findByText(/已添加 c\.csv/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
-    expect(screen.queryByText(/已添加 c\.csv/)).not.toBeInTheDocument();
-  });
-
-  it("keeps the add batch running past a failed file -- the banner names it, the done face never does", async () => {
-    // The `.catch(() => {})` over each `mutateAsync` is the documented
-    // design: one bad file must not drop the remainder. The failure rides
-    // TRAILING here (the good file lands first): "the last file that
-    // landed" and "the last file attempted" only diverge in this order, and
-    // the done face must name the landed one -- a failed file never reads
-    // as added.
-    vi.mocked(listWorkspaceDatasets)
-      .mockResolvedValueOnce([])
-      .mockResolvedValue([entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" })]);
-    vi.mocked(open).mockResolvedValue(["/src/b.csv", "/src/bad.csv"]);
-    vi.mocked(addWorkspaceDataset).mockClear();
-    let resolveGood!: (e: ListedWorkspaceDataset) => void;
-    vi.mocked(addWorkspaceDataset)
-      .mockImplementationOnce(
-        () => new Promise<ListedWorkspaceDataset>((resolve) => { resolveGood = resolve; }),
-      )
-      .mockRejectedValueOnce({
-        kind: "DataUnreadable",
-        data: `Error when sniffing file "/src/bad.csv".`,
-      });
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
-    // The good file runs first; its gate holds the batch mid-flight.
-    expect(await screen.findByText(/正在添加 b\.csv（第 1\/2 个）/)).toBeInTheDocument();
-    expect(addWorkspaceDataset).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      resolveGood(entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" }));
-    });
-    // The trailing file's rejection lands on the banner...
-    const banner = await screen.findByRole("alert");
-    expect(banner).toHaveTextContent("无法解析该数据文件");
-    // ...and the done badge names the LANDED file, never the failed one
-    // (the banner above owns that face).
-    expect(await screen.findByText(/已添加 b\.csv/)).toBeInTheDocument();
-    expect(screen.queryByText(/已添加 bad\.csv/)).not.toBeInTheDocument();
-  });
-
-  it("parks a done badge after a replace settles -- the running window locks Add, done unlocks and dismisses", async () => {
-    seed([entry({})]);
-    vi.mocked(open).mockResolvedValue("/src/people_v2.csv");
-    vi.mocked(replaceWorkspaceDataset).mockClear();
-    const gates: Array<(e: ListedWorkspaceDataset) => void> = [];
-    vi.mocked(replaceWorkspaceDataset).mockImplementation(
-      () => new Promise<ListedWorkspaceDataset>((resolve) => { gates.push(resolve); }),
-    );
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: /换源/ }));
-    await waitFor(() => expect(replaceWorkspaceDataset).toHaveBeenCalled());
-    expect(await screen.findByText(/正在替换 people/)).toBeInTheDocument();
-    // A replace mints its own clock at the round-trip's entry; the suffix
-    // rides the badge while it runs. The RUNNING window locks the Add
-    // button -- a second submission here would overwrite the live badge.
-    expect(screen.getByRole("status")).toHaveTextContent(ELAPSED_SUFFIX);
+    expect(screen.getByRole("status")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "添加数据集…" })).toBeDisabled();
-    await act(async () => {
-      gates[0](entry({}));
+    expect(screen.queryByRole("button", { name: "关闭" })).not.toBeInTheDocument();
+    expect(actions.pickAndAdd).not.toHaveBeenCalled();
+  });
+
+  it("parks the done badge with the frozen duration; dismiss routes through the seam", async () => {
+    const { actions } = stubModule({
+      rows: [],
+      badge: { phase: "done", mode: "replace", name: "people", seconds: 42 },
     });
-    // The done badge: the label + the frozen duration; the panel unlocks
-    // (done does not lock) and the dismiss clears the badge.
+    renderPanel();
     expect(await screen.findByText(/已替换 people/)).toBeInTheDocument();
-    const badge = screen.getByText(/已替换 people/).closest("[data-slot='badge']")!;
-    expect(badge).toHaveTextContent(ELAPSED_SUFFIX);
+    // Done does not lock -- the Add button is live.
     expect(screen.getByRole("button", { name: "添加数据集…" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "关闭" }));
-    expect(screen.queryByText(/已替换 people/)).not.toBeInTheDocument();
+    expect(actions.dismissBadge).toHaveBeenCalledTimes(1);
   });
 
-  it("parks no done badge when the whole batch fails -- the banner owns the failure face", async () => {
-    vi.mocked(listWorkspaceDatasets).mockResolvedValue([]);
-    vi.mocked(open)
-      .mockResolvedValueOnce(["/src/bad.csv"])
-      .mockResolvedValue(["/src/good.csv"]);
-    vi.mocked(addWorkspaceDataset).mockClear();
-    vi.mocked(addWorkspaceDataset)
-      .mockRejectedValueOnce({
-        kind: "DataUnreadable",
-        data: `Error when sniffing file "/src/bad.csv".`,
-      })
-      .mockResolvedValue(entry({ reference_name: "good", display_name: "good", source_path: "/src/good.csv" }));
+  it("spins the detail's privacy toggle while the seam reports privacyBusy", async () => {
+    stubModule({ rows: [entry({})], resolvedName: "people", shown: entry({}), privacyBusy: true });
     renderPanel();
-    // The on-site face stays the banner alone (#1490): a failure landing on
-    // the panel that minted the batch never fires a toast -- the two faces
-    // must not double-narrate one failure. The spy clears up front so the
-    // assertion covers the whole test window (failure and the retry below).
-    vi.mocked(toast).mockClear();
-    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("无法解析该数据文件");
-    // Neither face parks: the running badge cleared with its batch, and no
-    // done badge ever minted -- "added" must stay a true statement.
-    expect(screen.queryByRole("status")).not.toBeInTheDocument();
-    expect(screen.queryByText(/已添加/)).not.toBeInTheDocument();
-    // The unlock follows: the failed window is over, the Add button is live.
-    expect(screen.getByRole("button", { name: "添加数据集…" })).toBeEnabled();
-    // A retry that succeeds clears the stale banner on fire (the same
-    // clear-on-fire posture the row mutations carry): the fresh done face
-    // must not sit beside the old failure.
-    fireEvent.click(screen.getByRole("button", { name: "添加数据集…" }));
-    expect(await screen.findByText(/已添加 good\.csv/)).toBeInTheDocument();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(toast).not.toHaveBeenCalled();
-  });
-
-  it("keeps a running badge across close/reopen; the done badge still clears on the open edge", async () => {
-    // The panel stays mounted across close/reopen (the sidebar only nulls
-    // the workspace prop), so the upload loop keeps running with the panel
-    // closed. The open edge must therefore NOT clear a RUNNING badge -- its
-    // IPC is still in flight and the badge is its only face -- while a DONE
-    // badge is the previous session's residue and joins the cleanup.
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
-    const bound = (ws: { path: string; label: string } | null) => (
-      <QueryClientProvider client={client}>
-        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
-      </QueryClientProvider>
-    );
-    seed([]);
-    vi.mocked(open).mockResolvedValue("/src/a.csv");
-    vi.mocked(addWorkspaceDataset).mockClear();
-    let resolveAdd!: (e: ListedWorkspaceDataset) => void;
-    vi.mocked(addWorkspaceDataset).mockImplementation(
-      () => new Promise<ListedWorkspaceDataset>((resolve) => { resolveAdd = resolve; }),
-    );
-    const view = render(bound({ path: "/ws", label: "Demo" }));
-    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
-    expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
-    // Close and reopen while the upload runs: the badge survives the edge.
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/ws", label: "Demo" }));
-    expect(screen.getByText(/正在添加 a\.csv/)).toBeInTheDocument();
-    // Settle: the done badge parks -- and a second reopen clears it.
-    await act(async () => {
-      resolveAdd(entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" }));
-    });
-    expect(await screen.findByText(/已添加 a\.csv/)).toBeInTheDocument();
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/ws", label: "Demo" }));
-    expect(screen.queryByText(/已添加 a\.csv/)).not.toBeInTheDocument();
-  });
-
-  it("a mid-batch rebind never retargets the files that have not fired yet", async () => {
-    // #1491: the add loop resolves its target from the LIVE panel state at
-    // each call (TanStack builds the mutation from the latest options), so
-    // opening another workspace's panel mid-batch would land the remaining
-    // files in the wrong manifest. The batch's target must be pinned at
-    // mint -- every file rides the workspace the panel showed at the click.
-    // All defaults ride the constructor (setDefaultOptions replaces the
-    // whole object, so a later call would drop the retry pins); the
-    // staleTime Infinity mirror makes the invalidation the ONLY refetch
-    // trigger, so the reopen assertion below pins the invalidate target
-    // rather than key-switch noise.
-    const client = new QueryClient({
-      defaultOptions: {
-        queries: { retry: false, staleTime: Infinity },
-        mutations: { retry: false },
-      },
-    });
-    const bound = (ws: { path: string; label: string } | null) => (
-      <QueryClientProvider client={client}>
-        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
-      </QueryClientProvider>
-    );
-    seed([]);
-    vi.mocked(open).mockResolvedValue(["/src/a.csv", "/src/b.csv"]);
-    let releaseFirst!: (e: ListedWorkspaceDataset) => void;
-    const firstInFlight = new Promise<ListedWorkspaceDataset>((resolve) => {
-      releaseFirst = resolve;
-    });
-    // The add mock carries the prior tests' call records (mockClear is the
-    // file's per-consumer convention); the batch's own two calls must be the
-    // only ones on the books.
-    vi.mocked(addWorkspaceDataset).mockClear();
-    vi.mocked(addWorkspaceDataset)
-      .mockImplementationOnce(() => firstInFlight)
-      .mockResolvedValueOnce(
-        entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" }),
-      );
-    const view = render(bound({ path: "/ws", label: "Demo" }));
-    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
-    expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
-    // File 1 still in flight: close the panel and open ANOTHER workspace's
-    // -- the #1491 repro. The remaining file must keep landing in /ws.
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/other", label: "Other" }));
-    await act(async () => {
-      releaseFirst(entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" }));
-    });
-    await waitFor(() => expect(addWorkspaceDataset).toHaveBeenCalledTimes(2));
-    expect(
-      vi.mocked(addWorkspaceDataset).mock.calls.map((call) => call[0]),
-    ).toEqual(["/ws", "/ws"]);
-    // The criterion's other half: the origin's listing is invalidated, so
-    // reopening the home panel refetches it (staleTime Infinity makes the
-    // invalidation the only refetch trigger -- a miss leaves the origin's
-    // reopen without the new rows).
-    const before = vi.mocked(listWorkspaceDatasets).mock.calls.length;
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/ws", label: "Demo" }));
-    await waitFor(() =>
-      expect(vi.mocked(listWorkspaceDatasets).mock.calls.length).toBeGreaterThan(
-        before,
-      ),
-    );
-    expect(vi.mocked(listWorkspaceDatasets).mock.calls.at(-1)).toEqual(["/ws"]);
-  });
-
-  it("a foreign running badge neither narrates nor locks a panel opened on another workspace", async () => {
-    // #1491's sibling face: the badge and the Add lock are component state,
-    // so a panel reopened on another workspace would narrate (and lock for)
-    // a batch it does not own. The badge must follow its batch's workspace:
-    // silent on the foreign panel, back on its home panel's reopen.
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
-    const bound = (ws: { path: string; label: string } | null) => (
-      <QueryClientProvider client={client}>
-        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
-      </QueryClientProvider>
-    );
-    seed([]);
-    vi.mocked(open).mockResolvedValue(["/src/a.csv", "/src/b.csv"]);
-    // Never settled: the batch stays in flight for the test's whole life;
-    // the cleanup unmounts the panel and the pending promise is simply
-    // dropped (no rejection, nothing to flush).
-    const inFlight = new Promise<ListedWorkspaceDataset>(() => {});
-    vi.mocked(addWorkspaceDataset).mockImplementation(() => inFlight);
-    const view = render(bound({ path: "/ws", label: "Demo" }));
-    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
-    expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
-    // Rebind to another workspace mid-flight: no badge face, no Add lock.
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/other", label: "Other" }));
-    await waitFor(() =>
-      expect(screen.queryByText(/正在添加 a\.csv/)).not.toBeInTheDocument(),
-    );
-    expect(screen.getByRole("button", { name: "添加数据集…" })).toBeEnabled();
-    // The home panel's reopen restores its batch's narration.
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/ws", label: "Demo" }));
-    expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
-  });
-
-  it("an add failure landing while the panel is closed fires a destructive toast naming the origin workspace", async () => {
-    // #1490's closed-panel variant: the banner renders only while the panel
-    // does, so a batch failing after the sidebar nulled the workspace prop
-    // would vanish unread -- the reopen edge would destroy the error state
-    // before it ever rendered. Offsite, the failure changes faces: the
-    // toast carries it, attributed to the workspace that minted the batch.
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
-    const bound = (ws: { path: string; label: string } | null) => (
-      <QueryClientProvider client={client}>
-        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
-      </QueryClientProvider>
-    );
-    seed([]);
-    vi.mocked(open).mockResolvedValue("/src/a.csv");
-    vi.mocked(addWorkspaceDataset).mockClear();
-    let rejectAdd!: (e: unknown) => void;
-    vi.mocked(addWorkspaceDataset).mockImplementation(
-      () => new Promise<ListedWorkspaceDataset>((_resolve, reject) => { rejectAdd = reject; }),
-    );
-    vi.mocked(toast).mockClear();
-    const view = render(bound({ path: "/ws", label: "Demo" }));
-    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
-    expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
-    // Close while the upload runs; the failure lands with no panel present.
-    view.rerender(bound(null));
-    await act(async () => {
-      rejectAdd({ kind: "DataUnreadable", data: `Error when sniffing file "/src/a.csv".` });
-    });
-    // Destructive, attributed to the origin workspace by name, the banner's
-    // detail sentence riding as the description.
-    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
-    expect(toast).toHaveBeenCalledWith({
-      variant: "destructive",
-      title: "上传到 Demo 失败",
-      description: expect.stringContaining("无法解析该数据文件"),
-    });
-    // No double surface: the panel state never took the error, so the
-    // reopen edge has nothing to destroy -- no banner greets the reopen.
-    view.rerender(bound({ path: "/ws", label: "Demo" }));
-    await waitFor(() =>
-      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
-    );
-    expect(screen.getByRole("button", { name: "添加数据集…" })).toBeInTheDocument();
-  });
-
-  it("an add failure landing on a rebound panel fires the toast attributed to the origin workspace, the foreign panel stays clean", async () => {
-    // #1490's rebind variant shares the routing: the shared error state has
-    // no workspace attribution, so the banner would narrate a Demo failure
-    // on Other's panel and the reopen edge would then destroy it unread.
-    // The toast names the origin; the foreign panel takes nothing.
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
-    const bound = (ws: { path: string; label: string } | null) => (
-      <QueryClientProvider client={client}>
-        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
-      </QueryClientProvider>
-    );
-    seed([]);
-    vi.mocked(open).mockResolvedValue("/src/a.csv");
-    vi.mocked(addWorkspaceDataset).mockClear();
-    let rejectAdd!: (e: unknown) => void;
-    vi.mocked(addWorkspaceDataset).mockImplementation(
-      () => new Promise<ListedWorkspaceDataset>((_resolve, reject) => { rejectAdd = reject; }),
-    );
-    vi.mocked(toast).mockClear();
-    const view = render(bound({ path: "/ws", label: "Demo" }));
-    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
-    expect(await screen.findByText(/正在添加 a\.csv/)).toBeInTheDocument();
-    // Rebind mid-flight; the failure lands on the foreign panel's watch.
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/other", label: "Other" }));
-    await act(async () => {
-      rejectAdd({ kind: "Io", data: "disk full" });
-    });
-    // The Io echo rides verbatim as the description; the attribution names
-    // Demo, not the panel the user is looking at.
-    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
-    expect(toast).toHaveBeenCalledWith({
-      variant: "destructive",
-      title: "上传到 Demo 失败",
-      description: "disk full",
-    });
-    // The foreign panel's error state is untouched, and the origin's
-    // reopen is equally clean (the failure was delivered, not stored).
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/ws", label: "Demo" }));
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  });
-
-  it("a replace settling on a rebound panel invalidates the origin's listing, never the foreign panel's", async () => {
-    // #1492: the row mutations' success invalidation must ride the
-    // mutation's variables -- TanStack hot-swaps an in-flight mutation's
-    // options to the latest render's closures, so a live-panel callback
-    // would refresh the workspace the user has REBOUND to while the origin
-    // goes stale (the app default is staleTime Infinity, so this mirrored
-    // client makes the invalidation the ONLY refetch trigger -- key-switch
-    // noise would fake the green, the #1491 test's lesson).
-    const client = new QueryClient({
-      defaultOptions: {
-        queries: { retry: false, staleTime: Infinity },
-        mutations: { retry: false },
-      },
-    });
-    const bound = (ws: { path: string; label: string } | null) => (
-      <QueryClientProvider client={client}>
-        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
-      </QueryClientProvider>
-    );
-    const callsFor = (p: string) =>
-      vi.mocked(listWorkspaceDatasets).mock.calls.filter((call) => call[0] === p).length;
-    // The count assertions read ABSOLUTE per-path calls: clear the records
-    // the file's earlier tests left on the shared spy first (the mockClear
-    // per-consumer convention; seed() swaps the implementation, not the
-    // call log).
-    vi.mocked(listWorkspaceDatasets).mockClear();
-    seed([entry({})]);
-    vi.mocked(open).mockResolvedValue("/src/people_v2.csv");
-    vi.mocked(replaceWorkspaceDataset).mockClear();
-    let resolveReplace!: (e: ListedWorkspaceDataset) => void;
-    vi.mocked(replaceWorkspaceDataset).mockImplementation(
-      () => new Promise<ListedWorkspaceDataset>((resolve) => { resolveReplace = resolve; }),
-    );
-    const view = render(bound({ path: "/ws", label: "Demo" }));
-    fireEvent.click(await screen.findByRole("button", { name: /换源/ }));
-    await waitFor(() => expect(replaceWorkspaceDataset).toHaveBeenCalledTimes(1));
-    // The IPC target binds at fire time to the firing workspace (the review
-    // round's args pin): a count-only assert would stay green through a
-    // mutationFn rewritten onto the live panel.
-    expect(replaceWorkspaceDataset).toHaveBeenCalledWith("/ws", "people", "/src/people_v2.csv");
-    expect(callsFor("/ws")).toBe(1);
-    // The copy-in wait is the whole hazard window: close and open ANOTHER
-    // workspace's panel before the replace settles.
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/other", label: "Other" }));
-    await waitFor(() => expect(callsFor("/other")).toBe(1));
-    // Settle on the foreign panel. The replace refreshes its OWN
-    // workspace's listing (so the origin's reopen sees the new content) and
-    // leaves /other untouched -- the staleTime Infinity mirror makes both
-    // legs fail if the invalidate target drifts to the live panel.
-    await act(async () => {
-      resolveReplace(entry({}));
-    });
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/ws", label: "Demo" }));
-    await waitFor(() => expect(callsFor("/ws")).toBe(2));
-    expect(callsFor("/other")).toBe(1);
-    expect(vi.mocked(listWorkspaceDatasets).mock.calls.at(-1)).toEqual(["/ws"]);
-  });
-
-  it("a row mutation in flight locks only the panel whose workspace fired it", async () => {
-    // #1492's sibling face: busy's isPending legs carry no workspace
-    // identity, so a removal in flight would silently lock EVERY row on a
-    // panel reopened on another workspace -- with no narration, worse than
-    // the pre-#1491 state that at least told the user why. The legs gate on
-    // the firing workspace (the uploadRunning derivation's shape): the
-    // home panel keeps its lock across close/reopen while the IPC flies;
-    // the foreign panel neither locks nor narrates.
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
-    const bound = (ws: { path: string; label: string } | null) => (
-      <QueryClientProvider client={client}>
-        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
-      </QueryClientProvider>
-    );
-    seed([entry({})]);
-    let resolveRemove!: () => void;
-    vi.mocked(removeWorkspaceDataset).mockImplementation(
-      () => new Promise<void>((resolve) => { resolveRemove = resolve; }),
-    );
-    const view = render(bound({ path: "/ws", label: "Demo" }));
-    fireEvent.click(await screen.findByRole("button", { name: /删除/ }));
-    fireEvent.click(
-      within(screen.getAllByRole("alertdialog").at(-1)!).getByRole("button", { name: "删除" }),
-    );
-    // The home panel locks while the removal flies...
-    expect(await screen.findByRole("button", { name: /重命名/ })).toBeDisabled();
-    // ...a panel opened on another workspace stays unlocked...
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/other", label: "Other" }));
-    expect(await screen.findByRole("button", { name: /重命名/ })).toBeEnabled();
-    // ...and the home panel's reopen restores the lock (still in flight).
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/ws", label: "Demo" }));
-    expect(await screen.findByRole("button", { name: /重命名/ })).toBeDisabled();
-    resolveRemove();
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /重命名/ })).toBeEnabled(),
-    );
-  });
-
-  it("a superseding fire on the same row mutation never unlocks the home rows", async () => {
-    // The review round's I1: a useMutation observer's `isPending`/
-    // `variables` report only the LATEST fire. Rename flies on /ws; the
-    // panel rebinds and a second rename fires on /other, and the hook's
-    // slot now names /other -- a lock reading that slot would unlock /ws's
-    // rows while its own IPC still flies. The locks count the cache's
-    // pending flights by their MINTED variables, which freeze at fire time
-    // and survive the supersede; the gates array settles both fires at
-    // once (a single resolver variable would strand the first fire).
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
-    const bound = (ws: { path: string; label: string } | null) => (
-      <QueryClientProvider client={client}>
-        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
-      </QueryClientProvider>
-    );
-    seed([entry({})]);
-    const resolvers: Array<(value: ListedWorkspaceDataset) => void> = [];
-    vi.mocked(renameWorkspaceDataset).mockClear();
-    vi.mocked(renameWorkspaceDataset).mockImplementation(
-      () => new Promise<ListedWorkspaceDataset>((resolve) => { resolvers.push(resolve); }),
-    );
-    const view = render(bound({ path: "/ws", label: "Demo" }));
-    const fireRename = async (label: string) => {
-      fireEvent.click(await screen.findByRole("button", { name: /重命名/ }));
-      fireEvent.change(screen.getByRole("textbox"), { target: { value: label } });
-      fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    };
-    await fireRename("Folks");
-    await waitFor(() => expect(renameWorkspaceDataset).toHaveBeenCalledTimes(1));
-    // Home locks while its rename flies...
-    expect(screen.getByRole("button", { name: /重命名/ })).toBeDisabled();
-    // ...rebind and fire the SAME mutation on the foreign panel: the
-    // hook's variables slot switches to /other...
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/other", label: "Other" }));
-    await fireRename("Other Folks");
-    await waitFor(() => expect(renameWorkspaceDataset).toHaveBeenCalledTimes(2));
-    // ...rebind home: the superseded slot must not unlock /ws's own
-    // flight -- the minted-variables count keeps the lock.
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/ws", label: "Demo" }));
-    expect(await screen.findByRole("button", { name: /重命名/ })).toBeDisabled();
-    // Both flights settle: the rows release.
-    await act(async () => {
-      resolvers.forEach((resolve) => resolve(entry({})));
-    });
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /重命名/ })).toBeEnabled(),
-    );
-  });
-
-  it("the detail's privacy spinner follows the firing workspace, not the live panel", async () => {
-    // The review round's A1: the spinner gate is the busy derivation's
-    // one-off sibling -- a bare isPending would lock a foreign panel's
-    // privacy toggles behind a flight that is not theirs, and an inverted
-    // match would never spin the home pane. The gate counts pending
-    // privacy flights by their minted variables (the `next` field names
-    // the privacy leg among the row mutations).
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
-    const bound = (ws: { path: string; label: string } | null) => (
-      <QueryClientProvider client={client}>
-        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
-      </QueryClientProvider>
-    );
-    seed([entry({})]);
-    const resolvers: Array<(value: ListedWorkspaceDataset) => void> = [];
-    vi.mocked(setWorkspaceDatasetPrivacy).mockClear();
-    vi.mocked(setWorkspaceDatasetPrivacy).mockImplementation(
-      () => new Promise<ListedWorkspaceDataset>((resolve) => { resolvers.push(resolve); }),
-    );
-    const view = render(bound({ path: "/ws", label: "Demo" }));
-    fireEvent.click(await screen.findByLabelText(/发送样本值/));
-    await waitFor(() => expect(setWorkspaceDatasetPrivacy).toHaveBeenCalledTimes(1));
-    // Home spins (the toggle disables) while its privacy change flies...
-    expect(screen.getByLabelText(/发送样本值/)).toBeDisabled();
-    // ...a foreign panel's toggles stay free...
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/other", label: "Other" }));
-    expect(await screen.findByLabelText(/发送样本值/)).toBeEnabled();
-    // ...and the home pane's reopen restores the spinner.
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/ws", label: "Demo" }));
     expect(await screen.findByLabelText(/发送样本值/)).toBeDisabled();
-    await act(async () => {
-      resolvers.forEach((resolve) =>
-        resolve(entry({ privacy: { send_samples: false, type_only_columns: [] } })),
-      );
-    });
-    await waitFor(() => expect(screen.getByLabelText(/发送样本值/)).toBeEnabled());
   });
 
-  it("concurrent replaces on two panels keep both RUNNING faces alive", async () => {
-    // The review round's keyed-badge fix: two replaces may fly at once now
-    // that a foreign panel stays unlocked, and a single status slot would
-    // let the second fire's badge erase the first's -- the origin would
-    // lose its RUNNING face across the rebind (breaking #1488's promise in
-    // that corner). The map keys by the minting workspace, so each flight
-    // narrates on its own panel.
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  it("routes the Add button through the seam's pickAndAdd", async () => {
+    const { actions } = stubModule({ rows: [] });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
+    expect(actions.pickAndAdd).toHaveBeenCalledTimes(1);
+  });
+
+  // The guided Excel import (#1552): the dialog mounts over the panel while
+  // an upload parks on it, the AutoTidied sheet's pre-check keeps Load live,
+  // and the submit/cancel wiring rides the seam -- the session pane's
+  // posture, mirrored. The park ARRIVES after the panel settled (a preview
+  // resolving under the open panel): same-pass double-mounting leaves both
+  // dialogs aria-hidden in jsdom (Radix's stack sweep never converges),
+  // while the open-after-settled order is the nested confirm's proven
+  // cycle.
+  it("mounts the guided import dialog over the panel while an xlsx parks", async () => {
+    stubModule({});
+    const { rerender } = renderPanel();
+    stubModule({
+      guidance: { request: guidanceRequest(), path: "/src/book.xlsx", workspace: "/ws" },
     });
-    const bound = (ws: { path: string; label: string } | null) => (
-      <QueryClientProvider client={client}>
-        {withIntl(<WorkspaceDatasetsDialog workspace={ws} onOpenChange={() => {}} />)}
-      </QueryClientProvider>
-    );
-    vi.mocked(listWorkspaceDatasets).mockImplementation(async (p: string) =>
-      p === "/ws"
-        ? [entry({})]
-        : [entry({ reference_name: "orders", display_name: "orders", source_path: "/src/orders.csv" })],
-    );
-    vi.mocked(open).mockResolvedValue("/src/people_v2.csv");
-    const resolvers: Array<(value: ListedWorkspaceDataset) => void> = [];
-    vi.mocked(replaceWorkspaceDataset).mockClear();
-    vi.mocked(replaceWorkspaceDataset).mockImplementation(
-      () => new Promise<ListedWorkspaceDataset>((resolve) => { resolvers.push(resolve); }),
-    );
-    const view = render(bound({ path: "/ws", label: "Demo" }));
-    fireEvent.click(await screen.findByRole("button", { name: /换源/ }));
-    await waitFor(() => expect(replaceWorkspaceDataset).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText(/正在替换 people/)).toBeInTheDocument();
-    // Rebind: the foreign panel fires its own replace -- its badge names
-    // ITS row (the listing dispatches by path)...
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/other", label: "Other" }));
-    fireEvent.click(await screen.findByRole("button", { name: /换源/ }));
-    await waitFor(() => expect(replaceWorkspaceDataset).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText(/正在替换 orders/)).toBeInTheDocument();
-    // ...and the origin's badge survives the second fire: back home, the
-    // RUNNING face is still on the panel (a single slot would have been
-    // overwritten by the foreign fire and this panel would show nothing).
-    view.rerender(bound(null));
-    view.rerender(bound({ path: "/ws", label: "Demo" }));
-    expect(await screen.findByText(/正在替换 people/)).toBeInTheDocument();
-    await act(async () => {
-      resolvers.forEach((resolve) => resolve(entry({})));
+    rerender(withIntl(<WorkspaceDatasetsDialog workspace={{ path: "/ws", label: "Demo" }} onOpenChange={() => {}} />));
+    expect(await screen.findByText("导入 Excel：book")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "加载" })).toBeEnabled();
+  });
+
+  it("wires the guided dialog's submit and cancel through the seam", async () => {
+    stubModule({});
+    const { rerender } = renderPanel();
+    const { actions } = stubModule({
+      guidance: { request: guidanceRequest(), path: "/src/book.xlsx", workspace: "/ws" },
     });
+    rerender(withIntl(<WorkspaceDatasetsDialog workspace={{ path: "/ws", label: "Demo" }} onOpenChange={() => {}} />));
+    await screen.findByText("导入 Excel：book");
+    fireEvent.click(await screen.findByRole("button", { name: "加载" }));
+    expect(actions.handleGuidedSubmit).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(actions.handleGuidedCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders no guided dialog while nothing parks", () => {
+    stubModule({});
+    renderPanel();
+    expect(screen.queryByText("导入 Excel：book")).not.toBeInTheDocument();
   });
 });

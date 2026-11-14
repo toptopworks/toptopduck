@@ -138,6 +138,12 @@ export interface AppConfig {
   // catalog) are kept -- they re-enable automatically on re-detection
   // (ADR-0100 Decision 4).
   last_model_postures: Record<string, ModelPosture>;
+  // The memory extraction model's profile pointer (issue #1530,
+  // ADR-0147 Decision 7): names a provider profile to run the after-turn
+  // extraction; null = follow the ACTIVE profile (the zero-config posture
+  // is indistinguishable from the bound one). serde(default) fills null;
+  // a dangling pointer nulls on the next backend normalize.
+  memory_extraction_profile: string | null;
   // The enabled agent-definitions name set (issue #932, ADR-0117 Decision 2):
   // the machine-level single axis of the agent-definitions registry. Mirrors
   // the Rust BTreeSet (crosses IPC as an array); serde(default) fills an

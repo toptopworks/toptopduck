@@ -490,7 +490,7 @@ function AgentRow({
 }) {
   const intl = useIntl();
   return (
-    <div className="hover:bg-accent flex items-center gap-3 px-4 py-3">
+    <div className="hover:bg-transit flex items-center gap-3 px-4 py-3">
       <Bot
         className={cn(
           "size-4 shrink-0",

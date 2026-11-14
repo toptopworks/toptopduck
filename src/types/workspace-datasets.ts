@@ -10,8 +10,10 @@ export interface WorkspaceDatasetEntry {
   // The user-renamable display label (ADR-0037's dual-name scheme on the
   // shared face): defaults to the reference name; rename touches only this.
   display_name: string;
-  // The SHA256 of the original source bytes -- the store key (NOT the
-  // derived table fingerprint a working-set descriptor carries).
+  // The content key -- the store file's identity: the source bytes' SHA256
+  // for the direct formats, the rectified sheet CSV's SHA256 for the guided
+  // Excel import (issue #1552). NOT the derived table fingerprint a
+  // working-set descriptor carries.
   fingerprint: string;
   // The store file's byte size (issue #1485): the data body's on-disk size;
   // 0 = unknown (an old manifest row or a stat failure), rendered nowhere.

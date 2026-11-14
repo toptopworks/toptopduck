@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { WorkspaceWorkingSet } from "../WorkspaceWorkingSet";
+import { RightSidebarWorkingSet } from "../RightSidebarWorkingSet";
 import {
   listWorkingSet,
   activeDataset,
@@ -60,7 +60,7 @@ function makeSurfaces(): UseWorkingSetSurfaces {
     setError: vi.fn(),
     setMutationLoading: vi.fn(),
     pollPersistError: vi.fn(async () => {}),
-    trackReplace: vi.fn(),
+    armReplace: vi.fn(),
   };
 }
 
@@ -95,7 +95,7 @@ function renderSet(
   );
   const view = render(
     wrap(
-      <WorkspaceWorkingSet
+      <RightSidebarWorkingSet
         sessionId={SESSION}
         busy={false}
         onAddFiles={NOOP_ADD}
@@ -111,7 +111,7 @@ beforeEach(() => {
   vi.mocked(readRows).mockResolvedValue(EMPTY_PAGE);
 });
 
-describe("WorkspaceWorkingSet", () => {
+describe("RightSidebarWorkingSet", () => {
   it("renders a single empty-state card when the set is empty (issue #792)", () => {
     const { container } = renderSet([], null);
     // The two-column master/detail shell does not mount at all -- one panel
@@ -149,7 +149,7 @@ describe("WorkspaceWorkingSet", () => {
 
   it("pins the section heading to headline-sm 16px/600 (issue #864)", async () => {
     renderSet([mockDataset]);
-    // The workspace body's 14px baseline (issue #864) inherits into the bare
+    // The right-sidebar body's 14px baseline (issue #864) inherits into the bare
     // h2 unless it carries the headline token explicitly -- dropping the
     // utility would flatten the list section's hierarchy to body size.
     const h2 = await screen.findByRole("heading", { level: 2, name: /工作集 · 1/ });

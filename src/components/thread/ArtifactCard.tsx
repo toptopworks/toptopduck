@@ -99,7 +99,7 @@ function ArtifactRow({
         // result-link's bareButtonReset posture: a real button with the
         // card's row chrome; full-width rows keep one hit target per file.
         "artifact-row flex w-full items-center gap-1.5 border-t px-1.5 py-1 text-left transition-colors",
-        "hover:bg-accent",
+        "hover:bg-transit",
         active && "active font-semibold",
       )}
       aria-current={active ? "true" : undefined}

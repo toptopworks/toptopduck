@@ -37,6 +37,7 @@ export function skillEntry(name: string, overrides?: Partial<SkillEntry>): Skill
 export function baseAppConfig(overrides?: Partial<AppConfig>): AppConfig {
   return {
     format_version: 2,
+    memory_extraction_profile: null,
     theme: "system",
     locale: "system",
     engine: { memory_limit: "512MB", threads: 1, row_cap: 100 },

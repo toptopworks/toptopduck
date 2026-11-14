@@ -12,8 +12,8 @@ import { autoTidied, needsGuidance } from "./helpers";
 // before findByRole times out). Mock the primitives as a plain <select> so
 // header-row assertions stay integration-level without depending on Radix
 // internals (tested upstream by Radix themselves) — same convention as
-// ImportSkillsDialog.test.tsx. The skip checkboxes are NOT mocked: Radix
-// Checkbox has no portal and cooperates with plain jsdom clicks.
+// ImportSkillsDialog.test.tsx. The sheet/skip checkboxes are NOT mocked:
+// Radix Checkbox has no portal and cooperates with plain jsdom clicks.
 vi.mock("../../ui/select", () => ({
   Select: ({
     value,
@@ -87,10 +87,17 @@ describe("GuidedLoadDialog", () => {
     return { onSubmit, onFetchWindow };
   }
 
+  // The left pane's import toggle for one sheet (master-detail selection).
+  const importToggle = (sheet: string) =>
+    screen.getByRole("checkbox", { name: `导入 ${sheet}` });
+
   const previewRows = () => document.querySelectorAll("table.preview tr");
 
-  it("submits one SheetGuidance per sheet with the chosen header row", () => {
+  it("submits the checked sheet's guidance with the chosen header row", () => {
+    // The fixture sheet is NeedsGuidance -> unchecked by default; the user
+    // reviews it, ticks it, adjusts the header, then imports.
     const { onSubmit } = renderGuided();
+    fireEvent.click(importToggle("people"));
     // Default header row is 1; switch to row 2 (the real header).
     fireEvent.change(screen.getByTestId("header-row-select"), {
       target: { value: "2" },
@@ -99,6 +106,15 @@ describe("GuidedLoadDialog", () => {
     expect(onSubmit).toHaveBeenCalledWith([
       { name: "people", rectify: { header_row: 2, skip_rows: [] } },
     ]);
+  });
+
+  it("with nothing checked the submit is disabled and the dialog shows why", () => {
+    const { onSubmit } = renderGuided();
+    const load = screen.getByRole("button", { name: "加载" });
+    expect(load).toBeDisabled();
+    expect(screen.getByRole("dialog")).toHaveTextContent("未勾选任何工作表");
+    fireEvent.click(load);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("cancel calls onCancel without submitting", () => {
@@ -141,8 +157,9 @@ describe("GuidedLoadDialog", () => {
     expect(onCancel).not.toHaveBeenCalled();
   });
 
-  it("disables the header select and every skip checkbox while loading", () => {
+  it("disables the import toggles, header select and skip checkboxes while loading", () => {
     renderGuided({ loading: true });
+    expect(importToggle("people")).toBeDisabled();
     expect(screen.getByTestId("header-row-select")).toBeDisabled();
     for (const box of screen.getAllByRole("checkbox")) {
       expect(box).toBeDisabled();
@@ -165,7 +182,7 @@ describe("GuidedLoadDialog", () => {
   });
 
   describe("fixed-height skeleton (issue #749)", () => {
-    it("pins header + footer and scrolls only the middle body", () => {
+    it("pins header + footer and scrolls only the panes", () => {
       renderGuided();
       const dialog = screen.getByRole("dialog");
       const dialogClasses = dialog.className.split(/\s+/);
@@ -180,21 +197,372 @@ describe("GuidedLoadDialog", () => {
       expect(header).not.toBeNull();
       expect(footer).not.toBeNull();
       expect(body).not.toBeNull();
-      // Header + footer never shrink away; only the body scrolls.
+      // Header + footer never shrink away; the two-pane body flexes and the
+      // hairline splits master from detail.
       expect(header!.className.split(/\s+/)).toContain("shrink-0");
       expect(footer!.className.split(/\s+/)).toContain("shrink-0");
       const bodyClasses = body!.className.split(/\s+/);
       expect(bodyClasses).toContain("flex-1");
       expect(bodyClasses).toContain("min-h-0");
-      expect(bodyClasses).toContain("overflow-y-auto");
-      // Sheets stack vertically with a 1px hairline between sections.
-      expect(bodyClasses).toContain("divide-y");
+      expect(bodyClasses).toContain("min-w-0");
+      // Master-detail: the sheet list pane and the preview pane.
+      const listPane = body!.querySelector("[data-slot=\"sheet-list\"]");
+      const detailPane = body!.querySelector("[data-slot=\"sheet-detail\"]");
+      expect(listPane).not.toBeNull();
+      expect(detailPane).not.toBeNull();
+    });
+  });
+
+  describe("master-detail sheet list (ADR-0148)", () => {
+    // A mixed workbook in workbook order: "clean" resolved (header detected on
+    // row 2), "rough" deferred, "extra" resolved.
+    function mixedRequest(): GuidanceRequest {
+      return {
+        source_path: "/x/mixed.xlsx",
+        workbook_name: "mixed",
+        sheets: [
+          {
+            name: "clean",
+            preview: [["Report"], ["id", "name"], ["1", "Alice"]],
+            total_rows: 3,
+            state: autoTidied(2),
+          },
+          {
+            name: "rough",
+            preview: [["meta", "info"], ["id", "name"], ["2", "Bob"]],
+            total_rows: 3,
+            state: needsGuidance("MultipleHeaderRows"),
+          },
+          {
+            name: "extra",
+            preview: [["sku"], ["a1"]],
+            total_rows: 2,
+            state: autoTidied(1),
+          },
+        ],
+      };
+    }
+
+    it("lists every sheet with an import toggle, a state icon, its name and row count", () => {
+      renderGuided({ request: mixedRequest() });
+      const list = document.querySelector("[data-slot=\"sheet-list\"]")!;
+      for (const sheet of ["clean", "rough", "extra"]) {
+        // The sheet name rides the list row (its detail heading duplicates the
+        // text, so the list pane itself is the query scope).
+        expect(list).toHaveTextContent(sheet);
+        expect(importToggle(sheet)).toBeInTheDocument();
+      }
+      // Row counts ride the list rows as captions (clean/rough carry 3).
+      expect(list).toHaveTextContent("3 行");
+      // Dual-channel state icons: check glyph for resolved, alert for deferred
+      // (shape, not color alone). Scoped to the status icons -- a checked
+      // Radix Checkbox also renders a lucide-check internally.
+      expect(
+        list.querySelectorAll("[data-slot=\"sheet-state-icon\"].lucide-check"),
+      ).toHaveLength(2);
+      expect(
+        list.querySelectorAll("[data-slot=\"sheet-state-icon\"].lucide-triangle-alert"),
+      ).toHaveLength(1);
+    });
+
+    it("pre-checks AutoTidied sheets and leaves NeedsGuidance sheets unticked", () => {
+      // ADR-0148 default selection: a shape the algorithm trusts may import on
+      // acceptance; a shape it deferred must be reviewed by the user first.
+      renderGuided({ request: mixedRequest() });
+      expect(importToggle("clean")).toHaveAttribute("aria-checked", "true");
+      expect(importToggle("rough")).toHaveAttribute("aria-checked", "false");
+      expect(importToggle("extra")).toHaveAttribute("aria-checked", "true");
+      expect(screen.getByRole("dialog")).toHaveTextContent("已选 2 / 3");
+    });
+
+    it("the counter tracks every toggle", () => {
+      renderGuided({ request: mixedRequest() });
+      expect(screen.getByRole("dialog")).toHaveTextContent("已选 2 / 3");
+      fireEvent.click(importToggle("rough"));
+      expect(screen.getByRole("dialog")).toHaveTextContent("已选 3 / 3");
+      fireEvent.click(importToggle("clean"));
+      expect(screen.getByRole("dialog")).toHaveTextContent("已选 2 / 3");
+    });
+
+    it("defaults the active sheet to the first NeedsGuidance sheet", () => {
+      // The deferred sheet is the one that needs eyes first.
+      renderGuided({ request: mixedRequest() });
+      const detail = document.querySelector("[data-slot=\"sheet-detail\"]")!;
+      expect(detail).toHaveTextContent("rough");
+      expect(detail).toHaveTextContent("检测到多个疑似表头行");
+      expect(detail).not.toHaveTextContent("表头第 2 行（自动检测）");
+    });
+
+    it("defaults the active sheet to the first sheet when every sheet resolved", () => {
+      const allGreen: GuidanceRequest = {
+        source_path: "/x/all.xlsx",
+        workbook_name: "all",
+        sheets: [
+          {
+            name: "clean",
+            preview: [["Report"], ["id"], ["1"]],
+            total_rows: 3,
+            state: autoTidied(2),
+          },
+          {
+            name: "extra",
+            preview: [["sku"], ["a1"]],
+            total_rows: 2,
+            state: autoTidied(1),
+          },
+        ],
+      };
+      const { onSubmit } = renderGuided({ request: allGreen });
+      const detail = document.querySelector("[data-slot=\"sheet-detail\"]")!;
+      expect(detail).toHaveTextContent("clean");
+      // Resolved: the summary line names the guess (#751 wording survives).
+      expect(detail).toHaveTextContent("表头第 2 行（自动检测）");
+      // And every sheet is pre-checked: one click submits both guesses.
+      expect(screen.getByRole("dialog")).toHaveTextContent("已选 2 / 2");
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "clean", rectify: { header_row: 2, skip_rows: [] } },
+        { name: "extra", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+    });
+
+    it("switching sheets swaps the detail pane and resets its window", async () => {
+      const onFetchWindow = vi.fn(
+        (_sheet: string, offset: number, limit: number) =>
+          Promise.resolve(
+            Array.from({ length: Math.min(limit, 3 - offset) }, (_, i) => [`r${offset + i + 1}`]),
+          ),
+      );
+      renderGuided({ request: mixedRequest(), onFetchWindow });
+      // Active is "rough"; its first cell renders.
+      expect(document.querySelector("table.preview")).toHaveTextContent("meta");
+      fireEvent.click(screen.getByRole("button", { name: /clean/ }));
+      const detail = document.querySelector("[data-slot=\"sheet-detail\"]")!;
+      expect(detail).toHaveTextContent("clean");
+      expect(detail).toHaveTextContent("表头第 2 行（自动检测）");
+      // The table re-rendered with clean's first window.
+      expect(document.querySelector("table.preview")).toHaveTextContent("Report");
+      expect(document.querySelector("table.preview")).not.toHaveTextContent("meta");
+    });
+
+    it("per-sheet choices survive switching sheets", () => {
+      renderGuided({ request: mixedRequest() });
+      // Active "rough": tick a skip row.
+      fireEvent.click(screen.getByRole("checkbox", { name: "跳过 rough 第 3 行" }));
+      // Switch away and back: the tick survives (absolute-row state).
+      fireEvent.click(screen.getByRole("button", { name: /clean/ }));
+      fireEvent.click(screen.getByRole("button", { name: /rough/ }));
+      expect(
+        screen.getByRole("checkbox", { name: "跳过 rough 第 3 行" }),
+      ).toHaveAttribute("aria-checked", "true");
+    });
+
+    it("submitting sends only the checked sheets, in workbook order", () => {
+      const onSubmit = vi.fn();
+      renderGuided({ request: mixedRequest(), onSubmit });
+      // Defaults: clean + extra checked, rough not. Tick rough.
+      fireEvent.click(importToggle("rough"));
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "clean", rectify: { header_row: 2, skip_rows: [] } },
+        { name: "rough", rectify: { header_row: 1, skip_rows: [] } },
+        { name: "extra", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+      // Uncheck clean: it drops out of the payload entirely.
+      fireEvent.click(importToggle("clean"));
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenLastCalledWith([
+        { name: "rough", rectify: { header_row: 1, skip_rows: [] } },
+        { name: "extra", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+    });
+
+    it("unchecking everything re-disables the submit", () => {
+      renderGuided({ request: mixedRequest() });
+      fireEvent.click(importToggle("clean"));
+      fireEvent.click(importToggle("extra"));
+      expect(screen.getByRole("button", { name: "加载" })).toBeDisabled();
+      expect(screen.getByRole("dialog")).toHaveTextContent("未勾选任何工作表");
+    });
+
+    it("an AutoTidied sheet submits its guess until the user adjusts it in the detail pane", () => {
+      const onSubmit = vi.fn();
+      renderGuided({ request: mixedRequest(), onSubmit });
+      // Switch to clean, adjust the header away from the guess, and submit —
+      // the user's value replaces the guess. rough stays unticked (the
+      // default for a deferred sheet) and drops out of the payload.
+      fireEvent.click(screen.getByRole("button", { name: /clean/ }));
+      fireEvent.change(screen.getByTestId("header-row-select"), { target: { value: "1" } });
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "clean", rectify: { header_row: 1, skip_rows: [] } },
+        { name: "extra", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+    });
+
+    it("a guess beyond the first window submits as the absolute row", () => {
+      // A banner plus note rows can park the detected header below window 1
+      // (tidy's header_like[0] route): the summary names row 15 while window 1
+      // offers no matching option, and the pick must still ride as the
+      // absolute row number.
+      const onSubmit = vi.fn();
+      renderGuided({
+        request: {
+          source_path: "/x/farguess.xlsx",
+          workbook_name: "farguess",
+          sheets: [
+            {
+              name: "far",
+              preview: Array.from({ length: 12 }, (_, i) => [`r${i + 1}`]),
+              total_rows: 30,
+              state: autoTidied(15),
+            },
+            {
+              name: "rough",
+              preview: [["x"], ["1"]],
+              total_rows: 2,
+              state: needsGuidance("NoHeaderRow"),
+            },
+          ],
+        },
+        onSubmit,
+      });
+      // Active defaults to "rough" (first NeedsGuidance); switch to "far".
+      fireEvent.click(screen.getByRole("button", { name: /far/ }));
+      const detail = document.querySelector("[data-slot=\"sheet-detail\"]")!;
+      expect(detail).toHaveTextContent("表头第 15 行（自动检测）");
+      // The resolved face paginates like the deferred one (30 rows over a
+      // 12-row window): the pager rides here too, not just on NeedsGuidance.
+      expect(screen.getByRole("dialog")).toHaveTextContent("第 1–12 行 / 共 30 行");
+      // Row 15 is not rendered in window 1, so it carries no checkbox.
+      expect(screen.queryByRole("checkbox", { name: "跳过 far 第 15 行" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      // rough stays unticked (deferred default) and drops out of the payload:
+      // the far guess rides as the absolute row.
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "far", rectify: { header_row: 15, skip_rows: [] } },
+      ]);
+    });
+
+    it("a same-path re-route re-derives choices, checks and the active sheet", () => {
+      // The remount key is the path (#748), so a workbook fixed on disk and
+      // re-dropped at the SAME path re-parks the dialog without remounting
+      // it: choices, import checks and the active sheet must all re-derive
+      // from the new request, or the stale parse renders and submits.
+      const onSubmit = vi.fn();
+      const props = {
+        loading: false,
+        error: null as AppError | null,
+        onSubmit,
+        onCancel: () => {},
+        onFetchWindow: vi.fn().mockResolvedValue([]),
+      };
+      const view = renderI18n(<GuidedLoadDialog request={mixedRequest()} {...props} />);
+      expect(screen.getByRole("dialog")).toHaveTextContent("已选 2 / 3");
+      view.rerender(
+        withIntl(
+          <GuidedLoadDialog
+            request={{
+              source_path: "/x/mixed.xlsx",
+              workbook_name: "mixed",
+              sheets: [
+                {
+                  name: "clean",
+                  preview: [["meta", "info"], ["id", "name"], ["1", "Alice"]],
+                  total_rows: 3,
+                  state: needsGuidance("MultipleHeaderRows"),
+                },
+                {
+                  name: "added",
+                  preview: [["id"], ["1"]],
+                  total_rows: 2,
+                  state: autoTidied(1),
+                },
+              ],
+            }}
+            {...props}
+          />,
+        ),
+      );
+      // Re-derived: clean flipped to deferred (unchecked, active as the first
+      // NeedsGuidance), rough/extra are gone, added is pre-checked.
+      const detail = document.querySelector("[data-slot=\"sheet-detail\"]")!;
+      expect(detail).toHaveTextContent("clean");
+      expect(detail).toHaveTextContent("检测到多个疑似表头行");
+      expect(screen.getByRole("dialog")).toHaveTextContent("已选 1 / 2");
+      expect(screen.queryByText("extra")).toBeNull();
+      fireEvent.click(importToggle("clean"));
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "clean", rectify: { header_row: 1, skip_rows: [] } },
+        { name: "added", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+    });
+
+    it("a same-path re-route moves an existing sheet's pre-fill guess", () => {
+      // The re-derive must refresh the GUESS too, not just the checks: a
+      // workbook re-tidied on disk can move a still-clean sheet's detected
+      // header, and the payload must ride the new row -- the old re-track
+      // pin died with the Adjust form.
+      const onSubmit = vi.fn();
+      const props = {
+        loading: false,
+        error: null as AppError | null,
+        onSubmit,
+        onCancel: () => {},
+        onFetchWindow: vi.fn().mockResolvedValue([]),
+      };
+      const sheetWith = (headerRow: number) => [
+        {
+          name: "clean",
+          preview: [
+            ["meta"],
+            ["id", "name"],
+            ["1", "Alice"],
+          ],
+          total_rows: 3,
+          state: autoTidied(headerRow),
+        },
+      ];
+      const view = renderI18n(
+        <GuidedLoadDialog
+          request={{
+            source_path: "/x/moved.xlsx",
+            workbook_name: "moved",
+            sheets: sheetWith(2),
+          }}
+          {...props}
+        />,
+      );
+      expect(screen.getByRole("dialog")).toHaveTextContent("已选 1 / 1");
+      view.rerender(
+        withIntl(
+          <GuidedLoadDialog
+            request={{
+              source_path: "/x/moved.xlsx",
+              workbook_name: "moved",
+              sheets: sheetWith(3),
+            }}
+            {...props}
+          />,
+        ),
+      );
+      // Still pre-checked; activate it to read the moved guess.
+      expect(screen.getByRole("dialog")).toHaveTextContent("已选 1 / 1");
+      fireEvent.click(screen.getByRole("button", { name: /clean/ }));
+      const detail = document.querySelector("[data-slot=\"sheet-detail\"]")!;
+      expect(detail).toHaveTextContent("表头第 3 行（自动检测）");
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "clean", rectify: { header_row: 3, skip_rows: [] } },
+      ]);
     });
   });
 
   describe("row-state visuals (issue #749)", () => {
     it("marks the header row with the accent tint + a caption 表头 mark", () => {
       renderGuided();
+      fireEvent.click(importToggle("people"));
       const first = previewRows()[0]!;
       const classes = first.className.split(/\s+/);
       // Dual channel: the accent background rides the token (dark-mode aware)…
@@ -258,16 +626,21 @@ describe("GuidedLoadDialog", () => {
       fireEvent.change(screen.getByTestId("header-row-select"), {
         target: { value: "2" },
       });
-      const boxes = screen.getAllByRole("checkbox");
-      expect(boxes).toHaveLength(3);
-      expect(boxes[0]).toBeDisabled(); // row 1 — above the header
-      expect(boxes[1]).toBeDisabled(); // row 2 — the header itself
-      expect(boxes[2]).toBeEnabled(); // row 3 — data below the header
+      // Only the skip checkboxes (rows at/above the header) plus the single
+      // sheet import toggle ride the dialog.
+      const skipBoxes = screen
+        .getAllByRole("checkbox")
+        .filter((box) => box.getAttribute("aria-label")?.startsWith("跳过"));
+      expect(skipBoxes).toHaveLength(3);
+      expect(skipBoxes[0]).toBeDisabled(); // row 1 — above the header
+      expect(skipBoxes[1]).toBeDisabled(); // row 2 — the header itself
+      expect(skipBoxes[2]).toBeEnabled(); // row 3 — data below the header
     });
 
     it("moving the header clears any skips the header overtakes", () => {
       const onSubmit = vi.fn();
       renderGuided({ onSubmit });
+      fireEvent.click(importToggle("people"));
       fireEvent.click(
         screen.getByRole("checkbox", { name: "跳过 people 第 2 行" }),
       );
@@ -313,28 +686,24 @@ describe("GuidedLoadDialog", () => {
         ],
       };
       renderGuided({ request: twoSheets, onSubmit });
-      // The mocked Select renders one native select per sheet, in workbook
-      // order — index 0 is "people".
+      // Active = people (first NeedsGuidance). Its mocked Select is index 0.
       const peopleSelect = screen.getAllByTestId("header-row-select")[0]!;
-      // Independent choices per sheet: header + skip on people, a skip on orders.
       fireEvent.change(peopleSelect, { target: { value: "2" } });
       fireEvent.click(
         screen.getByRole("checkbox", { name: "跳过 people 第 3 行" }),
       );
+      // Switch to orders, adjust independently.
+      fireEvent.click(screen.getByRole("button", { name: /orders/ }));
       fireEvent.click(
         screen.getByRole("checkbox", { name: "跳过 orders 第 2 行" }),
       );
+      fireEvent.click(importToggle("people"));
+      fireEvent.click(importToggle("orders"));
       fireEvent.click(screen.getByRole("button", { name: "加载" }));
       expect(onSubmit).toHaveBeenCalledWith([
         { name: "people", rectify: { header_row: 2, skip_rows: [3] } },
         { name: "orders", rectify: { header_row: 1, skip_rows: [2] } },
       ]);
-      // Moving sheet A's header cannot disturb sheet B's skips — a toggle
-      // that clobbers the other sheets' entries fails here.
-      fireEvent.change(peopleSelect, { target: { value: "3" } });
-      expect(
-        screen.getByRole("checkbox", { name: "跳过 orders 第 2 行" }),
-      ).toHaveAttribute("aria-checked", "true");
     });
   });
 
@@ -469,6 +838,7 @@ describe("GuidedLoadDialog", () => {
       const onFetchWindow = vi.fn(() => Promise.reject(new Error("retention gone")));
       const onSubmit = vi.fn();
       renderGuided({ request: bigRequest(), onSubmit, onFetchWindow });
+      fireEvent.click(importToggle("big"));
       fireEvent.click(screen.getByRole("button", { name: "下一页" }));
       await waitFor(() => expect(onFetchWindow).toHaveBeenCalledWith("big", 12, 12));
       // The fetch flag clears -> the pager re-arms on the original window.
@@ -503,6 +873,7 @@ describe("GuidedLoadDialog", () => {
       const onSubmit = vi.fn();
       const onFetchWindow = vi.fn(windowRows);
       renderGuided({ request: bigRequest(), onSubmit, onFetchWindow });
+      fireEvent.click(importToggle("big"));
       // Window 1: header row 3 + skip row 5.
       fireEvent.change(screen.getByTestId("header-row-select"), { target: { value: "3" } });
       fireEvent.click(screen.getByRole("checkbox", { name: "跳过 big 第 5 行" }));
@@ -527,6 +898,7 @@ describe("GuidedLoadDialog", () => {
       const onSubmit = vi.fn();
       const onFetchWindow = vi.fn(windowRows);
       renderGuided({ request: bigRequest(), onSubmit, onFetchWindow });
+      fireEvent.click(importToggle("big"));
       fireEvent.click(screen.getByRole("button", { name: "下一页" }));
       await screen.findByText("r13");
       fireEvent.change(screen.getByTestId("header-row-select"), { target: { value: "13" } });
@@ -588,7 +960,7 @@ describe("GuidedLoadDialog", () => {
 
   describe("auto-tidy failure reasons (issue #750)", () => {
     it("renders the sheet's failure reason under its heading", () => {
-      // The default fixture sheet carries MultipleHeaderRows.
+      // The default fixture sheet carries MultipleHeaderRows and is active.
       renderGuided();
       expect(screen.getByRole("dialog")).toHaveTextContent("检测到多个疑似表头行");
     });
@@ -609,261 +981,15 @@ describe("GuidedLoadDialog", () => {
           ],
         },
       });
+      // Active defaults to rough (first NeedsGuidance) -> its reason shows.
       const dialog = screen.getByRole("dialog");
       expect(dialog).toHaveTextContent("数据从第一行开始");
       expect(dialog).not.toHaveTextContent("检测到多个疑似表头行");
-      // The resolved sheet collapses to its auto-detected summary instead of
-      // a reason line (#751).
-      expect(dialog).toHaveTextContent("表头第 1 行（自动检测）");
-    });
-  });
-
-  describe("auto-tidied sheets: prefill + sectioned presentation (issue #751)", () => {
-    // A mixed workbook in workbook order: "clean" resolved (header detected on
-    // row 2, below a banner title), "rough" deferred.
-    function mixedRequest(): GuidanceRequest {
-      return {
-        source_path: "/x/mixed.xlsx",
-        workbook_name: "mixed",
-        sheets: [
-          {
-            name: "clean",
-            preview: [["Report"], ["id", "name"], ["1", "Alice"]],
-            total_rows: 3,
-            state: autoTidied(2),
-          },
-          {
-            name: "rough",
-            preview: [["meta", "info"], ["id", "name"], ["2", "Bob"]],
-            total_rows: 3,
-            state: needsGuidance("MultipleHeaderRows"),
-          },
-        ],
-      };
-    }
-
-    it("collapses auto sheets into a summary row; deferred sheets stay expanded", () => {
-      renderGuided({ request: mixedRequest() });
-      const dialog = screen.getByRole("dialog");
-      // Summary = sheet name + detected header row + the Adjust button.
-      expect(dialog).toHaveTextContent("clean");
-      expect(dialog).toHaveTextContent("表头第 2 行（自动检测）");
-      expect(screen.getByRole("button", { name: "调整" })).toBeInTheDocument();
-      // Collapsed: no preview table rows -> no skip checkboxes for "clean".
-      expect(screen.queryByRole("checkbox", { name: "跳过 clean 第 1 行" })).toBeNull();
-      // The deferred sheet keeps its expanded form + reason line (unchanged).
-      expect(dialog).toHaveTextContent("检测到多个疑似表头行");
-      expect(screen.getByRole("checkbox", { name: "跳过 rough 第 3 行" })).toBeInTheDocument();
-      // Workbook order rides the section stack: clean's heading precedes rough's.
-      const headings = Array.from(dialog.querySelectorAll("h3")).map((h) => h.textContent);
-      expect(headings).toEqual(["clean", "rough"]);
-    });
-
-    it("Adjust expands the auto sheet into the full form with the header pre-filled", () => {
-      renderGuided({ request: mixedRequest() });
-      fireEvent.click(screen.getByRole("button", { name: "调整" }));
-      // The full form renders the preview table with the guess in the select.
-      expect(screen.getByRole("checkbox", { name: "跳过 clean 第 1 行" })).toBeInTheDocument();
-      const cleanSelect = screen.getAllByTestId("header-row-select")[0]!;
-      expect(cleanSelect).toHaveValue("2"); // the guess, not the blind row 1
-      // The guessed row carries the accent mark in the preview.
-      const secondRow = document.querySelectorAll("table.preview tr")[1]!;
-      expect(secondRow.className.split(/\s+/)).toContain("bg-accent");
-    });
-
-    it("an expanded auto sheet that outgrows one window shows the pager", () => {
-      renderGuided({
-        request: {
-          source_path: "/x/tallauto.xlsx",
-          workbook_name: "tallauto",
-          sheets: [
-            {
-              name: "tall",
-              preview: Array.from({ length: 12 }, (_, i) => [`r${i + 1}`]),
-              total_rows: 30,
-              state: autoTidied(1),
-            },
-            { name: "rough", preview: [["x"], ["1"]], total_rows: 2, state: needsGuidance("NoHeaderRow") },
-          ],
-        },
-      });
-      // No pager while collapsed.
-      expect(screen.queryByRole("button", { name: "下一页" })).toBeNull();
-      fireEvent.click(screen.getByRole("button", { name: "调整" }));
-      expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled();
-      expect(screen.getByRole("dialog")).toHaveTextContent("第 1–12 行 / 共 30 行");
-    });
-
-    it("submitting from the summary covers every sheet, the auto one with its guess", () => {
-      const onSubmit = vi.fn();
-      renderGuided({ request: mixedRequest(), onSubmit });
-      // No expansion, no adjustment: the guess rides as an explicit rectify.
-      fireEvent.click(screen.getByRole("button", { name: "加载" }));
-      expect(onSubmit).toHaveBeenCalledWith([
-        { name: "clean", rectify: { header_row: 2, skip_rows: [] } },
-        { name: "rough", rectify: { header_row: 1, skip_rows: [] } },
-      ]);
-    });
-
-    it("an adjusted auto sheet submits the user's value, not the guess", () => {
-      const onSubmit = vi.fn();
-      renderGuided({ request: mixedRequest(), onSubmit });
-      fireEvent.click(screen.getByRole("button", { name: "调整" }));
-      const cleanSelect = screen.getAllByTestId("header-row-select")[0]!;
-      fireEvent.change(cleanSelect, { target: { value: "1" } });
-      fireEvent.click(screen.getByRole("button", { name: "加载" }));
-      expect(onSubmit).toHaveBeenCalledWith([
-        { name: "clean", rectify: { header_row: 1, skip_rows: [] } },
-        { name: "rough", rectify: { header_row: 1, skip_rows: [] } },
-      ]);
-    });
-
-    it("disables Adjust while loading, like every other control", () => {
-      renderGuided({ request: mixedRequest(), loading: true });
-      expect(screen.getByRole("button", { name: "调整" })).toBeDisabled();
-    });
-
-    it("Adjust is one-way: no collapse back, and the summary is gone", () => {
-      // The expanded form IS the adjustment surface (the ticket defines
-      // expand only; YAGNI on a collapse toggle): once expanded there is no
-      // button that folds the section back, and the summary line itself is
-      // gone -- a future regression that re-derives choices on collapse has
-      // no seam to ride through unnoticed.
-      renderGuided({ request: mixedRequest() });
-      fireEvent.click(screen.getByRole("button", { name: "调整" }));
-      expect(screen.queryByText("表头第 2 行（自动检测）")).toBeNull();
-      expect(screen.queryByRole("button", { name: "调整" })).toBeNull();
-    });
-
-    it("a guess beyond the first window survives Adjust and submits as the absolute row", () => {
-      // A banner plus note rows can park the detected header below window 1
-      // (tidy's header_like[0] route): Adjust expands into window 1 where the
-      // select offers no matching option, and the pick must still ride as the
-      // absolute row number. jsdom cannot assert the Radix trigger's
-      // placeholder fallback (the Select portal never opens in this suite) --
-      // the data path is the part that can regress silently.
-      const onSubmit = vi.fn();
-      renderGuided({
-        request: {
-          source_path: "/x/farguess.xlsx",
-          workbook_name: "farguess",
-          sheets: [
-            {
-              name: "far",
-              preview: Array.from({ length: 12 }, (_, i) => [`r${i + 1}`]),
-              total_rows: 30,
-              state: autoTidied(15),
-            },
-            { name: "rough", preview: [["x"], ["1"]], total_rows: 2, state: needsGuidance("NoHeaderRow") },
-          ],
-        },
-        onSubmit,
-      });
-      // The summary names the far guess before any expansion.
-      expect(screen.getByRole("dialog")).toHaveTextContent("表头第 15 行（自动检测）");
-      fireEvent.click(screen.getByRole("button", { name: "调整" }));
-      // Row 15 is not rendered in window 1, so it carries no checkbox.
-      expect(screen.queryByRole("checkbox", { name: "跳过 far 第 15 行" })).toBeNull();
-      fireEvent.click(screen.getByRole("button", { name: "加载" }));
-      expect(onSubmit).toHaveBeenCalledWith([
-        { name: "far", rectify: { header_row: 15, skip_rows: [] } },
-        { name: "rough", rectify: { header_row: 1, skip_rows: [] } },
-      ]);
-    });
-
-    it("a same-path re-route re-tracks the pre-fill to the moved guess", () => {
-      // The remount key is the path (#748), so a workbook fixed on disk and
-      // re-dropped at the SAME path re-parks the dialog without remounting:
-      // the choices must re-derive from the new request, or the old guess
-      // renders mislabeled as auto-detected and submits as the user's pick
-      // (issue #751 review) -- and a newly added sheet name must get a
-      // choice instead of crashing on the read.
-      const onSubmit = vi.fn();
-      const props = {
-        loading: false,
-        error: null as AppError | null,
-        onSubmit,
-        onCancel: () => {},
-        onFetchWindow: vi.fn().mockResolvedValue([]),
-      };
-      const view = renderI18n(<GuidedLoadDialog request={mixedRequest()} {...props} />);
-      expect(screen.getByRole("dialog")).toHaveTextContent("表头第 2 行（自动检测）");
-      view.rerender(
-        withIntl(
-          <GuidedLoadDialog
-            request={{
-              source_path: "/x/mixed.xlsx",
-              workbook_name: "mixed",
-              sheets: [
-                { name: "clean", preview: [["Report"], ["note"], ["id", "name"], ["1", "Alice"]], total_rows: 4, state: autoTidied(3) },
-                {
-                  name: "rough",
-                  preview: [["meta", "info"], ["id", "name"], ["2", "Bob"]],
-                  total_rows: 3,
-                  state: needsGuidance("MultipleHeaderRows"),
-                },
-                { name: "added", preview: [["id"], ["1"]], total_rows: 2, state: autoTidied(1) },
-              ],
-            }}
-            {...props}
-          />,
-        ),
-      );
-      // The summary follows the moved guess; the added sheet renders its own
-      // summary instead of throwing on a missing choice.
-      expect(screen.getByRole("dialog")).toHaveTextContent("表头第 3 行（自动检测）");
+      // Switching to the resolved sheet shows its auto-detected summary
+      // instead of a reason line (#751 wording survives in the detail pane).
+      fireEvent.click(screen.getByRole("button", { name: /clean/ }));
       expect(screen.getByRole("dialog")).toHaveTextContent("表头第 1 行（自动检测）");
-      fireEvent.click(screen.getByRole("button", { name: "加载" }));
-      expect(onSubmit).toHaveBeenCalledWith([
-        { name: "clean", rectify: { header_row: 3, skip_rows: [] } },
-        { name: "rough", rectify: { header_row: 1, skip_rows: [] } },
-        { name: "added", rectify: { header_row: 1, skip_rows: [] } },
-      ]);
-    });
-
-    it("a same-path re-route that defers a resolved sheet swaps to the full form", () => {
-      // The flip side of the re-route reset: if the fixed workbook now makes
-      // auto-tidy defer a previously resolved sheet, the section must follow
-      // the new two-state -- the reason line and full form render, and the
-      // stale auto summary is gone (issue #751 review: hidden reason line).
-      const props = {
-        loading: false,
-        error: null as AppError | null,
-        onSubmit: vi.fn(),
-        onCancel: () => {},
-        onFetchWindow: vi.fn().mockResolvedValue([]),
-      };
-      const view = renderI18n(<GuidedLoadDialog request={mixedRequest()} {...props} />);
-      expect(screen.getByRole("dialog")).toHaveTextContent("表头第 2 行（自动检测）");
-      view.rerender(
-        withIntl(
-          <GuidedLoadDialog
-            request={{
-              source_path: "/x/mixed.xlsx",
-              workbook_name: "mixed",
-              sheets: [
-                {
-                  name: "clean",
-                  preview: [["meta", "info"], ["id", "name"], ["1", "Alice"]],
-                  total_rows: 3,
-                  state: needsGuidance("MultipleHeaderRows"),
-                },
-                {
-                  name: "rough",
-                  preview: [["meta", "info"], ["id", "name"], ["2", "Bob"]],
-                  total_rows: 3,
-                  state: needsGuidance("MultipleHeaderRows"),
-                },
-              ],
-            }}
-            {...props}
-          />,
-        ),
-      );
-      // "clean" swapped from its collapsed summary to the deferred branch:
-      // reason line + full form (its checkbox renders; the summary is gone).
-      expect(screen.getByRole("dialog")).not.toHaveTextContent("表头第 2 行（自动检测）");
-      expect(screen.getByRole("checkbox", { name: "跳过 clean 第 3 行" })).toBeInTheDocument();
+      expect(screen.getByRole("dialog")).not.toHaveTextContent("数据从第一行开始");
     });
   });
 });

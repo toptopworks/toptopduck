@@ -1191,7 +1191,7 @@ mod tests {
         let reg = WorkspaceRegistry::new(dir.path().join(crate::workspace::WORKSPACES_FILE_NAME));
         // Slash spellings keep Path::file_name platform-neutral: the suite
         // runs on the Linux CI leg, where a backslash is not a separator.
-        reg.record_titled(Path::new("C:/ws/alpha"), "Alpha")
+        reg.record_explicit(Path::new("C:/ws/alpha"), Some("Alpha"))
             .expect("record");
         reg.record_at(Path::new("C:/ws/2026-10-29-15-48-00"), None, false, 1_000)
             .expect("record");

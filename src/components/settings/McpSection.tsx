@@ -44,7 +44,6 @@ import {
   RowActionButton,
   RowFoldChevron,
   PaneHeader,
-  SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
 } from "./settings-chrome";
 import { useRegistryPane } from "./useRegistryPane";
@@ -570,7 +569,7 @@ function McpServerRow({
   return (
     <div
       data-testid={`mcp-server-row-${server.id}`}
-      className="hover:bg-accent px-4 py-3"
+      className="hover:bg-transit px-4 py-3"
     >
       <div className="flex items-center gap-3">
         <RowFoldChevron
@@ -709,9 +708,7 @@ function StatusDot({ probeState }: { probeState: ProbeState }) {
             className={cn(dotClass, "bg-muted-foreground/40 cursor-help")}
           />
         </TooltipTrigger>
-        <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-          {notTested}
-        </TooltipContent>
+        <TooltipContent side="top">{notTested}</TooltipContent>
       </Tooltip>
     );
   }
@@ -842,13 +839,10 @@ function ToolTable({ tools }: { tools: McpToolInfo[] }) {
                     </TooltipTrigger>
                     <TooltipContent
                       side="top"
-                      className={cn(
-                        SETTINGS_TOOLTIP_CLASS,
-                        // pointer-events-auto overrides the display-only
-                        // base: this body scrolls and stays open under
-                        // the pointer.
-                        "max-w-sm max-h-40 overflow-y-auto pointer-events-auto",
-                      )}
+                      // pointer-events-auto overrides the display-only
+                      // base: this body scrolls and stays open under
+                      // the pointer.
+                      className="max-w-sm max-h-40 overflow-y-auto pointer-events-auto"
                     >
                       {tool.description}
                     </TooltipContent>

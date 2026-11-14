@@ -13,7 +13,7 @@ import { NameBadge, RowActionButton } from "./settings-chrome";
 // The row is list chrome (hover highlight + layout); the text block is the
 // detail affordance (click / Enter opens the read-only dialog) and every
 // write action lives in the row-end cluster -- never on the text block.
-const ROW_CLASS = "hover:bg-accent flex items-center gap-3 px-4 py-3";
+const ROW_CLASS = "hover:bg-transit flex items-center gap-3 px-4 py-3";
 
 /** The acquired axis's locale label: the row badge and the detail dialog's
  *  scope value share the one vocabulary -- no second word for the same

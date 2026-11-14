@@ -58,7 +58,10 @@ describe("ui toast face (issue #1494)", () => {
   it("renders default and destructive distinguishably", () => {
     fireToast({ title: "Neutral note" });
     fireToast({ title: "Upload failed", variant: "destructive" });
-    expect(toastEl("Neutral note")).toHaveClass("bg-background");
+    expect(toastEl("Neutral note")).toHaveClass(
+      "bg-inverted",
+      "text-inverted-foreground",
+    );
     expect(toastEl("Neutral note")).not.toHaveClass("destructive");
     expect(toastEl("Upload failed")).toHaveClass(
       "bg-destructive",
@@ -68,16 +71,17 @@ describe("ui toast face (issue #1494)", () => {
   });
 
   it("re-tints the description on the destructive surface", () => {
-    // The muted token is correct on the neutral surface but lands as
-    // low-contrast gray-on-red without the group override (the copy-in
-    // gap found on the updater-failure toast, issue #1509). The override
-    // class rides the string unconditionally -- the variant distinction
-    // is the root's marker class (pinned above), not the class list.
+    // The inverted-surface dim (inverted-foreground/75) is correct on the
+    // dark face but lands as low-contrast gray-on-red without the group
+    // override (the copy-in gap found on the updater-failure toast, issue
+    // #1509). The override class rides the string unconditionally -- the
+    // variant distinction is the root's marker class (pinned above), not
+    // the class list.
     fireToast({ title: "Failed", description: "raw detail" });
     fireToast({ title: "Failed red", description: "raw detail red", variant: "destructive" });
-    expect(screen.getByText("raw detail")).toHaveClass("text-muted-foreground");
+    expect(screen.getByText("raw detail")).toHaveClass("text-inverted-foreground/75");
     expect(screen.getByText("raw detail red")).toHaveClass(
-      "text-muted-foreground",
+      "text-inverted-foreground/75",
       "group-[.destructive]:text-destructive-foreground/90",
     );
   });

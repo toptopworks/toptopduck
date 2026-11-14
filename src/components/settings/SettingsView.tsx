@@ -3,6 +3,7 @@ import { FormattedMessage, useIntl } from "react-intl";
 import {
   ArrowLeft,
   Box,
+  Brain,
   Cable, Terminal,
   Database,
   Info,
@@ -36,6 +37,7 @@ import { EngineSection } from "./EngineSection";
 import { GeneralSection } from "./GeneralSection";
 import { CliSection } from "./CliSection";
 import { McpSection } from "./McpSection";
+import { MemorySection } from "./MemorySection";
 import { type ProfilesControls } from "./ProfilesSection";
 import { PrivacySection } from "./PrivacySection";
 import { RuntimeSection } from "./RuntimeSection";
@@ -90,6 +92,8 @@ function SectionIcon({ section }: { section: SettingsSection }) {
       return <Box className="size-4 shrink-0" aria-hidden />;
     case "database-engine":
       return <Database className="size-4 shrink-0" aria-hidden />;
+    case "memory":
+      return <Brain className="size-4 shrink-0" aria-hidden />;
     case "privacy":
       return <ShieldCheck className="size-4 shrink-0" aria-hidden />;
     case "mcp":
@@ -120,6 +124,8 @@ function SectionLabel({ section }: { section: SettingsSection }) {
       return <FormattedMessage id="settings.nav.runtime" defaultMessage="Runtime" />;
     case "database-engine":
       return <FormattedMessage id="settings.nav.databaseEngine" defaultMessage="Analysis Engine" />;
+    case "memory":
+      return <FormattedMessage id="settings.nav.memory" defaultMessage="User Memory" />;
     case "privacy":
       return <FormattedMessage id="settings.nav.privacy" defaultMessage="Privacy" />;
     case "mcp":
@@ -189,6 +195,7 @@ function SectionContent({
       return (
         <RuntimeSection
           provider={appConfig.provider}
+          memoryExtractionProfile={appConfig.memory_extraction_profile}
           defaultRuntime={appConfig.default_runtime}
           onCommit={onCommit}
           onDefaultRuntimeChanged={onDefaultRuntimeChanged}
@@ -199,6 +206,8 @@ function SectionContent({
       );
     case "database-engine":
       return <EngineSection appConfig={appConfig} onCommit={onCommit} />;
+    case "memory":
+      return <MemorySection />;
     case "privacy":
       return <PrivacySection />;
     case "mcp":
@@ -499,9 +508,9 @@ export function SettingsView({
               className={cn(
                 bareButtonReset,
                 "settings-nav-button text-foreground flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm",
-                "hover:bg-accent",
+                "hover:bg-transit",
                 "focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
-                section === s && "bg-accent text-accent-foreground font-medium",
+                section === s && "bg-accent text-accent-foreground font-medium hover:bg-accent",
               )}
               aria-current={section === s ? "page" : undefined}
               onClick={() => onSectionChange(s)}
@@ -514,8 +523,8 @@ export function SettingsView({
 
         {/* Rail bottom: the "back to workspace" gear (issue #282). Intentional
             rail chrome, deliberately not a HeaderActionButton call site
-            (issue #960): a single consumer with its own default-ghost skin
-            (no SETTINGS_TOOLTIP_CLASS), and both slots read the same
+            (issue #960): a single consumer with its own default-ghost skin,
+            and both slots read the same
             backToWorkspaceLabel variable -- there is no descriptor double-write
             to collapse and no second rail consumer to converge. */}
         <div className="settings-footer border-border border-t p-2">

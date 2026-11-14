@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { findLatestMaterializedPrimary } from "./workspace";
 import type { ThreadEntry } from "../types/thread";
 
-// The workspace fold state machine (ADR-0083, issue #298). The workspace
-// panel defaults to COLLAPSED -- conversation is the primary surface; the
+// The right-sidebar fold state machine (ADR-0083, issue #298). The panel
+// defaults to COLLAPSED -- conversation is the primary surface; the
 // panel opens on demand. Three entry paths open it:
 //  1. the FIRST result_N promotion of the session auto-expands ONCE,
 //     showing the just-produced dataset ("the full picture lives here"
@@ -19,13 +19,13 @@ import type { ThreadEntry } from "../types/thread";
 // that already materialized a result finds the guidance consumed, so only a
 // session whose first result arrives after the mount auto-expands.
 
-export interface UseWorkspaceCollapse {
-  /** True while the workspace panel is folded away (the rail owns the pane). */
-  workspaceCollapsed: boolean;
+export interface UseRightSidebarCollapse {
+  /** True while the right sidebar is folded away (the rail owns the pane). */
+  rightSidebarCollapsed: boolean;
   /** Open the panel (result selection from the rail). Idempotent. */
-  expandWorkspace: () => void;
+  expandRightSidebar: () => void;
   /** The session header toggle (the manual fold-AND-unfold path). */
-  toggleWorkspace: () => void;
+  toggleRightSidebar: () => void;
   /** A result_N promotion just settled (the useTurnFlow markProduced seam).
    *  The FIRST call auto-expands, unless the mount scan already spent the
    *  one-shot on a session that materialized before this mount (issue
@@ -34,9 +34,9 @@ export interface UseWorkspaceCollapse {
   notePromotion: () => void;
 }
 
-export function useWorkspaceCollapse(thread: ThreadEntry[]): UseWorkspaceCollapse {
+export function useRightSidebarCollapse(thread: ThreadEntry[]): UseRightSidebarCollapse {
   // Cold start (app / session start) is always folded (ADR-0083).
-  const [workspaceCollapsed, setWorkspaceCollapsed] = useState(true);
+  const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(true);
   // The auto-expand one-shot. A ref (not state) because its consumption never
   // needs a render on its own -- it only guards the notePromotion transition.
   const autoExpandedRef = useRef(false);
@@ -63,22 +63,22 @@ export function useWorkspaceCollapse(thread: ThreadEntry[]): UseWorkspaceCollaps
     }
   }, [thread]);
 
-  const expandWorkspace = useCallback(() => {
-    setWorkspaceCollapsed(false);
+  const expandRightSidebar = useCallback(() => {
+    setRightSidebarCollapsed(false);
   }, []);
-  const toggleWorkspace = useCallback(() => {
-    setWorkspaceCollapsed((collapsed) => !collapsed);
+  const toggleRightSidebar = useCallback(() => {
+    setRightSidebarCollapsed((collapsed) => !collapsed);
   }, []);
   const notePromotion = useCallback(() => {
     if (autoExpandedRef.current) return;
     autoExpandedRef.current = true;
-    setWorkspaceCollapsed(false);
+    setRightSidebarCollapsed(false);
   }, []);
 
   return {
-    workspaceCollapsed,
-    expandWorkspace,
-    toggleWorkspace,
+    rightSidebarCollapsed,
+    expandRightSidebar,
+    toggleRightSidebar,
     notePromotion,
   };
 }

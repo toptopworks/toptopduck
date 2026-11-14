@@ -740,3 +740,85 @@ describe("QuestionBar pre-first-event wait window (issue #1266)", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 });
+
+describe("QuestionBar quote materialization (#1573)", () => {
+  function renderWithQuotes(
+    onSubmit: (question: string) => void,
+    quotes: readonly string[],
+    opts: { draft?: string } = {},
+  ) {
+    return renderQuestionBar(
+      <QuestionBar
+        onSubmit={onSubmit}
+        onCancel={() => {}}
+        loading={false}
+        draft={opts.draft ?? ""}
+        setDraft={() => {}}
+        skillPicker={{
+          onPick: () => {},
+          chips: { node: null, onBackspace: () => {} },
+        }}
+        quoteChips={{ node: null, quotes }}
+      />,
+    );
+  }
+
+  it("prepends the staged quotes as blockquotes before the draft at submit", () => {
+    const onSubmit = vi.fn();
+    renderWithQuotes(onSubmit, ["第一条引用"], { draft: "帮我分析" });
+    fireEvent.change(screen.getByLabelText("提问"), {
+      target: { value: "帮我分析" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    expect(onSubmit).toHaveBeenCalledWith("> 第一条引用\n\n帮我分析");
+  });
+
+  it("serializes multi-line and multiple quotes with per-line prefixes", () => {
+    const onSubmit = vi.fn();
+    renderWithQuotes(onSubmit, ["甲一\r\n甲二", "乙"], { draft: "问题" });
+    fireEvent.change(screen.getByLabelText("提问"), {
+      target: { value: "问题" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    expect(onSubmit).toHaveBeenCalledWith("> 甲一\n> 甲二\n\n> 乙\n\n问题");
+  });
+
+  it("submits the quotes alone when the draft is empty", () => {
+    const onSubmit = vi.fn();
+    renderWithQuotes(onSubmit, ["只有引用"], { draft: "" });
+    const submit = screen.getByRole("button", { name: "提问" });
+    expect(submit).toBeEnabled();
+    fireEvent.click(submit);
+    expect(onSubmit).toHaveBeenCalledWith("> 只有引用");
+  });
+
+  it("keeps the submit disabled with an empty draft and no quotes", () => {
+    renderWithQuotes(() => {}, [], { draft: "" });
+    expect(screen.getByRole("button", { name: "提问" })).toBeDisabled();
+  });
+
+  it("seats the quote chips before the skill chips in the input row", () => {
+    const { container } = renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={false}
+        skillPicker={{
+          onPick: () => {},
+          chips: {
+            node: <div data-testid="skill-slot" />,
+            onBackspace: () => {},
+          },
+        }}
+        quoteChips={{
+          node: <div data-testid="quote-slot" />,
+          quotes: ["q"],
+        }}
+      />,
+    );
+    const row = container.querySelector(".flex.flex-wrap.items-start") as HTMLElement;
+    const children = Array.from(row.children);
+    expect(children[0]).toHaveAttribute("data-testid", "quote-slot");
+    expect(children[1]).toHaveAttribute("data-testid", "skill-slot");
+  });
+});

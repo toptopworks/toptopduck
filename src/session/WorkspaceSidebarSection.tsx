@@ -8,10 +8,11 @@
 // and locale keys are the shared parts) as the "New workspace" entry.
 //
 // Mutation stance: rename / remove are explicit user actions served by
-// strict IPC commands; a refusal surfaces inline in the rename modal or as
-// a failed mutation (the group simply stays). Every success invalidates the
-// workspace listing so the pill / popover / sidebar faces re-derive from
-// the registry (issue #1392's three-faces rule).
+// strict IPC commands; a refusal surfaces inline in the rename modal, or
+// under the failed group's own row when no modal remains to carry it (the
+// remove confirm is gone by the time the command refuses). Every success
+// invalidates the workspace listing so the pill / popover / sidebar faces
+// re-derive from the registry (issue #1392's three-faces rule).
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
@@ -19,6 +20,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
   ChevronRight,
+  Brain,
   FolderClosed,
   FolderOpen,
   FolderX,
@@ -63,6 +65,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { bareButtonReset } from "@/lib/buttonReset";
+import { describeError } from "@/lib/error-presentation";
 import { log } from "@/lib/log";
 import { usePointerCloseIntent } from "@/lib/usePointerCloseIntent";
 import { isInvalidWorkspaceName } from "@/lib/workspaceName";
@@ -73,6 +76,7 @@ import {
   renameWorkspace,
 } from "../api";
 import { WorkspaceDatasetsDialog } from "./WorkspaceDatasetsDialog";
+import { WorkspaceMemoryDialog } from "./WorkspaceMemoryDialog";
 import { readSidebarExpansion, saveSidebarExpansion } from "./sidebarExpansion";
 import { workspaceKeys } from "./queryKeys";
 import { SIDEBAR_PREVIEW_CAP as PREVIEW_CAP } from "./sidebarModel";
@@ -84,13 +88,13 @@ import type { SessionMetadata } from "../types/session";
  *  hand-synced copies (the marker names carry no CSS of their own; this
  *  string IS the style). */
 export const ROW_SHELL_CLASS =
-  "session-entry group/row relative my-0.5 flex items-stretch rounded-md hover:bg-accent";
+  "session-entry group/row relative my-0.5 flex items-stretch rounded-md hover:bg-transit";
 
 /** The row-end pill container, shared VERBATIM with the recent body's
  *  rows: the opacity + pointer-events reveal pair keyed on the row hover
  *  / focus-inside. */
 export const PILL_CLASS =
-  "session-entry-actions absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md bg-accent opacity-0 pointer-events-none group-hover/row:opacity-100 group-hover/row:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto";
+  "session-entry-actions absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md opacity-0 pointer-events-none group-hover/row:opacity-100 group-hover/row:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto";
 
 /** The pill's trigger face: the RowActionsMenu trigger posture (the bare
  *  reset + the size-7 hit area + the focus ring + the busy dim). */
@@ -100,7 +104,7 @@ const PILL_TRIGGER_CLASS = `session-row-action ${bareButtonReset} flex size-7 it
  *  entry): the ArchivedToggle posture -- hover-revealed, focus-visible
  *  kept, busy-dimmed. Show/hide snaps (no transition): a fade lags fast
  *  pointer sweeps, the same ruling the working-set row pill carries. */
-const HEAD_ACTION_CLASS = `sidebar-archived-toggle ${bareButtonReset} rounded-md p-1 text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
+const HEAD_ACTION_CLASS = `sidebar-archived-toggle ${bareButtonReset} rounded-md p-1 text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-transit hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
 
 /** The "Show more (N)" tail button, shared with the parent's section
  *  renderer (the recent body mounts its own instances). */
@@ -177,6 +181,39 @@ export function WorkspaceSidebarSection({
   // The shared-dataset panel's target (ADR-0141 D4): the workspace the modal
   // manages; null keeps it closed.
   const [managing, setManaging] = useState<{ path: string; label: string } | null>(null);
+  // The memory panel's target (issue #1529): same modal-off-the-menu shape.
+  const [viewingMemory, setViewingMemory] = useState<{
+    path: string;
+    label: string;
+  } | null>(null);
+  // A refused group folder open (#1543): the menu is closed by the time the
+  // opener refuses, so the failure surfaces under the group's own row --
+  // scoped to the group it failed on. The clear is path-guarded (another
+  // group's successful open cannot retire it), but a newer group's failure
+  // displaces it: one live slot, whichever failed last (#1317's posture).
+  const [folderOpenFailure, setFolderOpenFailure] = useState<{
+    path: string;
+    message: string;
+  } | null>(null);
+  const openGroupFolder = (path: string) => {
+    openPath(path)
+      .then(() =>
+        setFolderOpenFailure((prev) => (prev?.path === path ? null : prev)),
+      )
+      .catch((e: unknown) => {
+        log.warn("WorkspaceSidebarSection", "openPath failed", e);
+        setFolderOpenFailure({ path, message: describeError(e, intl) });
+      });
+  };
+  // A refused remove (#1547): the confirm dialog is already gone when the
+  // registry command refuses, so the failure surfaces under the group's own
+  // row -- the same #1543 row-alert posture, one live slot (a newer group's
+  // refusal displaces an older one). The clear is path-guarded: only that
+  // group's own successful retry retires it.
+  const [removeFailure, setRemoveFailure] = useState<{
+    path: string;
+    message: string;
+  } | null>(null);
 
   function toggleGroup(path: string) {
     const next = new Set(expanded);
@@ -304,12 +341,20 @@ export function WorkspaceSidebarSection({
 
   const remove = useMutation({
     mutationFn: (path: string) => removeWorkspace(path),
-    onSuccess: invalidate,
-    // The confirm dialog is already gone when the mutation runs, so a
-    // refusal has no modal to surface in: log it -- the ArtifactHeader
-    // posture (the record stays, the action is simply retryable).
-    onError: (e) =>
-      log.warn("WorkspaceSidebarSection", "removeWorkspace failed", e),
+    onSuccess: (_data, path) => {
+      invalidate();
+      // A stale slot for a re-registered path must not leak into the fresh
+      // group: the success retires that path's refusal only.
+      setRemoveFailure((prev) => (prev?.path === path ? null : prev));
+    },
+    // The confirm dialog is already gone when the mutation runs, so the
+    // refusal has no modal to surface in: it lands under the failed group's
+    // own row (#1547, the #1543 row-alert posture -- the record stays, the
+    // action is simply retryable). The log keeps the technical detail.
+    onError: (e, path) => {
+      log.warn("WorkspaceSidebarSection", "removeWorkspace failed", e);
+      setRemoveFailure({ path, message: describeError(e, intl) });
+    },
   });
 
   const rename = useMutation({
@@ -527,12 +572,28 @@ export function WorkspaceSidebarSection({
                     <WorkspaceGroupMenu
                       group={g}
                       disabled={disabled}
+                      onOpenFolder={openGroupFolder}
                       onRename={() => openRename(g)}
                       onRemove={() => setRemoving(g)}
                       onManageDatasets={() => setManaging({ path: g.path, label: g.label })}
+                      onViewMemory={() => setViewingMemory({ path: g.path, label: g.label })}
                     />
                   </div>
                 </div>
+                {folderOpenFailure?.path === g.path && (
+                  // A refused folder open surfaces under its group's row
+                  // (#1543) -- the menu is gone by then, the row stays.
+                  <p className="text-destructive m-0 py-1 pl-7 text-xs" role="alert">
+                    {folderOpenFailure.message}
+                  </p>
+                )}
+                {removeFailure?.path === g.path && (
+                  // A refused remove surfaces under its group's row (#1547)
+                  // -- the confirm dialog is gone by then, the row stays.
+                  <p className="text-destructive m-0 py-1 pl-7 text-xs" role="alert">
+                    {removeFailure.message}
+                  </p>
+                )}
                 {open && shown.length > 0 && (
                   <ul className="ml-4 border-l border-border pl-0.5">
                     {renderRows(shown)}
@@ -644,6 +705,14 @@ export function WorkspaceSidebarSection({
         workspace={managing}
         onOpenChange={(next) => {
           if (!next) setManaging(null);
+        }}
+      />
+
+      {/* Issue #1529: the workspace memory panel (read-only list + toggle). */}
+      <WorkspaceMemoryDialog
+        workspace={viewingMemory}
+        onOpenChange={(next) => {
+          if (!next) setViewingMemory(null);
         }}
       />
 
@@ -793,15 +862,19 @@ export function WorkspaceSidebarSection({
 function WorkspaceGroupMenu({
   group,
   disabled,
+  onOpenFolder,
   onRename,
   onRemove,
   onManageDatasets,
+  onViewMemory,
 }: {
   group: WorkspaceGroup;
   disabled: boolean;
+  onOpenFolder: (path: string) => void;
   onRename: () => void;
   onRemove: () => void;
   onManageDatasets: () => void;
+  onViewMemory: () => void;
 }) {
   const intl = useIntl();
   const menuLabel = intl.formatMessage({
@@ -835,16 +908,14 @@ function WorkspaceGroupMenu({
         <DropdownMenuItem
           disabled={group.missing}
           onSelect={() => {
-            // The opener can refuse (a folder deleted after the listing
-            // snapshot): log it -- the ArtifactHeader posture. The menu is
-            // closed by then, so the log is the honest surface.
-            openPath(group.path).catch((e: unknown) =>
-              log.warn("WorkspaceSidebarSection", "openPath failed", e),
-            );
+            // The parent owns the open + its failure face (#1543): the menu
+            // is closed by the time the opener refuses, so the failure
+            // surfaces under the group's row, not here.
+            onOpenFolder(group.path);
           }}
         >
           <FolderOpen aria-hidden />
-          <FormattedMessage id="sidebar.workspace.openFolder" defaultMessage="Open folder" />
+          <FormattedMessage id="common.openFolder" defaultMessage="Open folder" />
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onRename}>
           <Pencil aria-hidden />
@@ -858,6 +929,12 @@ function WorkspaceGroupMenu({
             id="sidebar.workspace.manageDatasets"
             defaultMessage="Datasets"
           />
+        </DropdownMenuItem>
+        {/* Issue #1529: the workspace memory panel's entry. A missing
+            directory has no memories to list (and no toggle target). */}
+        <DropdownMenuItem disabled={group.missing} onSelect={onViewMemory}>
+          <Brain aria-hidden />
+          <FormattedMessage id="sidebar.workspace.memory" defaultMessage="Memory" />
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem variant="destructive" onSelect={onRemove}>

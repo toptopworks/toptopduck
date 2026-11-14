@@ -1,16 +1,16 @@
 // Width algebra for the three-column session shell (sidebar / conversation
-// rail / workspace), issue #770. The 320px workspace floor matches the
+// rail / right sidebar), issue #770. The 320px right-sidebar floor matches the
 // "minimum usable column" convention — the conversation rail's 320px
 // flex-basis floor (issue #350; the rail's pre-#1286 320px width token)
 // is the prior art. The CSS side mirrors this constant as
-// --workspace-min-width on .shell (styles.css cross-references it).
+// --right-sidebar-min-width on .shell (styles.css cross-references it).
 
-/** Minimum workspace column width when expanded (px). */
-export const WORKSPACE_MIN_WIDTH = 320;
+/** Minimum right sidebar column width when expanded (px). */
+export const RIGHT_SIDEBAR_MIN_WIDTH = 320;
 
 /** Lower floor for the rail under sidebar-driven compensation (px): the
  *  sidebar drag may push the rail below its own direct-drag floor to keep
- *  the workspace usable (the toolbar compresses but stays functional).
+ *  the right sidebar usable (the toolbar compresses but stays functional).
  *  Declared here rather than in useRailResize so this pure algebra module
  *  has no dependency on the React hook modules; useRailResize imports it. */
 export const COMPENSATED_MIN_WIDTH = 280;
@@ -47,11 +47,11 @@ export function clampRenderedWidth(
  * floor) — while the floor form also stays correct at restore time, where
  * the rail's state can be stale relative to its visually-yielded width. */
 export function sidebarMaxWidth(shellWidth: number): number {
-  return shellWidth - COMPENSATED_MIN_WIDTH - WORKSPACE_MIN_WIDTH;
+  return shellWidth - COMPENSATED_MIN_WIDTH - RIGHT_SIDEBAR_MIN_WIDTH;
 }
 
 /** Rail width ceiling: the track-host width (shell minus sidebar) minus the
- * workspace floor. */
+ * right sidebar floor. */
 export function railMaxWidth(trackHostWidth: number): number {
-  return trackHostWidth - WORKSPACE_MIN_WIDTH;
+  return trackHostWidth - RIGHT_SIDEBAR_MIN_WIDTH;
 }

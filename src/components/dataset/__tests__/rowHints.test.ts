@@ -152,6 +152,28 @@ describe("useRowHints", () => {
     expect(trigger).toHaveFocus();
   });
 
+  it("lands the restore on the row list item, the context-menu path's opener", () => {
+    // The widened captureTrigger seam (#1570): the context-menu path captures
+    // the row <li> (tabIndex -1, no disabled state) -- the gate's property
+    // sniff must pass it through like the button arm, not strand the restore
+    // on the list fallback.
+    const row = document.createElement("li");
+    row.tabIndex = -1;
+    document.body.appendChild(row);
+    const list = document.createElement("ul");
+    list.tabIndex = -1;
+    document.body.appendChild(list);
+    const { result } = renderHook(() => useRowHints());
+    result.current.listRef.current = list;
+    act(() => result.current.captureTrigger(row));
+    act(() => result.current.closeDialog(vi.fn()));
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    expect(row).toHaveFocus();
+    expect(list).not.toHaveFocus();
+  });
+
   it("drops hint opens while the restore lands, and opens again once it clears", () => {
     const trigger = mountTrigger();
     const { result } = renderHook(() => useRowHints());

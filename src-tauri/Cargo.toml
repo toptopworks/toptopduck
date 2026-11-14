@@ -1,6 +1,6 @@
 [package]
 name = "toptopduck"
-version = "0.5.0"
+version = "0.6.0"
 description = "Local-first AI data analysis desktop tool"
 edition = "2021"
 # MSRV 1.86 (ADR-0116): rig's edition-2024 crates floor at 1.85, and one step
@@ -336,6 +336,21 @@ tracing = { version = "0.1", features = ["log"] }
 # in the driver also rides tokio's own macros -- no futures executor).
 futures = "0.3"
 http = "1"
+# The egress seam's proxy-bypass overlay (issue #1521) delegates proxy
+# selection to hyper-util's system matcher -- the same env->OS resolution
+# reqwest's `system-proxy` feature rides -- while owning the bypass-list
+# exemption judgment itself. `client-proxy` opens the public matcher module;
+# `client-proxy-system` enables the OS-config legs the dependency graph
+# already unifies in (reqwest turns the same features on), so this
+# declaration adds zero new compilation.
+hyper-util = { version = "0.1", default-features = false, features = ["client-proxy", "client-proxy-system"] }
+# Decodes the env proxy's Basic credentials back into the returned proxy
+# URL's userinfo for the egress overlay (issue #1521): hyper-util splits
+# the credentials into its intercept auth when parsing the env URI, and
+# the custom-matcher contract's only auth channel is the userinfo of the
+# URL the closure returns. Already in the graph at this version via
+# hyper-util's own encoding side.
+base64 = "0.22"
 
 # Desktop-only Tauri plugins (issue #100, ADR-0008 cross-platform). Gated to
 # non-mobile targets to mirror lib.rs `#[cfg(desktop)]` -- these plugins have
@@ -377,6 +392,16 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Registry",
     "Win32_System_Threading",
 ] }
+# Reads the WinINET `ProxyOverride` bypass list for the egress overlay
+# (issue #1521) -- the same registry store hyper-util's own Windows proxy
+# leg reads, so the crate is already in the graph at the same version.
+windows-registry = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Reads the macOS `ExceptionsList` proxy-bypass array for the egress overlay
+# (issue #1521) -- the same dynamic-store access hyper-util's own macOS
+# proxy leg uses, so the crate is already in the graph at the same version.
+system-configuration = "0.7"
 
 # Exclusive-handle fixture for the blocked-delete test (issue #1022):
 # `CreateFileW` with zero sharing is the one open-time sharing-violation

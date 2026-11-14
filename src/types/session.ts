@@ -301,8 +301,10 @@ export interface SessionMetadata {
   // order, MRU head-insert). Disjoint from `archived` by backend construction.
   pinned: boolean;
   // True when the session is archived (ADR-0127): the row is absent from the
-  // default list_sessions response; only the archived view fetches it
-  // (includeArchived). An archived session never carries a runtime sid.
+  // default list_sessions response and surfaces only under includeArchived
+  // -- the shell's scan is unconditional since #1403, so the client
+  // partitions these rows out of the unarchived list. An archived session
+  // never carries a runtime sid.
   archived: boolean;
   // The session's bound workspace directory, canonical path (ADR-0137, issue
   // #1381): where agent-authored processes worked. null for a session that

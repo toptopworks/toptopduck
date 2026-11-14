@@ -18,13 +18,13 @@ function makeFields(
     handleAsk: vi.fn(),
     handleCancel: vi.fn(),
     handleIngestFiles: vi.fn(),
-    workspaceCollapsed: false,
+    rightSidebarCollapsed: false,
     ...overrides,
   };
 }
 
 const FIELDS_A = makeFields({ loading: true });
-const FIELDS_B = makeFields({ loading: false, workspaceCollapsed: true });
+const FIELDS_B = makeFields({ loading: false, rightSidebarCollapsed: true });
 
 function renderSeam(initialSid: string | null = null) {
   return renderHook(({ sid }) => useComposerRegistry(sid), {

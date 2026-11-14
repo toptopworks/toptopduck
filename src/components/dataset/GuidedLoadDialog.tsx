@@ -1,6 +1,12 @@
 import { useId, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
+import {
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
+  TriangleAlert,
+} from "lucide-react";
 import type {
   GuidanceReason,
   GuidanceRequest,
@@ -47,11 +53,11 @@ interface SheetWindow {
   rows: string[][];
 }
 
-// The auto-tidy failure reason surfaced under a sheet heading (issue #750).
-// The four id / defaultMessage pairs stay LITERAL at their FormattedMessage
-// sites -- a descriptor map indirection would hide them from the formatjs
-// extractor and break the i18n catalog guard. defaultMessage stays English;
-// the zh-CN counterparts live in the locale catalog.
+// The auto-tidy failure reason surfaced under the active sheet's heading
+// (issue #750). The four id / defaultMessage pairs stay LITERAL at their
+// FormattedMessage sites -- a descriptor map indirection would hide them from
+// the formatjs extractor and break the i18n catalog guard. defaultMessage
+// stays English; the zh-CN counterparts live in the locale catalog.
 function GuidanceReasonMessage({ reason }: { reason: GuidanceReason }) {
   switch (reason) {
     case "EmptySheet":
@@ -129,22 +135,42 @@ function prefillChoices(sheets: GuidanceSheet[]): Record<string, SheetChoice> {
   return init;
 }
 
-// Guided-load dialog (ADR-0015): shown when auto-tidy can't confidently rectify
-// a workbook. For each sheet the user points at the header row and ticks any
-// rows to skip; the submitted choices re-enter ingest as rectify params
-// (ADR-0042 explicit user decisions).
+// Seed the per-sheet import checks (ADR-0148 default selection): a sheet the
+// auto-tidy resolved is pre-checked (importing it on acceptance costs the user
+// one glance); a DEFERRED sheet starts unticked -- the algorithm punted on
+// that shape, so the user must preview it and make the call before it can
+// enter the working set (a tidy fallback guess is never confirmation).
+function prefillChecked(sheets: GuidanceSheet[]): Set<string> {
+  const checked = new Set<string>();
+  for (const s of sheets) {
+    if (decodeSheetState(s.state).isAutoTidied) checked.add(s.name);
+  }
+  return checked;
+}
+
+// The sheet the detail pane opens on: the first deferred sheet -- the one that
+// needs eyes first -- or, in a fully resolved workbook, the first sheet.
+function defaultActiveSheet(sheets: GuidanceSheet[]): string {
+  const firstDeferred = sheets.find((s) => !decodeSheetState(s.state).isAutoTidied);
+  return (firstDeferred ?? sheets[0])?.name ?? "";
+}
+
+// Excel import confirmation dialog (ADR-0148): EVERY workbook ingest parks
+// here before anything enters the working set -- a tidy guess is never
+// confirmation. Master-detail: the left pane lists each sheet with its import
+// check (resolved sheets pre-checked, deferred ones not) + state icon + row
+// count; the right pane is the active sheet's preview (issue #750 pager,
+// #749 header/skip controls, #751 auto-detected summary line). Submit sends
+// ONLY the checked sheets' guidance; an empty selection disables the submit
+// (the backend rejects an empty selection too, as the defensive floor).
 //
 // The shell is a Radix Dialog (issue #105): portal + focus-trap + scroll-lock
-// + ESC + overlay-click dismiss come from the primitive. Issue #749 rebuilt
-// the body: a fixed-height flex skeleton (header + footer pinned, only the
-// sheet stack scrolls), design-system controls (Select primitive for the
-// header row, Checkbox copy-in for the skip ticks, headline-sm sheet
-// headings), dual-channel row states (accent/muted token tints + caption
-// Header/Skipped text marks), and a setter-level contradiction invariant --
-// skips
-// can only live below the header row, so a header move clears any skip it
-// overtakes and the submitted payload can never pair the header row with an
-// at/above skip.
+// + ESC + overlay-click dismiss come from the primitive. The fixed-height
+// flex skeleton survives from issue #749 (header + footer pinned, the two
+// panes scroll independently), as do the design-system controls and the
+// setter-level contradiction invariant -- skips can only sit below the header
+// row, so a header move clears any skip it overtakes and the submitted
+// payload can never pair the header row with an at/above skip.
 //
 // Issue #748: a guided-submit failure renders INLINE via the `error` prop --
 // the shared workspace ErrorBanner sits in the workspace body BEHIND the modal
@@ -153,13 +179,8 @@ function prefillChoices(sheets: GuidanceSheet[]): Record<string, SheetChoice> {
 // parent clears the error on re-submit / cancel / a freshly routed guidance,
 // and remounts this component keyed on the source path so a resumed batch's
 // next file starts from clean choices (a same-path re-route re-derives them
-// in place -- the `choicesAtMount` identity check below).
-//
-// Issue #751: sheets the auto-tidy resolved ride the request with their
-// detected header row as a guess. They pre-fill the header pick, collapse to
-// a one-line summary ("Header row N (auto-detected)" + Adjust), and submit
-// the guess as an explicit rectify alongside the deferred sheets' user picks
-// (ADR-0042: visible at load time = confirmed by the user).
+// in place -- the `requestAtMount` identity check below, which also bumps the
+// pane epoch so the detail pane remounts onto the new parse).
 export function GuidedLoadDialog({
   request,
   loading,
@@ -183,21 +204,30 @@ export function GuidedLoadDialog({
   onFetchWindow: (sheetName: string, offset: number, limit: number) => Promise<string[][]>;
 }) {
   const intl = useIntl();
-  const [choicesAtMount, setChoicesAtMount] = useState(request);
+  const [requestAtMount, setRequestAtMount] = useState(request);
   const [choices, setChoices] = useState<Record<string, SheetChoice>>(() =>
     prefillChoices(request.sheets),
   );
+  const [checked, setChecked] = useState<Set<string>>(() => prefillChecked(request.sheets));
+  const [activeName, setActiveName] = useState(() => defaultActiveSheet(request.sheets));
+  // Bumped on every same-path re-route so the detail pane's remount key
+  // changes even when the active sheet's name doesn't -- a stale window must
+  // never survive a re-parked parse.
+  const [paneEpoch, setPaneEpoch] = useState(0);
   // A same-path re-route re-parks the dialog WITHOUT remounting it (the
   // remount key is the path, #748 -- a file drop on the window while the
   // dialog is open bypasses the modal, per useIngestFlow): the request object
-  // is replaced in place, so re-derive the choices the moment its identity
-  // changes, or a re-dropped workbook rides the stale parse -- a moved guess
-  // renders and submits mislabeled as auto-detected, and a newly added sheet
-  // name has no choice at all (issue #751 review). Mirrors the sheetAtMount
-  // reset in GuidedSheetSection below.
-  if (choicesAtMount !== request) {
-    setChoicesAtMount(request);
+  // is replaced in place, so re-derive every piece of dialog state the moment
+  // its identity changes, or a re-dropped workbook rides the stale parse --
+  // a moved guess renders and submits mislabeled as auto-detected, a newly
+  // added sheet name has no choice at all (issue #751 review), and stale
+  // checks would import sheets the user never saw.
+  if (requestAtMount !== request) {
+    setRequestAtMount(request);
     setChoices(prefillChoices(request.sheets));
+    setChecked(prefillChecked(request.sheets));
+    setActiveName(defaultActiveSheet(request.sheets));
+    setPaneEpoch((v) => v + 1);
   }
 
   // The parent mounts this component only while the dialog is open and unmounts
@@ -243,18 +273,38 @@ export function GuidedLoadDialog({
     });
   }
 
-  function submit() {
-    const guidance: SheetGuidance[] = request.sheets.map((s) => {
-      const c = choices[s.name];
-      const rectify: SheetRectify = {
-        header_row: c.headerRow,
-        // Belt and braces on the #749 invariant: the setters keep skips below
-        // the header, and the payload re-derives it so a contradicting
-        // combination can never leave the dialog.
-        skip_rows: c.skipRows.filter((r) => r > c.headerRow),
-      };
-      return { name: s.name, rectify };
+  function toggleChecked(name: string) {
+    setChecked((cur) => {
+      const next = new Set(cur);
+      if (next.has(name)) {
+        next.delete(name);
+      } else {
+        next.add(name);
+      }
+      return next;
     });
+  }
+
+  const checkedCount = request.sheets.filter((s) => checked.has(s.name)).length;
+  const activeSheet = request.sheets.find((s) => s.name === activeName) ?? request.sheets[0];
+
+  function submit() {
+    // Only the checked sheets ride the payload, in workbook order (ADR-0148):
+    // an unchecked sheet is skipped server-side, not default-imported.
+    const guidance: SheetGuidance[] = request.sheets
+      .filter((s) => checked.has(s.name))
+      .map((s) => {
+        const c = choices[s.name];
+        const rectify: SheetRectify = {
+          header_row: c.headerRow,
+          // Belt and braces on the #749 invariant: the setters keep skips below
+          // the header, and the payload re-derives it so a contradicting
+          // combination can never leave the dialog.
+          skip_rows: c.skipRows.filter((r) => r > c.headerRow),
+        };
+        return { name: s.name, rectify };
+      });
+    if (guidance.length === 0) return; // unreachable (submit disabled); belt and braces
     onSubmit(guidance);
   }
 
@@ -266,8 +316,8 @@ export function GuidedLoadDialog({
       }}
     >
       {/* Fixed-height flex skeleton (#749): the dialog itself never scrolls --
-          header + footer stay pinned and only the sheet stack does, so the
-          submit button remains reachable on multi-sheet workbooks. */}
+          header + footer stay pinned and each pane scrolls independently, so
+          the submit button remains reachable on multi-sheet workbooks. */}
       <DialogContent
         showCloseButton={false}
         onEscapeKeyDown={(e) => {
@@ -276,38 +326,71 @@ export function GuidedLoadDialog({
         onInteractOutside={(e) => {
           if (loading) e.preventDefault();
         }}
-        className="flex h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl"
+        className="flex h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl"
       >
         <DialogHeader className="shrink-0 px-6 pt-6 pb-4 text-left">
           <DialogTitle>
             <FormattedMessage
               id="guidedLoad.title"
-              defaultMessage="Guided load: {name}"
+              defaultMessage="Import Excel: {name}"
               values={{ name: request.workbook_name }}
             />
           </DialogTitle>
           <DialogDescription>
             <FormattedMessage
               id="guidedLoad.description"
-              defaultMessage="Auto-tidy could not read every sheet in this workbook. Sheets it resolved are collapsed with their detected header row — pick Adjust to review or change one. For the remaining sheets, point at the header row and tick any non-data rows to skip. Rows above the header row are excluded automatically."
+              defaultMessage="Every sheet is confirmed here before it enters the working set: sheets detected automatically are pre-checked; ambiguous sheets start unchecked — preview each one, set its header row, then check it to import. Rows above the header row are excluded automatically."
             />
           </DialogDescription>
         </DialogHeader>
-        <div
-          data-slot="dialog-body"
-          className="min-h-0 flex-1 divide-y overflow-y-auto px-6"
-        >
-          {request.sheets.map((sheet) => (
-            <GuidedSheetSection
-              key={sheet.name}
-              sheet={sheet}
-              choice={choices[sheet.name]}
-              loading={loading}
-              onHeaderRow={(row) => setHeaderRow(sheet.name, row)}
-              onToggleSkip={(row) => toggleSkip(sheet.name, row)}
-              onFetchWindow={onFetchWindow}
-            />
-          ))}
+        <div data-slot="dialog-body" className="flex min-h-0 min-w-0 flex-1">
+          {/* Master pane: the per-sheet import list. */}
+          <aside
+            data-slot="sheet-list"
+            aria-label={intl.formatMessage({
+              id: "guidedLoad.sheetList",
+              defaultMessage: "Sheet list",
+            })}
+            className="flex w-56 shrink-0 flex-col border-r"
+          >
+            <div className="shrink-0 border-b px-4 py-2 text-xs text-muted-foreground tabular-nums">
+              <FormattedMessage
+                id="guidedLoad.selectedCount"
+                defaultMessage="{selected} of {total} selected"
+                values={{ selected: checkedCount, total: request.sheets.length }}
+              />
+            </div>
+            <ul className="min-h-0 flex-1 overflow-y-auto py-1">
+              {request.sheets.map((sheet) => (
+                <SheetListRow
+                  key={sheet.name}
+                  sheet={sheet}
+                  isChecked={checked.has(sheet.name)}
+                  isActive={sheet.name === activeSheet?.name}
+                  loading={loading}
+                  onToggle={() => toggleChecked(sheet.name)}
+                  onActivate={() => setActiveName(sheet.name)}
+                />
+              ))}
+            </ul>
+          </aside>
+          {/* Detail pane: the active sheet's preview + rectify controls. The
+              remount key covers BOTH the sheet switch (fresh first window per
+              sheet) and the same-path re-route (paneEpoch), so a stale window
+              can never survive a re-parked parse. */}
+          <div data-slot="sheet-detail" className="min-h-0 min-w-0 flex-1 overflow-y-auto px-6 py-4">
+            {activeSheet && (
+              <GuidedSheetPane
+                key={`${activeSheet.name}@${paneEpoch}`}
+                sheet={activeSheet}
+                choice={choices[activeSheet.name]}
+                loading={loading}
+                onHeaderRow={(row) => setHeaderRow(activeSheet.name, row)}
+                onToggleSkip={(row) => toggleSkip(activeSheet.name, row)}
+                onFetchWindow={onFetchWindow}
+              />
+            )}
+          </div>
         </div>
         {error && (
           <div className="shrink-0 px-6 pt-4">
@@ -315,10 +398,18 @@ export function GuidedLoadDialog({
           </div>
         )}
         <DialogFooter className="shrink-0 px-6 py-4">
+          {checkedCount === 0 && !loading && (
+            <p className="mr-auto text-xs text-muted-foreground">
+              <FormattedMessage
+                id="guidedLoad.noSelection"
+                defaultMessage="No sheets selected — check at least one sheet to import."
+              />
+            </p>
+          )}
           <Button variant="outline" onClick={onCancel} disabled={loading}>
             <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
           </Button>
-          <Button onClick={submit} disabled={loading}>
+          <Button onClick={submit} disabled={loading || checkedCount === 0}>
             {loading && <Loader2 className="size-4 animate-spin" aria-hidden />}
             {loading
               ? intl.formatMessage({
@@ -336,12 +427,83 @@ export function GuidedLoadDialog({
   );
 }
 
-// One sheet's guidance block (#749): a headline-sm heading, the auto-tidy
-// failure reason (issue #750), the Select-driven header row, the preview
+// One row of the master pane's sheet list: the import check (ADR-0148
+// selection), the two-state icon (check = resolved, alert = deferred -- shape,
+// not color alone), the sheet name as the activation control, and the row
+// count caption. The check and the activation are SEPARATE controls so both
+// stay valid interactive targets (no nesting interactive elements): the
+// checkbox toggles import, the name button opens the sheet in the detail pane.
+function SheetListRow({
+  sheet,
+  isChecked,
+  isActive,
+  loading,
+  onToggle,
+  onActivate,
+}: {
+  sheet: GuidanceSheet;
+  isChecked: boolean;
+  isActive: boolean;
+  loading: boolean;
+  onToggle: () => void;
+  onActivate: () => void;
+}) {
+  const intl = useIntl();
+  const { isAutoTidied } = decodeSheetState(sheet.state);
+  return (
+    <li>
+      <div
+        className={cn(
+          "flex items-center gap-2 px-3 py-2",
+          isActive && "bg-accent text-accent-foreground",
+        )}
+      >
+        <Checkbox
+          checked={isChecked}
+          disabled={loading}
+          onCheckedChange={() => onToggle()}
+          aria-label={intl.formatMessage(
+            { id: "guidedLoad.importSheetAria", defaultMessage: "Import {sheet}" },
+            { sheet: sheet.name },
+          )}
+        />
+        <button
+          type="button"
+          onClick={onActivate}
+          disabled={loading}
+          aria-current={isActive ? "true" : undefined}
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left"
+        >
+          {isAutoTidied ? (
+            <Check data-slot="sheet-state-icon" className="size-4 shrink-0" aria-hidden />
+          ) : (
+            <TriangleAlert
+              data-slot="sheet-state-icon"
+              className="size-4 shrink-0 text-warning"
+              aria-hidden
+            />
+          )}
+          <span className="truncate text-sm">{sheet.name}</span>
+          <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
+            <FormattedMessage
+              id="guidedLoad.rowCount"
+              defaultMessage="{count, plural, one {# row} other {# rows}}"
+              values={{ count: sheet.total_rows }}
+            />
+          </span>
+        </button>
+      </div>
+    </li>
+  );
+}
+
+// The detail pane's one active sheet (#749 controls): the headline-sm heading,
+// the auto-tidy failure reason (issue #750) or the resolved sheet's
+// auto-detected summary (#751), the Select-driven header row, the preview
 // window pager (issue #750), and the preview table with dual-channel row
-// states. Issue #751 adds the resolved sheets' collapsed summary + Adjust
-// expansion. useId gives every sheet its own heading / select ids -- hooks
-// cannot run inside the parent's map callback, hence the component split.
+// states. Remounted per sheet switch + per same-path re-route (the parent's
+// key) -- no expansion state to track: the master-detail layout made every
+// sheet inspectable, so the #751 collapse/Adjust affordance is gone.
 //
 // Paging model (issue #750): the FIRST window rides the inlined
 // `sheet.preview`; the pager (visible only when the sheet outgrows one
@@ -351,7 +513,7 @@ export function GuidedLoadDialog({
 // swap never disturbs them, and picks made across different windows coexist.
 // Both the header Select and the skip checkboxes offer ONLY the current
 // window's rows: a row that isn't rendered is not selectable.
-function GuidedSheetSection({
+function GuidedSheetPane({
   sheet,
   choice,
   loading,
@@ -369,14 +531,7 @@ function GuidedSheetSection({
   const intl = useIntl();
   const headingId = useId();
   const selectId = useId();
-  // Per-sheet two-state rendering (#751): a deferred sheet always shows its
-  // full form (reason line + controls, unchanged); a resolved sheet starts
-  // collapsed on its one-line summary and expands through Adjust into the
-  // same full form. The flag only ever turns ON -- the expanded form IS the
-  // adjustment surface, so no collapse toggle is needed (YAGNI); the only
-  // path back to collapsed is the same-path re-route reset below.
   const { isAutoTidied, reason } = decodeSheetState(sheet.state);
-  const [expanded, setExpanded] = useState(!isAutoTidied);
   // The first window is the inlined preview; its height IS the page size.
   // The max-1 clamp keeps pageCount finite for a zero-preview sheet (an
   // EmptySheet guidance) -- the backend drops rowless sheets, so the clamp
@@ -389,52 +544,6 @@ function GuidedSheetSection({
     rows: sheet.preview,
   });
   const [isFetchingWindow, setIsFetchingWindow] = useState(false);
-  const [sheetAtMount, setSheetAtMount] = useState(sheet);
-  // A same-path re-route re-parks the dialog WITHOUT remounting it (the
-  // remount key is the path, #748), replacing the sheet object in place:
-  // reset the per-sheet UI state the moment the sheet's identity changes.
-  // The window resets to the new first window or the table keeps rendering
-  // the old parse (issue #750 review), and the expansion re-tracks the new
-  // two-state or a flipped sheet renders the wrong branch of it (issue #755
-  // review: a newly deferred sheet collapsed on a stale auto summary).
-  if (sheetAtMount !== sheet) {
-    setSheetAtMount(sheet);
-    setWindowState({ offset: 0, rows: sheet.preview });
-    setExpanded(!isAutoTidied);
-  }
-
-  if (!expanded) {
-    // The resolved sheet's one-line summary (#751): sheet name + detected
-    // header row + Adjust. The choice survives the collapse in the parent's
-    // absolute-row state, so submitting straight from the summary sends the
-    // guess as an explicit rectify (ADR-0042 visible = confirmed).
-    return (
-      <section className="py-4" aria-labelledby={headingId}>
-        <div className="flex items-center justify-between gap-4">
-          <div className="min-w-0">
-            <h3 id={headingId} className="text-base font-semibold">
-              {sheet.name}
-            </h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              <FormattedMessage
-                id="guidedLoad.autoSummary"
-                defaultMessage="Header row {n} (auto-detected)"
-                values={{ n: choice.headerRow }}
-              />
-            </p>
-          </div>
-          <Button
-            variant="outline"
-            className="shrink-0"
-            onClick={() => setExpanded(true)}
-            disabled={loading}
-          >
-            <FormattedMessage id="guidedLoad.adjust" defaultMessage="Adjust" />
-          </Button>
-        </div>
-      </section>
-    );
-  }
 
   const currentPage = Math.floor(windowState.offset / pageSize);
 
@@ -465,14 +574,24 @@ function GuidedSheetSection({
   const rowOptionLabel = (row: number) =>
     intl.formatMessage({ id: "guidedLoad.rowOption", defaultMessage: "Row {n}" }, { n: row });
   return (
-    <section className="py-4" aria-labelledby={headingId}>
+    <section className="py-1" aria-labelledby={headingId}>
       <h3 id={headingId} className="text-base font-semibold">
         {sheet.name}
       </h3>
-      {reason && (
+      {reason ? (
         <p className="mt-1 text-xs text-muted-foreground">
           <GuidanceReasonMessage reason={reason} />
         </p>
+      ) : (
+        isAutoTidied && (
+          <p className="mt-1 text-xs text-muted-foreground">
+            <FormattedMessage
+              id="guidedLoad.autoSummary"
+              defaultMessage="Header row {n} (auto-detected)"
+              values={{ n: choice.headerRow }}
+            />
+          </p>
+        )
       )}
       <div className="mt-3 flex items-center gap-2">
         <Label htmlFor={selectId}>
@@ -559,9 +678,9 @@ function GuidedSheetSection({
                 key={rowNo}
                 className={
                   isHeader
-                    ? "group bg-accent text-accent-foreground hover:bg-accent"
+                    ? "group bg-accent text-accent-foreground"
                     : isSkip
-                      ? "group bg-muted text-muted-foreground hover:bg-muted"
+                      ? "group bg-muted text-muted-foreground hover:bg-transit"
                       : "group"
                 }
               >

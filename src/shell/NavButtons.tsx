@@ -13,7 +13,7 @@ import { useNavigationHistory } from "./useNavigationHistory";
 // (ADR-0052). NAV_BUTTON_CLASS is the single source of truth for the ghost-button
 // styling so the two buttons cannot drift.
 const NAV_BUTTON_CLASS =
-  "nav-button inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50";
+  "nav-button inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-transit hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50";
 
 export function NavButtons() {
   const intl = useIntl();

@@ -9,7 +9,7 @@ import { pickDataFiles } from "../dataset/pickDataFiles";
 // popover (#962 -- the "/" and "$" pickers stay the only explicit skill
 // channels).
 //
-// The retired standalone source entry (the workspace-hero FileDropzone button)
+// The retired standalone source entry (the right-sidebar-hero FileDropzone button)
 // moved here; window-level drag-and-drop stays untouched (App's single
 // listener, ADR-0061), and the ingest pipeline + source lifecycle events
 // (ADR-0040) are unchanged -- onIngestFiles routes through useIngestFlow's
@@ -23,7 +23,7 @@ import { pickDataFiles } from "../dataset/pickDataFiles";
 // Session-active bars omit the chip (pendingFiles is undefined).
 
 const TRIGGER_CLASS =
-  "composer-context-trigger relative inline-flex size-9 items-center justify-center rounded-md border border-border bg-card text-foreground transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50";
+  "composer-context-trigger relative inline-flex size-9 items-center justify-center rounded-md border border-border bg-card text-foreground transition-colors hover:bg-transit disabled:pointer-events-none disabled:opacity-50";
 
 // The pending-queue chip chrome: the muted surface + small text match the
 // composer's trigger chips; max-w keeps a long queue from stretching the

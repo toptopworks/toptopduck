@@ -5,17 +5,19 @@ import type { AppConfig, DefaultRuntime } from "../../types/app-config";
 import { bareButtonReset } from "../../lib/buttonReset";
 import { cn } from "../../lib/utils";
 import { DefaultRuntimeControl } from "./DefaultRuntimeControl";
+import { ExtractionModelSelect } from "./ExtractionModelSelect";
 import type { ProfilesControls } from "./ProfilesSection";
 import { ProfilesSection } from "./ProfilesSection";
 import { LocalCliTab } from "./LocalCliTab";
-import { PaneHeader } from "./settings-chrome";
+import { PaneHeader, SettingsCard } from "./settings-chrome";
 
 // Runtime section (issue #489, ADR-0091): the Settings "Runtime" pane, split
 // into two sub-tabs -- "API Access" (the existing ProfilesSection master-detail
 // + keychain + preflight) and "Local CLI" (the v1 adapter management panel).
-// Above the tab switcher sits the default-runtime control (issue #571,
-// ADR-0098 Decision 2): a section-level preamble preference, always mounted
-// regardless of the active sub-tab.
+// Above the tab switcher sits the preferences card: the two section-level
+// preferences -- the default-runtime control (issue #571, ADR-0098 Decision 2)
+// and the extraction-model pointer -- always mounted regardless of the active
+// sub-tab.
 //
 // The PaneHeader (hero title + description) sits ABOVE the tabs and describes
 // the entire runtime section. Tab state is local useState -- NOT persisted: a
@@ -34,6 +36,10 @@ const DEFAULT_TAB: RuntimeTab = "api-access";
 
 export type RuntimeSectionProps = {
   provider: AppConfig["provider"];
+  /** The extraction-model pointer (issue #1530): rides the api-access tab
+   *  above the profiles list -- a section-level preference like the
+   *  default runtime, not any single profile's field. */
+  memoryExtractionProfile: string | null;
   /** The persisted default-runtime preference (issue #571), feeding the
    *  section-top control. */
   defaultRuntime: DefaultRuntime;
@@ -53,6 +59,7 @@ export type RuntimeSectionProps = {
 
 export function RuntimeSection({
   provider,
+  memoryExtractionProfile,
   defaultRuntime,
   onCommit,
   onDefaultRuntimeChanged,
@@ -100,16 +107,25 @@ export function RuntimeSection({
         )}
       />
 
-      {/* Default runtime (issue #571, ADR-0098 Decision 2): the machine-level
-          startup preference, above the sub-tabs so it reads as a section-level
-          setting, not either tab's content. Always mounted -- its draft
-          survives a sub-tab switch (a nav switch unmounts the pane, resetting
-          the draft like every pane-local state). */}
-      <DefaultRuntimeControl
-        defaultRuntime={defaultRuntime}
-        onSaved={onDefaultRuntimeChanged}
-        onIpcBusy={onIpcBusy}
-      />
+      {/* The two section-level preferences as ONE card above the tabs (no
+          group title -- the rows carry their own names): cross-tab pointers
+          always mounted outside the panels, so both rows' drafts survive a
+          sub-tab switch (a nav switch unmounts the pane, resetting the
+          drafts like every pane-local state). */}
+      <SettingsCard className="mb-6">
+        <DefaultRuntimeControl
+          defaultRuntime={defaultRuntime}
+          onSaved={onDefaultRuntimeChanged}
+          onIpcBusy={onIpcBusy}
+        />
+        {/* The extraction-model pointer (issue #1530, ADR-0147 Decision 7):
+            it points INTO the profile pool managed in the API Access tab. */}
+        <ExtractionModelSelect
+          provider={provider}
+          memoryExtractionProfile={memoryExtractionProfile}
+          onCommit={onCommit}
+        />
+      </SettingsCard>
 
       {/* Tab switcher (issue #489): two tab buttons. State is NOT persisted --
           a nav switch unmounts RuntimeSection and useState resets on remount.

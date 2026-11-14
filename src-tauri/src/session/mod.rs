@@ -487,6 +487,12 @@ pub struct Session {
     /// resume, beside [`Self::workspaces_root`]; `None` (test constructors)
     /// disconnects the ledger -- the session runs on, unrecorded.
     workspace_registry: Option<std::sync::Arc<crate::workspace::WorkspaceRegistry>>,
+    /// The user-level memory root (issue #1531, ADR-0147): the app-domain
+    /// `memory/` directory the built-in engine's injection reads as the
+    /// user layer. Seated by the command layer at creation / resume, beside
+    /// [`Self::workspaces_root`]; `None` (the constructor default) mutes
+    /// the user layer. Read by [`Session::memory_index_rows`].
+    user_memory_root: Option<std::path::PathBuf>,
     /// The LLM provider (ADR-0007/0064), held behind `Arc<dyn>` (dyn, not
     /// generic) so this struct does not parameterize `commands.rs` / `lib.rs`.
     /// [`Self::ask_with_phase`] reads the live response locale off it for the
@@ -1036,6 +1042,7 @@ impl Session {
             temp_path,
             workspaces_root: None,
             workspace_registry: None,
+            user_memory_root: None,
             provider,
             materializer: Box::new(RealMaterializer),
             session_id: None,
@@ -3248,6 +3255,7 @@ mod tests {
             name: name.to_string(),
             body: String::new(),
             actor: crate::model::SkillLifecycleActor::Agent,
+            via_subagent: None,
             content_hash: hash.to_string(),
         };
         let folded = super::fold_skill_provenance(&[
@@ -3268,6 +3276,29 @@ mod tests {
                 },
             ],
             "one row per name, first-appearance order, the last hash wins"
+        );
+    }
+
+    /// #985's provenance AC: a sub-agent-sourced record folds in like any
+    /// other -- the name set is the turn's whole invocation record set, the
+    /// attribution never gates the fold.
+    #[test]
+    fn provenance_fold_includes_subagent_sourced_records() {
+        let sub_record = crate::model::SkillInvocation {
+            name: "sql-coach".to_string(),
+            body: String::new(),
+            actor: crate::model::SkillLifecycleActor::Agent,
+            via_subagent: Some("analyst".to_string()),
+            content_hash: "hash-sub".to_string(),
+        };
+        let folded = super::fold_skill_provenance(&[sub_record]);
+        assert_eq!(
+            folded,
+            vec![crate::model::SkillProvenance {
+                name: "sql-coach".to_string(),
+                content_hash: "hash-sub".to_string(),
+            }],
+            "a sub-sourced name joins the provenance name set"
         );
     }
 

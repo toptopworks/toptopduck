@@ -59,12 +59,18 @@ export function RoundBody({
         />
       )}
       {text !== undefined && (
-        <RoundProse
-          text={text}
-          mode={proseMode}
-          onSelectViz={onSelectViz}
-          selectedVizSpec={selectedVizSpec}
-        />
+        // #1573: the caller-side selection-source mark -- this prose (the
+        // settled trace round AND, through the live adapter, the streaming
+        // live prose) is a selection-surface source. The wrapper stays
+        // layout-inert: the prose root carries its own cap and spacing.
+        <div data-selection-source="">
+          <RoundProse
+            text={text}
+            mode={proseMode}
+            onSelectViz={onSelectViz}
+            selectedVizSpec={selectedVizSpec}
+          />
+        </div>
       )}
       {children}
     </div>

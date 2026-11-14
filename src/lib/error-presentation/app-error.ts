@@ -13,9 +13,10 @@ import { errorDetail, fmtError } from "./format";
 
 // The Engine locale message, used as the never-blank fallback when fmtError
 // yields an empty string (a bare throw with no message, or a minified error).
-// Applied ONLY on the shell/read branches of toAppError: a shell/read reject
-// has no verb prefix, so without a fallback an empty bare would render a blank
-// banner. The SessionFlowKind branches carry no fallback -- their "{verb}
+// Applied ONLY on the read branch of toAppError (issue #1563 took shell onto
+// the verb template, whose "{verb} failed:" output is non-empty even for an
+// empty bare) -- without the fallback an empty bare would render a blank
+// banner. The verb-prefixed branches carry no fallback -- their "{verb}
 // failed: {bare}" template already guarantees a non-empty banner (an empty
 // bare renders "{verb} failed:").
 function engineFallback(intl: IntlShape): string {
@@ -30,7 +31,11 @@ function engineFallback(intl: IntlShape): string {
 // Chinese verbs and wrapped an English catalog message in a Chinese prefix,
 // breaking locale consistency under en-US. Each arm carries a literal id +
 // defaultMessage so @formatjs/cli extract recovers it for the catalog guard.
-function errorVerb(intl: IntlShape, kind: SessionFlowKind): string {
+// Issue #1563: shell joins the verb set with a neutral "Operation" verb --
+// the kind spans open / create / profile switch / file ops, so no specific
+// operation name is honest across its callers, and the bare message read as
+// a verdict on the surface above the banner.
+function errorVerb(intl: IntlShape, kind: SessionFlowKind | "shell"): string {
   switch (kind) {
     case "load":
       return intl.formatMessage({ id: "common.load", defaultMessage: "Load" });
@@ -53,6 +58,11 @@ function errorVerb(intl: IntlShape, kind: SessionFlowKind): string {
       });
     case "ask":
       return intl.formatMessage({ id: "common.ask", defaultMessage: "Ask" });
+    case "shell":
+      return intl.formatMessage({
+        id: "error.verb.shell",
+        defaultMessage: "Operation",
+      });
     default: {
       // Exhaustiveness guard (issue #139): a new SessionFlowKind member without
       // a case would fall through and return undefined, rendering a malformed
@@ -60,7 +70,7 @@ function errorVerb(intl: IntlShape, kind: SessionFlowKind): string {
       // this regardless of tsconfig flags -- mirror the guard used by
       // loadErrorDisplay + the format core.
       const unhandled: never = kind;
-      throw new Error(`unhandled SessionFlowKind: ${JSON.stringify(unhandled)}`);
+      throw new Error(`unhandled verb kind: ${JSON.stringify(unhandled)}`);
     }
   }
 }
@@ -70,8 +80,14 @@ function errorVerb(intl: IntlShape, kind: SessionFlowKind): string {
 // active locale, so the catalog message underneath is no longer wrapped in a
 // hard-coded Chinese prefix. Exported (issue #1100) so App.test builds its
 // expected failure-prefix regex through this composer with an empty message
-// instead of hand-mirroring the verb -> id map.
-export function flowFailedMessage(intl: IntlShape, kind: SessionFlowKind, message: string): string {
+// instead of hand-mirroring the verb -> id map. Issue #1563 widens the kind
+// to admit "shell", whose neutral verb rides the same composer with zero new
+// mechanics.
+export function flowFailedMessage(
+  intl: IntlShape,
+  kind: SessionFlowKind | "shell",
+  message: string,
+): string {
   return intl.formatMessage(
     {
       id: "error.flow.failed",
@@ -108,20 +124,22 @@ function refreshFailedMessage(
 //   - SessionFlowKind (load/rename/replace/delete/privacy/ask): "{verb} failed:
 //     {message}", or "{verb} saved, but refreshing the working set failed:
 //     {message}" when opts.refreshFailed is set (a post-mutation refresh reject
-//     where the mutation itself succeeded). The template already guarantees a
-//     non-empty banner, so no Engine fallback -- an empty bare renders
-//     "{verb} failed:".
-//   - shell / read: the bare message (no verb prefix), with the Engine fallback
-//     (see engineFallback) so a bare throw / minified error never renders a
-//     blank banner.
+//     where the mutation itself succeeded).
+//   - shell (issue #1563): the same "{verb} failed: {message}" composer with a
+//     neutral "Operation" verb -- a shell reject is a shell-level action
+//     refusal, and the bare message alone read as a verdict on the surface the
+//     banner sits above.
+//   - read: the bare message (no verb prefix), with the Engine fallback (see
+//     engineFallback) so a bare throw / minified error never renders a blank
+//     banner.
 //
 // opts.refreshFailed is meaningful only for SessionFlowKind; it is ignored on
 // shell/read.
 //
-// The exhaustiveness `default: never` guard makes "verb applies only to
-// SessionFlowKind" a compile-time invariant (SessionFlowKind ⊂ AppErrorKind is
-// already established in types/error.ts): adding a new AppErrorKind member
-// without a case trips the compiler here instead of silently rendering bare.
+// The exhaustiveness `default: never` guard keeps "read is the only bare kind"
+// a compile-time invariant (SessionFlowKind ⊂ AppErrorKind is already
+// established in types/error.ts): adding a new AppErrorKind member without a
+// case trips the compiler here instead of silently rendering bare.
 export function toAppError(
   e: unknown,
   intl: IntlShape,
@@ -142,7 +160,10 @@ export function toAppError(
         : flowFailedMessage(intl, kind, bare);
       return { message, kind, detail };
     }
-    case "shell":
+    case "shell": {
+      const bare = fmtError(e, intl);
+      return { message: flowFailedMessage(intl, "shell", bare), kind, detail };
+    }
     case "read": {
       const bare = fmtError(e, intl) || engineFallback(intl);
       return { message: bare, kind, detail };

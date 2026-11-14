@@ -312,6 +312,17 @@ struct Harness {
     /// delegation suites seed specs and advertise the matching tool names
     /// on the request.
     delegations: Vec<crate::agents::DelegationSpec>,
+    /// The turn's discovery-snapshot fragments (issue #985): defaults
+    /// empty (no index, no invocation tool); the sub-agent skill suites
+    /// seed a registry-backed fragment set.
+    skills: Vec<crate::skills::SkillPromptFragment>,
+    /// The invocation channel's discovery snapshot names (issue #985):
+    /// what the unknown-name self-correction lists. Defaults empty.
+    skill_snapshot: Vec<String>,
+    /// The turn's landed pending invocation records (issue #985): moved
+    /// here when `run_turn` returns, so the suites can assert the
+    /// sub-agent-sourced records' shape.
+    landed_invocations: Vec<crate::model::SkillInvocation>,
 }
 
 impl Harness {
@@ -327,6 +338,9 @@ impl Harness {
             read_root: std::path::PathBuf::new(),
             phase_hook: None,
             delegations: Vec::new(),
+            skills: Vec::new(),
+            skill_snapshot: Vec::new(),
+            landed_invocations: Vec::new(),
         }
     }
 
@@ -447,14 +461,25 @@ impl Harness {
             root: &self.read_root,
         };
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        runtime.run(
+        // The harness's invocation channel (issue #985): the registry root
+        // rides the read gate's root (the suites seed one tempdir registry
+        // for both surfaces); the snapshot lists what the self-correction
+        // message offers.
+        let mut invocation_ctx = crate::skills::invocation::SkillInvocationCtx {
+            pending: &mut invocations,
+            snapshot: &self.skill_snapshot,
+            root: &self.read_root,
+            disabled: &[],
+        };
+        let outcome = runtime.run(
             request,
             &mut deps,
             &mut RealMaterializer,
             &mut mcp,
             cli,
             &self.delegations,
-            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &self.skills,
+            &mut invocation_ctx,
             &mut Vec::new(),
             &read,
             &crate::skills::create::SkillCreateGate::inert(),
@@ -467,7 +492,9 @@ impl Harness {
                 }
                 phases.lock().unwrap().push(phase);
             },
-        )
+        );
+        self.landed_invocations = invocations;
+        outcome
     }
 }
 
@@ -2731,6 +2758,149 @@ fn delegation_runs_a_subagent_over_the_shared_face_with_one_numberer() {
         tagged,
         vec![(id.clone(), "started"), (id, "completed")],
         "the sub-agent's call pair rides tagged sub-events with the delegation's id (issue #1359)"
+    );
+}
+
+/// The sub-agent skill fixture (issue #985): one spec-valid skill with a
+/// body + one attachment file, over a caller-owned tempdir.
+struct SkillFixture {
+    root: std::path::PathBuf,
+    _dir: TempDir,
+}
+
+impl SkillFixture {
+    fn new() -> Self {
+        let dir = TempDir::new().unwrap();
+        let skill_dir = dir.path().join("sql-coach");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: sql-coach\ndescription: Coach SQL.\n---\nName the method.\n",
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("notes.md"), "Prefer CTEs over subqueries.\n").unwrap();
+        Self {
+            root: dir.path().to_path_buf(),
+            _dir: dir,
+        }
+    }
+}
+
+/// The #985 core path, end to end over the shared dispatch server: the
+/// delegated sub-agent carries the discovery index in its system prompt,
+/// calls `invoke_skill` (the body enters the SUB-agent's context through
+/// its own tool result), then reads the skill's attachment in the SAME
+/// turn (the read gate unions the parent turn's pending, where the
+/// sub-agent's invocation landed with `via_subagent` attribution).
+#[test]
+fn a_subagent_invokes_a_skill_and_reads_its_attachment_in_the_same_turn() {
+    let fx = SkillFixture::new();
+    let mut h = Harness::new();
+    h.delegations = vec![analyst_spec()];
+    h.read_root = fx.root.clone();
+    h.skill_snapshot = vec!["sql-coach".to_string()];
+    h.skills = crate::skills::prompt::resolve_prompt_fragments(&fx.root, &h.skill_snapshot);
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "delegate",
+            None,
+            &[(
+                "tu_d1",
+                "analyst",
+                json!({"prompt": "use the sql-coach skill"}),
+            )],
+        ),
+        // The sub-agent's tool-bearing turn: invoke, then read the
+        // attachment the body points at -- sequential in one batch.
+        batch_turn(
+            "sub: invoke then read",
+            None,
+            &[
+                ("tu_s1", "invoke_skill", json!({"name": "sql-coach"})),
+                (
+                    "tu_s2",
+                    "read_skill_file",
+                    json!({"name": "sql-coach", "path": "notes.md"}),
+                ),
+            ],
+        ),
+        text_turn("sub coached"),
+        text_turn("main done"),
+    ]);
+    // The turn's table mirrors the assembly the snapshot gate produces:
+    // invoke_skill + read_skill_file mount because the snapshot is
+    // non-empty; the sub-face inherits both by subtraction.
+    let mut request = delegation_request(&h, "coach me");
+    request
+        .tools
+        .push(crate::skills::invocation::invoke_skill_definition());
+    request
+        .tools
+        .push(crate::skills::read::read_skill_file_definition());
+    let outcome = h.run(
+        &request,
+        mock_runtime(model.clone()),
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(outcome.termination, Termination::Text("main done".into()));
+    // The sub-agent's FIRST request (index 1) carries the rendered preamble:
+    // the discovery index, same bytes as the main face's system prompt.
+    let sub_first = &model.requests()[1];
+    let system = sub_first
+        .chat_history
+        .iter()
+        .find_map(|m| match m {
+            Message::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("the sub-agent's system prompt");
+    assert!(
+        system.contains("【可用技能】"),
+        "the discovery index rides the sub-agent's preamble"
+    );
+    assert!(
+        system.contains("- `sql-coach` — Coach SQL."),
+        "the index row is the main-face shape"
+    );
+    // The sub-agent's SECOND request (index 2) carries the tool results of
+    // its first turn -- the invocation body entered the SUB-agent's context
+    // through its own tool result, and the attachment read served its bytes.
+    let sub_second = &model.requests()[2];
+    let history_debug = format!("{:?}", sub_second.chat_history);
+    assert!(
+        history_debug.contains("Name the method."),
+        "the invocation body rode the sub-agent's own tool result"
+    );
+    assert!(
+        history_debug.contains("Prefer CTEs over subqueries."),
+        "the same-turn attachment read served the file's bytes"
+    );
+    // The invocation landed on the PARENT turn's pending with the
+    // sub-agent attribution (issue #985): agent actor, `via_subagent` name,
+    // invocation-time hash, exactly one record (the read is not an
+    // invocation).
+    assert_eq!(h.landed_invocations.len(), 1);
+    let record = &h.landed_invocations[0];
+    assert_eq!(record.name, "sql-coach");
+    assert_eq!(record.body, "Name the method.\n");
+    assert_eq!(record.actor, crate::model::SkillLifecycleActor::Agent);
+    assert_eq!(record.via_subagent.as_deref(), Some("analyst"));
+    assert!(!record.content_hash.is_empty());
+    // Both sub-face calls succeeded under the delegation entry.
+    let sub = outcome.trace[0].calls[0]
+        .sub_trace
+        .as_ref()
+        .expect("the sub-trace hangs under the delegation entry");
+    let calls: Vec<(&str, bool)> = sub[0]
+        .calls
+        .iter()
+        .map(|c| (c.name.as_str(), c.success))
+        .collect();
+    assert_eq!(
+        calls,
+        vec![("invoke_skill", true), ("read_skill_file", true)],
+        "the sub-agent's invoke + same-turn read both succeeded"
     );
 }
 

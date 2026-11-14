@@ -1,8 +1,9 @@
-import { useState, type MouseEvent, type ReactNode } from "react";
+import { useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useIntl, FormattedMessage } from "react-intl";
-import { Pencil, RefreshCw, X } from "lucide-react";
+import { Pencil, RefreshCw, Trash2, X } from "lucide-react";
 import { Badge } from "../ui/badge";
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "../ui/context-menu";
 import { Button } from "../ui/button";
 import { buttonVariants } from "../ui/button-variants";
 import { DeleteImpactList } from "./DeleteImpactList";
@@ -47,7 +48,7 @@ const BUTTON_CHROME = "appearance-none border-0 rounded-md";
 // cn() at the call site. The selection band and the hover tint are NOT here:
 // both live on the row <li> (see DatasetRow) so the pointer anywhere on the
 // row -- the action pill included -- lights the same full-height band.
-const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left`;
+const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left pr-24`;
 // The row-actions overlay: the rename/replace/delete actions sit in an
 // absolutely-positioned pill anchored inside the label-tail wrapper (the
 // flow child holding the select button, see DatasetRow), floating ABOVE the
@@ -61,11 +62,13 @@ const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 fl
 // compact bar (the glyphs keep ~7px of visual air inside their own hit
 // areas). The wrapper spans exactly the row's bg-clip-content band (the li's
 // py frames it), so inset-y-0 puts hover band, selected band and action
-// strip all at one height. The pill's ground is bg-accent -- the same tint a
-// hovered or selected row carries -- so the strip reads as part of the row
-// rather than a floating widget (a border/shadow card form would read as a
-// separate widget on this ground); being opaque, it still keeps the label
-// underneath from bleeding through. Visibility is the #865 hover-reveal
+// strip all at one height. The pill carries NO ground of its own: the
+// hover band underneath (the li's transit tint) shows straight through, so
+// the strip reads as part of the row rather than a floating widget -- a
+// translucent pill would double-tint over the band, and an opaque one can
+// never match an alpha band. The label keeps clear of the icons via the
+// select button's static pr-24 reserve (the truncate point retreats before
+// the pill's footprint; no hover reflow). Visibility is the #865 hover-reveal
 // contract moved one
 // level up: the CONTAINER owns opacity-0 + pointer-events-none, restored on
 // row hover (group-hover) or keyboard focus-visible -- any tabbed-into
@@ -80,13 +83,13 @@ const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 fl
 // the buttons from the a11y tree). Show/hide snaps (no transition): a
 // per-row 150ms fade cross-fades the outgoing row's icons with the incoming
 // row's on every row-to-row sweep, which reads as the strip flashing.
-const ROW_ACTIONS_OVERLAY = `absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md bg-accent opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto`;
+const ROW_ACTIONS_OVERLAY = `absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto`;
 // The per-row icon actions (issue #790): a 28px square hit area (h-7 w-7)
 // wrapping a 14px glyph -- the #774 header-chrome spec. Visibility is owned
 // by the ROW_ACTIONS_OVERLAY container (see above); the buttons carry only
 // the per-icon emphasis: the glyph rests muted and highlights to foreground
-// on hover / keyboard focus -- on the pill's accent ground there is no
-// further background tint to layer (a hover:bg-accent would be invisible
+// on hover / keyboard focus -- on the pill's transit ground there is no
+// further background tint to layer (a hover:bg-transit would be invisible
 // against it), so color alone marks the hot icon. The hand rides the
 // app.css base rule; the loading state dims like every
 // other action surface (disabled:opacity-50, the sidebar / result forms) --
@@ -184,12 +187,14 @@ function DatasetRow({
   isSelected: boolean;
   loading: boolean;
   tip: RowTipControls;
-  // An optional extra marker beside the stale chip's slot (the workspace
+  // An optional extra marker beside the stale chip's slot (the right-sidebar
   // panel flags a missing store file here); the private face passes none.
   extraBadge?: ReactNode;
   onSelect: (referenceName: string) => void;
-  onOpenRename: (d: DatasetDescriptor, trigger: HTMLButtonElement) => void;
-  onOpenDelete?: (d: DatasetDescriptor, trigger: HTMLButtonElement) => void;
+  // The trigger argument is the focus-restorable opener element: the pill
+  // button on the pointer path, the row <li> on the context-menu path.
+  onOpenRename: (d: DatasetDescriptor, trigger: HTMLElement) => void;
+  onOpenDelete?: (d: DatasetDescriptor, trigger: HTMLElement) => void;
   onPickReplace?: (d: DatasetDescriptor) => void;
 }) {
   const { openKey, setTip } = tip;
@@ -209,28 +214,38 @@ function DatasetRow({
         { name: d.stale.display_name, reason: d.stale.reason },
       )
     : undefined;
+  // The context menu captures its target from the row it opens on (#1570):
+  // the <li> is both the trigger and the focus-restorable opener element, so
+  // the dialog-close restore lands back on the row (mirroring the pill
+  // path's button capture). tabIndex -1 keeps the row out of the Tab
+  // sequence while making the programmatic restore landable.
+  const rowRef = useRef<HTMLLIElement | null>(null);
   return (
-    <li
-      className={cn(
-        "group relative flex items-center gap-1 rounded-md py-[0.1rem] bg-clip-content hover:bg-accent",
-        isActive && "active",
-        isSelected && "selected bg-accent",
-        d.stale && "stale",
-      )}
-    >
-      {/* The label-tail wrapper: the flow child filling the row's leftover
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <li
+          ref={rowRef}
+          tabIndex={-1}
+          className={cn(
+            "group relative flex items-center gap-1 rounded-md py-[0.1rem] bg-clip-content hover:bg-transit",
+            isActive && "active",
+            isSelected && "selected bg-accent hover:bg-accent",
+            d.stale && "stale",
+          )}
+        >
+          {/* The label-tail wrapper: the flow child filling the row's leftover
           width. It owns the select button AND the action pill's positioning
           anchor -- the pill's right edge lands at the button's tail,
           structurally clear of whatever follows in flow (the stale chip),
           so the chip keeps its hover beside the revealed pill. The wrapper
           spans the li's content box, i.e. exactly the bg-clip-content band. */}
-      <div className="relative flex-1 min-w-0 flex">
-        <button
-          type="button"
-          className={cn(SELECT_BUTTON_BASE, isActive && "font-semibold")}
-          onClick={() => onSelect(d.reference_name)}
-        >
-          {/* The truncated label's full text rides the OS-native title:
+          <div className="relative flex-1 min-w-0 flex">
+            <button
+              type="button"
+              className={cn(SELECT_BUTTON_BASE, isActive && "font-semibold")}
+              onClick={() => onSelect(d.reference_name)}
+            >
+              {/* The truncated label's full text rides the OS-native title:
             truncation recovery without any Radix machinery (no popper to
             keep pointer-transparent, no mutex slot, no open/close handlers).
             Unlike the action hints' theme-following Radix tooltips (#865
@@ -238,117 +253,151 @@ function DatasetRow({
             surfaces only its own text, so the OS chrome costs nothing. The
             hand cursor on the button below no longer flips when the
             affordance surfaces -- a native title never touches the cursor. */}
-          <span className="min-w-0 flex-1 truncate" title={d.display_name}>
-            {d.display_name}
-          </span>
-          {/* font-normal overrides the active button's font-semibold so the
+              <span className="min-w-0 flex-1 truncate" title={d.display_name}>
+                {d.display_name}
+              </span>
+              {/* font-normal overrides the active button's font-semibold so the
             row-count annotation stays muted-weight in either state;
             shrink-0 + nowrap keep truncation from ever eliding the note.
             text-xs pins the caption token: the preflight small rule (80%)
             would resolve an unsized small at 11.2px under the panel's 14px
             baseline (issue #864) -- below the ladder's 12px floor. */}
-          <small className="shrink-0 whitespace-nowrap text-xs text-muted-foreground font-normal">
-            {" "}
-            <FormattedMessage
-              id="workingSet.rowCount"
-              defaultMessage="{count, plural, one {# row} other {# rows}}"
-              values={{ count: d.row_count }}
-            />
-          </small>
-        </button>
-        {/* The action pill (ROW_ACTIONS_OVERLAY): floats over the label's
+              <small className="shrink-0 whitespace-nowrap text-xs text-muted-foreground font-normal">
+                {" "}
+                <FormattedMessage
+                  id="workingSet.rowCount"
+                  defaultMessage="{count, plural, one {# row} other {# rows}}"
+                  values={{ count: d.row_count }}
+                />
+              </small>
+            </button>
+            {/* The action pill (ROW_ACTIONS_OVERLAY): floats over the label's
             tail inside the wrapper; Radix Tooltip renders no DOM wrapper of
             its own, so the pill div is the buttons' direct flex parent and
             the has-focus-visible hook sees each tabbed-into action. */}
-        <div className={ROW_ACTIONS_OVERLAY}>
-          <RowActionButton
-            hintKey={key("rename")}
-            open={isTipOpen("rename")}
-            tip={tip}
-            title={intl.formatMessage({ id: "common.rename", defaultMessage: "Rename" })}
-            ariaLabel={intl.formatMessage(
-              { id: "workingSet.rename.ariaLabel", defaultMessage: "Rename {name}" },
-              { name: d.display_name },
-            )}
-            actionClass="rename"
-            icon={<Pencil className="h-3.5 w-3.5" aria-hidden="true" />}
+            <div className={ROW_ACTIONS_OVERLAY}>
+              <RowActionButton
+                hintKey={key("rename")}
+                open={isTipOpen("rename")}
+                tip={tip}
+                title={intl.formatMessage({ id: "common.rename", defaultMessage: "Rename" })}
+                ariaLabel={intl.formatMessage(
+                  { id: "workingSet.rename.ariaLabel", defaultMessage: "Rename {name}" },
+                  { name: d.display_name },
+                )}
+                actionClass="rename"
+                icon={<Pencil className="h-3.5 w-3.5" aria-hidden="true" />}
+                disabled={loading}
+                onActivate={(e) => onOpenRename(d, e.currentTarget)}
+              />
+              {onPickReplace && (
+                <RowActionButton
+                  hintKey={key("replace")}
+                  open={isTipOpen("replace")}
+                  tip={tip}
+                  title={intl.formatMessage({
+                    id: "workingSet.replace.hint",
+                    defaultMessage: "Replace",
+                  })}
+                  ariaLabel={intl.formatMessage(
+                    { id: "workingSet.replace.ariaLabel", defaultMessage: "Replace source {name}" },
+                    { name: d.display_name },
+                  )}
+                  actionClass="replace"
+                  icon={<RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}
+                  disabled={loading}
+                  onActivate={() => onPickReplace(d)}
+                />
+              )}
+              {onOpenDelete && (
+                <RowActionButton
+                  hintKey={key("delete")}
+                  open={isTipOpen("delete")}
+                  tip={tip}
+                  title={intl.formatMessage({
+                    id: "common.delete",
+                    defaultMessage: "Delete",
+                  })}
+                  ariaLabel={intl.formatMessage(
+                    { id: "workingSet.delete.ariaLabel", defaultMessage: "Delete {name}" },
+                    { name: d.display_name },
+                  )}
+                  actionClass="delete"
+                  icon={<X className="h-3.5 w-3.5" aria-hidden="true" />}
+                  disabled={loading}
+                  onActivate={(e) => onOpenDelete(d, e.currentTarget)}
+                />
+              )}
+            </div>
+          </div>
+          {extraBadge}
+          {d.stale && (
+          // #793: a short chip with the full causal sentence on the tooltip --
+          // the sentence used to wrap inside the badge and break the chip shape
+          // in narrow columns. No action outlet here: the rerun path lives with
+          // the result panel's stale banner (#758). #1062 makes the sentence
+          // keyboard-reachable too: tabIndex + the staleCause aria-label put it in
+          // the tab order and the a11y tree, and Radix's own focus path opens
+          // the tooltip through the controlled slot (the chip keeps no
+          // handlers of its own; its opens need no restore gate -- the
+          // dialog-close restore never lands on the chip, the rowHints setTip
+          // note). The focus ring follows the action buttons' outline tokens
+          // so tabbing reads the same across the row, and the badge-variants
+          // base already carries shrink-0, so the call site stays lean.
+            <Tooltip open={isTipOpen("stale")} onOpenChange={(next) => setTip(key("stale"), next)}>
+              <TooltipTrigger asChild>
+                <Badge
+                  variant="secondary"
+                  className="stale-badge focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                  tabIndex={0}
+                  aria-label={staleCause}
+                >
+                  <FormattedMessage id="workingSet.staleRow" defaultMessage="Stale" />
+                </Badge>
+              </TooltipTrigger>
+              <TooltipContent
+                data-hit-transparent
+                className="pointer-events-none data-[state=closed]:animate-none!"
+              >
+                {staleCause}
+              </TooltipContent>
+            </Tooltip>
+          )}
+        </li>
+      </ContextMenuTrigger>
+      <ContextMenuContent aria-label={d.display_name}>
+        {/* Icon + text rows mirror the session-header menu's item shape
+            (ADR-0093), and the labels reuse its catalog keys instead of a
+            menu-specific namespace (delete rides Trash2 there, not X). */}
+        <ContextMenuItem
+          disabled={loading}
+          onSelect={() => {
+            if (rowRef.current) onOpenRename(d, rowRef.current);
+          }}
+        >
+          <Pencil aria-hidden />
+          <FormattedMessage id="common.rename" defaultMessage="Rename" />
+        </ContextMenuItem>
+        {onPickReplace && (
+          <ContextMenuItem disabled={loading} onSelect={() => onPickReplace(d)}>
+            <RefreshCw aria-hidden />
+            <FormattedMessage id="workingSet.replace.hint" defaultMessage="Replace" />
+          </ContextMenuItem>
+        )}
+        {onOpenDelete && (
+          <ContextMenuItem
             disabled={loading}
-            onActivate={(e) => onOpenRename(d, e.currentTarget)}
-          />
-          {onPickReplace && (
-            <RowActionButton
-              hintKey={key("replace")}
-              open={isTipOpen("replace")}
-              tip={tip}
-              title={intl.formatMessage({
-                id: "workingSet.replace.hint",
-                defaultMessage: "Replace",
-              })}
-              ariaLabel={intl.formatMessage(
-                { id: "workingSet.replace.ariaLabel", defaultMessage: "Replace source {name}" },
-                { name: d.display_name },
-              )}
-              actionClass="replace"
-              icon={<RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}
-              disabled={loading}
-              onActivate={() => onPickReplace(d)}
-            />
-          )}
-          {onOpenDelete && (
-            <RowActionButton
-              hintKey={key("delete")}
-              open={isTipOpen("delete")}
-              tip={tip}
-              title={intl.formatMessage({
-                id: "common.delete",
-                defaultMessage: "Delete",
-              })}
-              ariaLabel={intl.formatMessage(
-                { id: "workingSet.delete.ariaLabel", defaultMessage: "Delete {name}" },
-                { name: d.display_name },
-              )}
-              actionClass="delete"
-              icon={<X className="h-3.5 w-3.5" aria-hidden="true" />}
-              disabled={loading}
-              onActivate={(e) => onOpenDelete(d, e.currentTarget)}
-            />
-          )}
-        </div>
-      </div>
-      {extraBadge}
-      {d.stale && (
-        // #793: a short chip with the full causal sentence on the tooltip --
-        // the sentence used to wrap inside the badge and break the chip shape
-        // in narrow columns. No action outlet here: the rerun path lives with
-        // the result panel's stale banner (#758). #1062 makes the sentence
-        // keyboard-reachable too: tabIndex + the staleCause aria-label put it in
-        // the tab order and the a11y tree, and Radix's own focus path opens
-        // the tooltip through the controlled slot (the chip keeps no
-        // handlers of its own; its opens need no restore gate -- the
-        // dialog-close restore never lands on the chip, the rowHints setTip
-        // note). The focus ring follows the action buttons' outline tokens
-        // so tabbing reads the same across the row, and the badge-variants
-        // base already carries shrink-0, so the call site stays lean.
-        <Tooltip open={isTipOpen("stale")} onOpenChange={(next) => setTip(key("stale"), next)}>
-          <TooltipTrigger asChild>
-            <Badge
-              variant="secondary"
-              className="stale-badge focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-              tabIndex={0}
-              aria-label={staleCause}
-            >
-              <FormattedMessage id="workingSet.staleRow" defaultMessage="Stale" />
-            </Badge>
-          </TooltipTrigger>
-          <TooltipContent
-            data-hit-transparent
-            className="pointer-events-none data-[state=closed]:animate-none!"
+            variant="destructive"
+            onSelect={() => {
+              if (rowRef.current) onOpenDelete(d, rowRef.current);
+            }}
           >
-            {staleCause}
-          </TooltipContent>
-        </Tooltip>
-      )}
-    </li>
+            <Trash2 aria-hidden />
+            <FormattedMessage id="common.delete" defaultMessage="Delete" />
+          </ContextMenuItem>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
@@ -442,12 +491,12 @@ function WorkingSetDeleteDialog({
   onCancel,
   onConfirm,
 }: {
-  // Session addressing for the impact preview (issue #1063); the workspace
+  // Session addressing for the impact preview (issue #1063); the right-sidebar
   // panel has no session, and its confirm renders without the preview.
   sessionId?: string;
   target: DatasetDescriptor;
   // The confirm title's copy slot: the private face names the working set,
-  // the workspace panel overrides with its own neutral wording. A renderer
+  // the right-sidebar panel overrides with its own neutral wording. A renderer
   // over the display name -- NOT a {id, defaultMessage} data shape, whose
   // dynamic id is invisible to the formatjs extractor and would leave the
   // catalog entry dangling as `extra` in the CI guard. Both faces therefore
@@ -480,7 +529,7 @@ function WorkingSetDeleteDialog({
           </AlertDialogDescription>
         </AlertDialogHeader>
         {/* The pre-delete impact preview (issue #1063); DeleteImpactList
-            owns the rendering contract. Session-scoped: the workspace
+            owns the rendering contract. Session-scoped: the right-sidebar
             panel's confirm (no session) renders without it. */}
         {sessionId !== undefined && (
           <DeleteImpactList sessionId={sessionId} referenceName={target.reference_name} />
@@ -517,7 +566,7 @@ export function WorkingSetList({
 }: {
   // Session addressing for the delete dialog's impact preview (issue #1063);
   // the rows themselves render from the `datasets` snapshot prop. Optional:
-  // the workspace panel (no session) omits it, and its delete confirm
+  // the right-sidebar panel (no session) omits it, and its delete confirm
   // renders without the impact preview.
   sessionId?: string;
   datasets: DatasetDescriptor[];
@@ -532,7 +581,7 @@ export function WorkingSetList({
   // accent band. The session face passes the RESOLVED pick
   // (resolveWorkingSetDetail output), so the band rides the deleted-pick
   // fallbacks (active, then first) with the pane and never diverges from
-  // what is shown; the workspace panel resolves its own pick-then-first
+  // what is shown; the right-sidebar panel resolves its own pick-then-first
   // chain inline (no active pointer), under the same contract.
   selectedName: string | null;
   onSelect: (referenceName: string) => void;
@@ -550,12 +599,12 @@ export function WorkingSetList({
   // Remove a source from the working set (issue #38, ADR-0040). On the
   // session face the backend detaches the snapshot, deletes its file, drops
   // the reference name, and appends a Deleted source lifecycle event; the
-  // workspace panel's delete is a manifest edit (bound sessions keep their
+  // right-sidebar panel's delete is a manifest edit (bound sessions keep their
   // store links, ADR-0141 D7). Optional only so tests that don't exercise
   // delete can skip it; App always supplies it, and the button is hidden
   // when it is absent (no silent no-op).
   onDelete?: (referenceName: string) => void;
-  // A picker-open failure's error channel: the workspace panel routes it to
+  // A picker-open failure's error channel: the right-sidebar panel routes it to
   // its banner. Absent, the rejection is dropped (the private face's
   // long-standing posture).
   onPickError?: (e: unknown) => void;
@@ -564,7 +613,7 @@ export function WorkingSetList({
   // window: ask in flight -> source management disabled), preventing concurrent
   // IPC and source-vs-turn interleaving.
   loading?: boolean;
-  // An extra per-row marker beside the stale chip's slot: the workspace
+  // An extra per-row marker beside the stale chip's slot: the right-sidebar
   // panel flags a missing store file. Undefined rows render nothing; the
   // private face passes none.
   badgeFor?: (d: DatasetDescriptor) => ReactNode;
@@ -585,16 +634,16 @@ export function WorkingSetList({
   const { tip, listRef, captureTrigger, closeDialog } = useRowHints();
   const closeRename = () => closeDialog(() => setRenameTarget(null));
   const closeDelete = () => closeDialog(() => setDeleteTarget(null));
-  const openRename = (d: DatasetDescriptor, trigger: HTMLButtonElement) => {
+  const openRename = (d: DatasetDescriptor, trigger: HTMLElement) => {
     captureTrigger(trigger);
     setRenameTarget(d);
   };
-  const openDelete = (d: DatasetDescriptor, trigger: HTMLButtonElement) => {
+  const openDelete = (d: DatasetDescriptor, trigger: HTMLElement) => {
     captureTrigger(trigger);
     setDeleteTarget(d);
   };
 
-  // The empty set never reaches this list: WorkspaceWorkingSet renders the
+  // The empty set never reaches this list: RightSidebarWorkingSet renders the
   // single empty-state card instead (issue #792), so the two-column shell and
   // this list mount only for a non-empty set.
 

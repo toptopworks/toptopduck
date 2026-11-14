@@ -11,7 +11,7 @@
 import { createContext } from "react";
 
 /** The wired link: the handler that promotes a fence body onto the
- *  workspace stage, plus the staged body for the selection mirror (a
+ *  right-sidebar stage, plus the staged body for the selection mirror (a
  *  fence lights when its raw text EQUALS the staged spec -- two fences
  *  sharing a body share the identity, by design). */
 export interface VizStageLink {

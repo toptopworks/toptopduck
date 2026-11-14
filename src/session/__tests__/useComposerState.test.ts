@@ -17,7 +17,7 @@ const SESSION_FIELDS: ComposerSessionFields = {
   handleAsk: vi.fn(),
   handleCancel: vi.fn(),
   handleIngestFiles: vi.fn(),
-  workspaceCollapsed: false,
+  rightSidebarCollapsed: false,
 };
 
 // Wrapper that always passes both args. The `as string` cast bypasses the
@@ -107,9 +107,9 @@ describe("useComposerState (ADR-0092 per-session drafts)", () => {
     // No throw = pass.
   });
 
-  it("idle fields report workspaceCollapsed false", () => {
+  it("idle fields report rightSidebarCollapsed false", () => {
     const { result } = renderHook(() => useComposerState(null));
-    expect(result.current.workspaceCollapsed).toBe(false);
+    expect(result.current.rightSidebarCollapsed).toBe(false);
   });
 
   it("dropDraft removes a closed session's draft without touching other slots", () => {
@@ -146,5 +146,78 @@ describe("useComposerState (ADR-0092 per-session drafts)", () => {
     // The cold-start slot is untouched too.
     rerender({ sid: null });
     expect(result.current.draft).toBe("");
+  });
+});
+
+describe("quote staging (#1573)", () => {
+  it("cold start reads no quotes", () => {
+    const { result } = renderHook(() => useComposerState(null));
+    expect(result.current.quotes).toEqual([]);
+  });
+
+  it("stageQuote appends per-session entries; duplicates stay distinct", () => {
+    const { result, rerender } = renderHook(
+      ({ sid }) => useTestComposerState(sid, SESSION_FIELDS),
+      { initialProps: { sid: "sess-1" as string | null } },
+    );
+    act(() => result.current.stageQuote("sess-1", "same text"));
+    act(() => result.current.stageQuote("sess-1", "same text"));
+    expect(result.current.quotes.map((q) => q.text)).toEqual([
+      "same text",
+      "same text",
+    ]);
+    // Distinct identity: both chips render and each removes itself.
+    const [first, second] = result.current.quotes;
+    expect(first.id).not.toBe(second.id);
+    // Another session's slot is untouched.
+    rerender({ sid: "sess-2" });
+    expect(result.current.quotes).toEqual([]);
+  });
+
+  it("stageQuote ignores an empty selection", () => {
+    const { result } = renderHook(() =>
+      useComposerState("sess-1", SESSION_FIELDS),
+    );
+    act(() => result.current.stageQuote("sess-1", ""));
+    expect(result.current.quotes).toEqual([]);
+  });
+
+  it("staging survives session switches (per-session, like the draft)", () => {
+    const { result, rerender } = renderHook(
+      ({ sid }) => useTestComposerState(sid, SESSION_FIELDS),
+      { initialProps: { sid: "sess-1" as string | null } },
+    );
+    act(() => result.current.stageQuote("sess-1", "kept quote"));
+    rerender({ sid: "sess-2" });
+    expect(result.current.quotes).toEqual([]);
+    rerender({ sid: "sess-1" });
+    expect(result.current.quotes.map((q) => q.text)).toEqual(["kept quote"]);
+  });
+
+  it("removeQuote drops one entry by id and keeps the order of the rest", () => {
+    const { result } = renderHook(() =>
+      useComposerState("sess-1", SESSION_FIELDS),
+    );
+    act(() => result.current.stageQuote("sess-1", "a"));
+    act(() => result.current.stageQuote("sess-1", "b"));
+    act(() => result.current.stageQuote("sess-1", "c"));
+    const doomed = result.current.quotes[1]?.id;
+    expect(doomed).toBeDefined();
+    act(() => result.current.removeQuote("sess-1", doomed as number));
+    expect(result.current.quotes.map((q) => q.text)).toEqual(["a", "c"]);
+  });
+
+  it("clearQuotes empties the slot at the submit boundary", () => {
+    const { result, rerender } = renderHook(
+      ({ sid }) => useTestComposerState(sid, SESSION_FIELDS),
+      { initialProps: { sid: "sess-1" as string | null } },
+    );
+    act(() => result.current.stageQuote("sess-1", "staged"));
+    act(() => result.current.clearQuotes("sess-1"));
+    expect(result.current.quotes).toEqual([]);
+    // Other sessions are untouched.
+    act(() => result.current.stageQuote("sess-2", "elsewhere"));
+    rerender({ sid: "sess-1" });
+    expect(result.current.quotes).toEqual([]);
   });
 });

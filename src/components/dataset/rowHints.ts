@@ -126,9 +126,11 @@ export interface RowHints {
   // closeDialog fallback restore target (sequence 5). The consumer attaches
   // it to the list element.
   listRef: RefObject<HTMLUListElement | null>;
-  // Captures the row button opening a dialog -- the hand-wired restore's
-  // target (sequence 4).
-  captureTrigger: (trigger: HTMLButtonElement) => void;
+  // Captures the element opening a dialog -- the hand-wired restore's
+  // target (sequence 4). The opener is a pill button on the pointer path and
+  // a row <li> on the context-menu path (#1570), so the seam is the
+  // focus-restorable element, not the button.
+  captureTrigger: (trigger: HTMLElement) => void;
   // The dialog-close handoff (sequences 2-5): stamps the suppression
   // window, clears the dialog target synchronously, then restores focus one
   // setTimeout(0) out (falling back to the list when the opener is gone or
@@ -140,7 +142,7 @@ export function useRowHints(): RowHints {
   const [openTip, setOpenTip] = useState<TipKey | null>(null);
   const dialogClosedAtRef = useRef(0);
   const focusRestoreRef = useRef(false);
-  const openTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const openTriggerRef = useRef<HTMLElement | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
 
   const setTip = (key: TipKey, next: boolean) => setOpenTip((current) => reduceTip(current, key, next));
@@ -161,7 +163,7 @@ export function useRowHints(): RowHints {
     },
   };
 
-  const captureTrigger = (trigger: HTMLButtonElement) => {
+  const captureTrigger = (trigger: HTMLElement) => {
     openTriggerRef.current = trigger;
   };
 
@@ -171,7 +173,9 @@ export function useRowHints(): RowHints {
     setTimeout(() => {
       focusRestoreRef.current = true;
       const trigger = openTriggerRef.current;
-      if (trigger && trigger.isConnected && !trigger.disabled) {
+      // The disabled gate is the pill path's loading flip (a disabled button
+      // ignores focus()); the context-menu path's <li> has no disabled state.
+      if (trigger && trigger.isConnected && !("disabled" in trigger && trigger.disabled)) {
         trigger.focus();
       } else {
         listRef.current?.focus();

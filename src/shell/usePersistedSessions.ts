@@ -19,13 +19,6 @@ export interface UsePersistedSessionsDeps {
   /** Shell-level IntlShape (App sits above <IntlProvider>, built via createIntl)
    *  so fmtError can localize a list_sessions reject at the shell layer. */
   intl: IntlShape;
-  /** The archived view's visibility (ADR-0127 Decision 7, issue #1175). While
-   *  true the effect fetches listSessions({ includeArchived: true }) -- one
-   *  scan whose client-side partition feeds both `sessions` (unarchived) and
-   *  `archivedSessions`; false fetches the default (trimmed) response, whose
-   *  partition is empty. Never persisted -- the caller's state resets on
-   *  startup. */
-  includeArchived: boolean;
 }
 
 /** The persisted-session sidebar list state. sessionsEpoch stays INTERNAL -- it
@@ -34,13 +27,14 @@ export interface UsePersistedSessionsDeps {
  *  `sessions` / `loadError` source (ADR-0061 cold start). */
 export function usePersistedSessions({
   intl,
-  includeArchived,
 }: UsePersistedSessionsDeps): {
   sessions: SessionMetadata[];
-  /** The archived rows (ADR-0127): only the includeArchived scan carries
-   *  them, so this is empty while the view is hidden. `sessions` NEVER
-   *  contains archived rows -- the partition below excludes them, so tray /
-   *  search consumers stay blind to the organization state. */
+  /** The archived rows (ADR-0127; #1403): the unconditional includeArchived
+   *  scan always carries them, so the sidebar's peek toggle is a pure
+   *  visibility switch over this list (and the search modal renders it as its
+   *  bottom partition). `sessions` NEVER contains archived rows -- the
+   *  partition below excludes them, so tray consumers stay blind to the
+   *  organization state. */
   archivedSessions: SessionMetadata[];
   sessionsError: string | null;
   /** True once the first listSessions scan has RESOLVED: the list starts
@@ -63,17 +57,18 @@ export function usePersistedSessions({
 
   // ADR-0061 cold start: load list_sessions on mount (and after a save/delete/
   // rename bumps sessionsEpoch). NOT createSession -- zero instances until the
-  // user acts. ADR-0127 (issue #1175): while the archived view is visible the
-  // ONE includeArchived scan feeds both lists -- the Rust scan's only
-  // difference is the !include_archived retain, so the response minus its
-  // archived tail is exactly the default list, partitioned client-side. One
-  // fetch also means one reject surface: a failure keeps BOTH lists at their
-  // prior values (a just-archived session stays visible in the main list)
-  // and surfaces once on the shared loadError line -- no second settle order
-  // to race a set against a clear.
+  // user acts. ADR-0127 (issue #1175) + #1403: the ONE includeArchived scan is
+  // UNCONDITIONAL -- the Rust scan's only difference is the !include_archived
+  // retain, so the response minus its archived tail is exactly the default
+  // list, partitioned client-side. With no visibility input on this hook, the
+  // sidebar's peek toggle is a pure render-side switch: flipping it cannot
+  // re-trigger the scan. One fetch also means one reject surface: a failure
+  // keeps BOTH lists at their prior values (a just-archived session stays
+  // visible in the main list) and surfaces once on the shared loadError line
+  // -- no second settle order to race a set against a clear.
   useEffect(() => {
     let cancelled = false;
-    listSessions(includeArchived ? { includeArchived: true } : undefined)
+    listSessions({ includeArchived: true })
       .then((list) => {
         if (cancelled) return;
         setSessions(list.filter((m) => !m.archived));
@@ -96,7 +91,7 @@ export function usePersistedSessions({
     return () => {
       cancelled = true;
     };
-  }, [intl, sessionsEpoch, includeArchived]);
+  }, [intl, sessionsEpoch]);
 
   const refreshSessions = useCallback(() => setSessionsEpoch((e) => e + 1), []);
 

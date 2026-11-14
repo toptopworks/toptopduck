@@ -1,6 +1,7 @@
 import { useIntl } from "react-intl";
 import { Puzzle, X } from "lucide-react";
 import { bareButtonReset } from "../../lib/buttonReset";
+import { CHIP_FACE } from "./chip-face";
 
 // Skill chips (ADR-0112 trigger-then-stage, calibrated by ADR-0119
 // Decision 5): the composer's display of THIS turn's staged invocations,
@@ -33,16 +34,13 @@ export function ComposerSkillChips({ names, onRemove }: ComposerSkillChipsProps)
       })}
     >
       {names.map((name) => (
-        <li
-          key={name}
-          className="inline-flex min-w-0 max-w-full items-center gap-1 text-sm font-medium text-accent-foreground"
-        >
-          <Puzzle className="size-4 shrink-0" aria-hidden />
+        <li key={name} className={CHIP_FACE}>
+          <Puzzle className="size-3.5 shrink-0" aria-hidden />
           <span className="truncate">{name}</span>
           {onRemove && (
             <button
               type="button"
-              className={`${bareButtonReset} hover:bg-accent -m-0.5 shrink-0 rounded-sm p-0.5 text-muted-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
+              className={`${bareButtonReset} hover:bg-transit -m-0.5 shrink-0 rounded-sm p-0.5 text-muted-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
               aria-label={intl.formatMessage(
                 {
                   id: "composer.skillChips.removeLabel",

@@ -52,6 +52,23 @@ pub struct WorkspaceRecord {
     /// remove action's job, never an implicit demotion.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub explicit: bool,
+    /// Whether this workspace's memory layer is on (issue #1529): gates the
+    /// built-in engine's index injection AND the memory panel. A HOST-side
+    /// toggle over a workspace asset (each machine's host decides its own
+    /// injection), so it lives on the registry record, not in
+    /// `.toptopduck/`. Default ON (Q6 ruling): the field serializes only
+    /// when `false`, so the default never writes a byte -- additive like
+    /// `explicit`, upgrade-neutral both ways (re-enabling is a normal edit).
+    #[serde(default = "memory_enabled_default", skip_serializing_if = "is_true")]
+    pub memory_enabled: bool,
+    /// Whether this workspace opted into automatic memory extraction
+    /// (issue #1530): the write path's own gate, deliberately SEPARATE from
+    /// [`Self::memory_enabled`] (ADR-0147 Decision 6 -- read/write risk
+    /// profiles differ). Default OFF: extraction costs a model call per
+    /// turn, so only an explicit opt-in writes `true` (additive like
+    /// `explicit`; `false` never serializes).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory_auto_extraction: bool,
     /// Epoch milliseconds.
     pub created_at: u64,
     /// Epoch milliseconds.
@@ -68,6 +85,18 @@ impl WorkspaceRecord {
             None => directory_tail(&self.path),
         }
     }
+}
+
+/// The serde default for [`WorkspaceRecord::memory_enabled`] (issue #1529):
+/// ON unless the user opts out -- the Q6 default-on ruling.
+fn memory_enabled_default() -> bool {
+    true
+}
+
+/// The skip predicate for the default-on toggle: only an OPT-OUT writes the
+/// byte (the mirror of `explicit`'s skip-false posture).
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// The untitled display fallback: the directory tail, or the whole path
@@ -125,29 +154,18 @@ impl WorkspaceRegistry {
         }
     }
 
-    /// The named-workspace creation mount point (issue #1393): a fresh mint
-    /// records with the user's name as the `title`. On an existing record the
-    /// call takes the LRU bump plus the one-way explicit upgrade -- this
-    /// mount registers explicitly -- never rewriting the title (identity is
-    /// immutable, ADR-0138 Decision 3). Unlike
-    /// [`Self::record`] this mount FAILS the caller: it serves the explicit
-    /// create command, whose essence is the record itself -- not bookkeeping
-    /// riding a session event, which is the reach of ADR-0138's best-effort
-    /// stance. A record that never lands must not report a successful create.
-    /// The untitled-registration mount [`Self::record_explicit`] (issue
-    /// #1477) is this mount's general shape; the titled call is its
-    /// always-titled special case.
-    pub fn record_titled(&self, canonical: &Path, title: &str) -> Result<(), String> {
-        self.record_explicit(canonical, Some(title)).map(|_| ())
-    }
-
-    /// The existing-directory registration mount (issue #1477): the
-    /// register-without-a-session command's essence -- [`Self::record_at`]
+    /// The explicit-registration mount: the register-without-a-session
+    /// command's essence (issue #1477) and the named-workspace create
+    /// command's always-titled shape (issue #1393) -- [`Self::record_at`]
     /// with `explicit=true` and the registry's own clock, FAILING the
-    /// caller like [`Self::record_titled`] (the record IS the command the
-    /// user asked for). Returns whether the record already existed (the
-    /// bump + one-way upgrade path) so the command layer can project an
-    /// honest idempotency marker.
+    /// caller (the record IS the command the user asked for, not
+    /// bookkeeping riding a session event -- the reach of ADR-0138's
+    /// best-effort stance; a record that never lands must not report a
+    /// successful create). On an existing record the call takes the LRU
+    /// bump plus the one-way explicit upgrade, never rewriting the title
+    /// (identity is immutable, ADR-0138 Decision 3). Returns whether the
+    /// record already existed (the bump + one-way upgrade path) so the
+    /// command layer can project an honest idempotency marker.
     pub fn record_explicit(&self, canonical: &Path, title: Option<&str>) -> Result<bool, String> {
         self.record_at(canonical, title, true, now_millis())
     }
@@ -207,6 +225,61 @@ impl WorkspaceRegistry {
         let mut records = self.load_for_write()?;
         match records.iter_mut().find(|r| r.path == canonical) {
             Some(record) => record.title = Some(title.to_string()),
+            None => return Err(format!("no workspace record for {}", canonical.display())),
+        }
+        self.save(&records)
+    }
+
+    /// The memory toggle's read (issue #1529): `true` unless the record
+    /// says otherwise -- a missing record (or a pre-field record) reads as
+    /// the default-on posture, so the injection + panel never block on
+    /// ledger state.
+    pub fn memory_enabled(&self, canonical: &Path) -> bool {
+        let (records, _) = self.load();
+        records
+            .into_iter()
+            .find(|r| r.path == canonical)
+            .map(|r| r.memory_enabled)
+            .unwrap_or_else(memory_enabled_default)
+    }
+
+    /// The memory toggle's write (issue #1529): strict like [`Self::rename`]
+    /// -- an explicit user action, so a missing record or a refused write
+    /// surfaces to the caller.
+    pub fn set_memory_enabled(&self, canonical: &Path, enabled: bool) -> Result<(), String> {
+        let Ok(_guard) = self.write_lock.lock() else {
+            return Err("workspace registry write lock poisoned".to_string());
+        };
+        let mut records = self.load_for_write()?;
+        match records.iter_mut().find(|r| r.path == canonical) {
+            Some(record) => record.memory_enabled = enabled,
+            None => return Err(format!("no workspace record for {}", canonical.display())),
+        }
+        self.save(&records)
+    }
+
+    /// The extraction toggle's read (issue #1530): OFF unless the record says
+    /// otherwise -- the mirror of [`Self::memory_enabled`]'s default-on, per
+    /// ADR-0147 Decision 6 (write-path risk, explicit opt-in). A missing or
+    /// pre-field record reads as the default-off posture.
+    pub fn auto_extraction(&self, canonical: &Path) -> bool {
+        let (records, _) = self.load();
+        records
+            .into_iter()
+            .find(|r| r.path == canonical)
+            .map(|r| r.memory_auto_extraction)
+            .unwrap_or(false)
+    }
+
+    /// The extraction toggle's write (issue #1530): strict like
+    /// [`Self::set_memory_enabled`] -- an explicit user action.
+    pub fn set_auto_extraction(&self, canonical: &Path, enabled: bool) -> Result<(), String> {
+        let Ok(_guard) = self.write_lock.lock() else {
+            return Err("workspace registry write lock poisoned".to_string());
+        };
+        let mut records = self.load_for_write()?;
+        match records.iter_mut().find(|r| r.path == canonical) {
+            Some(record) => record.memory_auto_extraction = enabled,
             None => return Err(format!("no workspace record for {}", canonical.display())),
         }
         self.save(&records)
@@ -299,6 +372,8 @@ impl WorkspaceRegistry {
                 path: canonical.to_path_buf(),
                 title: title.map(str::to_string),
                 explicit,
+                memory_enabled: memory_enabled_default(),
+                memory_auto_extraction: false,
                 created_at: now,
                 last_used_at: now,
             }),
@@ -498,6 +573,8 @@ mod tests {
             path: a.clone(),
             title: None,
             explicit: false,
+            memory_enabled: true,
+            memory_auto_extraction: false,
             created_at: 1_000,
             last_used_at: 1_000,
         };
@@ -506,6 +583,8 @@ mod tests {
             path: b.clone(),
             title: None,
             explicit: false,
+            memory_enabled: true,
+            memory_auto_extraction: false,
             created_at: 2_000,
             last_used_at: 2_000,
         };
@@ -621,7 +700,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let reg = registry(&root);
         let named = dir_under(root.path(), "alpha");
-        reg.record_titled(&named, "Alpha").expect("record");
+        reg.record_explicit(&named, Some("Alpha")).expect("record");
         let selected = dir_under(root.path(), "my-project");
         reg.record_selected(&selected);
         assert_eq!(reg.explicit_label_of(&named), Some("Alpha".into()));
@@ -717,33 +796,6 @@ mod tests {
             recent.len(),
             1,
             "the titled call does not fork a second record"
-        );
-    }
-
-    #[test]
-    fn record_titled_seats_a_fresh_titled_record() {
-        // The create command's mount: the user's name lands as the title on
-        // a fresh record.
-        let root = tempfile::tempdir().expect("tempdir");
-        let reg = registry(&root);
-        let dir = dir_under(root.path(), "alpha");
-        reg.record_titled(&dir, "Alpha").expect("record");
-        let recent = reg.recent();
-        assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].title.as_deref(), Some("Alpha"));
-    }
-
-    #[test]
-    fn record_titled_fails_the_caller_when_the_write_refuses() {
-        // Unlike the session-event mounts, the explicit create must hear a
-        // refused write: a record that never lands cannot report success.
-        let root = tempfile::tempdir().expect("tempdir");
-        std::fs::write(root.path().join(WORKSPACES_FILE_NAME), "{ not json").expect("corrupt");
-        let reg = registry(&root);
-        let dir = dir_under(root.path(), "alpha");
-        assert!(
-            reg.record_titled(&dir, "Alpha").is_err(),
-            "a refused write surfaces as Err, not a warn"
         );
     }
 
@@ -908,5 +960,68 @@ mod tests {
             "dangling records stay, newest first"
         );
         assert_eq!(reg.recent().len(), 1, "recent keeps filtering dangling");
+    }
+
+    /// The memory toggle (issue #1529): default-on everywhere (a fresh
+    /// record, a MISSING record, and a pre-field record shape), a strict
+    /// opt-out write, and the `false`-only serialization posture (a
+    /// default-on record writes no `memory_enabled` byte).
+    #[test]
+    fn memory_toggle_defaults_on_and_round_trips_strictly() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let dir = dir_under(root.path(), "mem");
+        // A missing record reads the default-on posture.
+        assert!(reg.memory_enabled(&dir));
+        // Strict write on a missing record refuses.
+        assert!(reg.set_memory_enabled(&dir, false).is_err());
+        reg.record_at(&dir, None, true, 1_000).expect("record");
+        assert!(reg.memory_enabled(&dir), "fresh record defaults on");
+        // The default never serializes: the field is absent from the file.
+        let raw = std::fs::read_to_string(root.path().join(WORKSPACES_FILE_NAME)).unwrap();
+        assert!(!raw.contains("memory_enabled"), "{raw}");
+        reg.set_memory_enabled(&dir, false).expect("opt out");
+        assert!(!reg.memory_enabled(&dir));
+        assert!(raw_or(root.path()).contains("memory_enabled"));
+        reg.set_memory_enabled(&dir, true).expect("opt back in");
+        assert!(reg.memory_enabled(&dir));
+        // A pre-field record (hand-written, no memory_enabled key) reads on.
+        let legacy = r#"[{"id":"00000000-0000-0000-0000-000000000001","path":"/nowhere","created_at":1,"last_used_at":1}]"#;
+        std::fs::write(root.path().join(WORKSPACES_FILE_NAME), legacy).unwrap();
+        assert!(reg.memory_enabled(Path::new("/nowhere")));
+    }
+
+    /// The extraction toggle (issue #1530): the memory toggle's mirror --
+    /// default OFF (ADR-0147 Decision 6: write-path risk, explicit opt-in),
+    /// the opt-in byte serializes, and the write stays strict.
+    #[test]
+    fn auto_extraction_defaults_off_and_round_trips_strictly() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let dir = dir_under(root.path(), "mem");
+        // A missing record reads the default-off posture.
+        assert!(!reg.auto_extraction(&dir));
+        // Strict write on a missing record refuses.
+        assert!(reg.set_auto_extraction(&dir, true).is_err());
+        reg.record_at(&dir, None, true, 1_000).expect("record");
+        assert!(!reg.auto_extraction(&dir), "fresh record defaults off");
+        // The default never serializes: the field is absent from the file.
+        let raw = std::fs::read_to_string(root.path().join(WORKSPACES_FILE_NAME)).unwrap();
+        assert!(!raw.contains("memory_auto_extraction"), "{raw}");
+        reg.set_auto_extraction(&dir, true).expect("opt in");
+        assert!(reg.auto_extraction(&dir));
+        assert!(raw_or(root.path()).contains("memory_auto_extraction"));
+        reg.set_auto_extraction(&dir, false).expect("opt back out");
+        assert!(!reg.auto_extraction(&dir));
+        // A pre-field record (hand-written, no memory_auto_extraction key)
+        // reads off.
+        let legacy = r#"[{"id":"00000000-0000-0000-0000-000000000001","path":"/nowhere","created_at":1,"last_used_at":1}]"#;
+        std::fs::write(root.path().join(WORKSPACES_FILE_NAME), legacy).unwrap();
+        assert!(!reg.auto_extraction(Path::new("/nowhere")));
+    }
+
+    /// Raw file read helper for the serialization-posture assertions.
+    fn raw_or(dir: &Path) -> String {
+        std::fs::read_to_string(dir.join(WORKSPACES_FILE_NAME)).unwrap_or_default()
     }
 }

@@ -7,8 +7,10 @@ import { cn } from "@/lib/utils";
 // hover-recovery layer for tail-ellipsis card truncation (ADR-0050 maps Tooltip
 // to card-truncation full-text recovery, ADR-0054 tail ellipsis): hovering a
 // truncated span surfaces the full text in TooltipContent. Token consumption is via var utilities
-// (bg-primary / text-primary-foreground), so the tooltip rides the teal
-// --primary token and flips with the .dark class; enter/exit animations use
+// (bg-inverted / text-inverted-foreground, issue #1568): the tooltip rides the
+// inverted floating-surface tier -- the transient-hint face that stays dark in
+// both themes (see the --inverted comment in app.css; the earlier teal
+// --primary face read 3.75:1, under the AA text floor); enter/exit animations use
 // tw-animate-css utilities (loaded in app.css). Exports only components (no
 // cva variant map), so react-refresh/only-export-components stays clean without
 // a variants split (cf. button/button-variants).
@@ -62,7 +64,7 @@ function TooltipContent({
           // triggers (RowActionButton's Test button, #1346). The one
           // interactive usage (McpSection's scrollable tool descriptions)
           // restores pointer events locally at its call site.
-          "pointer-events-none bg-primary text-primary-foreground animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 w-fit rounded-md px-3 py-1.5 text-xs text-balance",
+          "pointer-events-none bg-inverted text-inverted-foreground shadow-md animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 w-fit rounded-md px-3 py-1.5 text-xs text-balance",
           className,
         )}
         {...props}

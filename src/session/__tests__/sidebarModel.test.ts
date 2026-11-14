@@ -193,7 +193,7 @@ describe("formatLastModified (ADR-0072, issue #251)", () => {
   });
 });
 
-describe("buildSearchEntries (ADR-0072, issue #252)", () => {
+describe("buildSearchEntries dual partition (ADR-0072, issue #252; archived partition #1403)", () => {
   // Two persisted sessions: alpha (today, src "alpha_src") and beta (3 days old,
   // src "beta_src").NOW = 2026-07-10; beta's mtime = 2026-07-07.
   function twoPersisted(): SessionMetadata[] {
@@ -202,34 +202,40 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
       meta("/b.json", "beta", 3, { source_summary: { first_source_name: "beta_src", source_count: 2, turn_count: 12 } }),
     ];
   }
+  // An archived row rides the same metadata face with the organization flag
+  // set (#1403).
+  function arch(path: string, name: string, ageDays: number): SessionMetadata {
+    return meta(path, name, ageDays, { archived: true });
+  }
 
-  it("returns the persisted sessions (mtime desc) when the query is empty", () => {
+  it("returns the persisted sessions (mtime desc) in main when the query is empty", () => {
     // ⌘K is also a browse/jump entry point: an empty query lists the newest
-    // matches (capped at MAX_SEARCH_RESULTS), freshest first.
-    const entries = buildSearchEntries(twoPersisted(), [], null, "");
-    expect(entries.map((e) => e.name)).toEqual(["alpha", "beta"]);
+    // matches (capped at MAX_SEARCH_RESULTS), freshest first. The archived
+    // partition is empty here; the query is the shared matcher input.
+    const { main } = buildSearchEntries(twoPersisted(), [], [], null, "");
+    expect(main.map((e) => e.name)).toEqual(["alpha", "beta"]);
   });
 
   it("treats a whitespace-only query as empty", () => {
     // The query is trimmed before matching, so "   " behaves like "".
-    const entries = buildSearchEntries(twoPersisted(), [], null, "   ");
-    expect(entries.map((e) => e.name)).toEqual(["alpha", "beta"]);
+    const { main } = buildSearchEntries(twoPersisted(), [], [], null, "   ");
+    expect(main.map((e) => e.name)).toEqual(["alpha", "beta"]);
   });
 
   it("matches display_name as a case-insensitive substring", () => {
     // "ALP" hits alpha only; beta is dropped.
-    const entries = buildSearchEntries(twoPersisted(), [], null, "ALP");
-    expect(entries.map((e) => e.name)).toEqual(["alpha"]);
+    const { main } = buildSearchEntries(twoPersisted(), [], [], null, "ALP");
+    expect(main.map((e) => e.name)).toEqual(["alpha"]);
   });
 
   it("matches first_source_name as a case-insensitive substring", () => {
     // The first source's name is in scope: "BETA_SRC" hits beta only.
-    const entries = buildSearchEntries(twoPersisted(), [], null, "BETA_SRC");
-    expect(entries.map((e) => e.name)).toEqual(["beta"]);
+    const { main } = buildSearchEntries(twoPersisted(), [], [], null, "BETA_SRC");
+    expect(main.map((e) => e.name)).toEqual(["beta"]);
   });
 
   it("drops entries that match neither display_name nor first_source_name", () => {
-    expect(buildSearchEntries(twoPersisted(), [], null, "gamma")).toEqual([]);
+    expect(buildSearchEntries(twoPersisted(), [], [], null, "gamma").main).toEqual([]);
   });
 
   it("caps the list at the newest MAX_SEARCH_RESULTS matches", () => {
@@ -251,9 +257,9 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
         return meta(`/s${n}.recipe.json`, `session-${String(n).padStart(2, "0")}`, n);
       }),
     ];
-    const entries = buildSearchEntries(thirteen, [], null, "session");
-    expect(entries).toHaveLength(MAX_SEARCH_RESULTS);
-    expect(entries.map((e) => e.name)).toEqual(
+    const { main } = buildSearchEntries(thirteen, [], [], null, "session");
+    expect(main).toHaveLength(MAX_SEARCH_RESULTS);
+    expect(main.map((e) => e.name)).toEqual(
       Array.from({ length: MAX_SEARCH_RESULTS }, (_, i) =>
         `session-${String(i).padStart(2, "0")}`,
       ),
@@ -274,36 +280,37 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
       { sid: "uuid-active", name: "session-10", path: "/s10.recipe.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
     // The binding is live: queried alone, the stale row carries the active flag.
-    const solo = buildSearchEntries(eleven, open, "uuid-active", "session-10");
+    const solo = buildSearchEntries(eleven, [], open, "uuid-active", "session-10").main;
     expect(solo).toHaveLength(1);
     expect(solo[0].active).toBe(true);
     // Under the cap the same row loses the mtime race and is absent -- no row
     // in the truncated list is active.
-    const entries = buildSearchEntries(eleven, open, "uuid-active", "session");
-    expect(entries).toHaveLength(MAX_SEARCH_RESULTS);
-    expect(entries.map((e) => e.name)).toEqual(
+    const { main } = buildSearchEntries(eleven, [], open, "uuid-active", "session");
+    expect(main).toHaveLength(MAX_SEARCH_RESULTS);
+    expect(main.map((e) => e.name)).toEqual(
       Array.from({ length: MAX_SEARCH_RESULTS }, (_, i) =>
         `session-${String(i).padStart(2, "0")}`,
       ),
     );
-    expect(entries.find((e) => e.active)).toBeUndefined();
+    expect(main.find((e) => e.active)).toBeUndefined();
   });
 
   it("does not bridge the name/source boundary without the separating space", () => {
     // The composed haystack is `${display_name} ${first_source_name}`: the
     // space is load-bearing. Without it "data" + "set_one" would contain
     // "dataset" and match a query the row must reject.
-    const entries = buildSearchEntries(
+    const { main } = buildSearchEntries(
       [
         meta("/data.json", "data", 0, {
           source_summary: { first_source_name: "set_one", source_count: 1, turn_count: 1 },
         }),
       ],
       [],
+      [],
       null,
       "dataset",
     );
-    expect(entries).toEqual([]);
+    expect(main).toEqual([]);
   });
 
   it("merges an open binding into the persisted row (sid set) and flags active", () => {
@@ -314,13 +321,13 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     const open: OpenSession[] = [
       { sid: "uuid-b", name: "beta renamed", path: "/b.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
-    const entries = buildSearchEntries(twoPersisted(), open, "uuid-b", "");
-    const beta = entries.find((e) => e.path === "/b.json");
+    const { main } = buildSearchEntries(twoPersisted(), [], open, "uuid-b", "");
+    const beta = main.find((e) => e.path === "/b.json");
     expect(beta?.sid).toBe("uuid-b");
     expect(beta?.name).toBe("beta renamed");
     expect(beta?.active).toBe(true);
     // alpha stays a cold row (sid null, not active).
-    const alpha = entries.find((e) => e.path === "/a.json");
+    const alpha = main.find((e) => e.path === "/a.json");
     expect(alpha?.sid).toBeNull();
     expect(alpha?.active).toBe(false);
   });
@@ -333,8 +340,8 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     const open: OpenSession[] = [
       { sid: "uuid-new", name: "unsaved", path: "/sessions/uuid-new/recipe.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
-    const entries = buildSearchEntries(twoPersisted(), open, "uuid-new", "");
-    expect(entries.map((e) => e.name)).toEqual(["alpha", "beta"]);
+    const { main } = buildSearchEntries(twoPersisted(), [], open, "uuid-new", "");
+    expect(main.map((e) => e.name)).toEqual(["alpha", "beta"]);
   });
 
   it("sorts mtime desc with a name tiebreaker for deterministic render", () => {
@@ -344,8 +351,88 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
       { ...meta("/m.json", "mike", 1), last_modified_at: 1000 },
       { ...meta("/a.json", "alpha", 1), last_modified_at: 1000 },
     ];
-    const entries = buildSearchEntries(sameMtime, [], null, "");
-    expect(entries.map((e) => e.name)).toEqual(["alpha", "mike", "zulu"]);
+    const { main } = buildSearchEntries(sameMtime, [], [], null, "");
+    expect(main.map((e) => e.name)).toEqual(["alpha", "mike", "zulu"]);
+  });
+
+  // --- The archived partition (issue #1403) ---------------------------------
+
+  it("keeps the archived partition empty on an empty query (browse face)", () => {
+    // The empty-query face is the browse/jump surface over recent activity:
+    // a bare Ctrl/⌘+K lists the newest unarchived sessions only. Archived
+    // rows enter once the user is actually searching -- a non-empty query
+    // arms the bottom grayed section, so recall never floods the browse view.
+    const archived = [arch("/c.json", "gamma", 5)];
+    const emptyQuery = buildSearchEntries(twoPersisted(), archived, [], null, "");
+    expect(emptyQuery.main.map((e) => e.name)).toEqual(["alpha", "beta"]);
+    expect(emptyQuery.archived).toEqual([]);
+    // The whitespace-only query is the empty query.
+    const blankQuery = buildSearchEntries(twoPersisted(), archived, [], null, "   ");
+    expect(blankQuery.archived).toEqual([]);
+    // A non-empty query arms the partition.
+    expect(buildSearchEntries(twoPersisted(), archived, [], null, "gam").archived).toHaveLength(1);
+  });
+
+  it("lands archived matches in the bottom partition, metadata-only", () => {
+    // The archived rows ride the same scan and the same predicate, surfacing
+    // as the dialog's bottom grayed section while `main` stays unarchived
+    // only. Open-is-unarchive (ADR-0127 Decision 4) means an archived row
+    // never carries a runtime sid -- even if its path collides with the open
+    // set, the row stays metadata-only (no sid, never active).
+    const archived = [arch("/c.json", "gamma", 5), arch("/a.json", "alpha-old", 9)];
+    const open: OpenSession[] = [
+      { sid: "uuid-c", name: "gamma", path: "/c.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+    ];
+    // A non-empty query arms the archived partition ("a" hits every row here).
+    const { main, archived: archivedEntries } =
+      buildSearchEntries(twoPersisted(), archived, open, "uuid-c", "a");
+    expect(main.map((e) => e.name)).toEqual(["alpha", "beta"]);
+    expect(archivedEntries.map((e) => e.name)).toEqual(["gamma", "alpha-old"]);
+    expect(archivedEntries.map((e) => e.path)).toEqual(["/c.json", "/a.json"]);
+    expect(archivedEntries.every((e) => e.sid === null && e.active === false)).toBe(true);
+  });
+
+  it("caps each partition independently at MAX_SEARCH_RESULTS", () => {
+    // Eleven unarchived + eleven archived matches: each side truncates to the
+    // freshest nine on its own clock -- the bottom section can neither crowd
+    // the main window out nor borrow its budget.
+    expect(MAX_SEARCH_RESULTS).toBe(9);
+    const elevenPersisted = Array.from({ length: 11 }, (_, i) => {
+      const n = 10 - i;
+      return meta(`/s${n}.json`, `session-${String(n).padStart(2, "0")}`, n);
+    });
+    const elevenArchived = Array.from({ length: 11 }, (_, i) => {
+      const n = 10 - i;
+      return arch(`/a${n}.json`, `arch-${String(n).padStart(2, "0")}`, n);
+    });
+    // "0" hits every session-NN / arch-NN name, arming both partitions.
+    const { main, archived } =
+      buildSearchEntries(elevenPersisted, elevenArchived, [], null, "0");
+    expect(main).toHaveLength(MAX_SEARCH_RESULTS);
+    expect(archived).toHaveLength(MAX_SEARCH_RESULTS);
+    expect(main[0].name).toBe("session-00");
+    expect(archived[0].name).toBe("arch-00");
+  });
+
+  it("applies the shared matcher and mtime-desc ordering to the archived partition", () => {
+    // Same haystack (display_name + first_source_name), same sort: the two
+    // partitions cannot drift apart on who matches or what leads.
+    const archived = [
+      meta("/c.json", "alpha-archived", 2, {
+        archived: true,
+        source_summary: { first_source_name: "beta_src", source_count: 1, turn_count: 1 },
+      }),
+    ];
+    // Display-name hit, case-insensitive.
+    expect(
+      buildSearchEntries([], archived, [], null, "ARCHIVED").archived.map((e) => e.name),
+    ).toEqual(["alpha-archived"]);
+    // First-source-name hit.
+    expect(
+      buildSearchEntries([], archived, [], null, "beta_src").archived.map((e) => e.name),
+    ).toEqual(["alpha-archived"]);
+    // No hit either side.
+    expect(buildSearchEntries([], archived, [], null, "zzz").archived).toEqual([]);
   });
 });
 

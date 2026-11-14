@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -21,7 +21,8 @@ import {
 import { TooltipProvider } from "../../components/ui/tooltip";
 import { pickDataFiles } from "../../components/dataset/pickDataFiles";
 import { open } from "@tauri-apps/plugin-dialog";
-import { artifactTurn, failed } from "./fixtures";
+import { artifactTurn, failed, textual } from "./fixtures";
+import { log } from "../../lib/log";
 import type { ComposerSessionFields } from "../useComposerState";
 import type { ApprovalEntry } from "../useApprovalEvents";
 import type { ThreadEntry } from "../../types/thread";
@@ -155,6 +156,7 @@ function renderPane(opts?: {
   pendingIngestPaths?: string[];
   onSeedDraft?: (sid: string, question: string) => void;
   onSeedInvocations?: (sid: string, names: string[]) => void;
+  onStageQuote?: (sid: string, text: string) => void;
 }) {
   if (opts?.thread) {
     vi.mocked(conversation).mockResolvedValue(opts.thread);
@@ -193,6 +195,7 @@ function renderPane(opts?: {
             onQuestionConsumed={noop}
             onSeedDraft={opts?.onSeedDraft ?? noop}
             onSeedInvocations={opts?.onSeedInvocations ?? noop}
+            onStageQuote={opts?.onStageQuote ?? noop}
             onComposerFields={(_sid, fields) => {
               composerFields = fields;
             }}
@@ -219,7 +222,7 @@ function renderPane(opts?: {
 }
 
 // Open a delivered file through its rail artifact card (the real selection
-// path: the click moves viewedResult + expands the workspace).
+// path: the click moves viewedResult + expands the right sidebar).
 async function openArtifact(fileName: string) {
   const name = `Open ${fileName} in the right sidebar`;
   fireEvent.click(await screen.findByRole("button", { name }));
@@ -324,7 +327,7 @@ describe("SessionPane artifact stage boundary", () => {
 // the pill's render gate rides the real rail element -- jsdom has no layout,
 // so the pause is staged by stubbing the rail's geometry and dispatching the
 // scroll event by hand (the same rig the hook suite uses).
-describe("SessionPane workspace panel postures", () => {
+describe("SessionPane right-sidebar panel postures", () => {
   beforeEach(stubSessionApis);
 
   // #1323: the file-kind panel retires as a scroll container (the stage
@@ -609,7 +612,7 @@ describe("SessionPane composer queue behind an in-flight ingest (#1500)", () => 
 
 // Issue #1512: a source replace is the other long IPC that holds the backend
 // session lock, so its verdict flight arms the SAME queue window -- armed
-// through the pane's trackReplace composition when the working-set seam
+// through the pane's armReplace composition when the working-set seam
 // fires. The rail's replace progress line rides the same flight.
 describe("SessionPane composer queue behind an in-flight replace (#1512)", () => {
   const heldQuestion = "queued while replacing";
@@ -769,5 +772,106 @@ describe("SessionPane ask-again fire path (#1503)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Retry this question" }));
     await waitFor(() => expect(askQuestion).toHaveBeenCalledWith(SID, "坏查询", []));
     expect(view.getComposerFields()!.queued).toBe(false);
+  });
+});
+
+// The toggle's two posture mounts (the transit-shell PR's core conditional
+// rendering): folded -> the session header's right edge; expanded -> the
+// tab-row's right cluster. Exactly one instance exists at any time, and a
+// keyboard toggle keeps focus across the swap (the focus hand-off to the
+// surviving instance) -- the pre-calibration single mount never dropped it.
+// Placement pins ride document order, the same shape as the error-banner
+// relocation pin in App.test.tsx.
+describe("right-sidebar toggle placement", () => {
+  it("mounts in the session header while folded and moves into the tab row when expanded, exactly one at a time, keeping focus", async () => {
+    const { container } = renderPane();
+    const header = container.querySelector(".session-header");
+    const tabRow = container.querySelector(".right-sidebar-tabs");
+    expect(header).not.toBeNull();
+    expect(tabRow).not.toBeNull();
+
+    // Folded cold start: the toggle lives in the header.
+    const foldedToggle = screen.getByRole("button", { name: "Expand right sidebar" });
+    expect(header!.contains(foldedToggle)).toBe(true);
+    expect(tabRow!.contains(foldedToggle)).toBe(false);
+
+    // Expand: the fresh instance lands in the tab-row cluster.
+    fireEvent.click(foldedToggle);
+    const expandedToggle = await screen.findByRole("button", { name: "Collapse right sidebar" });
+    expect(tabRow!.contains(expandedToggle)).toBe(true);
+    expect(header!.contains(expandedToggle)).toBe(false);
+    expect(container.querySelectorAll(".right-sidebar-toggle")).toHaveLength(1);
+
+    // Fold back: the focus follows the surviving header instance.
+    fireEvent.click(expandedToggle);
+    const refoldedToggle = await screen.findByRole("button", { name: "Expand right sidebar" });
+    await waitFor(() => expect(refoldedToggle).toHaveFocus());
+    expect(container.querySelectorAll(".right-sidebar-toggle")).toHaveLength(1);
+  });
+});
+
+describe("selection toolbar copy (#1573)", () => {
+  beforeEach(stubSessionApis);
+
+  afterEach(() => {
+    document.getSelection()?.removeAllRanges();
+  });
+
+  // Stage a live selection over the thread's marked prose and release the
+  // gesture (the release path requires the window to have seen a
+  // selectionchange -- the machine harness's shape), then hand back the
+  // toolbar.
+  function appearToolbar(): HTMLElement | null {
+    const prose = document.querySelector(".round-text");
+    if (prose === null) return null;
+    const range = document.createRange();
+    range.selectNodeContents(prose);
+    const selection = document.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    const conversation = document.querySelector(".session-conversation");
+    if (conversation === null) return null;
+    fireEvent.pointerDown(conversation, { button: 0 });
+    fireEvent(document, new Event("selectionchange"));
+    fireEvent.pointerUp(conversation, { button: 0 });
+    return document.querySelector("[data-selection-toolbar]");
+  }
+
+  function copyButton(toolbar: HTMLElement): HTMLElement {
+    const button = [...toolbar.querySelectorAll("button")].find((candidate) =>
+      candidate.textContent?.includes("Copy"),
+    );
+    return button as HTMLElement;
+  }
+
+  it("copies on success: writes, then dismisses and clears the selection", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    renderPane({ thread: [textual("copy this passage")] });
+    await screen.findByText("copy this passage");
+    const toolbar = appearToolbar();
+    expect(toolbar).not.toBeNull();
+    fireEvent.click(copyButton(toolbar as HTMLElement));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("copy this passage"));
+    // The WorkBuddy shape rode the success leg: the toolbar leaves and the
+    // selection clears.
+    expect(document.querySelector("[data-selection-toolbar]")).toBeNull();
+    expect(document.getSelection()?.isCollapsed ?? true).toBe(true);
+  });
+
+  it("keeps the toolbar when the clipboard write fails", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    renderPane({ thread: [textual("failing passage")] });
+    await screen.findByText("failing passage");
+    const toolbar = appearToolbar();
+    expect(toolbar).not.toBeNull();
+    fireEvent.click(copyButton(toolbar as HTMLElement));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("failing passage"));
+    await waitFor(() => expect(warn).toHaveBeenCalled());
+    // Nothing was copied, so nothing may close.
+    expect(document.querySelector("[data-selection-toolbar]")).not.toBeNull();
+    warn.mockRestore();
   });
 });

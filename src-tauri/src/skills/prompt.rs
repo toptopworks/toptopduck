@@ -300,11 +300,13 @@ impl crate::model::SkillInvocation {
     pub(crate) fn from_fragment(
         fragment: &SkillPromptFragment,
         actor: crate::model::SkillLifecycleActor,
+        via_subagent: Option<String>,
     ) -> Self {
         Self {
             name: fragment.name.clone(),
             body: fragment.body.clone(),
             actor,
+            via_subagent,
             content_hash: fragment.content_hash.clone(),
         }
     }
@@ -595,6 +597,7 @@ mod tests {
         let record = crate::model::SkillInvocation::from_fragment(
             f,
             crate::model::SkillLifecycleActor::User,
+            None,
         );
         let preamble = crate::provider::prompt::render_invocation_preamble(&[record]);
         assert!(preamble.contains("[Truncated"));

@@ -99,7 +99,8 @@ export interface UseShellSessionsDeps {
   intl: IntlShape;
   queryClient: QueryClient;
   /** From usePersistedSessions: bumps sessionsEpoch to re-fetch list_sessions
-   *  after a save / delete / rename lands on disk. */
+   *  after a save / delete / rename lands on disk, and after openPersisted
+   *  succeeds (#1403: open-is-unarchive is a disk-side metadata change). */
   refreshSessions: () => void;
   /** From useShellError: surfaces a shell-layer AppError (kind "shell") for a
    *  createSession / openRecipe / save / delete / rename reject. */
@@ -223,7 +224,8 @@ export function useShellSessions({
   });
   // Resume / open-busy indicator (ADR-0034). `idle` is the resting state
   // (issue #205); Resume blocks the open action + the indicator shows globally
-  // while the clicked session is opening.
+  // while the clicked session is opening -- the "blocks" is the resumingRef
+  // guard in openPersisted below (#1562).
   const [resumeStatus, setResumeStatus] = useState<ResumeStatus>({
     kind: "idle",
   });
@@ -689,6 +691,19 @@ export function useShellSessions({
   // open_recipe reuses the id (ADR-0056), so createSession mints it first, then
   // openRecipe loads the recipe + replays the chain into that id. If the same
   // path is already open, just switch to it (no second instance, keep-alive).
+  //
+  // Reentry guard (#1562): resumingRef blocks a second resume while the
+  // createSession + openRecipe window is in flight. The open-set entry
+  // only lands on success (registerOpen below), so a second sidebar /
+  // search / tray click inside the window finds no `existing` row and
+  // would mint a ghost session that dies on the backend's AlreadyOpen
+  // rejection (ADR-0035 D3) as a false-error banner. The swallowed call
+  // needs no queueing -- the first resume's registerOpen activates the
+  // session on landing -- and the already-open branch precedes the guard
+  // so activating an open session stays available mid-window. Mirrors
+  // the mintingRef pattern above; this is what the "Resume blocks the
+  // open action" note at the resumeStatus declaration means.
+  const resumingRef = useRef(false);
   const openPersisted = useCallback(
     async (path: string, name: string) => {
       const existing = openSessions.find((s) => s.path === path);
@@ -696,79 +711,90 @@ export function useShellSessions({
         apply((prev) => ({ sessions: prev.sessions, activeId: existing.sid }));
         return;
       }
-      setResumeStatus({ kind: "opening" });
-      // ADR-0056 / issue #76: resume-progress is a global Tauri broadcast keyed
-      // by session_id. The listener registers BEFORE createSession mints the
-      // id, so targetSid starts null and is assigned the instant the id lands;
-      // every event is then filtered to the session THIS resume opened. An event
-      // for a different session (a concurrent resume path, or a stray broadcast)
-      // is dropped before it can move our status indicator. #83 R5: this filter
-      // is the multi-session seam -- without it a sibling resume's Source/Replay
-      // ticks would hijack this opener's progress strip.
-      let targetSid: string | null = null;
-      const unlisten = await onResumeProgress((ev) => {
-        // Defensive try/catch: this callback runs on the Tauri event loop's
-        // microtask, so a throw escapes PAST the outer try/catch -- it surfaces
-        // as an unhandled rejection, busy sticks true (soft-lock), and the
-        // listener leaks. Log and bail; the outer flow still clears
-        // resumeStatus when openRecipe resolves/rejects. #83 R5: the targetSid
-        // filter below is the multi-session isolation seam (issue #203).
-        try {
-          if (ev.session_id !== targetSid) return;
-          const { event } = ev;
-          if ("Source" in event) {
-            setResumeStatus({
-              kind: "source",
-              index: event.Source.index,
-              total: event.Source.total,
-              name: event.Source.reference_name,
-            });
-          } else if ("Replay" in event) {
-            setResumeStatus({
-              kind: "replay",
-              index: event.Replay.index,
-              total: event.Replay.total,
-              name: event.Replay.reference_name,
-            });
-          }
-        } catch (e) {
-          log.error("onResumeProgress", "listener threw", fmtError(e, intl));
-        }
-      });
+      if (resumingRef.current) return;
+      resumingRef.current = true;
       try {
-        // createSession mints a new session + binds an empty recipe at
-        // sessions/{new_uuid}/recipe.json. The resume target is the EXISTING
-        // file at `path` (a prior session's recipe.json), not the freshly-created empty
-        // one — so openRecipe replays `path` into the minted sid and the open-set
-        // entry binds `path` too (the sidebar's already-open lookup keys on it).
-        const { session_id: sid } = await createSession();
-        targetSid = sid;
-        await openRecipe(sid, path);
-        await queryClient.invalidateQueries({ queryKey: ["session", sid] });
-        registerOpen({
-          sid,
-          name,
-          path,
-          pendingIngestPaths: [],
-          pendingQuestion: null,
-          pendingSkillInvocations: [],
+        setResumeStatus({ kind: "opening" });
+        // ADR-0056 / issue #76: resume-progress is a global Tauri broadcast keyed
+        // by session_id. The listener registers BEFORE createSession mints the
+        // id, so targetSid starts null and is assigned the instant the id lands;
+        // every event is then filtered to the session THIS resume opened. An event
+        // for a different session (a concurrent resume path, or a stray broadcast)
+        // is dropped before it can move our status indicator. #83 R5: this filter
+        // is the multi-session seam -- without it a sibling resume's Source/Replay
+        // ticks would hijack this opener's progress strip.
+        let targetSid: string | null = null;
+        const unlisten = await onResumeProgress((ev) => {
+          // Defensive try/catch: this callback runs on the Tauri event loop's
+          // microtask, so a throw escapes PAST openPersisted's try/catch --
+          // it surfaces as an unhandled rejection, busy sticks true (soft-lock),
+          // and the listener leaks. Log and bail; the outer flow still clears
+          // resumeStatus when openRecipe resolves/rejects. #83 R5: the targetSid
+          // filter below is the multi-session isolation seam (issue #203).
+          try {
+            if (ev.session_id !== targetSid) return;
+            const { event } = ev;
+            if ("Source" in event) {
+              setResumeStatus({
+                kind: "source",
+                index: event.Source.index,
+                total: event.Source.total,
+                name: event.Source.reference_name,
+              });
+            } else if ("Replay" in event) {
+              setResumeStatus({
+                kind: "replay",
+                index: event.Replay.index,
+                total: event.Replay.total,
+                name: event.Replay.reference_name,
+              });
+            }
+          } catch (e) {
+            log.error("onResumeProgress", "listener threw", fmtError(e, intl));
+          }
         });
-        setResumeStatus({ kind: "idle" });
-      } catch (e) {
-        // C2: if createSession succeeded but openRecipe failed, the just-minted
-        // session is persisted on disk (ADR-0089 auto-persist). Close it
-        // best-effort so it does not linger as a ghost empty row in the
-        // sidebar scan. The close IPC itself may fail (the session may have
-        // been partially created); suppress that — the error toast is already
-        // surfaced via setShellError.
-        if (targetSid) {
-          void closeSession(targetSid).catch(() => {});
+        try {
+          // createSession mints a new session + binds an empty recipe at
+          // sessions/{new_uuid}/recipe.json. The resume target is the EXISTING
+          // file at `path` (a prior session's recipe.json), not the freshly-created empty
+          // one — so openRecipe replays `path` into the minted sid and the open-set
+          // entry binds `path` too (the sidebar's already-open lookup keys on it).
+          const { session_id: sid } = await createSession();
+          targetSid = sid;
+          await openRecipe(sid, path);
+          await queryClient.invalidateQueries({ queryKey: ["session", sid] });
+          registerOpen({
+            sid,
+            name,
+            path,
+            pendingIngestPaths: [],
+            pendingQuestion: null,
+            pendingSkillInvocations: [],
+          });
+          // Open-is-unarchive (ADR-0127 Decision 4): resuming an archived recipe
+          // removed its sidecar key server-side -- a metadata change no open-set
+          // merge mirrors, so the persisted list re-scans to land the row back
+          // in the main list (#1403). Local IPC, millisecond round trip.
           refreshSessions();
+          setResumeStatus({ kind: "idle" });
+        } catch (e) {
+          // C2: if createSession succeeded but openRecipe failed, the just-minted
+          // session is persisted on disk (ADR-0089 auto-persist). Close it
+          // best-effort so it does not linger as a ghost empty row in the
+          // sidebar scan. The close IPC itself may fail (the session may have
+          // been partially created); suppress that — the error toast is already
+          // surfaced via setShellError.
+          if (targetSid) {
+            void closeSession(targetSid).catch(() => {});
+            refreshSessions();
+          }
+          setShellError(toAppError(e, intl, "shell"));
+          setResumeStatus({ kind: "idle" });
+        } finally {
+          void unlisten();
         }
-        setShellError(toAppError(e, intl, "shell"));
-        setResumeStatus({ kind: "idle" });
       } finally {
-        void unlisten();
+        resumingRef.current = false;
       }
     },
     [

@@ -20,7 +20,7 @@ import { Select, SelectContent, SelectTrigger, SelectValue } from "../ui/select"
 // The two level-2 selects' shared trigger classes: indented under the level-1
 // group row and inset to the remaining width (the dot column).
 const LEVEL2_SELECT_TRIGGER_CLASS =
-  "ml-6 w-[calc(100%-1.5rem)] border-border bg-card hover:bg-muted";
+  "ml-6 w-[calc(100%-1.5rem)] border-border bg-card hover:bg-transit";
 
 export type ComposerRuntimeMenuProps = {
   // Whether the session runs an external adapter (the Local CLI group is the
@@ -300,7 +300,7 @@ function RuntimeGroupRow({
       disabled={disabled}
       onClick={onClick}
       aria-pressed={selected}
-      className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
+      className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium hover:bg-transit disabled:pointer-events-none disabled:opacity-50"
     >
       <RuntimeDot selected={selected} />
       {children}
@@ -359,8 +359,10 @@ function RuntimeSelectItem({
       value={value}
       disabled={disabled}
       className={cn(
-        "focus:bg-accent hover:bg-accent relative flex items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none",
-        "focus:text-accent-foreground",
+        // Grey = transit on every row -- same posture as the shared
+        // SelectItem: the selected row is marked by the check glyph alone,
+        // no committed face.
+        "hover:bg-transit focus:bg-transit relative flex items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none",
         "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
       )}

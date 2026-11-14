@@ -21,6 +21,8 @@ import { toAppError } from "../lib/error-presentation";
 import { loadErrorDisplay } from "../lib/loadErrorDisplay";
 import { sessionKeys } from "./queryKeys";
 import { resolveWorkingSetDetail } from "./workspace";
+import type { BatchProgress } from "./useWorkspaceDatasets";
+import type { VerdictThunk } from "./useComposerQueue";
 import type { AppError, SessionFlowKind } from "../types/error";
 import type {
   DatasetDescriptor,
@@ -174,19 +176,20 @@ export interface UseWorkingSetSurfaces {
   setError: (error: AppError | null) => void;
   setMutationLoading: (loading: boolean) => void;
   pollPersistError: () => Promise<void>;
-  /** Arm the replace flight with the queue (#1512): the verdict Promise
-   *  (Loaded -> true, every failure route -> false) plus the swap target
-   *  the rail's progress line names. Called synchronously at the handler's
-   *  entry, before the IPC's first microtask, so the queue gate closes in
-   *  the same tick as the click. */
-  trackReplace: (flight: Promise<boolean>, info: ReplaceFlightInfo) => void;
+  /** Arm the replace flight with the queue (#1512): the verdict thunk (the
+   *  resolve-only contract -- Loaded -> true, every failure route -> false
+   *  -- lives on VerdictThunk as its single home) plus the swap target the
+   *  rail's progress line names. Called synchronously at the handler's
+   *  entry; the pane's armWindow invokes the thunk in the same tick, so
+   *  the queue gate closes before the IPC's first microtask. */
+  armReplace: (verdict: VerdictThunk, info: ReplaceFlightInfo) => void;
 }
 
 /** The session-state slice of the surfaces (#1512): the sinks
- *  useSessionState owns directly. SessionPane composes `trackReplace` on
+ *  useSessionState owns directly. SessionPane composes `armReplace` on
  *  top (the composer queue lives there, not in the state hook), so the
  *  state hook's `mutationSurfaces` return carries this base only. */
-export type UseWorkingSetSurfacesBase = Omit<UseWorkingSetSurfaces, "trackReplace">;
+export type UseWorkingSetSurfacesBase = Omit<UseWorkingSetSurfaces, "armReplace">;
 
 /** The replace flight's swap target (#1512): the reference being taken
  *  over and the incoming file -- the progress line's two names. */
@@ -196,13 +199,16 @@ export interface ReplaceFlightInfo {
 }
 
 /** The rail's in-flight replace line's content model (#1512): the flight's
- *  swap target plus its start stamp (ONE clock, minted at the single report
- *  site -- SessionPane's trackReplace). Rendered by the rail's live region
- *  beside the ingest block; cleared on every settle. Client UI state only --
- *  never enters any cache. */
-export interface ReplaceProgress extends ReplaceFlightInfo {
-  startedAt: number;
-}
+ *  swap target plus its start stamp (ONE clock, minted in the arming tick
+ *  at the single report site -- SessionPane's armReplace, the stamp handed
+ *  out by the queue's armWindow). Rendered by the rail's live region beside
+ *  the ingest block; cleared on every settle. Client UI state only -- never
+ *  enters any cache.
+ *
+ *  A projection of the shared-face seam's unified batch progress union
+ *  (#1519): this face's member is recognized by its `referenceName` field,
+ *  and the armReplace construction site is unchanged. */
+export type ReplaceProgress = Extract<BatchProgress, { referenceName: string }>;
 
 export interface UseWorkingSet {
   // Data plane.
@@ -244,7 +250,7 @@ export function useWorkingSet(
   // sinks are dispatch- or useCallback-stable inside useSessionState, while
   // the surfaces object itself is rebuilt per render -- depending on the
   // methods keeps the handler identities below stable across renders.
-  const { setError, setMutationLoading, pollPersistError, trackReplace } = surfaces;
+  const { setError, setMutationLoading, pollPersistError, armReplace } = surfaces;
 
   const { datasets, activeName } = useWorkingSetData(sessionId);
 
@@ -326,13 +332,13 @@ export function useWorkingSet(
     async (referenceName: string, path: string) => {
       setMutationLoading(true);
       setError(null);
-      // The verdict flight (#1512): resolve-only (Loaded -> true, every
-      // failure route -> false), so the queue's window exit is total. The
-      // IIFE runs synchronously up to the replaceSource await, and the
-      // trackReplace report below lands in the same tick -- the queue gate
+      // The verdict thunk (#1512): resolve-only per VerdictThunk (Loaded ->
+      // true, every failure route -> false), handed over lazy -- the pane's
+      // armWindow invokes it in the entry tick, so this body runs
+      // synchronously up to the replaceSource await and the queue gate
       // closes before the IPC's first microtask, never racing a fast
       // submit.
-      const flight = (async () => {
+      armReplace(async () => {
         try {
           const result = await replaceSource(sessionId, referenceName, path);
           if (result.kind === "Loaded") {
@@ -361,8 +367,7 @@ export function useWorkingSet(
           setMutationLoading(false);
           void pollPersistError();
         }
-      })();
-      trackReplace(flight, { referenceName, path });
+      }, { referenceName, path });
     },
     [
       sessionId,
@@ -371,7 +376,7 @@ export function useWorkingSet(
       intl,
       setError,
       setMutationLoading,
-      trackReplace,
+      armReplace,
     ],
   );
 

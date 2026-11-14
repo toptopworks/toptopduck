@@ -38,7 +38,7 @@ export function StaleChip({
       asChild
       className={cn(
         "stale-chip ml-1",
-        "enabled:hover:bg-muted disabled:cursor-not-allowed disabled:opacity-[0.55]",
+        "enabled:hover:bg-transit disabled:cursor-not-allowed disabled:opacity-[0.55]",
       )}
     >
       <button

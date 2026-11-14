@@ -258,6 +258,16 @@ impl super::Session {
         self.workspace_registry = registry;
     }
 
+    /// Seat the user-level memory root (issue #1531, ADR-0147): the
+    /// app-domain `memory/` directory the built-in engine's injection
+    /// reads as the user layer. Command-layer wiring at creation and
+    /// resume, mirroring [`Self::set_workspaces_root`]; `None` (the
+    /// constructor default) mutes the user layer -- the session runs on
+    /// workspace memories only.
+    pub fn set_user_memory_root(&mut self, root: Option<PathBuf>) {
+        self.user_memory_root = root;
+    }
+
     /// The seated registry, if the ledger axis is connected (ADR-0138). Read
     /// by close-time record removal.
     pub fn workspace_registry(
@@ -293,6 +303,38 @@ impl super::Session {
     /// close-time reclaim.
     pub fn workspace(&self) -> Option<&Path> {
         self.runtime_facts.workspace.as_deref()
+    }
+
+    /// The memory index rows for the built-in turn's injection (issue
+    /// #1529's 轨 A read path, two layers since #1531): the user layer's
+    /// rows FIRST, then the bound workspace's (ADR-0147 Decision 3 --
+    /// project context overrides user generalities), gated as ONE block by
+    /// the registry's per-workspace `memory_enabled` toggle (a missing
+    /// registry or record reads the default-on posture; the toggle covers
+    /// both layers). Fail-safe by construction -- `load_rows` never fails
+    /// (a missing directory is the empty set, a corrupt file is skipped),
+    /// so a memory problem can never block a turn. An empty layer is
+    /// skipped; both empty injects nothing. The external-runtime arm never
+    /// calls this (external agents get zero injection in v1).
+    pub(super) fn memory_index_rows(&self) -> Vec<crate::persistence::memory::MemoryIndexRow> {
+        let enabled = match (self.workspace(), self.workspace_registry()) {
+            (Some(workspace), Some(registry)) => registry.memory_enabled(workspace),
+            // No record to read: the default-on posture (#1531 -- an
+            // unbound session still carries its user layer).
+            _ => true,
+        };
+        if !enabled {
+            return Vec::new();
+        }
+        use crate::persistence::memory;
+        let mut rows = match &self.user_memory_root {
+            Some(root) => memory::load_rows(root),
+            None => Vec::new(),
+        };
+        if let Some(workspace) = self.workspace() {
+            rows.extend(memory::load_rows(&memory::workspace_memory_dir(workspace)));
+        }
+        rows
     }
 
     /// The lazy-mint source, if seated (ADR-0137, issue #1381). Read by
@@ -624,6 +666,128 @@ mod tests {
         assert_eq!(session.workspace(), Some(user.path()));
         let recipe = session.build_recipe();
         assert_eq!(recipe.workspace.as_deref(), Some(user.path()));
+    }
+
+    /// Issue #1529 (轨 A): the injection row resolution -- a bound
+    /// workspace with files yields rows; the registry toggle off yields
+    /// empty; no bound workspace or no directory yields empty too (the
+    /// zero-block, zero-blocked posture: a read failure is the empty set,
+    /// never a turn failure).
+    #[test]
+    fn memory_index_rows_follow_the_toggle_and_never_fail() {
+        let dir = tempfile::tempdir().expect("registry dir");
+        let registry = test_registry(dir.path());
+        let user = tempfile::tempdir().expect("user dir");
+        let canonical = std::fs::canonicalize(user.path()).expect("canonicalize");
+
+        let mut session = super::super::Session::new().expect("session");
+        session.set_workspace_registry(Some(std::sync::Arc::clone(&registry)));
+        session.set_workspace(canonical.clone());
+
+        // Fresh workspace: no memory directory at all -- empty, nothing
+        // created, the turn proceeds.
+        assert!(session.memory_index_rows().is_empty());
+        assert!(!user.path().join(".toptopduck").join("memory").exists());
+
+        // A saved memory surfaces as a row.
+        crate::persistence::memory::save_entry(
+            &crate::persistence::memory::workspace_memory_dir(user.path()),
+            &crate::persistence::memory::MemoryEntry {
+                name: "fact".to_string(),
+                description: "hook".to_string(),
+                r#type: crate::persistence::memory::MemoryType::Project,
+                origin_session: None,
+                saved_at: "2026-11-09".to_string(),
+                source: crate::persistence::memory::MemorySource::Manual,
+            },
+            "body\n",
+        )
+        .expect("save");
+        let rows = session.memory_index_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "fact");
+
+        // The toggle off drops the rows to empty (no injection); back on
+        // restores them. A session with NO seated registry reads
+        // default-on (its rows flow, pinned below by the on state).
+        registry.set_memory_enabled(&canonical, false).expect("off");
+        assert!(session.memory_index_rows().is_empty());
+        registry.set_memory_enabled(&canonical, true).expect("on");
+        assert_eq!(session.memory_index_rows().len(), 1);
+
+        // No bound workspace: nothing to read, still no failure.
+        let unbound = super::super::Session::new().expect("session");
+        assert!(unbound.memory_index_rows().is_empty());
+    }
+
+    /// Issue #1531 (ADR-0147 Decision 3): the two-layer concat -- user
+    /// layer rows FIRST, workspace rows after (project context overrides
+    /// user generalities), each empty layer skipped, and the per-workspace
+    /// toggle gating BOTH layers as one block. An unbound session still
+    /// carries its user layer (the default-on posture -- the built-in
+    /// engine's only user-level fallback).
+    #[test]
+    fn memory_index_rows_concatenate_user_before_workspace() {
+        use crate::persistence::memory;
+        let dir = tempfile::tempdir().expect("registry dir");
+        let registry = test_registry(dir.path());
+        let user_layer = tempfile::tempdir().expect("user layer");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let canonical = std::fs::canonicalize(workspace.path()).expect("canonicalize");
+        let fact = |name: &str| memory::MemoryEntry {
+            name: name.to_string(),
+            description: format!("{name} hook"),
+            r#type: memory::MemoryType::User,
+            origin_session: None,
+            saved_at: "2026-11-10".to_string(),
+            source: memory::MemorySource::Manual,
+        };
+        memory::save_entry(user_layer.path(), &fact("identity"), "b\n").expect("user save");
+        memory::save_entry(
+            &memory::workspace_memory_dir(workspace.path()),
+            &fact("project lore"),
+            "b\n",
+        )
+        .expect("workspace save");
+
+        let mut session = super::super::Session::new().expect("session");
+        session.set_workspace_registry(Some(std::sync::Arc::clone(&registry)));
+        session.set_workspace(canonical.clone());
+        session.set_user_memory_root(Some(user_layer.path().to_path_buf()));
+
+        // User BEFORE workspace, both layers present.
+        let rows = session.memory_index_rows();
+        assert_eq!(
+            rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(),
+            vec!["identity", "project lore"],
+            "user layer rides before the workspace layer"
+        );
+
+        // The toggle gates BOTH layers as one block (ADR-0147 Decision 6).
+        registry.set_memory_enabled(&canonical, false).expect("off");
+        assert!(session.memory_index_rows().is_empty());
+        registry.set_memory_enabled(&canonical, true).expect("on");
+        assert_eq!(session.memory_index_rows().len(), 2);
+
+        // User layer only (no bound workspace): still injected -- an
+        // unbound session keeps its user-level fallback. A workspace-only
+        // session (no seated root) reads the workspace layer alone.
+        let mut unbound = super::super::Session::new().expect("session");
+        unbound.set_user_memory_root(Some(user_layer.path().to_path_buf()));
+        assert_eq!(unbound.memory_index_rows().len(), 1);
+        let mut local_only = super::super::Session::new().expect("session");
+        local_only.set_workspace(canonical);
+        assert_eq!(local_only.memory_index_rows().len(), 1);
+
+        // Both layers seated but EMPTY (fresh roots): the zero-block cell
+        // -- each empty layer is skipped, both empty injects nothing.
+        let empty_user = tempfile::tempdir().expect("empty user layer");
+        let empty_ws = tempfile::tempdir().expect("empty workspace");
+        let mut bare = super::super::Session::new().expect("session");
+        bare.set_workspace_registry(Some(std::sync::Arc::clone(&registry)));
+        bare.set_workspace(std::fs::canonicalize(empty_ws.path()).expect("canonicalize"));
+        bare.set_user_memory_root(Some(empty_user.path().to_path_buf()));
+        assert!(bare.memory_index_rows().is_empty());
     }
 
     fn test_registry(dir: &std::path::Path) -> std::sync::Arc<crate::workspace::WorkspaceRegistry> {

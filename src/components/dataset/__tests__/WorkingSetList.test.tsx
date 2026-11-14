@@ -144,13 +144,13 @@ describe("WorkingSetList", () => {
     expect(peopleRow.className.split(/\s+/)).toContain("active");
   });
 
-  // The empty-set face is no longer this list's concern: WorkspaceWorkingSet
+  // The empty-set face is no longer this list's concern: RightSidebarWorkingSet
   // renders the single empty-state card instead (issue #792), so the list
   // mounts only for a non-empty set -- its empty-branch test moved to the
   // WorkingSetEmptyState suite.
 
   it("pins the row-count annotation to the 12px caption token (issue #864)", () => {
-    // The workspace body's 14px baseline (issue #864) inherits into the
+    // The right-sidebar body's 14px baseline (issue #864) inherits into the
     // annotation's parent chain, and the preflight small rule (80%) would
     // resolve an unsized small at 11.2px -- below the caption token, the
     // ladder's floor. text-xs pins 12px independent of that chain.
@@ -1109,10 +1109,12 @@ describe("WorkingSetList", () => {
     // flow (see the DOM-order pin in the stale-chip layout test).
     expect(classes).toContain("right-1");
     expect(classes).toContain("z-10");
-    // The pill's ground is the row-hover tint itself (bg-accent) -- it reads
-    // as part of the row, not a floating widget; opaque, it also keeps the
-    // label underneath from bleeding through.
-    expect(classes).toContain("bg-accent");
+    // The pill carries no ground: the hover band underneath (the li's
+    // transit tint) shows straight through, so the strip reads as part of
+    // the row -- a translucent pill would double-tint the band, an opaque
+    // one can never match an alpha band. The label keeps clear via the
+    // select button's static pr-24 reserve.
+    expect(classes).not.toContain("bg-transit");
     expect(classes).not.toContain("bg-card");
     expect(classes).not.toContain("shadow-md");
     expect(classes).toContain("opacity-0");
@@ -1147,20 +1149,20 @@ describe("WorkingSetList", () => {
     );
     const select = screen.getByRole("button", { name: /^people/ });
     const rowClasses = select.closest("li")!.className.split(/\s+/);
-    expect(rowClasses).toContain("hover:bg-accent");
+    expect(rowClasses).toContain("hover:bg-transit");
     // bg-clip-content keeps a py-gutter between adjacent rows' bands (padding
     // carries the gap, not margin -- a margin gap is a hover dead zone).
     expect(rowClasses).toContain("bg-clip-content");
     expect(rowClasses).not.toContain("transition-colors");
     expect(rowClasses).toContain("rounded-md");
-    expect(select.className.split(/\s+/)).not.toContain("hover:bg-accent");
+    expect(select.className.split(/\s+/)).not.toContain("hover:bg-transit");
   });
 
   it("rests the icon glyphs muted, highlights the hot icon, and stays clear of per-site cursor classes", () => {
     // The icon strip reads like the reference session list: each glyph rests
-    // muted on the pill's accent ground and the hovered / keyboard-focused
+    // muted on the pill's transit ground and the hovered / keyboard-focused
     // icon highlights to foreground -- color alone marks the hot icon (a
-    // background tint would be invisible on the pill's own accent). The hand
+    // background tint would be invisible on the pill's own transit). The hand
     // comes from the app.css base rule (button:not(:disabled)), so no row
     // button carries a per-site cursor class -- the not.toContain pins that
     // no scattered cursor-pointer patch creeps back in.
@@ -1192,7 +1194,7 @@ describe("WorkingSetList", () => {
       // would be a per-site cursor-default class, so absence is pinned both
       // ways (the base rule is the hand, not any local class).
       expect(classes).not.toContain("cursor-default");
-      expect(classes).not.toContain("hover:bg-accent");
+      expect(classes).not.toContain("hover:bg-transit");
     }
     // The select button takes the same base hand as the strip -- its click
     // is the row's selection. The label's truncation-recovery affordance is
@@ -1364,5 +1366,142 @@ describe("WorkingSetList", () => {
     const classes = select.className.split(/\s+/);
     expect(classes).toContain("font-semibold");
     expect(classes).not.toContain("bg-accent");
+  });
+});
+
+// The row context menu (#1570, ADR-0149): right-click opens the row's
+// management actions (rename / replace / delete) with the TARGET captured at
+// open -- the menu acts on the right-clicked row while the selection (and the
+// detail pane that follows it) stays untouched.
+describe("WorkingSetList context menu", () => {
+  // Spies must not leak between tests; the delete dialog's impact preview
+  // needs the same empty seed as the main suite above.
+  afterEach(() => vi.restoreAllMocks());
+  beforeEach(() => {
+    vi.mocked(previewDeleteImpact).mockResolvedValue([]);
+  });
+
+  const ordersDataset = { ...mockDataset, reference_name: "orders", display_name: "orders" };
+
+  function rightClickRow(name: RegExp): void {
+    fireEvent.contextMenu(screen.getByRole("button", { name }));
+  }
+
+  it("opens the three-action menu on right-click", () => {
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[mockDataset]}
+        activeName="people"
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onReplace={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    rightClickRow(/^people/);
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "重命名" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "换源" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "删除" })).toBeInTheDocument();
+  });
+
+  it("targets the right-clicked row regardless of the selection", () => {
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[mockDataset, ordersDataset]}
+        activeName="people"
+        selectedName="people"
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    rightClickRow(/^orders/);
+    fireEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
+    // The rename dialog carries the CAPTURED target's display name: the
+    // menu opened on the orders row while people held the selection.
+    expect(screen.getByDisplayValue("orders")).toBeInTheDocument();
+  });
+
+  it("leaves the selection untouched on right-click", () => {
+    const onSelect = vi.fn();
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[mockDataset, ordersDataset]}
+        activeName="people"
+        selectedName="people"
+        onSelect={onSelect}
+        onRename={() => {}}
+      />,
+    );
+    // Resolve the rows BEFORE opening the menu: while the modal menu is open
+    // Radix aria-hides the outside tree, so post-open role queries miss.
+    const pickedRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
+    const rightClickedRow = screen.getByRole("button", { name: /^orders/ }).closest("li")!;
+    rightClickRow(/^orders/);
+    expect(onSelect).not.toHaveBeenCalled();
+    // The selection band stays on the picked row.
+    expect(pickedRow.className.split(/\s+/)).toContain("bg-accent");
+    expect(rightClickedRow.className.split(/\s+/)).not.toContain("bg-accent");
+  });
+
+  it("routes delete through the confirm dialog chain", () => {
+    const onDelete = vi.fn();
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[ordersDataset]}
+        activeName="orders"
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    rightClickRow(/^orders/);
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    // Nothing is deleted until the dialog confirms.
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("offers only the actions that have handlers", () => {
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[mockDataset]}
+        activeName="people"
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    rightClickRow(/^people/);
+    expect(screen.getByRole("menuitem", { name: "重命名" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "换源" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "删除" })).not.toBeInTheDocument();
+  });
+
+  it("disables the actions while an operation is in flight", () => {
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[mockDataset]}
+        activeName="people"
+        selectedName={null}
+        loading
+        onSelect={() => {}}
+        onRename={() => {}}
+        onReplace={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    rightClickRow(/^people/);
+    for (const name of ["重命名", "换源", "删除"]) {
+      expect(screen.getByRole("menuitem", { name })).toHaveAttribute("data-disabled");
+    }
   });
 });

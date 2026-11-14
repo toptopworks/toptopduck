@@ -414,7 +414,7 @@ export function ProbeFaceRow({
   // the toggle must not flicker away while a probe runs.
   const hasFoldContent = foldContent !== null;
   return (
-    <div className="hover:bg-accent px-4 py-3">
+    <div className="hover:bg-transit px-4 py-3">
       <div className="flex items-center gap-3">
         {/* The chevron rides the row END (after the actions):
          * collapsed rows without fold content render none, and

@@ -257,7 +257,7 @@ describe("FoldHead", () => {
 });
 
 describe("FieldHint", () => {
-  it("renders the trigger with its accessible name and the muted body", async () => {
+  it("renders the trigger with its accessible name and the dimmed body", async () => {
     renderSettings(
       <FieldHint label="Import mode explanation">Body copy</FieldHint>,
     );
@@ -265,6 +265,9 @@ describe("FieldHint", () => {
       name: "Import mode explanation",
     });
     const tooltip = await hoverOpenTooltip(trigger);
+    expect(screen.getByText("Body copy")).toHaveClass(
+      "text-inverted-foreground/75",
+    );
     expect(tooltip.textContent).toBe("Body copy");
   });
 
@@ -282,7 +285,7 @@ describe("FieldHint", () => {
     expect(tooltip.textContent).toContain("Body copy");
     const title = screen.getByText("Import mode");
     expect(title.tagName).toBe("P");
-    expect(title).toHaveClass("text-popover-foreground", "font-medium");
+    expect(title).toHaveClass("text-inverted-foreground", "font-medium");
   });
 });
 

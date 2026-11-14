@@ -138,6 +138,11 @@ vi.mock("../api", async (importOriginal) => {
     // posture (issue #352). Default per_call read + no-op write; the chip
     // tests override per scenario.
     getAuthorizationMode: vi.fn(async () => "per_call" as const),
+    // Issue #1369: the auth chip's trust-management read + revoke; no Shell
+    // scenario drives the trust set, so the empty list is the honest answer
+    // (no badge, no panel section) and the revoke is a no-op.
+    listSessionTrust: vi.fn(async () => []),
+    revokeSessionTrust: vi.fn(async () => {}),
     setAuthorizationMode: vi.fn(async () => {}),
     // The composer runtime picker reads / writes the session's runtime choice
     // + the v1 adapter table (issue #353). Default built-in read + empty
@@ -187,7 +192,8 @@ import type { McpServerConfig } from "../types/mcp";
 import { toast, useToast } from "../components/ui/use-toast";
 import { baseAppConfig as sharedBaseAppConfig, skillEntry } from "../test-fixtures";
 import { artifactTurn, recordedTurn, textual } from "../session/__tests__/fixtures";
-import { embedOk } from "../components/common/__tests__/helpers";
+import { catalogIntl, embedOk } from "../components/common/__tests__/helpers";
+import { flowFailedMessage } from "../lib/error-presentation";
 import type { SessionRuntimeChoice } from "../types/runtime";
 import { log } from "../lib/log";
 
@@ -286,13 +292,13 @@ describe("App three-column shell (issue #79 ACs)", () => {
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
-  it("renders the three-column grid + thin top bar (R1: session bar / rail / workspace)", async () => {
+  it("renders the three-column grid + thin top bar (R1: session bar / rail / right sidebar)", async () => {
     render(<App />);
     await openSession();
     // Three columns + topbar + questionbar all render.
     expect(document.querySelector(".session-sidebar")).toBeInTheDocument();
     expect(document.querySelector(".session-rail")).toBeInTheDocument();
-    expect(document.querySelector(".session-workspace")).toBeInTheDocument();
+    expect(document.querySelector(".session-right-sidebar")).toBeInTheDocument();
     expect(document.querySelector(".topbar")).toBeInTheDocument();
     expect(document.querySelector(".shell-bar-slot")).toBeInTheDocument();
   });
@@ -343,7 +349,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
     await openSession();
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    // The workspace ResultView heading appears (chart+table pane).
+    // The right-sidebar ResultView heading appears (chart+table pane).
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /总共几行/ })).toBeInTheDocument(),
     );
@@ -367,7 +373,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
     const asksBeforeClick = vi.mocked(askQuestion).mock.calls.length;
     // Click result_1 in the rail (the Thread result-link button).
     fireEvent.click(screen.getByRole("button", { name: /结果：result_1/ }));
-    // viewedResult moved to result_1; the workspace now shows result_1.
+    // viewedResult moved to result_1; the right sidebar now shows result_1.
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
     );
@@ -419,14 +425,14 @@ describe("App three-column shell (issue #79 ACs)", () => {
     );
   });
 
-  it("keeps the workspace inert to a textual last turn; a rail click moves viewedResult (ADR-0114)", async () => {
+  it("keeps the right sidebar inert to a textual last turn; a rail click moves viewedResult (ADR-0114)", async () => {
     // End-to-end chain: R5 resume lands viewedResult on the LAST Materialized
     // (result_2). The last turn is a Clarify -- the rail is its read surface,
-    // and the workspace reacts not at all (still showing result_2, the exact
+    // and the right sidebar reacts not at all (still showing result_2, the exact
     // "keep showing what was being viewed" AC). Clicking an EARLIER
     // Materialized result in the rail moves ONLY viewedResult (no pin flag)
-    // -> the workspace shows result_1's table. This is the full
-    // handleSelectResult -> deriveWorkspaceContent path the pure-function
+    // -> the right sidebar shows result_1's table. This is the full
+    // handleSelectResult -> deriveRightSidebarContent path the pure-function
     // unit test alone cannot cover.
     const r1 = src("result_1");
     const r2 = src("result_2");
@@ -448,11 +454,11 @@ describe("App three-column shell (issue #79 ACs)", () => {
     ];
     render(<App />);
     await openSession();
-    // The rail renders the Clarify turn; the workspace still shows result_2
+    // The rail renders the Clarify turn; the right sidebar still shows result_2
     // (resume landing) -- the textual last turn changed nothing.
     await waitFor(() => expect(document.querySelector(".turn-outcome.textual")).toBeInTheDocument());
     expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument();
-    // Click result_1 in the rail -> only viewedResult moves -> workspace shows result_1's table.
+    // Click result_1 in the rail -> only viewedResult moves -> right sidebar shows result_1's table.
     fireEvent.click(screen.getByRole("button", { name: /结果：result_1/ }));
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
@@ -463,8 +469,8 @@ describe("App three-column shell (issue #79 ACs)", () => {
     // The rail's Failed card renders the failure by TurnFailure kind through
     // the locale catalog (no backend Display string crosses IPC); the engine
     // detail rides the collapsed TechnicalDetailsFold. ADR-0114: the
-    // workspace is inert to turn outcomes -- the rail is the read surface,
-    // so the workspace stays on the hero.
+    // the right sidebar is inert to turn outcomes -- the rail is the read surface,
+    // so the right sidebar stays on the hero.
     state.workingSet = [src("result_1")];
     state.thread = [
       {
@@ -489,8 +495,8 @@ describe("App three-column shell (issue #79 ACs)", () => {
     const card = document.querySelector(".turn-outcome.failed") as HTMLElement;
     expect(within(card).getByText("执行失败")).toBeInTheDocument(); // error.turn.execution
     expect(within(card).getByText("no_such_col")).toBeInTheDocument(); // fold detail
-    // The workspace shows no outcome card for the failed turn.
-    expect(document.querySelector(".workspace-hero")).toBeInTheDocument();
+    // The right sidebar shows no outcome card for the failed turn.
+    expect(document.querySelector(".right-sidebar-hero")).toBeInTheDocument();
   });
 
   it("elevates working-set panels with shadow-sm (issue #222)", async () => {
@@ -937,7 +943,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       // The "+" file button + the auth-mode chip.
       expect(bar.contains(screen.getByRole("button", { name: "添加文件" }))).toBe(true);
       expect(
-        bar.contains(await screen.findByRole("combobox", { name: /授权模式/ })),
+        bar.contains(await screen.findByRole("button", { name: /授权模式/ })),
       ).toBe(true);
       // The runtime picker trailing slot.
       expect(
@@ -996,15 +1002,13 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       expect(ingestFile).not.toHaveBeenCalled();
 
       // Auth-mode draft: switch to no-confirmation (no IPC yet).
-      const authTrigger = screen.getByRole("combobox", { name: "授权模式：请求批准" });
-      fireEvent.pointerDown(authTrigger, { button: 0, pointerType: "mouse" });
+      const authTrigger = screen.getByRole("button", { name: "授权模式：请求批准" });
       fireEvent.click(authTrigger);
-      const option = await screen.findByRole("option", { name: /完全访问权限/ });
-      fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
-      fireEvent.click(option);
+      const radio = await screen.findByRole("radio", { name: /完全访问权限/ });
+      fireEvent.click(radio);
       await waitFor(() =>
         expect(
-          screen.getByRole("combobox", { name: "授权模式：完全访问权限" }),
+          screen.getByRole("button", { name: "授权模式：完全访问权限" }),
         ).toBeInTheDocument(),
       );
       expect(setAuthorizationMode).not.toHaveBeenCalled();
@@ -1434,7 +1438,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
   it("resume lands viewedResult on the last Materialized and shows the stale disclosure (ADR-0062 R5 / 0047)", async () => {
     // A persisted session with two Materialized turns; result_2 is the last ->
     // R5 points viewedResult at it on resume. result_2's source was replaced
-    // after materialization, so the workspace shows the old table + the
+    // after materialization, so the right sidebar shows the old table + the
     // stage-stale disclosure banner (ADR-0047 honest wording).
     vi.mocked(listSessions).mockResolvedValue([
       {
@@ -1469,7 +1473,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument(),
     );
-    // ADR-0047 stage-stale: the workspace shows the old table + disclosure.
+    // ADR-0047 stage-stale: the right sidebar shows the old table + disclosure.
     expect(screen.getByText(/此结果已失效/)).toBeInTheDocument();
   });
 
@@ -1613,7 +1617,7 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     // recorded turn already carries the settle-computed manifest (ADR-0124
     // Decision 2), TurnCard's render gate mounts the ArtifactCard, the
     // exists-checked row is clickable, handleSelectFile moves viewedResult
-    // onto the file view AND expands the workspace, and the manifest-member HTML
+    // onto the file view AND expands the right sidebar, and the manifest-member HTML
     // renders the sandboxed iframe stage.
     state.workingSet = [src("people")];
     state.thread = [artifactTurn(["/sessions/sess-1/artifacts/page.html"])];
@@ -1623,11 +1627,11 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     expect(screen.getByText(/交付文件/)).toBeInTheDocument();
     // Resume posture (#771 mirror): no Materialized turn means nothing
     // auto-opens -- the one-shot spends silently on the init scan and the
-    // workspace stays folded until the user picks a row.
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    // the right sidebar stays folded until the user picks a row.
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(true);
     fireEvent.click(row);
     await waitFor(() =>
-      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+      expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(false),
     );
     const frame = document.querySelector("[data-testid=\"artifact-frame\"]");
     expect(frame?.getAttribute("src")).toContain("page.html");
@@ -1704,8 +1708,8 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     await openSession();
     // The mount's initial conversation load saw the empty thread; the
     // optimistic append carries no manifest (settle-computed fields are
-    // backend-only), so the workspace is still folded here.
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    // backend-only), so the right sidebar is still folded here.
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(true);
     // The recorded row the turn-end refetch returns (mock parity): the
     // same outcome plus the manifest.
     state.thread = [artifactTurn(["/sessions/sess-1/artifacts/report.pdf"], outcome)];
@@ -1720,10 +1724,10 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     expect(releaseRefetch).not.toBeNull();
     releaseRefetch!();
     // The manifest lands; the auto-open one-shot fires (no Materialized -> the artifact owns
-    // the stage): the workspace expands and the primary renders in-page (pdf
+    // the stage): the right sidebar expands and the primary renders in-page (pdf
     // -> the unsandboxed viewer frame, issue #1199).
     await waitFor(() =>
-      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+      expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(false),
     );
     const frame = await waitFor(() => {
       const node = document.querySelector("[data-testid=\"artifact-frame\"]");
@@ -1755,11 +1759,11 @@ describe("App viz stage presentation (issue #1093, ADR-0120 calibration)", () =>
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
-  it("stages a settled fence body onto the workspace on click (the stream->stage link)", async () => {
+  it("stages a settled fence body onto the right sidebar on click (the stream->stage link)", async () => {
     // The composition chain pinned end to end (the #1088 file-face twin):
     // the settled fence renders clickable through the context link,
     // handleSelectViz moves viewedResult onto the viz view AND expands the
-    // workspace, the stage renders the export-bearing frame, and the
+    // right sidebar, the stage renders the export-bearing frame, and the
     // clicked fence lights the aria-current mirror.
     const body = "```vega-lite\n{\"mark\": \"bar\"}\n```";
     state.workingSet = [src("people")];
@@ -1768,11 +1772,11 @@ describe("App viz stage presentation (issue #1093, ADR-0120 calibration)", () =>
     await openSession();
     const fence = await screen.findByRole("button", { name: "在结果页查看图表" });
     // Resume posture mirror (#771): no Materialized turn auto-opens, so the
-    // workspace stays folded until the fence is clicked.
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    // the right sidebar stays folded until the fence is clicked.
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(true);
     fireEvent.click(fence);
     await waitFor(() =>
-      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+      expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(false),
     );
     // The stage's third face: the export anchor on the viz view.
     expect(screen.getByRole("button", { name: "下载图表" })).toBeInTheDocument();
@@ -1797,18 +1801,18 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
-  it("starts a session with the workspace collapsed (ADR-0083 cold start, issue #298)", async () => {
-    // The workspace panel defaults to COLLAPSED -- a fresh session (and every
+  it("starts a session with the right sidebar collapsed (ADR-0083 cold start, issue #298)", async () => {
+    // The right-sidebar panel defaults to COLLAPSED -- a fresh session (and every
     // pane mount: new / resume / app start) begins folded; the header toggle
     // is the manual open path.
     render(<App />);
     await openSession();
     const pane = document.querySelector(".session-pane");
-    expect(pane?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(pane?.classList.contains("right-sidebar-collapsed")).toBe(true);
     expect(screen.getByRole("button", { name: "展开右侧栏" })).toBeInTheDocument();
   });
 
-  it("centers the thread content in a reading column when the workspace is folded (issue #833)", async () => {
+  it("centers the thread content in a reading column when the right sidebar is folded (issue #833)", async () => {
     // The rail is the full-width scroll container in the folded state; the
     // thread content centers inside it via the .rail-reading-column wrapper
     // (capped by --reading-column-cap). jsdom has no layout engine, so the
@@ -1822,12 +1826,12 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // cannot silently opt out of the reading column.
     render(<App />);
     await openSession();
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(true);
     const wrapper = document.querySelector<HTMLElement>(".session-rail > .rail-reading-column");
     expect(wrapper).toBeInTheDocument();
     expect(within(wrapper!).getByText("尚无对话。在下方提问或加载数据开始。")).toBeInTheDocument();
     // Materialized turn (the suite's ADR-0083 idiom): auto-expands the
-    // workspace, which does not matter here -- the wrapper is unconditional.
+    // right sidebar, which does not matter here -- the wrapper is unconditional.
     const outcome833 = {
       kind: "Materialized",
       data: {
@@ -1932,14 +1936,14 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(activeScrollBy).toHaveBeenCalledTimes(6);
   });
 
-  it("opens / closes the workspace via the header toggle (manual fold)", async () => {
+  it("opens / closes the right sidebar via the header toggle (manual fold)", async () => {
     render(<App />);
     await openSession();
     fireEvent.click(screen.getByRole("button", { name: "展开右侧栏" }));
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false);
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(false);
     // The toggle flips to its close label once open.
     fireEvent.click(screen.getByRole("button", { name: "收起右侧栏" }));
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(true);
   });
 
   it("shields the strip behind the bar and keeps the scrollbar band open (issue #836)", async () => {
@@ -2043,12 +2047,12 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(observers[0].disconnected).toBe(true);
   });
 
-  it("the first Materialized promotion auto-expands the workspace ONCE (ADR-0083)", async () => {
+  it("the first Materialized promotion auto-expands the right sidebar ONCE (ADR-0083)", async () => {
     render(<App />);
     await openSession();
     // Queue the test's own turns AFTER openSession so the creation turn consumes
     // the helper's one-time rejection, not these Materialized outcomes (which
-    // would otherwise auto-expand the workspace during openSession).
+    // would otherwise auto-expand the right sidebar during openSession).
     const outcome1 = {
       kind: "Materialized",
       data: {
@@ -2070,16 +2074,16 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     vi.mocked(askQuestion).mockResolvedValueOnce(outcome1).mockResolvedValueOnce(outcome2);
     // The recorded rows the turn-end refreshes return (mock parity, #1088).
     state.thread = [recordedTurn("第一问", outcome1), recordedTurn("第二问", outcome2)];
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(true);
     // First promotion -> the panel opens with the produced dataset.
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第一问" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     await waitFor(() =>
-      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+      expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(false),
     );
     // The user folds it back; the one-shot is spent.
     fireEvent.click(screen.getByRole("button", { name: "收起右侧栏" }));
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(true);
     // A SECOND promotion must not steal focus -- the fold stays.
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第二问" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
@@ -2088,7 +2092,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /结果：result_2/ })).toBeInTheDocument(),
     );
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(true);
   });
 
   it("on resume onto a materialized session, a new promotion never auto-expands (one-shot is session-scoped, issue #771)", async () => {
@@ -2119,7 +2123,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // thread, so the refetch sees both rows like the backend would.
     // Resume cold-start: folded, with the R5 landing visible on the rail
     // (result_1 is the viewed result) -- the landing moved no fold.
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(true);
     expect(await screen.findByRole("button", { name: /result_1 的预览/ })).toHaveAttribute(
       "aria-current",
       "true",
@@ -2138,21 +2142,21 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
       "aria-current",
       "true",
     );
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(true);
   });
 
-  it("a rail preview-card click opens the workspace on the same dataset (dual view, issue #298)", async () => {
-    // The rail preview card and the workspace panel are dual views of the
+  it("a rail preview-card click opens the right sidebar on the same dataset (dual view, issue #298)", async () => {
+    // The rail preview card and the right-sidebar panel are dual views of the
     // same dataset: clicking the card selects its result AND unfolds the
-    // workspace onto it (cold start is collapsed).
+    // right sidebar onto it (cold start is collapsed).
     state.thread = [materializedTurn("result_1")];
     render(<App />);
     await openSession();
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(true);
     fireEvent.click(await screen.findByRole("button", { name: /result_1 的预览/ }));
-    // The fold opens and the workspace shows result_1's table (the viewed
+    // The fold opens and the right sidebar shows result_1's table (the viewed
     // selection landed -- the card reads back as active).
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false);
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(false);
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
     );
@@ -2165,12 +2169,12 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
   it("switching the viewed dataset with the panel already open (dual view, issue #298)", async () => {
     // Dual-view linkage is not only "collapsed -> click -> open": with the
     // panel already open, clicking another card swaps viewedResult and the
-    // active marker follows. expandWorkspace is a no-op when already open;
+    // active marker follows. expandRightSidebar is a no-op when already open;
     // selectResult carries the switch.
     state.thread = [materializedTurn("result_1"), materializedTurn("result_2")];
     render(<App />);
     await openSession();
-    // Open the workspace onto result_1.
+    // Open the right sidebar onto result_1.
     fireEvent.click(await screen.findByRole("button", { name: /result_1 的预览/ }));
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
@@ -2179,7 +2183,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
       "aria-current",
       "true",
     );
-    // Click result_2's card: the workspace swaps + the active marker moves.
+    // Click result_2's card: the right sidebar swaps + the active marker moves.
     fireEvent.click(screen.getByRole("button", { name: /result_2 的预览/ }));
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument(),
@@ -2194,13 +2198,13 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     );
   });
 
-  it("a rail result-link click also unfolds the workspace (issue #298)", async () => {
+  it("a rail result-link click also unfolds the right sidebar (issue #298)", async () => {
     state.thread = [materializedTurn("result_1")];
     render(<App />);
     await openSession();
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(true);
     fireEvent.click(await screen.findByRole("button", { name: /结果：result_1/ }));
-    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false);
+    expect(document.querySelector(".session-pane")?.classList.contains("right-sidebar-collapsed")).toBe(false);
   });
 
   it("restores persisted collapse prefs from app-config on mount (ADR-0038/0054)", async () => {
@@ -2243,8 +2247,8 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
 
   it("collapses the settings overlay left nav via the top-bar toggle (issue #285)", async () => {
     // The settings overlay's left nav collapses from the SAME topbar slot as
-    // the workspace session-sidebar toggle (settings-mode swaps in the settings
-    // kind). Unlike the workspace collapse prefs this is a TEMP state -- it
+    // the right-sidebar session-sidebar toggle (settings-mode swaps in the settings
+    // kind). Unlike the right-sidebar collapse prefs this is a TEMP state -- it
     // never rides app-config, so this test asserts only the className flip, not
     // a setAppConfig commit.
     vi.mocked(getAppConfig).mockResolvedValue(
@@ -2646,11 +2650,11 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     await openSession();
     const bar = document.querySelector(".question-bar");
     expect(bar).toBeInTheDocument();
-    // The unified container holds the trigger (+), auth-mode Select, and the
+    // The unified container holds the trigger (+), auth-mode chip, and the
     // textarea -- all inside .question-bar (ADR-0083 composer row restructured
     // into a single container).
     const trigger = screen.getByRole("button", { name: "添加文件" });
-    const chip = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
+    const chip = await screen.findByRole("button", { name: "授权模式：请求批准" });
     expect(bar?.contains(trigger)).toBe(true);
     expect(bar?.contains(chip)).toBe(true);
     // The textarea sits above the toolbar row in DOM order.
@@ -2672,30 +2676,28 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // system) the trigger is the degraded pure add-files button.
     const trigger = screen.getByRole("button", { name: "添加文件" });
     expect(bar?.contains(trigger)).toBe(true);
-    // Issue #352: the Select reads the session's posture (per_call default)
+    // Issue #352: the chip reads the session's posture (per_call default)
     // and renders INSIDE the question-bar, not as a loose sibling.
-    const authTrigger = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
+    const authTrigger = await screen.findByRole("button", { name: "授权模式：请求批准" });
     expect(bar?.contains(authTrigger)).toBe(true);
   });
 
   it("switches the auth-mode Select to no-confirmation with the warning color (ADR-0080)", async () => {
     render(<App />);
     await openSession();
-    const authTrigger = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
+    const authTrigger = await screen.findByRole("button", { name: "授权模式：请求批准" });
 
-    fireEvent.pointerDown(authTrigger, { button: 0, pointerType: "mouse" });
     fireEvent.click(authTrigger);
 
-    const option = await screen.findByRole("option", { name: /完全访问权限/ });
-    fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
-    fireEvent.click(option);
+    const radio = await screen.findByRole("radio", { name: /完全访问权限/ });
+    fireEvent.click(radio);
 
     await waitFor(() =>
       expect(setAuthorizationMode).toHaveBeenCalledWith("sess-1", "no_confirmation"),
     );
     // The flipped trigger reads 完全访问权限 and rides the --warning token
     // (border / fill / text all consume it).
-    const flipped = await screen.findByRole("combobox", { name: "授权模式：完全访问权限" });
+    const flipped = await screen.findByRole("button", { name: "授权模式：完全访问权限" });
     expect(flipped.className).toContain("border-warning/40");
     expect(flipped.className).toContain("bg-warning/10");
     expect(flipped.className).toContain("text-warning");
@@ -2731,10 +2733,10 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     await waitFor(() =>
       expect(getAuthorizationMode).toHaveBeenCalledWith("sess-resume"),
     );
-    // The Select renders the backend's actual answer for the NEW sid, not a
+    // The chip renders the backend's actual answer for the NEW sid, not a
     // hardcoded per_call default.
     expect(
-      await screen.findByRole("combobox", { name: "授权模式：完全访问权限" }),
+      await screen.findByRole("button", { name: "授权模式：完全访问权限" }),
     ).toBeInTheDocument();
   });
 
@@ -3395,5 +3397,218 @@ describe("App toast viewport mount (ADR-0142, issue #1494)", () => {
     act(() => {
       result.current.dismiss();
     });
+  });
+});
+
+// Issue #1563: the shell banner's lifecycle. A shell-level reject mounts the
+// banner with the neutral verb prefix ("{verb}失败：", the composer reuse from
+// issue #139), and its close affordance clears it -- the only production clear,
+// so a rejected action no longer pins the banner up until a webview reload.
+describe("App shell error banner lifecycle (issue #1563)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("a rejected bar creation mounts the shell banner with the verb prefix, and close clears it", async () => {
+    // The "{verb}失败：" expectation composes through the production composer
+    // (issue #1100 precedent): no mirrored verb map in the test.
+    const bannerText = flowFailedMessage(catalogIntl("zh-CN"), "shell", "内部错误");
+    vi.mocked(createSession).mockRejectedValueOnce({
+      kind: "Engine",
+      data: "close-wait timed out",
+    });
+    render(<App />);
+    // Cold-start bar submit: the createSession reject surfaces through the
+    // shell banner -- a shell-level refusal, attributed to no session (none
+    // opened).
+    fireEvent.change(screen.getByLabelText("提问"), {
+      target: { value: "test question" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    expect(await screen.findByText(bannerText)).toBeInTheDocument();
+    // Expanded posture (no session active): the track wrapper mirrors the
+    // same activeRightSidebarCollapsed source as the session pane and the
+    // bar slot, so the fold class is absent here.
+    expect(
+      document
+        .querySelector(".shell-error-track")
+        ?.classList.contains("right-sidebar-collapsed"),
+    ).toBe(false);
+    // The close affordance clears the banner: it leaves the grid entirely,
+    // and the shell falls back to the plain cold-start face.
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    await waitFor(() =>
+      expect(screen.queryByText(bannerText)).not.toBeInTheDocument(),
+    );
+    // Dismiss clears the slot, it does not retire the surface: a second
+    // reject mounts a fresh banner through the same path.
+    vi.mocked(createSession).mockRejectedValueOnce({
+      kind: "Engine",
+      data: "close-wait timed out",
+    });
+    fireEvent.change(screen.getByLabelText("提问"), {
+      target: { value: "second question" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    expect(await screen.findByText(bannerText)).toBeInTheDocument();
+  });
+
+  it("mirrors the folded posture on the track wrapper while a session is active", async () => {
+    // The wrapper's fold class rides the same activeRightSidebarCollapsed
+    // source as the pane and the bar slot (#1563): with an active session and
+    // nothing auto-opened the right sidebar is folded, so the banner track
+    // must carry the collapsed class for the banner to ride the collapsed
+    // grid. Without this pin, deleting the conditional in App passes the
+    // whole suite green.
+    const bannerText = flowFailedMessage(catalogIntl("zh-CN"), "shell", "内部错误");
+    vi.mocked(listSessions).mockResolvedValue([
+      {
+        recipe_path: "/x/persisted.json",
+        display_name: "季报",
+        last_modified_at: Date.now(),
+        source_summary: { first_source_name: "people", source_count: 1, turn_count: 2 },
+        format_version: 1,
+        pinned: false,
+        archived: false,
+        workspace: null,
+      },
+    ]);
+    render(<App />);
+    await openSession();
+    // Posture precondition: an active session with nothing auto-opened keeps
+    // the right sidebar folded (the #771 resume-posture mirror).
+    expect(
+      document
+        .querySelector(".session-pane")
+        ?.classList.contains("right-sidebar-collapsed"),
+    ).toBe(true);
+    // A shell-level reject while the session stays active: resuming the
+    // persisted entry with its open rejecting surfaces the shell banner
+    // without tearing the active session down.
+    vi.mocked(openRecipe).mockRejectedValueOnce({
+      kind: "Engine",
+      data: "close-wait timed out",
+    });
+    fireEvent.click(screen.getByText("季报"));
+    expect(await screen.findByText(bannerText)).toBeInTheDocument();
+    expect(
+      document
+        .querySelector(".shell-error-track")
+        ?.classList.contains("right-sidebar-collapsed"),
+    ).toBe(true);
+  });
+});
+
+describe("App context-menu policy mount (ADR-0149, issue #1570)", () => {
+  it("keeps the native menu off non-editing surfaces once the shell mounts", () => {
+    render(<App />);
+    // A blank surface: the mounted policy's document listener must claim the
+    // event (the WebView's reload / print items never surface in the shell).
+    const plain = document.createElement("div");
+    document.body.appendChild(plain);
+    const onPlain = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    plain.dispatchEvent(onPlain);
+    plain.remove();
+    expect(onPlain.defaultPrevented).toBe(true);
+    // The whitelist arm rides the same mounted listener: an editing surface
+    // keeps the native menu, so a blanket-prevent regression also goes red.
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    const onField = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    field.dispatchEvent(onField);
+    field.remove();
+    expect(onField.defaultPrevented).toBe(false);
+  });
+});
+
+describe("App quote lifecycle (#1573)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  afterEach(() => {
+    document.getSelection()?.removeAllRanges();
+  });
+
+  const QUOTE_BODY = "可引用的正文内容比较长一些";
+
+  async function openSessionWithProse(): Promise<void> {
+    state.workingSet = [src("people")];
+    state.thread = [textual(QUOTE_BODY)];
+    render(<App />);
+    await openSession();
+    await waitFor(() => expect(screen.getByText(QUOTE_BODY)).toBeInTheDocument());
+  }
+
+  // Stage a quote through the real chain: select the thread's marked prose,
+  // release the gesture (the window must see a selectionchange), click the
+  // toolbar's quote action, then wait for the chip's excerpt.
+  async function stageQuote(): Promise<void> {
+    const prose = document.querySelector(".round-text") as HTMLElement;
+    const range = document.createRange();
+    range.selectNodeContents(prose);
+    const selection = document.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    const conversation = document.querySelector(".session-conversation") as HTMLElement;
+    fireEvent.pointerDown(conversation, { button: 0 });
+    fireEvent(document, new Event("selectionchange"));
+    fireEvent.pointerUp(conversation, { button: 0 });
+    const toolbar = document.querySelector("[data-selection-toolbar]") as HTMLElement;
+    expect(toolbar).not.toBeNull();
+    const quote = [...toolbar.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("添加到对话"),
+    );
+    fireEvent.click(quote as HTMLElement);
+    await waitFor(() =>
+      expect(screen.getByText(`${QUOTE_BODY.slice(0, 8)}…`)).toBeInTheDocument(),
+    );
+  }
+
+  it("materializes staged quotes at submit and clears the staging", async () => {
+    await openSessionWithProse();
+    const asksBefore = vi.mocked(askQuestion).mock.calls.length;
+    await stageQuote();
+    // Settle this turn so the bar returns to idle for the second submit.
+    vi.mocked(askQuestion).mockRejectedValueOnce(new Error("settle turn one"));
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第二问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(vi.mocked(askQuestion).mock.calls.length).toBe(asksBefore + 1),
+    );
+    const ask = JSON.stringify(
+      vi.mocked(askQuestion).mock.calls.at(-1),
+    );
+    expect(ask).toContain(`> ${QUOTE_BODY}`);
+    expect(ask).toContain("第二问");
+    // The staging cleared at the submit boundary: the next question carries
+    // no blockquote.
+    vi.mocked(askQuestion).mockRejectedValueOnce(new Error("settle turn two"));
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第三问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(vi.mocked(askQuestion).mock.calls.length).toBe(asksBefore + 2),
+    );
+    const nextAsk = JSON.stringify(
+      vi.mocked(askQuestion).mock.calls.at(-1),
+    );
+    expect(nextAsk).toContain("第三问");
+    expect(nextAsk).not.toContain("> ");
+  });
+
+  it("Backspace at the draft's start withdraws the staged quote", async () => {
+    await openSessionWithProse();
+    await stageQuote();
+    const excerpt = `${QUOTE_BODY.slice(0, 8)}…`;
+    fireEvent.keyDown(screen.getByLabelText("提问"), { key: "Backspace" });
+    await waitFor(() => expect(screen.queryByText(excerpt)).toBeNull());
   });
 });

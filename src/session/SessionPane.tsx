@@ -5,11 +5,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail } from "../lib/error-presentation";
 import { log } from "../lib/log";
 import { getApprovalAttachments } from "../api";
-import { WorkspaceToggle } from "../shell/WorkspaceToggle";
+import { RightSidebarToggle } from "../shell/RightSidebarToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useRailFollow } from "./useRailFollow";
+import { useSelectionSurface } from "./useSelectionSurface";
 import { useSessionState } from "./useSessionState";
-import { useComposerQueue } from "./useComposerQueue";
+import { useComposerQueue, type VerdictThunk } from "./useComposerQueue";
 import { consumePendingPayload } from "./pendingPayload";
 import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
@@ -19,12 +20,14 @@ import { ErrorBoundary } from "../components/common/ErrorBoundary";
 import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
 import { ArtifactView } from "../components/thread/ArtifactView";
 import { ResultView } from "../components/thread/ResultView";
+import { SelectionToolbar } from "../components/thread/SelectionToolbar";
 import { TechnicalDetailsFold } from "../components/common/TechnicalDetailsFold";
 import { Thread } from "../components/thread/Thread";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
-import { WorkspaceWorkingSet } from "../components/dataset/WorkspaceWorkingSet";
+import { toast } from "../components/ui/use-toast";
+import { RightSidebarWorkingSet } from "../components/dataset/RightSidebarWorkingSet";
 import {
   type ReplaceFlightInfo,
   type ReplaceProgress,
@@ -32,7 +35,7 @@ import {
 } from "./useWorkingSet";
 import { cn } from "@/lib/utils";
 import type { ThreadEntry } from "../types/thread";
-import type { WorkspaceContent } from "./workspace";
+import type { RightSidebarContent } from "./workspace";
 import { VizStageView } from "../components/viz/VizStageView";
 import { artifactKeys, sessionKeys } from "./queryKeys";
 import { useSkillsRegistry } from "../skills/registry";
@@ -40,7 +43,7 @@ import { useSkillsRegistry } from "../skills/registry";
 // The per-session pane (ADR-0051/0092). One `<SessionPane key={sid} sessionId={sid} />`
 // owns ALL of a session's server state (via useSessionState -> TanStack Query)
 // and client UI state (viewedResult / loading / dialogs).
-// The shell (<App>) places this as the right grid block (rail + workspace);
+// The shell (<App>) places this as the right grid block (rail + right sidebar);
 // the session sidebar is a separate, full-height column (R1).
 //
 // ADR-0092: QuestionBar moved to the shell level. SessionPane no longer owns
@@ -95,6 +98,11 @@ interface SessionPaneProps {
    *  re-seed -- the staged names go back into the session's composer
    *  staging, so a resubmit carries the pick + question pair whole. */
   onSeedInvocations: (sessionId: string, names: string[]) => void;
+  /** Stage a selection-surface quote onto this session's composer staging
+   *  (#1573): the toolbar's quote action appends to the per-session list the
+   *  shell bar displays as chips and materializes at submit. The seed-prop
+   *  precedent -- identity-stable, sid-addressed. */
+  onStageQuote: (sessionId: string, text: string) => void;
   /** ADR-0092: lifts this session's bar-relevant fields (loading / queued /
    *  phase / handleAsk / handleCancel / handleIngestFiles) to the
    *  shell-level bar. Called via useEffect whenever the fields change. */
@@ -141,15 +149,15 @@ interface SessionPaneProps {
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
-// The workspace tab order (ADR-0045): result first, working set second.
+// The right-sidebar tab order (ADR-0045): result first, working set second.
 // Module-level so the APG keyboard handler can index/wrap it (issue #760).
-const WORKSPACE_TABS = ["result", "workingSet"] as const;
-type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
+const RIGHT_SIDEBAR_TABS = ["result", "workingSet"] as const;
+type RightSidebarTab = (typeof RIGHT_SIDEBAR_TABS)[number];
 
 // #1323 edge-docked scroll containers: both postures break the tabpanel out
-// of the workspace-body's p-4 (the host flex column is not a scroll
+// of the right-sidebar-body's p-4 (the host flex column is not a scroll
 // container, so nothing enters a scrollable overflow region) so the
-// scrollbars dock to the workspace edges; the breathing-room padding rides
+// scrollbars dock to the right-sidebar edges; the breathing-room padding rides
 // the panel itself -- padding sits inside the scrollbar.
 /** The scrolling posture, broken out on all four sides -- all four, or the
  * panel's pt stacks on the host's for a doubled 32px. */
@@ -164,7 +172,7 @@ const EDGE_DOCKED_SCROLL_CLASS = "-m-4 overflow-y-auto p-4";
  * padding, or the stage header's border-b sits flush on the tab strip's. */
 const FILE_STAGE_CLASS = "-mx-4 -mb-4 overflow-hidden";
 
-export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, recipePath, onRename, onClose, onDelete, disabled }: SessionPaneProps) {
+export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onStageQuote, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, recipePath, onRename, onClose, onDelete, disabled }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -204,7 +212,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // the working-set tab's add entry (issue #792), and the pendingPayload
   // consumption below all route through it, so a cold-start batch gates the
   // bar exactly like a manual one; the replace flight arms the same window
-  // separately, through trackWindow below. The pendingPayload
+  // separately, through armReplace below. The pendingPayload
   // chain's held question occupies the SAME slot (hold below), so the
   // session can never carry two pending questions and the bar honestly
   // shows the queued posture during the chain window. The wrapped
@@ -213,7 +221,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // instead of silently parking on the backend session lock). onSeedDraft /
   // onSeedInvocations are useCallback-stable in the shell (the #991
   // atomic-rollback channels).
-  const { queued, ingestMany, trackWindow, handleAsk: queuedHandleAsk, hold } = useComposerQueue({
+  const { queued, ingestMany, armWindow, handleAsk: queuedHandleAsk, hold } = useComposerQueue({
     sessionId,
     ingestMany: s.handleIngestMany,
     ask: s.handleAsk,
@@ -222,36 +230,24 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     hasLiveTurn: s.hasLiveTurn,
   });
   // The replace window's arming + the rail's progress line (#1512): the
-  // working-set seam hands the verdict flight here at entry; the pane mints
-  // the progress stamp (ONE clock per flight, minted at this single call
-  // site), arms the queue window (the replace holds the backend session
-  // lock, so a question submitted mid-replace must queue, not silently
-  // block on it), and clears the line at the settle. The flight ref is the
-  // identity gate: a stale settle must not clear a newer flight's line (the
-  // queue's own gate already ignores stale verdicts by the same rule).
-  const progressFlightRef = useRef<Promise<boolean> | null>(null);
-  // The line's content state, pane-local beside its identity gate: every
-  // writer and reader of this value is this pane (the Thread prop and the
-  // empty-rail gate below), so -- unlike ingestProgress, which a state hook
-  // produces -- it never crosses a hook interface.
+  // working-set seam hands the verdict thunk here at entry; armWindow mints
+  // the progress stamp (ONE clock per flight, minted in the arming tick),
+  // starts the flight, and arms the queue window (the replace holds the
+  // backend session lock, so a question submitted mid-replace must queue,
+  // not silently block on it). The handle's settled belongs to THIS flight
+  // -- a newer window arming leaves it alone -- so the line clears at its
+  // own settle with no identity gate; the queue's slot exit keeps the
+  // newest-owner rule for itself.
   const [replaceProgress, setReplaceProgress] = useState<ReplaceProgress | null>(null);
-  const trackReplace = useCallback(
-    (flight: Promise<boolean>, info: ReplaceFlightInfo) => {
-      progressFlightRef.current = flight;
-      setReplaceProgress({ ...info, startedAt: Date.now() });
-      trackWindow(flight);
-      void flight.then(
-        () => {
-          if (progressFlightRef.current === flight) setReplaceProgress(null);
-        },
-        () => {
-          if (progressFlightRef.current === flight) setReplaceProgress(null);
-        },
-      );
+  const armReplace = useCallback(
+    (verdict: VerdictThunk, info: ReplaceFlightInfo) => {
+      const handle = armWindow(verdict);
+      setReplaceProgress({ ...info, startedAt: handle.startedAt });
+      void handle.settled.then(() => setReplaceProgress(null));
     },
-    [trackWindow, setReplaceProgress],
+    [armWindow, setReplaceProgress],
   );
-  const workingSetSurfaces: UseWorkingSetSurfaces = { ...s.mutationSurfaces, trackReplace };
+  const workingSetSurfaces: UseWorkingSetSurfaces = { ...s.mutationSurfaces, armReplace };
   // Issue #829: the rail's stick-to-bottom posture. Signals only -- the
   // settled count grows on appends, liveTurn's identity changes per streaming
   // event and per approval-channel update (and its null -> live transition
@@ -277,7 +273,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // The payload is the pane-side selection: the TURN-domain turnLoading /
   // phase, NOT the union `loading` (turn OR mutation, ADR-0040) -- a dataset
   // mutation's in-flight window must not flip the bar's Ask/Stop button (the
-  // reported flicker). workspaceCollapsed (bar-shaping, ADR-0083 fold)
+  // reported flicker). rightSidebarCollapsed (bar-shaping, ADR-0083 fold)
   // changes on the fold toggle + the one-shot first-Materialized expansion;
   // the effect fires on those changes so the shell's registry entry stays
   // fresh for the active session.
@@ -291,7 +287,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
       handleAsk: queuedHandleAsk,
       handleCancel: s.handleCancel,
       handleIngestFiles: ingestMany,
-      workspaceCollapsed: s.workspaceCollapsed,
+      rightSidebarCollapsed: s.rightSidebarCollapsed,
     });
   }, [
     sessionId,
@@ -303,7 +299,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     queuedHandleAsk,
     s.handleCancel,
     ingestMany,
-    s.workspaceCollapsed,
+    s.rightSidebarCollapsed,
     onComposerFields,
   ]);
 
@@ -339,11 +335,11 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: the tracked ingestMany / hold / s.handleAsk are stable inside useSessionState + useComposerQueue, the consumed callbacks are useCallback-stable in useShellSessions
   }, [pendingIngestPaths, pendingQuestion, pendingSkillInvocations, sessionId, onSeedDraft, onSeedInvocations]);
 
-  // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
+  // Right-sidebar tab (ADR-0045: 工作集 is a right-sidebar tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
-  const [tab, setTab] = useState<WorkspaceTab>("result");
+  const [tab, setTab] = useState<RightSidebarTab>("result");
 
-  // Issue #760: the WAI-ARIA APG tabs contract for the workspace tab row.
+  // Issue #760: the WAI-ARIA APG tabs contract for the right-sidebar tab row.
   // useId-scoped stable ids wire each tab's aria-controls to its own panel.
   // Issue #1060: both panels stay mounted and the inactive one carries the
   // `hidden` attribute, so the working set's detail pick and the result view
@@ -363,12 +359,19 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // (selection follows focus); Home/End jump to the first/last tab. Roving
   // tabindex -- only the active tab holds tabIndex 0 -- is set in the JSX.
   function handleTabKeyDown(e: KeyboardEvent<HTMLDivElement>) {
-    const idx = WORKSPACE_TABS.indexOf(tab);
-    let next: WorkspaceTab | null = null;
-    if (e.key === "ArrowRight") next = WORKSPACE_TABS[(idx + 1) % WORKSPACE_TABS.length];
-    else if (e.key === "ArrowLeft") next = WORKSPACE_TABS[(idx - 1 + WORKSPACE_TABS.length) % WORKSPACE_TABS.length];
-    else if (e.key === "Home") next = WORKSPACE_TABS[0];
-    else if (e.key === "End") next = WORKSPACE_TABS[WORKSPACE_TABS.length - 1];
+    // The tablist owns ONLY the two tabs (the toggle cluster lives on a
+    // sibling inside the same visual row), so the guard below is
+    // belt-and-suspenders -- but a future child must not silently re-arm
+    // the arrow-key hijack: the handler preventDefaults and steals focus
+    // on every Arrow/Home/End press, which is correct for a tab and a
+    // no-op violation on anything else.
+    if (!(e.target instanceof HTMLElement) || e.target.closest("[role='tab']") === null) return;
+    const idx = RIGHT_SIDEBAR_TABS.indexOf(tab);
+    let next: RightSidebarTab | null = null;
+    if (e.key === "ArrowRight") next = RIGHT_SIDEBAR_TABS[(idx + 1) % RIGHT_SIDEBAR_TABS.length];
+    else if (e.key === "ArrowLeft") next = RIGHT_SIDEBAR_TABS[(idx - 1 + RIGHT_SIDEBAR_TABS.length) % RIGHT_SIDEBAR_TABS.length];
+    else if (e.key === "Home") next = RIGHT_SIDEBAR_TABS[0];
+    else if (e.key === "End") next = RIGHT_SIDEBAR_TABS[RIGHT_SIDEBAR_TABS.length - 1];
 
     if (next) {
       e.preventDefault();
@@ -378,6 +381,60 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
       document.getElementById(next === "result" ? resultTabId : workingSetTabId)?.focus();
     }
   }
+
+  // The toggle lives at two mutually-exclusive mount sites (header while
+  // folded, tab-row cluster while expanded -- see the JSX); activating it
+  // always unmounts the focused instance. Handing focus to the surviving
+  // instance keeps a keyboard toggle in place (the pre-diff single mount
+  // never dropped focus). The swap commits after the handler returns, so
+  // the focus hand-off waits one frame for the new mount.
+  const headerToggleRef = useRef<HTMLButtonElement | null>(null);
+  const rightSidebarToggleRef = useRef<HTMLButtonElement | null>(null);
+  function handleToggleRightSidebar() {
+    s.handleToggleRightSidebar();
+    // s.rightSidebarCollapsed is the pre-toggle render value: folded means the
+    // expansion just started, so the tab-row instance is the survivor.
+    const survivor = s.rightSidebarCollapsed ? rightSidebarToggleRef : headerToggleRef;
+    requestAnimationFrame(() => survivor.current?.focus());
+  }
+
+  // --- Selection surface (#1573) ------------------------------------------
+  // The conversation column is the surface root: the gesture machine scopes
+  // its selections to the caller-marked prose containers below it, and the
+  // toolbar mounts inside the column (position:fixed, non-portal). The
+  // pane's active posture gates the machine -- a session switch dismisses.
+  const conversationRef = useRef<HTMLDivElement | null>(null);
+  const selection = useSelectionSurface(conversationRef, isActive);
+  const { active: selectionActive, toolbarRef, dismiss: dismissSelection, clearSelection } = selection;
+  const handleQuoteSelection = useCallback(() => {
+    const text = selectionActive?.text;
+    if (text === undefined) return;
+    onStageQuote(sessionId, text);
+    dismissSelection();
+    clearSelection();
+  }, [selectionActive, onStageQuote, sessionId, dismissSelection, clearSelection]);
+  const handleCopySelection = useCallback(() => {
+    const text = selectionActive?.text;
+    if (text === undefined) return;
+    // Success: the toast announces, the toolbar leaves, the selection
+    // clears (the WorkBuddy shape). Failure: log + the toolbar stays put --
+    // nothing was copied, so nothing may close.
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        toast({
+          title: intl.formatMessage({
+            id: "thread.selectionSurface.copied",
+            defaultMessage: "Copied to clipboard",
+          }),
+        });
+        dismissSelection();
+        clearSelection();
+      })
+      .catch((e: unknown) => {
+        log.warn("SessionPane", "selection copy failed", e);
+      });
+  }, [selectionActive, dismissSelection, clearSelection, intl]);
 
   // ADR-0058 L2 partition retry: each region's onReset RESETS its slice of the
   // session query cache so the boundary's error-clear remount renders fresh
@@ -502,68 +559,18 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     <div
       className={cn(
         "session-pane",
-        s.workspaceCollapsed && "workspace-collapsed",
+        s.rightSidebarCollapsed && "right-sidebar-collapsed",
       )}
     >
-      {/* Session header (row 1): session name + management menu + workspace
-          toggle. Moved here from the global topbar so session-scoped chrome
-          lives with the pane. ADR-0093 (issue #512): the `⋯` management menu
-          (Rename / Close / Delete) sits between the name and the
-          workspace toggle. The workspace toggle (ADR-0083, issue #298) stays at
-          the header's right edge: the panel defaults to collapsed and this is
-          its manual open/close path. */}
-      <div className="session-header" data-tauri-drag-region>
-        <span className="min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
-          {sessionName ||
-            intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" })}
-        </span>
-        <SessionHeaderMenu
-          sessionName={sessionName}
-          recipePath={recipePath}
-          sessionId={sessionId}
-          onRename={onRename}
-          onClose={onClose}
-          onDelete={onDelete}
-          disabled={disabled}
-        />
-        <div className="flex-1" data-tauri-drag-region />
-        <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={s.handleToggleWorkspace} />
-      </div>
-      {s.queryErrors.length > 0 && (
-        // Issue #763: the session-level data-channel error face, below the
-        // session header and spanning the conversation + workspace columns
-        // (the pane column's full width, inset to the header's rhythm). The
-        // three session queries coalesce through `data ??` empty fallbacks,
-        // so a failed fetch or refetch (reachable via an ADR-0058 region
-        // retry's resetQueries) used to render as a pristine empty session.
-        // This is a NON-BLOCKING disclosure: cached data keeps rendering,
-        // absent data keeps the empty-state derivations, the composer stays
-        // live; Retry refetches only the errored queries (useSessionState).
-        // Destructive variant keeps the Alert's assertive "alert" role
-        // default (alert-variants.ts).
-        <Alert variant="destructive" className="mx-3 my-2">
-          <AlertTitle>
-            <FormattedMessage
-              id="session.queries.errorTitle"
-              defaultMessage="Session data failed to load"
-            />
-          </AlertTitle>
-          <AlertDescription className="flex items-center justify-between gap-3">
-            <p className="m-0">
-              <FormattedMessage
-                id="session.queries.errorDescription"
-                defaultMessage="Some session data could not be loaded; what is shown may be incomplete."
-              />
-            </p>
-            <Button variant="outline" size="sm" onClick={s.handleRetryQueries}>
-              <FormattedMessage
-                id="common.retry"
-                defaultMessage="Retry"
-              />
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
+      {/* Session header (row 1): session name + management menu. ADR-0093
+          (issue #512): the `⋯` management menu (Rename / Close / Delete)
+          follows the name. The header now lives INSIDE the conversation
+          column (see session-body below) so the column divider runs
+          unbroken from the pane top -- WorkBuddy topology, no line break
+          at the header row. The right-sidebar toggle (ADR-0083, issue #298)
+          rides the right-sidebar tab row's far edge while the panel is
+          expanded, and falls back to this header's right edge while folded
+          -- a folded panel cannot host its own reopen control. */}
       {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get
           their own ErrorBoundary so a render crash in one degrades only that
           block (the shell-level QuestionBar -- a session-skeleton element,
@@ -582,7 +589,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           visible + session isolated + retry" rather than "region boundary
           catches precisely". See memory: react19-nested-errorboundary-outer-
           catches. */}
-      {/* session-body: grid container for the conversation column + workspace
+      {/* session-body: grid container for the conversation column + right sidebar
           so both collapses animate via grid-template-columns (interpolatable).
           ADR-0092: the QuestionBar no longer lives inside session-conversation
           — it is a shell-level overlay above the pane host (issue #836), so
@@ -590,7 +597,62 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           scrolls behind the bar (the rail's dynamic bottom padding keeps the
           last element readable above it). */}
       <div className="session-body">
-        <div className="session-conversation">
+        <div className="session-conversation" ref={conversationRef}>
+          <div className="session-header" data-tauri-drag-region>
+            <span className="min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
+              {sessionName ||
+                intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" })}
+            </span>
+            <SessionHeaderMenu
+              sessionName={sessionName}
+              recipePath={recipePath}
+              sessionId={sessionId}
+              onRename={onRename}
+              onClose={onClose}
+              onDelete={onDelete}
+              disabled={disabled}
+            />
+            <div className="flex-1" data-tauri-drag-region />
+            {s.rightSidebarCollapsed && (
+              <RightSidebarToggle collapsed={s.rightSidebarCollapsed} onToggle={handleToggleRightSidebar} ref={headerToggleRef} />
+            )}
+          </div>
+          {s.queryErrors.length > 0 && (
+            // Issue #763: the session-level data-channel error face, inside
+            // the conversation column between the session header and the
+            // rail (the disclosure follows the header into the column). The
+            // three session queries coalesce through `data ??` empty
+            // fallbacks, so a failed fetch or refetch (reachable via an
+            // ADR-0058 region retry's resetQueries) used to render as a
+            // pristine empty session. This is a NON-BLOCKING disclosure:
+            // cached data keeps rendering, absent data keeps the
+            // empty-state derivations, the composer stays live; Retry
+            // refetches only the errored queries (useSessionState).
+            // Destructive variant keeps the Alert's assertive "alert" role
+            // default (alert-variants.ts).
+            <Alert variant="destructive" className="mx-3 my-2">
+              <AlertTitle>
+                <FormattedMessage
+                  id="session.queries.errorTitle"
+                  defaultMessage="Session data failed to load"
+                />
+              </AlertTitle>
+              <AlertDescription className="flex items-center justify-between gap-3">
+                <p className="m-0">
+                  <FormattedMessage
+                    id="session.queries.errorDescription"
+                    defaultMessage="Some session data could not be loaded; what is shown may be incomplete."
+                  />
+                </p>
+                <Button variant="outline" size="sm" onClick={s.handleRetryQueries}>
+                  <FormattedMessage
+                    id="common.retry"
+                    defaultMessage="Retry"
+                  />
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
           {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
           {/* Issue #829: the rail ref feeds useRailFollow's stick-to-bottom
               machine; the section itself is unconditional within the pane, so
@@ -601,7 +663,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             aria-label={intl.formatMessage({ id: "session.rail.ariaLabel", defaultMessage: "Conversation timeline" })}
           >
             {/* Issue #833: the rail is the full-width scroll container while the
-                workspace is folded; this wrapper is the centered reading
+                right sidebar is folded; this wrapper is the centered reading
                 column that caps the thread's measure (.rail-reading-column in
                 styles.css, capped at --reading-column-cap).
                 useRailFollow's range observer watches this node as the rail's
@@ -659,81 +721,108 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               )}
             </div>
           </section>
+          {selectionActive !== null && (
+            // #1573: the selection toolbar rides the conversation column
+            // (position:fixed, non-portal) -- it dies with the pane, and the
+            // hook drives its viewport placement.
+            <SelectionToolbar
+              ref={toolbarRef}
+              onQuote={handleQuoteSelection}
+              onCopy={handleCopySelection}
+            />
+          )}
         </div>
 
-        {/* --- Workspace (ADR-0045/0062 R2) -------------------------------- */}
+        {/* --- Right sidebar (ADR-0045/0062 R2) ---------------------------- */}
         <section
-          className="session-workspace"
-          aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Right sidebar" })}
-          inert={s.workspaceCollapsed}
+          className="session-right-sidebar"
+          aria-label={intl.formatMessage({ id: "session.rightSidebar.ariaLabel", defaultMessage: "Right sidebar" })}
+          inert={s.rightSidebarCollapsed}
         >
-          {/* ADR-0067 (issue #173): the .workspace-tabs visual chrome (padding,
+          {/* ADR-0067 (issue #173): the .right-sidebar-tabs visual chrome (padding,
             border-bottom, background) + the [role=tab] base + .active
             primary-underline retired from styles.css onto this component as
-            utility + ADR-0050 token. The .workspace-tabs hook + bare "active"
+            utility + ADR-0050 token. The .right-sidebar-tabs hook + bare "active"
             class stay for selector / test stability; twMerge picks
             border-b-primary over border-b-transparent when the tab is active. */}
-          <div
-            className="workspace-tabs flex items-center gap-2 px-4 py-1.5 border-b"
-            role="tablist"
-            onKeyDown={handleTabKeyDown}
-          >
-            <button
-              type="button"
-              role="tab"
-              id={resultTabId}
-              aria-selected={tab === "result"}
-              aria-controls={resultPanelId}
-              tabIndex={tab === "result" ? 0 : -1}
-              className={cn(
-                "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
-                tab === "result" && "active text-primary border-b-primary font-semibold",
-              )}
-              onClick={() => setTab("result")}
+          <div className="right-sidebar-tabs flex h-(--session-header-height) items-center gap-2 px-4 border-b">
+            {/* The tablist owns ONLY the two tabs (APG required ownership):
+                the badge + toggle cluster is a sibling inside the same
+                visual row, so arrows on the toggle stay a no-op instead of
+                bubbling into the tab activation handler. */}
+            <div
+              role="tablist"
+              onKeyDown={handleTabKeyDown}
+              className="flex items-center gap-2"
             >
-              <FormattedMessage id="session.tab.result" defaultMessage="Results" />
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id={workingSetTabId}
-              aria-selected={tab === "workingSet"}
-              aria-controls={workingSetPanelId}
-              tabIndex={tab === "workingSet" ? 0 : -1}
-              className={cn(
-                "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
-                tab === "workingSet" && "active text-primary border-b-primary font-semibold",
-              )}
-              onClick={() => setTab("workingSet")}
-            >
-              <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
-            </button>
+              <button
+                type="button"
+                role="tab"
+                id={resultTabId}
+                aria-selected={tab === "result"}
+                aria-controls={resultPanelId}
+                tabIndex={tab === "result" ? 0 : -1}
+                className={cn(
+                  "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
+                  tab === "result" && "active text-primary border-b-primary font-semibold",
+                )}
+                onClick={() => setTab("result")}
+              >
+                <FormattedMessage id="session.tab.result" defaultMessage="Results" />
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id={workingSetTabId}
+                aria-selected={tab === "workingSet"}
+                aria-controls={workingSetPanelId}
+                tabIndex={tab === "workingSet" ? 0 : -1}
+                className={cn(
+                  "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
+                  tab === "workingSet" && "active text-primary border-b-primary font-semibold",
+                )}
+                onClick={() => setTab("workingSet")}
+              >
+                <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
+              </button>
+            </div>
             {/* active (server truth, ADR-0051/0060) shown read-only here so the
                 user sees what the next question targets by default. Naming it
                 here, not in QuestionBar, keeps QuestionBar presentational. */}
-            {s.activeName && (
-              <Badge
-                variant="default"
-                className="active-chip"
-                title={intl.formatMessage({
-                  id: "session.activeChip.title",
-                  defaultMessage: "The next question targets this table by default",
-                })}
-              >
-                <FormattedMessage
-                  id="session.activeChip.label"
-                  defaultMessage="Targets {name}"
-                  values={{
-                    name:
-                    s.datasets.find((d) => d.reference_name === s.activeName)?.display_name ??
-                    s.activeName,
-                  }}
-                />
-              </Badge>
-            )}
+            {/* The right cluster: the active chip ahead of the right-sidebar
+                toggle, parked at the row's far edge by the container's single
+                ml-auto -- the toggle stays pinned whether or not the chip
+                renders. While the panel is folded the toggle falls back to
+                the session header (see the conversation column's header), so
+                only the chip rides this cluster. */}
+            <div className="ml-auto flex items-center gap-2">
+              {s.activeName && (
+                <Badge
+                  variant="default"
+                  className="active-chip"
+                  title={intl.formatMessage({
+                    id: "session.activeChip.title",
+                    defaultMessage: "The next question targets this table by default",
+                  })}
+                >
+                  <FormattedMessage
+                    id="session.activeChip.label"
+                    defaultMessage="Targets {name}"
+                    values={{
+                      name:
+                      s.datasets.find((d) => d.reference_name === s.activeName)?.display_name ??
+                      s.activeName,
+                    }}
+                  />
+                </Badge>
+              )}
+              {!s.rightSidebarCollapsed && (
+                <RightSidebarToggle collapsed={s.rightSidebarCollapsed} onToggle={handleToggleRightSidebar} ref={rightSidebarToggleRef} />
+              )}
+            </div>
           </div>
 
-          {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)
+          {/* ADR-0067 (issue #173): the .right-sidebar-body visual rule (padding)
             retired from styles.css; the hook stays for selector / test
             stability AND as the staged fold/expand fade anchor (the
             transition + collapsed rules in styles.css). Issue #1060: the
@@ -742,10 +831,10 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             mounted (contract at the tab-id comment above). overflow-y-auto
             rides the panels so each tab keeps its own scroll offset instead
             of clamping against the other tab's height on a shared container.
-            The panels carry text-sm themselves -- they are the workspace's
+            The panels carry text-sm themselves -- they are the right sidebar's
             type roots (issue #864); the container keeps its own for the
             banner strip above them. */}
-          <div className="workspace-body flex min-h-0 flex-1 flex-col p-4 text-sm">
+          <div className="right-sidebar-body flex min-h-0 flex-1 flex-col p-4 text-sm">
             {s.error && <ErrorBanner error={s.error} />}
             {s.haltedRemaining !== null && (
               // Issue #748: a terminally halted batch (user cancelled the
@@ -817,14 +906,14 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               hidden={tab !== "result"}
               className={cn(
                 "min-h-0 flex-1 text-sm",
-                s.workspaceContent.kind === "file"
+                s.rightSidebarContent.kind === "file"
                   ? FILE_STAGE_CLASS
                   : EDGE_DOCKED_SCROLL_CLASS,
               )}
             >
-              <WorkspaceResult
+              <RightSidebarResult
                 key={`result-${regionRetryEpoch}`}
-                content={s.workspaceContent}
+                content={s.rightSidebarContent}
                 sessionId={sessionId}
                 hasData={s.datasets.length > 0}
                 onResetRegion={resetSessionCache}
@@ -849,7 +938,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   pane-level union), the empty card's ingest entry (issue #792:
                   it rides the same pipeline as the composer's + entry), and
                   the session-level mutation reporting surfaces. */}
-              <WorkspaceWorkingSet
+              <RightSidebarWorkingSet
                 sessionId={sessionId}
                 busy={s.loading}
                 onAddFiles={ingestMany}
@@ -898,9 +987,9 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
 }
 
 // The "结果" tab content: derived from (viewedResult, thread) via
-// workspaceContent. Two states per ADR-0062 R2 (calibrated by ADR-0114):
+// rightSidebarContent. Two states per ADR-0062 R2 (calibrated by ADR-0114):
 // a resolving viewed result, or the hero.
-function WorkspaceResult({
+function RightSidebarResult({
   content,
   sessionId,
   hasData,
@@ -910,7 +999,7 @@ function WorkspaceResult({
   onRerun,
   busy,
 }: {
-  content: WorkspaceContent;
+  content: RightSidebarContent;
   sessionId: string;
   hasData: boolean;
   /** ADR-0058 L2 result-partition retry: remove the session slice so a
@@ -937,11 +1026,11 @@ function WorkspaceResult({
       // (ADR-0083, issue #351); window-level drag-and-drop stays the shortcut
       // path, so the hero is now the drop hint + the ask-a-question pivot once
       // a source is loaded (hasData).
-      // ADR-0067 (issue #173): the .workspace-hero visual rule (flex column,
+      // ADR-0067 (issue #173): the .right-sidebar-hero visual rule (flex column,
       // centered, gap, padding, text-align) retired from styles.css onto
-      // utility; the .workspace-hero hook stays for selector stability.
+      // utility; the .right-sidebar-hero hook stays for selector stability.
       return (
-        <div className="workspace-hero flex flex-col items-center gap-4 p-8 text-center">
+        <div className="right-sidebar-hero flex flex-col items-center gap-4 p-8 text-center">
           <p className="text-muted-foreground">
             {hasData ? (
               <FormattedMessage
@@ -965,7 +1054,7 @@ function WorkspaceResult({
       return (
         <>
           {content.viewingHistory && (
-            // Issue #757: the workspace is showing a past result, not the
+            // Issue #757: the right sidebar is showing a past result, not the
             // latest Materialized primary -- a derived fact (ADR-0114), so the
             // indicator rides the derivation and adds no state. Informational,
             // not cautionary (the stale disclosure owns the warning surface),
@@ -1039,7 +1128,7 @@ function WorkspaceResult({
       return <VizStageView spec={content.spec} />;
     default: {
       const unhandled: never = content;
-      throw new Error(`unhandled workspace content: ${JSON.stringify(unhandled)}`);
+      throw new Error(`unhandled right-sidebar content: ${JSON.stringify(unhandled)}`);
     }
   }
 }

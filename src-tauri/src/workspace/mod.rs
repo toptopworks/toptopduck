@@ -7,6 +7,8 @@
 //! canonical spelling but never each other's state.
 
 pub mod datasets;
+pub mod extract;
+pub mod extract_runtime;
 pub mod registry;
 
 pub use datasets::{DatasetEntry, ListedDataset, StoreError};

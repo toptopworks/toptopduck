@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { catalogIntl } from "../components/common/__tests__/helpers";
-import { errorDetail, fmtError, toAppError } from "../lib/error-presentation";
+import { toAppError } from "../lib/error-presentation";
 import type { AppErrorKind, SessionFlowKind } from "../types/error";
 
 // toAppError is the single kind-driven entry for an IPC reject -> AppError
-// (ADR-0069). These tests cover message/detail/kind passthrough + empty
-// fallback, the verb-prefix locale consistency (issue #139), the refreshFailed
-// prefix, the shell/read bare output, and the exhaustiveness throw guard.
+// (ADR-0069). These tests cover empty fallback, the verb-prefix locale
+// consistency (issue #139), the refreshFailed
+// prefix, the read bare output, the shell neutral-verb prefix (issue #1563),
+// and the exhaustiveness throw guard.
 
 // Real-catalog en-US intl from the shared i18n test seam so the verb +
 // templates track the active locale (issue #139): the assertion strings are
@@ -58,41 +59,50 @@ describe("toAppError (refreshFailed prefix)", () => {
   );
 });
 
-// shell / read render the BARE fmtError message (no verb prefix), with the
-// Engine locale message as a never-blank fallback (ADR-0069 Decision 3 -- the
-// fallback applies only to these kinds).
-describe("toAppError (shell/read bare output)", () => {
-  it.each(["shell", "read"] as AppErrorKind[])(
-    "renders the bare message + carries the %s kind",
-    (kind) => {
-      const out = toAppError(engineReject, intl, kind);
-      expect(out.kind).toBe(kind);
-      expect(out.message).toBe("Internal error");
-      expect(out.detail).toBe("close-wait timed out");
-    },
-  );
+// read renders the BARE fmtError message (no verb prefix), with the Engine
+// locale message as a never-blank fallback (ADR-0069 Decision 3 -- the
+// fallback's only remaining home now that shell carries the #1563 verb).
+describe("toAppError (read bare output)", () => {
+  it("renders the bare message + carries the read kind", () => {
+    const out = toAppError(engineReject, intl, "read");
+    expect(out.kind).toBe("read");
+    expect(out.message).toBe("Internal error");
+    expect(out.detail).toBe("close-wait timed out");
+  });
 
-  it.each(["shell", "read"] as AppErrorKind[])(
-    "falls back to the Engine locale message on %s when fmtError yields empty",
-    (kind) => {
-      // A bare throw with no message (or a minified error): fmtError returns
-      // the empty string via the `e instanceof Error` branch, so toAppError
-      // substitutes the Engine locale message on shell/read so the banner is
-      // never blank.
-      const out = toAppError(new Error(""), intl, kind);
-      expect(out.message).toBe("Internal error");
-      expect(out.kind).toBe(kind);
-    },
-  );
+  it("falls back to the Engine locale message when fmtError yields empty", () => {
+    // A bare throw with no message (or a minified error): fmtError returns
+    // the empty string via the `e instanceof Error` branch, so toAppError
+    // substitutes the Engine locale message on read so the banner is never
+    // blank.
+    const out = toAppError(new Error(""), intl, "read");
+    expect(out.message).toBe("Internal error");
+    expect(out.kind).toBe("read");
+  });
 });
 
-// message/detail come from fmtError + errorDetail (the format core); toAppError
-// composes them with the kind-driven prefix (issue #194).
-describe("toAppError (message/detail passthrough)", () => {
-  it("Engine message/detail match fmtError + errorDetail on the shell kind", () => {
+// shell carries the neutral "Operation" verb through the same "{verb} failed:"
+// composer as the session flows (issue #1563): a shell reject is a shell-level
+// action refusal (open / create / profile switch / file ops), and the bare
+// message read as a verdict on whatever surface the banner sits above. The
+// template guarantees a non-empty banner, so the Engine fallback no longer
+// applies to shell -- an empty bare renders "Operation failed:" (the
+// SessionFlowKind precedent).
+describe("toAppError (shell verb prefix, issue #1563)", () => {
+  it("prepends the shell verb via the active locale", () => {
     const out = toAppError(engineReject, intl, "shell");
-    expect(out.message).toBe(fmtError(engineReject, intl));
-    expect(out.detail).toBe(errorDetail(engineReject));
+    expect(out.kind).toBe("shell");
+    expect(out.message).toBe("Operation failed: Internal error");
+    expect(out.detail).toBe("close-wait timed out");
+  });
+
+  it("renders the bare template on an empty fmtError (no Engine fallback)", () => {
+    // The template keeps its inter-placeholder space, exactly as the
+    // SessionFlowKind empty-bare output does (the App.test prefix regexes
+    // are built from this same composer + empty message).
+    const out = toAppError(new Error(""), intl, "shell");
+    expect(out.message).toBe("Operation failed: ");
+    expect(out.kind).toBe("shell");
   });
 });
 

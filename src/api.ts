@@ -8,6 +8,7 @@ import type {
   DatasetDescriptor,
   DatasetPrivacy,
   DeleteImpactEntry,
+  GuidanceRequest,
   LoadOutcome,
   RowPage,
   SheetGuidance,
@@ -29,6 +30,11 @@ import type {
   ListedWorkspaceDataset,
   WorkspaceDatasetEntry,
 } from "./types/workspace-datasets";
+import type {
+  ExtractionStatus,
+  ListedMemorySection,
+  MemoryType,
+} from "./types/workspace-memory";
 import type {
   ResumeProgress,
   SaveError,
@@ -177,6 +183,62 @@ export async function addWorkspaceDataset(
   return invoke<WorkspaceDatasetEntry>("add_workspace_dataset", { workspace, path });
 }
 
+// Read an .xlsx workbook for the shared face's guided import (issue #1552):
+// every visible non-blank sheet's two-state + previews, and the full parse parks
+// server-side keyed by (workspace, path) so the dialog's paging never
+// re-reads the file. A superseding preview replaces the park.
+export async function previewWorkspaceDataset(
+  workspace: string,
+  path: string,
+): Promise<GuidanceRequest> {
+  return invoke<GuidanceRequest>("preview_workspace_dataset", { workspace, path });
+}
+
+// Add a workbook's checked sheets as shared datasets, after a preview round
+// trip gathered the per-sheet rectify choices. One entry lands per checked
+// sheet.
+export async function addWorkspaceDatasetGuided(
+  workspace: string,
+  path: string,
+  guidance: SheetGuidance[],
+): Promise<WorkspaceDatasetEntry[]> {
+  return invoke<WorkspaceDatasetEntry[]>("add_workspace_dataset_guided", {
+    workspace,
+    path,
+    guidance,
+  });
+}
+
+// Fetch one preview window for a sheet parked by previewWorkspaceDataset:
+// rows [offset, offset + limit) rendered as strings, served from the parked
+// parse. Rejects when the (workspace, path, sheet) triple no longer matches
+// (committed / discarded / superseded).
+export async function workspaceDatasetPreviewWindow(
+  workspace: string,
+  path: string,
+  sheetName: string,
+  offset: number,
+  limit: number,
+): Promise<string[][]> {
+  return invoke<string[][]>("workspace_dataset_preview_window", {
+    workspace,
+    path,
+    sheetName,
+    offset,
+    limit,
+  });
+}
+
+// Drop a parked preview parse (the dialog-cancel path). Idempotent; a
+// reject leaks nothing (the park dies with the process), so callers treat
+// it best-effort.
+export async function discardWorkspaceDatasetPreview(
+  workspace: string,
+  path: string,
+): Promise<void> {
+  await invoke<void>("discard_workspace_dataset_preview", { workspace, path });
+}
+
 // Remove a shared dataset: the manifest drops the name immediately; bound
 // sessions keep their hard links until they end.
 export async function removeWorkspaceDataset(
@@ -225,6 +287,97 @@ export async function setWorkspaceDatasetPrivacy(
     referenceName,
     privacy,
   });
+}
+
+// List a workspace's memory entries (issue #1529, calibrated by #1530):
+// the read-only panel's face -- rows carry the reveal target path, plus
+// the index usage percentage the color scale renders. A workspace without
+// a memory directory lists empty (the zero-footprint fresh workspace).
+export async function listWorkspaceMemory(
+  workspace: string,
+): Promise<ListedMemorySection> {
+  return invoke<ListedMemorySection>("list_workspace_memory", { workspace });
+}
+
+// List the USER-level memory entries (issue #1531): the app-domain layer
+// shared across workspaces. Read-only -- the layer is hand-written files
+// only (no create form), so this and the folder open are its whole panel
+// surface.
+export async function listUserMemory(): Promise<ListedMemorySection> {
+  return invoke<ListedMemorySection>("list_user_memory");
+}
+
+// Read a workspace's memory toggle (issue #1529): on unless the record
+// opted out (the default-on posture).
+export async function getWorkspaceMemoryEnabled(
+  workspace: string,
+): Promise<boolean> {
+  return invoke<boolean>("get_workspace_memory_enabled", { workspace });
+}
+
+// Write a workspace's memory toggle (issue #1529): off stops the built-in
+// engine's memory injection and deactivates the panel's list.
+export async function setWorkspaceMemoryEnabled(
+  workspace: string,
+  enabled: boolean,
+): Promise<void> {
+  return invoke<void>("set_workspace_memory_enabled", { workspace, enabled });
+}
+
+// Read a workspace's extraction toggle (issue #1530): off unless the
+// record opted in (the write path's own gate).
+export async function getWorkspaceAutoExtraction(
+  workspace: string,
+): Promise<boolean> {
+  return invoke<boolean>("get_workspace_auto_extraction", { workspace });
+}
+
+// Write a workspace's extraction toggle (issue #1530).
+export async function setWorkspaceAutoExtraction(
+  workspace: string,
+  enabled: boolean,
+): Promise<void> {
+  return invoke<void>("set_workspace_auto_extraction", { workspace, enabled });
+}
+
+// Read a workspace's latest extraction status (issue #1530): the panel's
+// three-state face. Null = no extraction ever ran for this workspace.
+export async function getWorkspaceExtractionStatus(
+  workspace: string,
+): Promise<ExtractionStatus | null> {
+  return invoke<ExtractionStatus | null>(
+    "get_workspace_extraction_status",
+    { workspace },
+  );
+}
+
+// Create a memory from the panel's form (issue #1538): the host stamps
+// `source: manual` + today's date; the type is the four-category string.
+export async function createWorkspaceMemory(
+  workspace: string,
+  memory: { title: string; description: string; type: MemoryType },
+): Promise<void> {
+  return invoke<void>("create_workspace_memory", {
+    workspace,
+    title: memory.title,
+    description: memory.description,
+    memoryType: memory.type,
+  });
+}
+
+// Open the workspace's memory directory (issue #1538): the backend creates
+// the directory family on demand (the zero-footprint fresh workspace
+// included) and returns the absolute path for the opener.
+export async function openWorkspaceMemoryDir(
+  workspace: string,
+): Promise<string> {
+  return invoke<string>("open_workspace_memory_dir", { workspace });
+}
+
+// Open the user-level memory directory (issue #1531): the app-domain
+// `memory/` root, created on demand -- the hand-write entry point.
+export async function openUserMemoryDir(): Promise<string> {
+  return invoke<string>("open_user_memory_dir");
 }
 
 // Create a new session (ADR-0056/0089): the backend builds an independent
@@ -588,9 +741,11 @@ export async function onSessionNamed(
 // (ADR-0060/0061, issue #76). The backend scans the managed sessions directory
 // (ADR-0089) and derives each entry from its recipe + mtime; unreadable paths
 // are skipped. recipe_path is the recipe.json path -- pass it back to openRecipe to
-// resume. `includeArchived` (ADR-0127) appends the archived rows (mtime desc)
-// after the pinned block + unarchived mtime-desc block -- the archived view's
-// fetch; the default response excludes them so tray / search never see them.
+// resume. `includeArchived` (ADR-0127; #1403) appends the archived rows
+// (mtime desc) after the pinned block + unarchived mtime-desc block. The
+// shell's only caller always passes it since #1403 (the search modal's
+// archived partition); the default response still excludes them, and the
+// tray consumes only the unarchived partition.
 export async function listSessions(
   opts?: { includeArchived?: boolean },
 ): Promise<SessionMetadata[]> {

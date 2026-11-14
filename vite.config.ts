@@ -17,6 +17,13 @@ export default defineConfig({
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },
+  // vega-embed is only imported from the lazy chart chunk (LazyVegaChart),
+  // so without this pin the optimizer discovers it mid-session on the first
+  // chart render and re-runs pre-bundling -- stale-batch dep URLs then 504
+  // ("Outdated Optimize Dep"), the dynamic import chain rejects, and every
+  // chart on the page degrades. Pinning it into the initial batch removes
+  // the mid-session re-optimize entirely.
+  optimizeDeps: { include: ["vega-embed"] },
   server: { port: 1420, strictPort: true },
   test: {
     environment: "jsdom",

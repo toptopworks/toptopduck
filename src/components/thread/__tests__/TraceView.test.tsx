@@ -241,6 +241,54 @@ describe("LiveRow approval action row wrap (issue #862)", () => {
   });
 });
 
+// The decision surface's three usability gaps (issue #1368): the always-allow
+// trust scope was invisible at the decision moment (ADR-0080 Decision 3 lifts
+// this one tool to session-wide trust, the button said none of it), the deny
+// answer sat one 6px gap from the allow pair it must not be mistaken for, and
+// the awaiting hint was never announced to assistive technology while the
+// gate suspension hides the round-trip wait line.
+describe("LiveRow approval decision surface (issue #1368)", () => {
+  it("renders the always-allow scope note persistently under the action row", () => {
+    // Zero interaction: a resident line, not a hover disclosure -- the
+    // consequence of "Always allow" must be readable at the decision moment
+    // with no pointer or focus (the tooltip variant, rejected in #1368's
+    // regrilling).
+    const { container } = renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} />,
+    );
+    const note = container.querySelector(".approval-scope-note");
+    expect(note).not.toBeNull();
+    expect(note).toHaveClass("m-0", "mt-1", "text-xs", "text-muted-foreground");
+    expect(note).toHaveTextContent("no longer ask for the rest of the session");
+    // Sits directly under the action row, ahead of the file-delivery section.
+    expect(note?.previousElementSibling).toHaveClass("flex", "flex-wrap");
+  });
+
+  it("separates the deny answer from the allow pair with a visible group gap", () => {
+    // The allow pair rides the row's gap-1.5; deny is the safety-side
+    // action and reads as its own group across a wider interval -- one
+    // className. The #862 wrap posture stands (the tail stays reachable,
+    // never cropped); its one known artifact: a deny that wraps alone
+    // carries the ml-3 as a line-start indent in the narrow band.
+    const { container } = renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} />,
+    );
+    expect(container.querySelector(".approval-deny")).toHaveClass("ml-3");
+  });
+
+  it("announces the pending decision through a polite live region", () => {
+    // While the gate holds the turn, isRoundTripWait judges false on the
+    // undecided row and the wait line vanishes -- this hint is the only
+    // announcement to assistive technology that a decision is being asked
+    // for, so it carries role="status" (polite, the SessionPane alert
+    // convention).
+    renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveClass("approval-pending-hint");
+    expect(status).toHaveTextContent("Awaiting approval");
+  });
+});
+
 describe("LiveRow approval tool name shrink (issue #872)", () => {
   it("lets the approval head's tool name truncate instead of shoving the row", () => {
     // The tool name is the approval head's identity token, and an external
@@ -392,9 +440,12 @@ describe("LiveRow approval card file values", () => {
       <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
     );
     fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
-    // The async fallback note is a live note (role="status").
-    const note = await screen.findByRole("status");
-    expect(note).toHaveTextContent(/Full contents unavailable/i);
+    // The async fallback note is a live note (role="status") -- found by
+    // text, since the pending hint carries role="status" too (issue #1368)
+    // and a role finder would reject the two matches; the attribute assert
+    // keeps the live-region semantics pinned.
+    const note = await screen.findByText(/full contents unavailable/i);
+    expect(note).toHaveAttribute("role", "status");
     // The capped broadcast snapshot stays visible as the fallback face.
     expect(screen.getByText("print(1)")).toBeInTheDocument();
   });

@@ -51,6 +51,7 @@ function renderSection(overrides: Partial<React.ComponentProps<typeof RuntimeSec
   const controlsRef = { current: null as ProfilesControls | null } as React.MutableRefObject<ProfilesControls | null>;
   const props: React.ComponentProps<typeof RuntimeSection> = {
     provider,
+    memoryExtractionProfile: null,
     defaultRuntime: { kind: "built_in" },
     onCommit: vi.fn(),
     onDefaultRuntimeChanged: vi.fn(),
@@ -110,15 +111,28 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
   // --- Default runtime placement (issue #571) -------------------------------
 
   it("renders the default-runtime control above the tab switcher, mounted on both tabs", async () => {
-    // The control is a section-level preamble preference: it must sit above
-    // the tabs (document order) and stay mounted across a sub-tab switch --
-    // gating it on either tab would silently reset its draft.
+    // The card is a section-level preamble: it sits above the tabs (document
+    // order) and stays mounted across a sub-tab switch -- gating it on either
+    // tab would silently reset both rows' drafts.
     renderSection();
     const combobox = await screen.findByRole("combobox", { name: "Default runtime" });
     const tablist = screen.getByRole("tablist");
     expect(
       combobox.compareDocumentPosition(tablist) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+
+    // One card, two rows (#1540): the two preference comboboxes share a
+    // single settings-card ancestor -- not two stray cards.
+    const extraction = screen.getByRole("combobox", { name: "Memory extraction model" });
+    const cards = new Set(
+      [combobox, extraction].map(
+        (el) => el.closest("[data-slot=\"settings-card\"]"),
+      ),
+    );
+    // closest returns null outside any card; without this check two nulls
+    // would still collapse to one member and pass the size assert (#1271).
+    expect(cards.has(null)).toBe(false);
+    expect(cards.size).toBe(1);
 
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
     expect(

@@ -4,14 +4,10 @@
 // and so refetch/ invalidate targets a precise slice. Session-AGNOSTIC queries
 // (provider config / app config) use a different prefix and are NOT here.
 
-/** The per-session row tuple (ADR-0051 row pages), read through the
- * useRowPage seam (issue #1079) -- a SNAPSHOT read that never joins an
- * invalidation cascade (narrative: the useRowPage module header). The
- * offset is part of the key so each page caches independently and
- * `placeholderData: keepPreviousData` can show the prior page while the
- * next loads; the limit is keyed too -- the page size is caller-variable,
- * and a differently-sized fetch must never be served from the same
- * window's cache. */
+/** The cold-start key sentinel (ADR-0092): cannot collide with a real UUID
+ *  session id; inert -- never fetched, never cleaned up. */
+const COLD_START_SESSION_ID = "__cold_start__";
+
 export const sessionKeys = {
   all: (sessionId: string) => ["session", sessionId] as const,
   workingSet: (sessionId: string) => ["session", sessionId, "workingSet"] as const,
@@ -36,6 +32,14 @@ export const sessionKeys = {
     ["session", sessionId, "workingSet", "deleteImpact", referenceName] as const,
   active: (sessionId: string) => ["session", sessionId, "active"] as const,
   thread: (sessionId: string) => ["session", sessionId, "thread"] as const,
+  /** The per-session row tuple (ADR-0051 row pages), read through the
+   * useRowPage seam (issue #1079) -- a SNAPSHOT read that never joins an
+   * invalidation cascade (narrative: the useRowPage module header). The
+   * offset is part of the key so each page caches independently and
+   * `placeholderData: keepPreviousData` can show the prior page while the
+   * next loads; the limit is keyed too -- the page size is caller-variable,
+   * and a differently-sized fetch must never be served from the same
+   * window's cache. */
   rows: (
     sessionId: string,
     referenceName: string,
@@ -48,6 +52,21 @@ export const sessionKeys = {
    *  the fresh SessionPane mount (the resume-path invalidateQueries fires
    *  against a not-yet-mounted key and is a no-op). */
   authMode: (sessionId: string) => ["session", sessionId, "authMode"] as const,
+  /** Per-session "always allow" trust set (ADR-0080 Decision 3, issue #1369)
+   *  -- the auth chip's trust-management read. Session-prefixed like
+   *  `authMode`: a close's removeQueries drops it with the rest, and a resume
+   *  (a NEW session id) starts from an empty set via the fresh mount's read.
+   *  Cache-filtered in place on revoke-success (the write is the truth
+   *  source -- no refetch); refetched on each always_allow
+   *  `approval-resolved` event. */
+  sessionTrust: (sessionId: string) =>
+    ["session", sessionId, "sessionTrust"] as const,
+  /** Cold-start placeholder (ADR-0092), paired with `coldStartAuthMode`: the
+   *  shell-level bar has no session id, so the chip's trust read is always
+   *  disabled and the trust set reads empty (no badge, no panel section).
+   *  Same inert sentinel as `coldStartAuthMode`. */
+  coldStartSessionTrust: () =>
+    ["session", COLD_START_SESSION_ID, "sessionTrust"] as const,
   /** Per-session runtime choice (issue #353) -- the composer runtime picker's
    *  read. Lives under the session prefix so a close's removeQueries drops it
    *  with the rest; a resume lands the RESTORED last runtime via the fresh
@@ -68,7 +87,8 @@ export const sessionKeys = {
    *  never runs -- the key exists only to satisfy useQuery's queryKey
    *  requirement. The sentinel segment cannot collide with a real UUID session
    *  id and is inert (never fetched, never cleaned up). */
-  coldStartAuthMode: () => ["session", "__cold_start__", "authMode"] as const,
+  coldStartAuthMode: () =>
+    ["session", COLD_START_SESSION_ID, "authMode"] as const,
 } as const;
 
 /** Session-AGNOSTIC adapter table (issue #353) -- the composer runtime picker's
@@ -139,6 +159,38 @@ export const artifactKeys = {
  *  query is enabled only while open). */
 export const workspaceKeys = {
   all: () => ["workspaces"] as const,
+} as const;
+
+/** The shared-dataset panel's listing (ADR-0141): keyed by the workspace's
+ *  canonical path -- a filesystem fact, not a session slice, so the panel's
+ *  listing and every mutation invalidation target the same family. The
+ *  app-wide staleTime Infinity makes the mutations' invalidation the ONLY
+ *  refetch trigger (#1491/#1492), which is why the key factory lives in the
+ *  one place every writer reads. */
+export const workspaceDatasetKeys = {
+  listing: (workspace: string) => ["workspace-datasets", workspace] as const,
+} as const;
+
+/** The workspace memory panel's reads (issue #1529): the same filesystem-fact
+ *  posture as the dataset listing -- keyed by the workspace's canonical
+ *  path under ONE root (the sibling's shape), session-agnostic. The toggle
+ *  is its own leaf so its invalidation never cascades into the listing. */
+export const workspaceMemoryKeys = {
+  listing: (workspace: string) => ["workspace-memory", workspace] as const,
+  enabled: (workspace: string) => ["workspace-memory", workspace, "enabled"] as const,
+  /** The extraction toggle + status leaves (issue #1530): own leaves so a
+   *  toggle write invalidates exactly its face, never the listing. */
+  autoExtraction: (workspace: string) =>
+    ["workspace-memory", workspace, "auto-extraction"] as const,
+  extractionStatus: (workspace: string) =>
+    ["workspace-memory", workspace, "extraction-status"] as const,
+} as const;
+
+/** The USER-level memory listing (issue #1531): app-global -- not keyed by
+ *  any workspace (the layer rides every workspace's injection). Session-
+ *  agnostic like the sibling above. */
+export const userMemoryKeys = {
+  listing: () => ["user-memory"] as const,
 } as const;
 
 /** The update-check slice (ADR-0143, issue #1509): one process-wide cached

@@ -1,5 +1,5 @@
 // The stage's viz view (issue #1093): a fence chart promoted onto the
-// workspace stage. One decode through the shared gate, the export-bearing
+// right-sidebar stage. One decode through the shared gate, the export-bearing
 // frame, and the honest disclosure on failure (ADR-0033). No header facts
 // are fabricated: a fence chart carries no stale anchor, producing
 // question, or assumption, so the view IS the chart -- the pane's own

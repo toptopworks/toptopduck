@@ -1,11 +1,11 @@
-// Pure workspace-derivation helpers (ADR-0051 / ADR-0062 R2, calibrated by
+// Pure right-sidebar-derivation helpers (ADR-0051 / ADR-0062 R2, calibrated by
 // ADR-0114). Kept out of the component so the derivation rule (viewedResult
-// -> what the workspace shows) is unit-testable without React, and so the
+// -> what the right sidebar shows) is unit-testable without React, and so the
 // SessionPane component stays a thin caller of these functions.
 //
 // Truth-source split (ADR-0051 "two sources, no overlap"):
 //  - THREAD is the single source of truth for turn PAYLOADS (question / outcome
-//    / viz / assumption / SQL). deriveWorkspaceContent + findMaterializedPayload
+//    / viz / assumption / SQL). deriveRightSidebarContent + findMaterializedPayload
 //    + findLatestMaterializedPrimary read only the thread.
 //  - WORKING SET is the single source of truth for DATASET RUNTIME STATE
 //    (stale / columns / rows / privacy). The stale anchor on a viewed result
@@ -14,7 +14,7 @@
 import type { DatasetDescriptor, StaleAnchor } from "../types/dataset";
 import type { ThreadEntry, TurnArtifact, VizSpec } from "../types/thread";
 
-/** The user's workspace view selection (ADR-0051, generalized by ADR-0124
+/** The user's right-sidebar view selection (ADR-0051, generalized by ADR-0124
  * Decision 3; the viz face is issue #1093): a thin reference to what the
  * result pane is showing -- a Materialized result (dataset), a delivered
  * artifact (file), or an in-stream fence chart (viz). The three are mutually
@@ -80,7 +80,7 @@ export function findMaterializedPayload(
 /** The primary result of the latest Materialized turn (issue #757 "latest"):
  * scan tail-first for the last turn whose outcome is Materialized AND carries
  * a primary (the promotion chain's tail, ADR-0084). Trailing non-materialized
- * turns are skipped -- the workspace is inert to them (ADR-0114), so they
+ * turns are skipped -- the right sidebar is inert to them (ADR-0114), so they
  * never age the viewed result -- as are promotion-less Materialized turns.
  * null when the thread materialized no primary. Shared by the R5 resume
  * landing (useViewedResult) and the "viewing a past result" fact below so the
@@ -175,7 +175,7 @@ export function latestArtifactCandidate(
   return null;
 }
 
-/** What the workspace "result" area shows (ADR-0062 R2 two-state, calibrated
+/** What the right sidebar "result" area shows (ADR-0062 R2 two-state, calibrated
  * by ADR-0114; extended to three states by ADR-0124 Decision 3 -- hero stays
  * the single non-data state):
  *  - `result`: the user selected a Materialized result (now or in the past)
@@ -183,10 +183,10 @@ export function latestArtifactCandidate(
  *  - `file`: the user selected a delivered artifact and its manifest entry
  *    resolves from the thread -- show it per the render matrix (Decision 4).
  *  - `hero`: otherwise -- the empty-state drop zone.
- * Non-materialized turns (B/C/D) still never reach the workspace on their
+ * Non-materialized turns (B/C/D) still never reach the right sidebar on their
  * own; their read surface is the rail (ADR-0103) -- an artifact they
  * delivered reaches it only through the view selection. */
-export type WorkspaceContent =
+export type RightSidebarContent =
   | {
     kind: "result";
     referenceName: string;
@@ -220,15 +220,15 @@ export type WorkspaceContent =
   }
   | { kind: "hero" };
 
-/** Derive what the workspace shows right now (ADR-0062 R2, ADR-0114). Pure in
+/** Derive what the right sidebar shows right now (ADR-0062 R2, ADR-0114). Pure in
  * (thread, viewedResult, staleByReference) -- the caller supplies the stale map
  * derived from the working-set query (runtime truth, ADR-0051), so this
  * function reads no queries itself. */
-export function deriveWorkspaceContent(
+export function deriveRightSidebarContent(
   thread: ThreadEntry[],
   viewedResult: ViewedResult | null,
   staleByReference: ReadonlyMap<string, StaleAnchor>,
-): WorkspaceContent {
+): RightSidebarContent {
   if (viewedResult) {
     if (viewedResult.kind === "viz") {
       // Issue #1093: the fence chart's own stage branch. The spec body is

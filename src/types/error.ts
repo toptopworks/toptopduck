@@ -5,11 +5,12 @@
 
 /** The session-flow operation kinds that carry a locale verb prefix (issue
  *  #139). A rename rejection renders "{verb} failed: ..."; a load rejection
- *  renders "{verb} failed: ..."; etc. The non-verb kinds ("shell" and "read" --
- *  see AppErrorKind) surface via toAppError as a bare fmtError message, so
- *  they are intentionally excluded from this verb-bearing set. Typing the verb
- *  logic over SessionFlowKind (not the full AppErrorKind) makes the exclusion a
- *  compile-time invariant, not a runtime default-arm hope. */
+ *  renders "{verb} failed: ..."; etc. Shell rejects composed through
+ *  toAppError join the verb set through the same composer with a neutral
+ *  verb (issue #1563); "read" stays the one bare kind, so the verb logic is
+ *  typed over SessionFlowKind | "shell" (not the full AppErrorKind) and the
+ *  read exclusion remains a compile-time invariant, not a runtime
+ *  default-arm hope. */
 export type SessionFlowKind =
   | "load"
   | "rename"
@@ -21,8 +22,12 @@ export type SessionFlowKind =
 /** The full error-tag domain. SessionFlowKind members tag a session-layer
  *  mutation/query reject (verb-prefixed banner); "shell" tags a shell-layer IPC
  *  reject (createSession / openRecipe / save / delete / rename persisted /
- *  profile switch); "read" tags a ResultView readRows reject. "shell" and
- *  "read" both render via toAppError without a verb prefix. */
+ *  profile switch) -- shell rejects composed through toAppError carry the
+ *  same "{verb} failed:" composer with a neutral "Operation" verb (issue
+ *  #1563), though hand-built AppErrors of this kind (the guidance error in
+ *  useWorkspaceDatasets, the picker persist verdicts in useShellSessions)
+ *  keep their own messages; "read" tags a ResultView
+ *  readRows reject and is the only bare, verb-less kind. */
 export type AppErrorKind = SessionFlowKind | "shell" | "read";
 
 /** An error tagged by the operation that produced it, so the displayed prefix
@@ -32,10 +37,10 @@ export type AppErrorKind = SessionFlowKind | "shell" | "read";
  *  Only `message` and `detail` are rendered by ErrorBanner; `kind` tags the
  *  operation for upstream prefix logic. */
 export interface AppError {
-  /** The locale-rendered banner text. Guaranteed non-empty on the shell/read
-   *  kinds (toAppError applies the Engine fallback); on SessionFlowKind kinds
-   *  it is the composed "{verb} failed: {message}" template, so an empty bare
-   *  reject renders "{verb} failed:". */
+  /** The locale-rendered banner text. On the verb-prefixed kinds toAppError
+   *  composes it as the "{verb} failed: {message}" template, so an empty
+   *  bare reject renders "{verb} failed:"; on "read" toAppError applies the
+   *  Engine fallback, so the text is never blank. */
   message: string;
   kind: AppErrorKind;
   /** Technical detail from a typed error reject (SessionError / ResumeError /

@@ -2,6 +2,7 @@ import { useRef, useState, type ReactNode } from "react";
 import { useIntl, type IntlShape } from "react-intl";
 import { ArrowUp, Square } from "lucide-react";
 import type { TurnPhase } from "../../types/session";
+import { materializeQuotes } from "../../lib/quoteText";
 import { Button } from "../ui/button";
 import { SkillPickerPanel } from "./SkillPickerPanel";
 import { skillPickerOptionId } from "./skillPickerLogic";
@@ -71,6 +72,19 @@ type QuestionBarProps = {
       onBackspace: () => void;
     };
   };
+  /** Quote chips channel (#1573): the selection surface's staged passages.
+   *  The node (ComposerQuoteChips) seats BEFORE the skill chips -- the quote
+   *  is the question's leading material. The staged texts ride alongside
+   *  because the submit materializes them itself: each becomes a `> `
+   *  blockquote, the block prepended to the draft (NOT the ADR-0112
+   *  invocation channel -- quotes must reach the question TEXT). Backspace
+   *  withdrawal shares the skill bundle's single draft-start channel: the
+   *  shell routes it (last skill chip, then last quote). Omitted by
+   *  embedders / tests that exercise no quotes. */
+  quoteChips?: {
+    node: ReactNode;
+    quotes: readonly string[];
+  };
 } & {
   /** Controlled draft pair (ADR-0092 useComposerState). Both must be provided
    *  together so the parent owns the draft state. When omitted, QuestionBar
@@ -109,7 +123,7 @@ const SKILL_PICKER_PANEL_ID = "question-bar-skill-picker";
 /** The textarea's DOM id -- the shell's one anchor for seating focus on the
  *  composer (the create exit's focus hand-off, issue #1040). */
 export const COMPOSER_INPUT_ID = "question-bar-input";
-export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnStartedAt = null, turnPausedSince = null, queued = false, draft, setDraft, children, trailing, skillPicker }: QuestionBarProps) {
+export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnStartedAt = null, turnPausedSince = null, queued = false, draft, setDraft, children, trailing, skillPicker, quoteChips }: QuestionBarProps) {
   const intl = useIntl();
   const [localDraft, setLocalDraft] = useState("");
   const value = draft ?? localDraft;
@@ -126,7 +140,13 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
   const panel = picker.state.status === "open" ? picker.state : null;
 
   function submit() {
-    const q = value.trim();
+    // Submit materialization (#1573): the staged quotes serialize into the
+    // question's leading blockquote block, prepended to the draft with a
+    // blank line. A staging with an empty draft submits the quotes alone --
+    // the chips ARE submission material (the button's enablement below
+    // agrees).
+    const prefix = materializeQuotes(quoteChips?.quotes ?? []);
+    const q = (prefix === "" ? value : `${prefix}\n\n${value}`).trim();
     // A submit is a turn boundary: close an open picker panel first (its
     // trigger char + query ride along as plain text, the same as Esc).
     picker.close();
@@ -157,7 +177,8 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
           wrap as flex items and the textarea takes the remainder of the last
           row, so the caret seats right after the last chip. With no chips
           the textarea alone fills the row (the plain composer). */}
-      <div className="flex flex-wrap items-start gap-x-3 gap-y-1 px-3 pt-3 pb-2">
+      <div className="flex flex-wrap items-start gap-x-2 gap-y-1 px-3 pt-3 pb-2">
+        {quoteChips?.node}
         {skillPicker?.chips.node}
         <textarea
           id={COMPOSER_INPUT_ID}
@@ -357,7 +378,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
             // textarea whose aria-label is the same zh-CN word "提问".
             <Button
               type="submit"
-              disabled={value.trim() === ""}
+              disabled={value.trim() === "" && (quoteChips?.quotes.length ?? 0) === 0}
               className="size-8 shrink-0 rounded-full p-0"
             >
               <ArrowUp className="size-4" aria-hidden />

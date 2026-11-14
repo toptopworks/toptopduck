@@ -35,9 +35,10 @@ use crate::cancel::CancelToken;
 use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
 use crate::mcp::McpClient;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, LoadOutcome, ProfileId, ProfileKeyStatus,
-    ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
-    SessionNamedPayload, SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
+    DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, GuidanceRequest, LoadOutcome, ProfileId,
+    ProfileKeyStatus, ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView,
+    RemoveSourceError, RowPage, SessionNamedPayload, SheetGuidance, ThreadEntry, TurnOutcome,
+    TurnProgress,
 };
 use crate::persistence::recipe::LastRuntime;
 use crate::persistence::{
@@ -377,6 +378,12 @@ pub fn create_session(
             // root's sibling): workspaces are user assets and do not follow a
             // user-overridden sessions dir.
             s.set_workspaces_root(Some(crate::persistence::default_workspaces_root(&app)));
+            // #1531 (ADR-0147): seat the user-layer memory root beside the
+            // mint source -- the built-in engine's injection reads it as the
+            // user layer on every turn. Same fixed product-domain placement
+            // (the default sessions root's sibling), so it too ignores a
+            // user-overridden sessions dir.
+            s.set_user_memory_root(Some(crate::persistence::default_user_memory_root(&app)));
             // ADR-0138 (issue #1384): seat the registry before the bind below
             // records the explicit selection, and for the close-time reclaim's
             // record removal. Seated unconditionally -- the lazy-mint path
@@ -508,7 +515,7 @@ pub fn create_workspace(
         // the registry cannot show. The minted directory stays; retrying
         // the same name takes the existing-directory branch.
         registry
-            .record_titled(&canonical, name.trim())
+            .record_explicit(&canonical, Some(name.trim()))
             .map_err(|detail| format!("workspace created but the record failed: {detail}"))?;
         name.trim().to_string()
     } else {
@@ -653,6 +660,37 @@ fn remove_registry_record(
     Ok(())
 }
 
+/// Apply a strict per-record registry write for an echoed path under the
+/// dual-spelling rule (the rename face's, issue #1392): a record stored
+/// under a spelling the re-canonicalized key misses (a junction swapped
+/// under the path, a record predating the filesystem's final form) must
+/// not strand the write -- retry the verbatim echo before surfacing the
+/// refusal. Shared by the memory + extraction toggles (issue #1530).
+fn set_registry_toggle_dual_spelling(
+    registry: &crate::workspace::WorkspaceRegistry,
+    workspace: &str,
+    write: impl Fn(&crate::workspace::WorkspaceRegistry, &std::path::Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let key = resolve_registry_key(workspace);
+    let attempt = write(registry, &key);
+    if attempt.is_err() && key != std::path::Path::new(workspace) {
+        return write(registry, std::path::Path::new(workspace));
+    }
+    attempt
+}
+
+/// The memory toggle's command face (issue #1529) over the shared
+/// dual-spelling rule.
+fn set_memory_registry_toggle(
+    registry: &crate::workspace::WorkspaceRegistry,
+    workspace: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    set_registry_toggle_dual_spelling(registry, workspace, |registry, key| {
+        registry.set_memory_enabled(key, enabled)
+    })
+}
+
 #[tauri::command]
 pub fn rename_workspace(
     registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
@@ -681,9 +719,9 @@ pub fn remove_workspace(
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum WorkspaceDatasetError {
-    /// xlsx is out of the shared face's first cut (ADR-0141 D11): the catalog
-    /// owns the "convert to CSV/Parquet or use a session-private source"
-    /// redirect this kind triggers.
+    /// The direct add and replace faces refuse workbooks (ADR-0141 D11 as
+    /// revised, #1552): the catalog owns the guided-dialog redirect and
+    /// remove-then-reimport wording this kind triggers.
     XlsxRejected,
     LegacyExcel,
     UnsupportedFormat(String),
@@ -787,6 +825,100 @@ pub async fn replace_workspace_dataset(
     .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
 }
 
+/// Read a workbook parked for the shared face's guided import (ADR-0141 D11
+/// as revised, issue #1552) and return its confirmation payload: every
+/// visible non-blank sheet's two-state + previews. The parse parks in-process keyed by
+/// (workspace, path) so the dialog's paging never re-reads the file; a
+/// superseding preview replaces the entry, a landed or cancelled import
+/// drops it. Runs the parse off the async/UI thread (AC8's shared-face
+/// posture).
+#[tauri::command]
+pub async fn preview_workspace_dataset(
+    workspace: String,
+    path: String,
+) -> Result<GuidanceRequest, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::preview(
+            std::path::Path::new(&workspace),
+            std::path::Path::new(&path),
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Add a workbook's checked sheets as shared datasets, after a
+/// `preview_workspace_dataset` round trip gathered the user's per-sheet
+/// rectify choices. Reuses the preview's parked parse (issue #1554); a miss
+/// falls back to a fresh parse. Runs the copy-in off the async/UI thread.
+#[tauri::command]
+pub async fn add_workspace_dataset_guided(
+    workspace: String,
+    path: String,
+    guidance: Vec<SheetGuidance>,
+) -> Result<Vec<crate::workspace::DatasetEntry>, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::add_guided(
+            std::path::Path::new(&workspace),
+            std::path::Path::new(&path),
+            &guidance,
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Serve one preview window for a sheet parked by
+/// `preview_workspace_dataset` (issue #1552), from the retained parse --
+/// zero workbook re-parse per page. A miss (committed, discarded, or
+/// superseded) rejects so a stale dialog can never render window rows from
+/// a different workbook.
+#[tauri::command]
+pub async fn workspace_dataset_preview_window(
+    workspace: String,
+    path: String,
+    sheet_name: String,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<Vec<String>>, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::parked_window(
+            std::path::Path::new(&workspace),
+            std::path::Path::new(&path),
+            &sheet_name,
+            offset,
+            limit,
+        )
+        .ok_or_else(|| {
+            WorkspaceDatasetError::Io(format!(
+                "no parked preview for sheet \"{sheet_name}\" of {path} (already committed, discarded, or superseded)"
+            ))
+        })
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Drop a parked preview parse (the dialog-cancel path, issue #1552).
+/// Idempotent.
+#[tauri::command]
+pub async fn discard_workspace_dataset_preview(
+    workspace: String,
+    path: String,
+) -> Result<(), WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::discard_parked(
+            std::path::Path::new(&workspace),
+            std::path::Path::new(&path),
+        );
+        Ok::<(), WorkspaceDatasetError>(())
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
 /// Rename a shared dataset's display label (ADR-0037's dual-name scheme on
 /// the shared face): the reference name, the resume triple and the injection
 /// card are untouched. Runs off the async/UI thread like the other mutators
@@ -830,6 +962,139 @@ pub async fn set_workspace_dataset_privacy(
     .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
 }
 
+/// The memory panel's full read (issue #1529, calibrated by #1530): the
+/// workspace's memory rows (title, category, hook, absolute reveal target)
+/// plus the index usage percentage the color scale renders. A missing
+/// memory directory lists empty (zero-footprint fresh workspace).
+#[tauri::command]
+pub fn list_workspace_memory(
+    workspace: String,
+) -> Result<crate::persistence::memory::ListedMemorySection, String> {
+    Ok(crate::persistence::memory::list_section(
+        &crate::persistence::memory::workspace_memory_dir(std::path::Path::new(&workspace)),
+    ))
+}
+
+/// The memory panel's USER-layer read (issue #1531): the app-domain
+/// user memories, listed beside the workspace section. Read-only -- the
+/// user layer has no create form (hand-written files only, D4), so this
+/// and the folder open below are the layer's whole panel surface.
+#[tauri::command]
+pub fn list_user_memory(
+    app: tauri::AppHandle,
+) -> Result<crate::persistence::memory::ListedMemorySection, String> {
+    Ok(crate::persistence::memory::list_section(
+        &crate::persistence::default_user_memory_root(&app),
+    ))
+}
+
+/// Create a memory from the panel's form (issue #1538): the host stamps
+/// `source: manual` + today's date; the type arrives as the enum itself --
+/// serde refuses an unknown variant at the IPC boundary, so no string
+/// mapping lives here.
+#[tauri::command]
+pub fn create_workspace_memory(
+    workspace: String,
+    title: String,
+    description: String,
+    memory_type: crate::persistence::memory::MemoryType,
+) -> Result<(), String> {
+    crate::persistence::memory::create_entry(
+        &crate::persistence::memory::workspace_memory_dir(std::path::Path::new(&workspace)),
+        &title,
+        &description,
+        memory_type,
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Open the workspace's memory directory (issue #1538): create the family
+/// on demand (the zero-footprint fresh workspace included) and hand back
+/// the absolute path for the front-end opener.
+#[tauri::command]
+pub fn open_workspace_memory_dir(workspace: String) -> Result<String, String> {
+    let dir = crate::persistence::memory::workspace_memory_dir(std::path::Path::new(&workspace));
+    crate::persistence::memory::ensure_memory_dir(&dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        // An io::Error carries no path -- name the directory so the
+        // surfaced failure (and the log) is diagnosable.
+        .map_err(|e| format!("failed to create the memory folder {}: {e}", dir.display()))
+}
+
+/// Open the user-layer memory directory (issue #1531): the app-domain
+/// `memory/` root, created on demand -- the user layer's hand-write
+/// entry point (any editor, via the folder).
+#[tauri::command]
+pub fn open_user_memory_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = crate::persistence::default_user_memory_root(&app);
+    crate::persistence::memory::ensure_memory_dir(&dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        // Same as the workspace twin: the io::Error names no directory.
+        .map_err(|e| format!("failed to create the memory folder {}: {e}", dir.display()))
+}
+
+/// Read a workspace's memory toggle (issue #1529): `true` unless the record
+/// opted out. A missing record reads the default-on posture.
+#[tauri::command]
+pub fn get_workspace_memory_enabled(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    workspace: String,
+) -> bool {
+    registry.memory_enabled(&resolve_registry_key(&workspace))
+}
+
+/// Write a workspace's memory toggle (issue #1529): gates the built-in
+/// engine's memory injection and deactivates the panel. Strict -- a
+/// missing record or refused write surfaces; the dual-spelling retry is
+/// [`set_memory_registry_toggle`], the rename face's echoed-path rule.
+#[tauri::command]
+pub fn set_workspace_memory_enabled(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    workspace: String,
+    enabled: bool,
+) -> Result<(), String> {
+    set_memory_registry_toggle(&registry, &workspace, enabled)
+}
+
+/// Read a workspace's extraction toggle (issue #1530): OFF unless the
+/// record opted in (ADR-0147 Decision 6 -- the write path's own gate,
+/// deliberately separate from the memory read toggle).
+#[tauri::command]
+pub fn get_workspace_auto_extraction(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    workspace: String,
+) -> bool {
+    registry.auto_extraction(&resolve_registry_key(&workspace))
+}
+
+/// Write a workspace's extraction toggle (issue #1530). Strict like the
+/// memory toggle's write, on the same dual-spelling rule.
+#[tauri::command]
+pub fn set_workspace_auto_extraction(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    workspace: String,
+    enabled: bool,
+) -> Result<(), String> {
+    set_registry_toggle_dual_spelling(&registry, &workspace, |registry, key| {
+        registry.set_auto_extraction(key, enabled)
+    })
+}
+
+/// The panel's extraction face (issue #1530): the workspace's latest
+/// extraction status (running / skipped + reason / no new facts /
+/// extracted titles / failed detail). `None` = no extraction ever ran.
+/// The lookup rides the same canonical key discipline as the toggle faces
+/// (issue #1530 review: a raw-spelling miss would silently blank the
+/// status line).
+#[tauri::command]
+pub fn get_workspace_extraction_status(
+    hub: State<'_, Arc<crate::workspace::extract_runtime::ExtractionHub>>,
+    workspace: String,
+) -> Option<crate::workspace::extract_runtime::ExtractionStatus> {
+    hub.status(&resolve_registry_key(&workspace))
+}
+
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
 /// from the store. Returns immediately -- it does NOT wait for an in-flight
 /// ask. If a turn is in flight, cancel fires (HTTP still runs to completion
@@ -847,10 +1112,16 @@ pub async fn set_workspace_dataset_privacy(
 /// Returns `true` when cleanup happened, `false` for a normal close or when
 /// the lock was unavailable (ask in flight).
 #[tauri::command]
-pub fn close_session(
+pub async fn close_session(
     store: State<'_, Arc<SessionStore>>,
+    extraction: State<'_, Arc<crate::workspace::extract_runtime::ExtractionHub>>,
     session_id: String,
 ) -> Result<bool, SessionError> {
+    // Issue #1530: abort + bounded-drain the session's extraction lane
+    // first (in-flight model calls void on the generation bump; the drain
+    // waits at most a bounded window, so a close never hangs on a slow
+    // call).
+    extraction.close_and_drain(&session_id);
     // Exempt from resolve_session (issue #1412): the typed id keys into
     // close_and_cleanup_empty, which addresses by id, not by handle.
     let id = SessionId::parse(&session_id)?;
@@ -1239,6 +1510,7 @@ pub async fn ask(
     live: State<'_, LiveProviderConfig>,
     skills_root: State<'_, SkillsRoot>,
     agents_root: State<'_, crate::agents::AgentsRoot>,
+    extraction: State<'_, Arc<crate::workspace::extract_runtime::ExtractionHub>>,
     session_id: String,
     question: String,
     // The user's staged skill names (ADR-0112 picker channel, calibrated by
@@ -1255,6 +1527,17 @@ pub async fn ask(
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     reject_if_in_flight(&handle)?;
+    // Issue #1530: the after-turn extraction's gate inputs, read before the
+    // turn -- external ACP turns never extract (the follow-up ticket's
+    // scope), and only a bound workspace has a memory store to write.
+    let is_external_turn = handle.runtime_and_posture().0.is_some();
+    let bound_workspace = handle
+        .session_lock()
+        .ok()
+        .and_then(|s| s.workspace().map(std::path::Path::to_path_buf));
+    // The turn body moves `question` into its closure; the extraction fire
+    // below needs it after the settle.
+    let question_for_extraction = question.clone();
     // ADR-0080/0083: the session's tiered-approval gateway rides the turn.
     // The store-attached ApprovalState is the SAME instance the
     // `respond_tool_approval` command wakes, so an in-flow approval card
@@ -1377,7 +1660,42 @@ pub async fn ask(
     })
     .await
     .map_err(|e| SessionError::Engine(e.to_string()))??;
+    // Issue #1530: fire-and-forget the after-turn extraction. Only a
+    // SETTLED built-in turn with a bound workspace fires -- Failed and
+    // Cancelled turns carry no settled facts. The reply never waits on
+    // this: the hub's scheduler owns its own thread, and a close aborts +
+    // drains it bounded.
+    if !is_external_turn {
+        if let Some(workspace) = bound_workspace {
+            if let Some(response_text) = settled_reply_for_extraction(&outcome) {
+                extraction.submit_turn(
+                    &session_id,
+                    &workspace,
+                    &question_for_extraction,
+                    &response_text,
+                    // v1's built-in table has no memory-write tool (the
+                    // guard's reserved names fire only when that tool
+                    // exists); the turn's tool names arrive as the empty
+                    // set by construction.
+                    Vec::new(),
+                );
+            }
+        }
+    }
     Ok(outcome)
+}
+
+/// Issue #1530's firing contract, extracted for its truth-table pin: the
+/// settled-reply projection. `Some(text)` only for a settled outcome --
+/// Failed and Cancelled turns carry no settled facts, so they never fire
+/// an extraction. The caller additionally gates on the turn being built-in
+/// (external ACP turns never fire) and a bound workspace.
+fn settled_reply_for_extraction(outcome: &TurnOutcome) -> Option<String> {
+    match outcome {
+        TurnOutcome::Materialized { body, .. } => Some(body.clone().unwrap_or_default()),
+        TurnOutcome::Textual { body, .. } => Some(body.clone()),
+        TurnOutcome::Failed(_) | TurnOutcome::Cancelled(_) => None,
+    }
 }
 
 /// Cancel the named session's in-flight turn (ADR-0021, issue #28). Fires THAT
@@ -2754,6 +3072,9 @@ pub async fn open_recipe(
         // binding inside open_recipe; this root only ever mints. Same FIXED
         // product-domain placement as create_session.
         new_session.set_workspaces_root(Some(workspaces_root_path));
+        // #1531 (ADR-0147): seat the user-layer memory root on the resumed
+        // session too -- same construction-point wiring as create_session.
+        new_session.set_user_memory_root(Some(crate::persistence::default_user_memory_root(&app)));
         // #1446: apply the count-cap snapshot before the session lands in the
         // store -- identical semantics to create_session's construction-point
         // wiring.
@@ -6417,6 +6738,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn echoed_memory_toggles_survive_a_canonical_drift_between_key_and_disk() {
+        // The same echoed-path rule as the rename and remove faces, mounted
+        // for the memory toggle (issue #1529): a record stored under a
+        // spelling the re-canonicalized key misses must not strand the
+        // toggle -- the strict write retries the verbatim echo before
+        // surfacing the refusal.
+        let root = tempfile::tempdir().expect("registry dir");
+        let registry = crate::workspace::WorkspaceRegistry::new(
+            root.path().join(crate::workspace::WORKSPACES_FILE_NAME),
+        );
+        let dir = root.path().join("Real");
+        std::fs::create_dir(&dir).expect("mkdir");
+        registry
+            .record_at(&dir, Some("Seed"), true, 1_000)
+            .expect("record");
+
+        let echo = dir.to_string_lossy().into_owned();
+        set_memory_registry_toggle(&registry, &echo, false).expect("toggle lands");
+        assert!(
+            !registry.memory_enabled(std::path::Path::new(&echo)),
+            "the opt-out landed despite the drift"
+        );
+        set_memory_registry_toggle(&registry, &echo, true).expect("toggle back");
+        assert!(
+            registry.memory_enabled(std::path::Path::new(&echo)),
+            "the opt-in landed despite the drift"
+        );
+    }
+
     // Issue #1481: the flag's only wire hop. The envelope projection must
     // carry the degraded flag through, or the sweep judges on a
     // permanently-false flag -- pinned here at the command's plain body,
@@ -6448,6 +6799,46 @@ mod tests {
         assert!(
             listing.degraded,
             "the corrupt read carries the flag true -- the tell"
+        );
+    }
+
+    // Issue #1530's firing contract, pinned as a truth table: the settled
+    // outcomes (Materialized and Textual) project their reply text; Failed
+    // and Cancelled carry no settled facts and never fire an extraction.
+    // (The command's remaining gates -- the external-turn arm and the
+    // bound workspace -- wrap this projection; they are wiring, not
+    // decision, and ride the fire block they guard.)
+    #[test]
+    fn the_extraction_firing_contract_projects_settled_replies_only() {
+        let materialized = TurnOutcome::Materialized {
+            promotions: vec![],
+            viz: None,
+            body: Some("settled materialized".to_string()),
+            assumption: None,
+        };
+        assert_eq!(
+            settled_reply_for_extraction(&materialized).as_deref(),
+            Some("settled materialized")
+        );
+        let textual = TurnOutcome::Textual {
+            text_kind: crate::model::TextKind::Agent,
+            body: "settled textual".to_string(),
+            assumption: None,
+        };
+        assert_eq!(
+            settled_reply_for_extraction(&textual).as_deref(),
+            Some("settled textual")
+        );
+        let failed = TurnOutcome::Failed(crate::model::TurnFailure::Execute {
+            detail: "step cap".to_string(),
+        });
+        assert!(
+            settled_reply_for_extraction(&failed).is_none(),
+            "a failed turn carries no settled facts"
+        );
+        assert!(
+            settled_reply_for_extraction(&TurnOutcome::Cancelled(None)).is_none(),
+            "a cancelled turn carries no settled facts"
         );
     }
 }
