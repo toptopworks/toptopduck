@@ -27,12 +27,17 @@ function renderBubble(props: { isStale?: boolean; invokedSkills?: string[] }) {
 
 function renderQuestion(
   question: string,
-  props: { isStale?: boolean } = {},
+  props: { isStale?: boolean; invokedSkills?: string[] } = {},
 ) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
       <TooltipProvider>
-        <UserBubble question={question} askedAt={0} isStale={props.isStale ?? false} />
+        <UserBubble
+          question={question}
+          askedAt={0}
+          isStale={props.isStale ?? false}
+          invokedSkills={props.invokedSkills ?? []}
+        />
       </TooltipProvider>
     </IntlProvider>,
   );
@@ -149,6 +154,26 @@ describe("UserBubble quote chips (#1573)", () => {
     const { container } = renderQuestion("> 只有引用");
     const q = container.querySelector(".turn-question");
     expect(q!.textContent).toBe("只有引用");
+  });
+
+  it("seats the quote chips ahead of the invocation chips", () => {
+    const { container } = renderQuestion(QUOTED_QUESTION, {
+      invokedSkills: ["sql-coach"],
+    });
+    const items = container.querySelectorAll("[role=\"listitem\"]");
+    expect(items).toHaveLength(2);
+    expect(items[0].textContent).toContain("宁德时代3007…");
+    expect(items[1].textContent).toBe("sql-coach");
+  });
+
+  it("wears the chip face on the bubble's quote chips", () => {
+    const { container } = renderQuestion(QUOTED_QUESTION);
+    const classes = container
+      .querySelector("[role=\"listitem\"]")!
+      .className.split(/\s+/);
+    expect(classes).toContain("bg-chip-surface");
+    expect(classes).toContain("rounded-md");
+    expect(classes).toContain("text-[13px]");
   });
 
   it("scopes the stale strike to the draft; the chips stay unstruck", () => {

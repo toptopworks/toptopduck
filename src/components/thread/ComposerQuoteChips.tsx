@@ -4,6 +4,7 @@ import { bareButtonReset } from "../../lib/buttonReset";
 import { quoteExcerpt } from "../../lib/quoteText";
 import type { QuoteEntry } from "../../session/useComposerState";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { CHIP_FACE } from "./chip-face";
 
 // Quote chips (#1573): the composer's display of the selection surface's
 // staged passages for THIS session, isomorphic with ComposerSkillChips
@@ -44,20 +45,13 @@ export function ComposerQuoteChips({ quotes, onRemove }: ComposerQuoteChipsProps
       {quotes.map((quote) => (
         <Tooltip key={quote.id}>
           <TooltipTrigger asChild>
-            {/* The face rides the chip-surface token's ground-relative
-                tint, not an opaque fill: the pill must lift a visible step
-                on BOTH grounds it sits on -- the secondary bubble box and
-                the card composer -- which one opaque value cannot serve
-                (the app.css transit token's own lesson). leading-5 pins the
-                pill's box to the prose line-height (20px, the text-sm
-                line): top alignment then reads as center alignment on the
-                first line, in both the composer row and the bubble's inline
-                flow. The glyph rides the reference's boxed face: a hairline
-                4px box one step down from the pill itself. */}
-            <span
-              role="listitem"
-              className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md bg-chip-surface px-1.5 leading-5 text-[13px] font-medium text-secondary-foreground"
-            >
+            {/* The face rides the shared CHIP_FACE constant (chip-face.ts
+                carries the rationale: ground-relative tint over an opaque
+                fill -- one opaque value cannot serve both grounds -- and
+                the leading-5 line box that makes top alignment read as
+                center alignment). The glyph rides the reference's boxed
+                face: a hairline 4px box one step down from the pill. */}
+            <span role="listitem" className={CHIP_FACE}>
               <span className="flex size-4 shrink-0 items-center justify-center rounded-sm border border-border">
                 <SquareLetterT className="size-3.5" aria-hidden />
               </span>

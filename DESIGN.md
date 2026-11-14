@@ -592,7 +592,7 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 **`badge-accent` / `badge-accent-dark`** — Teal-tinted pill. Background `{colors.accent}`, text `{colors.accent-foreground}`. Used for highlighted/active states in lists.
 
-**`chip` / `chip-dark`** — Ground-relative metadata pill for the quote and skill chips (the composer's staged chips and the sent bubble's chips alike). Background `{colors.chip-surface}` / `{colors.chip-surface-dark}`, text `{colors.secondary-foreground}` / `{colors.secondary-foreground-dark}`, type `{typography.badge}` (12px / 500), rounded `{rounded.md}` (6px), padding 2px × 6px. The quote chip boxes its glyph in a 1px `{colors.border}` hairline box at `{rounded.sm}`; the skill chip runs the glyph bare. phrasing-content spans with list roles — the face hosts inside the question bubble's `<p>`.
+**`chip` / `chip-dark`** — Ground-relative metadata pill for the quote and skill chips (the composer's staged chips and the sent bubble's chips alike). Background `{colors.chip-surface}` / `{colors.chip-surface-dark}`, text `{colors.secondary-foreground}` / `{colors.secondary-foreground-dark}`, type 13px / 500 (one step under the 14px body, the `code-inline` size), rounded `{rounded.md}` (6px), padding 6px horizontal; the 20px prose line box (`leading-5`) supplies the height, so the pill matches the first text line exactly. The quote chip boxes its glyph in a 1px `{colors.border}` hairline box at `{rounded.sm}`; the skill chip runs the glyph bare at the same glyph size. phrasing-content spans with list roles — the face hosts inside the question bubble's `<p>`.
 
 ### Alerts
 

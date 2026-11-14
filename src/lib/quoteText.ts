@@ -91,5 +91,5 @@ export function splitQuotedQuestion(question: string): SplitQuestion {
   if (quotes.length === 0) return { quotes: [], draft: question };
   const rest = lines.slice(head);
   if (rest[0] === "") rest.shift(); // the submit-side join's one blank line
-  return { quotes: quotes.map((lines) => lines.join("\n")), draft: rest.join("\n") };
+  return { quotes: quotes.map((block) => block.join("\n")), draft: rest.join("\n") };
 }

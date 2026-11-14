@@ -19,6 +19,7 @@ import { Puzzle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { splitQuotedQuestion } from "../../lib/quoteText";
 import { CopyButton } from "./CopyButton";
+import { CHIP_FACE } from "./chip-face";
 import { ComposerQuoteChips } from "./ComposerQuoteChips";
 import { HOVER_REVEAL_CLASS } from "./turn-visual";
 import { formatTurnStamp } from "./turnStamp";
@@ -118,7 +119,7 @@ export function UserBubble({
               <span
                 key={name}
                 role="listitem"
-                className="invoked-skill inline-flex max-w-full items-center gap-1 rounded-md bg-chip-surface px-1.5 leading-5 text-[13px] font-medium text-secondary-foreground"
+                className={cn("invoked-skill", CHIP_FACE)}
               >
                 <Puzzle className="size-3.5 shrink-0" aria-hidden="true" />
                 <span className="truncate">{name}</span>

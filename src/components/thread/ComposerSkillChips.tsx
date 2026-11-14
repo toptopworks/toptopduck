@@ -1,6 +1,7 @@
 import { useIntl } from "react-intl";
 import { Puzzle, X } from "lucide-react";
 import { bareButtonReset } from "../../lib/buttonReset";
+import { CHIP_FACE } from "./chip-face";
 
 // Skill chips (ADR-0112 trigger-then-stage, calibrated by ADR-0119
 // Decision 5): the composer's display of THIS turn's staged invocations,
@@ -33,10 +34,7 @@ export function ComposerSkillChips({ names, onRemove }: ComposerSkillChipsProps)
       })}
     >
       {names.map((name) => (
-        <li
-          key={name}
-          className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md bg-chip-surface px-1.5 leading-5 text-[13px] font-medium text-secondary-foreground"
-        >
+        <li key={name} className={CHIP_FACE}>
           <Puzzle className="size-3.5 shrink-0" aria-hidden />
           <span className="truncate">{name}</span>
           {onRemove && (
