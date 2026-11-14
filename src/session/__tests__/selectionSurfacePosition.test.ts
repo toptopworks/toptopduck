@@ -59,18 +59,19 @@ describe("computeToolbarPlacement", () => {
   });
 
   it("floors on the composer's top edge (third clip boundary)", () => {
-    // The anchor sits right above the composer: below-placement would
-    // overlap the composer, so above wins; the composer floor then cannot
-    // push the toolbar off.
-    const composer = rect(40, 520, 760, 600);
+    // A low anchor: above has no headroom and below-placement would land on
+    // the composer, so the floor squeezes the toolbar against the
+    // composer's top edge (84 -- without the floor the same anchor places
+    // at 208, on top of the composer).
     expect(
-      place({ composerRect: composer, anchorRects: [rect(300, 400, 500, 470)] }),
-    ).toEqual({ left: 340, top: 400 - 8 - 36, maxWidth: 800 });
+      place({ composerRect: rect(40, 120, 760, 600), anchorRects: [rect(300, 20, 500, 200)] }),
+    ).toEqual({ left: 340, top: 120 - 36, maxWidth: 800 });
     // The composer only floors when it horizontally overlaps the visible
-    // area (a narrow bar next to the right sidebar).
+    // area (a narrow bar past the right edge): the same anchor then places
+    // below itself -- the floor alone made the difference.
     expect(
-      place({ composerRect: rect(700, 520, 760, 600), anchorRects: [rect(300, 400, 500, 470)] }),
-    ).toEqual({ left: 340, top: 400 - 8 - 36, maxWidth: 800 });
+      place({ composerRect: rect(900, 120, 960, 600), anchorRects: [rect(300, 20, 500, 200)] }),
+    ).toEqual({ left: 340, top: 200 + 8, maxWidth: 800 });
   });
 
   it("anchors on the first selection rect intersecting the visible area", () => {
@@ -89,9 +90,9 @@ describe("computeToolbarPlacement", () => {
   });
 
   it("returns null when the toolbar is taller than the visible area", () => {
-    expect(
-      place({ clipRects: [rect(0, 250, 800, 300)] }),
-    ).toBeNull();
+    // The default anchor intersects the 20px-tall visible band, so the
+    // null can only come from the height guard -- not the anchor-miss path.
+    expect(place({ clipRects: [rect(0, 200, 800, 220)] })).toBeNull();
   });
 
   it("clamps the toolbar inside the visible area horizontally", () => {

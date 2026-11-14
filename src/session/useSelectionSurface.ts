@@ -8,7 +8,9 @@ import {
 // The selection surface's gesture machine (#1573), dsh's text-interaction
 // adapted to the ticket's rulings: the toolbar appears when a drag- or
 // Shift-selection RELEASES (a pointerdown -> pointerup window records
-// selection changes without showing anything), coexists with the native
+// selection changes without showing anything, and a window that saw no
+// change releases nothing -- a selection-preserving press cannot resurrect
+// what it dismissed), coexists with the native
 // right-click menu (a non-primary press neither dismisses nor re-arms --
 // the ADR-0149 policy layer is untouched), and rides rAF repositioning
 // (scroll / window resize / streaming growth move the box, never close it).
@@ -27,7 +29,6 @@ interface SelectionTarget {
    *  can die (focus moves) while the toolbar must keep placing from the
    *  same anchor. */
   readonly range: Range;
-  readonly text: string;
 }
 
 export interface SelectionSurface {
@@ -130,7 +131,7 @@ export function useSelectionSurface(
 
   const dismiss = useCallback(() => {
     targetRef.current = null;
-    setActive((prev) => (prev === null ? prev : null));
+    setActive(null);
   }, []);
 
   const clearSelection = useCallback(() => {
@@ -138,9 +139,9 @@ export function useSelectionSurface(
   }, [rootRef]);
 
   // The placement: pure math (selectionSurfacePosition) over live geometry.
-  // A detached source/range (streaming swapped the prose out) or a
-  // fully-clipped anchor hides the toolbar; it stays "active" until a real
-  // dismissal so scrolling back finds it again.
+  // A detached source/range (streaming swapped the prose out) dismisses; a
+  // fully-clipped anchor only hides the toolbar (it stays "active" until a
+  // real dismissal so scrolling back finds it again).
   const place = useCallback(() => {
     const root = rootRef.current;
     const toolbar = toolbarRef.current;
@@ -213,7 +214,7 @@ export function useSelectionSurface(
     if (source === null) return;
     lastRangeRef.current = range.cloneRange();
     gestureChangedRef.current = false;
-    targetRef.current = { source, range: range.cloneRange(), text };
+    targetRef.current = { source, range: range.cloneRange() };
     setActive({ text });
   }, [rootRef]);
 
@@ -243,7 +244,7 @@ export function useSelectionSurface(
     const readRange = (): Range | null => {
       const selection = doc.getSelection();
       return selection !== null && selection.rangeCount === 1
-        ? selection.getRangeAt(0)
+        ? selection.getRangeAt(0).cloneRange()
         : null;
     };
     const onSelectionChange = (): void => {
@@ -262,18 +263,14 @@ export function useSelectionSurface(
         return; // the post-appear echo
       }
       gestureChangedRef.current = false;
-      lastRangeRef.current = range === null ? null : range.cloneRange();
+      lastRangeRef.current = range;
       dismiss();
     };
     const onPointerDown = (event: PointerEvent): void => {
       if (insideToolbar(event)) return;
       if (event.button !== 0) return; // right-click coexists with the toolbar
       dismiss();
-      const selection = doc.getSelection();
-      lastRangeRef.current =
-        selection !== null && selection.rangeCount === 1
-          ? selection.getRangeAt(0).cloneRange()
-          : null;
+      lastRangeRef.current = readRange();
       gestureChangedRef.current = false;
       pointerArmedRef.current =
         event.target instanceof Node && root.contains(event.target);
@@ -281,6 +278,10 @@ export function useSelectionSurface(
     const onPointerUp = (): void => {
       if (!pointerArmedRef.current) return;
       pointerArmedRef.current = false;
+      // A window that saw no selection change releases nothing: the press
+      // preserved the selection (a scrollbar drag, a menu trigger that
+      // preventDefaults mousedown), so the release has no gesture to show.
+      if (!gestureChangedRef.current) return;
       tryAppear();
     };
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -298,6 +299,9 @@ export function useSelectionSurface(
       if (!shiftArmedRef.current) return;
       if (event.key !== "Shift" && event.shiftKey) return;
       shiftArmedRef.current = false;
+      // The pointerup gate's twin: a Shift window that changed nothing
+      // (the key was tapped alone) releases nothing.
+      if (!gestureChangedRef.current) return;
       tryAppear();
     };
     const onWindowBlur = (): void => cancel();

@@ -11,15 +11,18 @@ function normalizeNewlines(text: string): string {
   return text.replace(/\r\n?/g, "\n");
 }
 
+/** The chip's excerpt cap: the reference chip's head-glance width. */
+const EXCERPT_CAP = 8;
+
 /** The chip's display + accessible-name excerpt: the selection's head,
  *  capped at 8 characters with an ellipsis (the reference chip's head
  *  glance; the full text lives in the chip's hover tooltip). A surrogate
  *  pair straddling the cap leaves the HIGH surrogate as the cap's last
  *  unit (its low half got cut); stepping back one keeps the glyph whole. */
-export function quoteExcerpt(text: string, cap = 8): string {
-  if (text.length <= cap) return text;
-  const capped = text.slice(0, cap);
-  const tail = capped.charCodeAt(cap - 1);
+export function quoteExcerpt(text: string): string {
+  if (text.length <= EXCERPT_CAP) return text;
+  const capped = text.slice(0, EXCERPT_CAP);
+  const tail = capped.charCodeAt(EXCERPT_CAP - 1);
   if (tail >= 0xd800 && tail <= 0xdbff) return `${capped.slice(0, -1)}…`;
   return `${capped}…`;
 }

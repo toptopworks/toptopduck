@@ -74,6 +74,10 @@ function appearViaPointer(): void {
   selectText(prose);
   const root = document.getElementById("surface-root") as HTMLElement;
   fireEvent.pointerDown(root, { button: 0 });
+  // The real drag fires selectionchange as the selection extends (jsdom
+  // never auto-fires it); the release path requires the window to have
+  // recorded a change -- a no-change press releases nothing.
+  fireEvent(document, new Event("selectionchange"));
   fireEvent.pointerUp(root, { button: 0 });
 }
 
@@ -92,6 +96,7 @@ describe("useSelectionSurface (#1573 gesture machine)", () => {
     expect(toolbarEl()).toBeNull();
     fireEvent.pointerDown(root, { button: 0 });
     expect(toolbarEl()).toBeNull();
+    fireEvent(document, new Event("selectionchange"));
     fireEvent.pointerUp(root, { button: 0 });
     expect(toolbarEl()).not.toBeNull();
   });
@@ -105,6 +110,7 @@ describe("useSelectionSurface (#1573 gesture machine)", () => {
     fireEvent.keyDown(root, { key: "Shift" });
     expect(toolbarEl()).toBeNull();
     selectText(document.getElementById("prose-b") as HTMLElement);
+    fireEvent(document, new Event("selectionchange"));
     fireEvent.keyUp(root, { key: "Shift" });
     expect(toolbarEl()).not.toBeNull();
   });
@@ -224,6 +230,43 @@ describe("useSelectionSurface (#1573 gesture machine)", () => {
     fireEvent(document, new Event("selectionchange"));
     expect(toolbarEl()).toBeNull();
     fireEvent.pointerUp(root, { button: 0 });
+    expect(toolbarEl()).not.toBeNull();
+  });
+
+  it("a selection-preserving press does not resurrect the dismissed toolbar", () => {
+    render(<Harness onQuote={() => {}} />);
+    appearViaPointer();
+    expect(toolbarEl()).not.toBeNull();
+    const root = document.getElementById("surface-root") as HTMLElement;
+    // The press keeps the selection alive (a scrollbar drag, a trigger that
+    // preventDefaults mousedown): the pointerdown dismisses, the window
+    // records no change, and the release has nothing to show.
+    fireEvent.pointerDown(root, { button: 0 });
+    expect(toolbarEl()).toBeNull();
+    fireEvent.pointerUp(root, { button: 0 });
+    expect(toolbarEl()).toBeNull();
+  });
+
+  it("releasing Shift without a selection change does not resurrect the toolbar", () => {
+    render(<Harness onQuote={() => {}} />);
+    appearViaPointer();
+    const root = document.getElementById("surface-root") as HTMLElement;
+    fireEvent.keyDown(root, { key: "Shift" });
+    expect(toolbarEl()).toBeNull();
+    fireEvent.keyUp(root, { key: "Shift" });
+    expect(toolbarEl()).toBeNull();
+  });
+
+  it("a press inside the toolbar neither dismisses nor re-arms", () => {
+    render(<Harness onQuote={() => {}} />);
+    appearViaPointer();
+    const toolbar = toolbarEl() as HTMLElement;
+    // The real pointer flow: the press lands on the button BEFORE the
+    // click, so the guard is what keeps the toolbar alive through it.
+    const button = toolbar.querySelector("button") as HTMLButtonElement;
+    fireEvent.pointerDown(button, { button: 0 });
+    expect(toolbarEl()).not.toBeNull();
+    fireEvent.pointerUp(button, { button: 0 });
     expect(toolbarEl()).not.toBeNull();
   });
 });

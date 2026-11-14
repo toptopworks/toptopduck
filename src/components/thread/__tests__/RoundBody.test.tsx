@@ -16,4 +16,14 @@ describe("RoundBody trace round width cap (issue #826)", () => {
     const { container } = renderI18n(<RoundBody text="答轮">{false}</RoundBody>);
     expect(container.querySelector(".trace-round")).toHaveClass("max-w-full");
   });
+
+  it("wraps the prose in the selection-source mark (#1573)", () => {
+    // This body renders both the settled trace round and, through the live
+    // adapter, the streaming live prose -- dropping the wrapper here kills
+    // the selection surface for every live round at once.
+    const { container } = renderI18n(<RoundBody text="答轮">{false}</RoundBody>);
+    const prose = container.querySelector(".round-text");
+    expect(prose).not.toBeNull();
+    expect(prose?.closest("[data-selection-source]")).not.toBeNull();
+  });
 });

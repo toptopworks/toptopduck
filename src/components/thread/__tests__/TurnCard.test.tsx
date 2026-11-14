@@ -172,6 +172,16 @@ describe("TurnCard narrow-column width caps (issue #860)", () => {
     expect(container.querySelector(".round-text")).toHaveClass("max-w-full");
   });
 
+  it("wraps the materialized prose answer in the selection-source mark (#1573)", () => {
+    // The materialized turn's prose answer is a quoting surface like the
+    // textual body: without the wrapper the whole selection surface goes
+    // dark for this face (no toolbar can ever appear over it).
+    const { container } = renderCard(materializedRecord("物化正文回答"));
+    const prose = container.querySelector(".round-text");
+    expect(prose).not.toBeNull();
+    expect(prose?.closest("[data-selection-source]")).not.toBeNull();
+  });
+
   it("aligns the preview card with the prose column and paces its top gap", () => {
     // ml-6 was the #298 anchor to the trace-call gutter; since #847 put
     // terminal prose between the link row and the card, the visual
@@ -397,7 +407,10 @@ describe("TurnCard textual outcome markdown (issue #827)", () => {
       // sibling assertions vacuously (null contains nothing, null === null).
       expect(note).not.toBeNull();
       expect(prose?.contains(note)).toBe(false);
-      const proseBlock = prose?.closest("[data-selection-source]") ?? prose;
+      const proseBlock = prose?.closest("[data-selection-source]");
+      // Guard: without the #1573 wrapper the sibling pin would pass
+      // vacuously (the bare prose root precedes the note too).
+      expect(proseBlock, `kind=${text_kind}`).not.toBeNull();
       expect(proseBlock?.nextElementSibling).toBe(note);
     },
   );

@@ -698,6 +698,14 @@ export default function App() {
   // draft mode, the session slot otherwise).
   const pendingInvocations = readInvocations(activeSessionId);
 
+  // The quote chip's per-chip removal (#1573).
+  const handleRemoveQuote = useCallback(
+    (id: number) => {
+      if (activeSessionId !== null) removeQuote(activeSessionId, id);
+    },
+    [activeSessionId, removeQuote],
+  );
+
   // Backspace at the draft's start withdraws the most recent intent: the
   // chips seat before the draft's first char, so the last chip deletes like
   // a text char (ADR-0112 Decision 3). The quote chips (#1573) seat BEFORE
@@ -711,24 +719,13 @@ export default function App() {
       return;
     }
     const lastQuote = composerQuotes[composerQuotes.length - 1];
-    if (lastQuote !== undefined && activeSessionId !== null) {
-      removeQuote(activeSessionId, lastQuote.id);
-    }
+    if (lastQuote !== undefined) handleRemoveQuote(lastQuote.id);
   }, [
     pendingInvocations,
     handleRemoveInvocation,
     composerQuotes,
-    activeSessionId,
-    removeQuote,
+    handleRemoveQuote,
   ]);
-
-  // The quote chip's per-chip removal (#1573).
-  const handleRemoveQuote = useCallback(
-    (id: number) => {
-      if (activeSessionId !== null) removeQuote(activeSessionId, id);
-    },
-    [activeSessionId, removeQuote],
-  );
 
   // Shared teardown for "close this session": the pane header menu (ADR-0093)
   // and the sidebar row menu (ADR-0133, issue #1319) both fire cancel +

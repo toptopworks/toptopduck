@@ -742,14 +742,10 @@ describe("QuestionBar pre-first-event wait window (issue #1266)", () => {
 });
 
 describe("QuestionBar quote materialization (#1573)", () => {
-  type QuoteBundle = NonNullable<
-    ComponentProps<typeof QuestionBar>["quoteChips"]
-  >;
-
   function renderWithQuotes(
     onSubmit: (question: string) => void,
     quotes: readonly string[],
-    opts: { draft?: string; chips?: ReactNode } = {},
+    opts: { draft?: string } = {},
   ) {
     return renderQuestionBar(
       <QuestionBar
@@ -760,9 +756,9 @@ describe("QuestionBar quote materialization (#1573)", () => {
         setDraft={() => {}}
         skillPicker={{
           onPick: () => {},
-          chips: { node: opts.chips, onBackspace: () => {} },
+          chips: { node: null, onBackspace: () => {} },
         }}
-        quoteChips={{ node: null, quotes } as QuoteBundle}
+        quoteChips={{ node: null, quotes }}
       />,
     );
   }
