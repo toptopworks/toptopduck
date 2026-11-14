@@ -3524,3 +3524,91 @@ describe("App context-menu policy mount (ADR-0149, issue #1570)", () => {
     expect(onField.defaultPrevented).toBe(false);
   });
 });
+
+describe("App quote lifecycle (#1573)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  afterEach(() => {
+    document.getSelection()?.removeAllRanges();
+  });
+
+  const QUOTE_BODY = "可引用的正文内容比较长一些";
+
+  async function openSessionWithProse(): Promise<void> {
+    state.workingSet = [src("people")];
+    state.thread = [textual(QUOTE_BODY)];
+    render(<App />);
+    await openSession();
+    await waitFor(() => expect(screen.getByText(QUOTE_BODY)).toBeInTheDocument());
+  }
+
+  // Stage a quote through the real chain: select the thread's marked prose,
+  // release the gesture (the window must see a selectionchange), click the
+  // toolbar's quote action, then wait for the chip's excerpt.
+  async function stageQuote(): Promise<void> {
+    const prose = document.querySelector(".round-text") as HTMLElement;
+    const range = document.createRange();
+    range.selectNodeContents(prose);
+    const selection = document.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    const conversation = document.querySelector(".session-conversation") as HTMLElement;
+    fireEvent.pointerDown(conversation, { button: 0 });
+    fireEvent(document, new Event("selectionchange"));
+    fireEvent.pointerUp(conversation, { button: 0 });
+    const toolbar = document.querySelector("[data-selection-toolbar]") as HTMLElement;
+    expect(toolbar).not.toBeNull();
+    const quote = [...toolbar.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("添加到对话"),
+    );
+    fireEvent.click(quote as HTMLElement);
+    await waitFor(() =>
+      expect(screen.getByText(`${QUOTE_BODY.slice(0, 8)}…`)).toBeInTheDocument(),
+    );
+  }
+
+  it("materializes staged quotes at submit and clears the staging", async () => {
+    await openSessionWithProse();
+    const asksBefore = vi.mocked(askQuestion).mock.calls.length;
+    await stageQuote();
+    // Settle this turn so the bar returns to idle for the second submit.
+    vi.mocked(askQuestion).mockRejectedValueOnce(new Error("settle turn one"));
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第二问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(vi.mocked(askQuestion).mock.calls.length).toBe(asksBefore + 1),
+    );
+    const ask = JSON.stringify(
+      vi.mocked(askQuestion).mock.calls.at(-1),
+    );
+    expect(ask).toContain(`> ${QUOTE_BODY}`);
+    expect(ask).toContain("第二问");
+    // The staging cleared at the submit boundary: the next question carries
+    // no blockquote.
+    vi.mocked(askQuestion).mockRejectedValueOnce(new Error("settle turn two"));
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第三问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(vi.mocked(askQuestion).mock.calls.length).toBe(asksBefore + 2),
+    );
+    const nextAsk = JSON.stringify(
+      vi.mocked(askQuestion).mock.calls.at(-1),
+    );
+    expect(nextAsk).toContain("第三问");
+    expect(nextAsk).not.toContain("> ");
+  });
+
+  it("Backspace at the draft's start withdraws the staged quote", async () => {
+    await openSessionWithProse();
+    await stageQuote();
+    const excerpt = `${QUOTE_BODY.slice(0, 8)}…`;
+    fireEvent.keyDown(screen.getByLabelText("提问"), { key: "Backspace" });
+    await waitFor(() => expect(screen.queryByText(excerpt)).toBeNull());
+  });
+});

@@ -33,6 +33,7 @@ import type { PendingWorkspace } from "./components/thread/ComposerWorkspacePick
 import { ComposerOccupancy } from "./components/thread/OccupancyRing";
 import { ComposerContextPanel } from "./components/thread/ComposerContextPanel";
 import { ComposerSkillChips } from "./components/thread/ComposerSkillChips";
+import { ComposerQuoteChips } from "./components/thread/ComposerQuoteChips";
 import {
   ComposerProviderPicker,
   type ComposerProviderPickerProps,
@@ -397,6 +398,9 @@ export default function App() {
   // Destructured so handleShellSubmit's dep array holds the useCallback-stable
   // setter itself (the composer object rebuilds every render, issue #229 idiom).
   const { setDraft: setComposerDraft } = composer;
+  // The quote staging (#1573): the active session's entries drive the bar's
+  // quote chips; the mutators are identity-stable (useComposerState).
+  const { quotes: composerQuotes, stageQuote, removeQuote, clearQuotes } = composer;
   // The active pane's fold mirrored onto the shell-level layout (.main-area
   // class + the bar slot's right-sidebar-collapsed). Defaults to COLLAPSED while the
   // pane has not reported its fields yet (the activation -> mount-report
@@ -521,9 +525,12 @@ export default function App() {
         setComposerDraft("");
         // ADR-0119 Decision 1: the staging IS this turn's user invocation --
         // it rides the ask (the backend materializes the records at submit)
-        // and the staging clears at the submit boundary.
+        // and the staging clears at the submit boundary. The quote staging
+        // (#1573) rides the same boundary -- it materialized INTO the
+        // question text above the bar.
         const intents = readInvocations(activeSessionId);
         consumeView();
+        clearQuotes(activeSessionId);
         fireShellAsk(fields, question, intents);
         return;
       }
@@ -595,6 +602,7 @@ export default function App() {
       readInvocations,
       consumeCold,
       consumeView,
+      clearQuotes,
       setComposerDraft,
       createSessionWithQuestion,
       queryClient,
@@ -690,13 +698,34 @@ export default function App() {
   // draft mode, the session slot otherwise).
   const pendingInvocations = readInvocations(activeSessionId);
 
+  // The quote chip's per-chip removal (#1573).
+  const handleRemoveQuote = useCallback(
+    (id: number) => {
+      if (activeSessionId !== null) removeQuote(activeSessionId, id);
+    },
+    [activeSessionId, removeQuote],
+  );
+
   // Backspace at the draft's start withdraws the most recent intent: the
   // chips seat before the draft's first char, so the last chip deletes like
-  // a text char (ADR-0112 Decision 3).
+  // a text char (ADR-0112 Decision 3). The quote chips (#1573) seat BEFORE
+  // the skill chips, so the chain runs skills-first -- the element adjacent
+  // to the caret is the last skill chip; the quotes follow once the skill
+  // staging is empty.
   const handleChipBackspace = useCallback(() => {
     const last = pendingInvocations[pendingInvocations.length - 1];
-    if (last !== undefined) handleRemoveInvocation(last);
-  }, [pendingInvocations, handleRemoveInvocation]);
+    if (last !== undefined) {
+      handleRemoveInvocation(last);
+      return;
+    }
+    const lastQuote = composerQuotes[composerQuotes.length - 1];
+    if (lastQuote !== undefined) handleRemoveQuote(lastQuote.id);
+  }, [
+    pendingInvocations,
+    handleRemoveInvocation,
+    composerQuotes,
+    handleRemoveQuote,
+  ]);
 
   // Shared teardown for "close this session": the pane header menu (ADR-0093)
   // and the sidebar row menu (ADR-0133, issue #1319) both fire cancel +
@@ -715,6 +744,8 @@ export default function App() {
     // Its staged invocations are unreachable the same way -- the explicit
     // drop replaces the sid-mismatch implicit invalidation.
     dropSession(sid);
+    // The quote staging (#1573) is unreachable the same way.
+    composer.clearQuotes(sid);
   };
 
   // Symmetric teardown for "delete this session" (issue #1319): the pane
@@ -726,6 +757,7 @@ export default function App() {
     if (sid) {
       composer.dropDraft(sid);
       dropSession(sid);
+      composer.clearQuotes(sid);
     }
   };
 
@@ -1100,6 +1132,7 @@ export default function App() {
                               clearPendingQuestion(s.sid)}
                             onSeedDraft={composer.seedDraft}
                             onSeedInvocations={handleSeedInvocations}
+                            onStageQuote={stageQuote}
                             onComposerFields={report}
                             onComposerFieldsUnmount={reportUnmount}
                             sessionName={s.name}
@@ -1187,6 +1220,20 @@ export default function App() {
                             ),
                             onBackspace: handleChipBackspace,
                           },
+                        }}
+                        quoteChips={{
+                          // The quote chips (#1573) seat before the skill
+                          // chips: the quote is the question's leading
+                          // material. Backspace withdrawal shares the skill
+                          // bundle's single draft-start channel -- the chain
+                          // lives in handleChipBackspace above.
+                          node: (
+                            <ComposerQuoteChips
+                              quotes={composerQuotes}
+                              onRemove={handleRemoveQuote}
+                            />
+                          ),
+                          quotes: composerQuotes.map((quote) => quote.text),
                         }}
                         trailing={(
                           <>
