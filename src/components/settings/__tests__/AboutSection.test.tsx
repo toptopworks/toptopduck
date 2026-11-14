@@ -53,13 +53,17 @@ describe("AboutSection update block", () => {
     mockedLive.mockResolvedValue([]);
   });
 
-  it("offers a manual check and shows the running version by default", async () => {
+  it("offers a manual check and shows the identity row's version pill by default", async () => {
     renderPane();
 
     expect(
       screen.getByRole("button", { name: /check for updates/i }),
     ).toBeInTheDocument();
-    expect(await screen.findByText(/current version: 0\.4\.0/i)).toBeInTheDocument();
+    // The identity row (issue #1577): the sidebar.brand copy + bare-semver
+    // pill together; the old "Current version: …" description is retired.
+    expect(await screen.findByText("TOPTOPDuck")).toBeInTheDocument();
+    expect(screen.getByText("0.4.0")).toBeInTheDocument();
+    expect(screen.queryByText(/current version/i)).toBeNull();
   });
 
   it("lands the manual check's null result as up-to-date and into the shared cache", async () => {
@@ -68,7 +72,8 @@ describe("AboutSection update block", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /check for updates/i }));
 
-    expect(await screen.findByText(/you're up to date \(0\.4\.0\)/i)).toBeInTheDocument();
+    // The version interpolation is retired; the pill owns the current version.
+    expect(await screen.findByText("You're up to date.")).toBeInTheDocument();
     expect(queryClient.getQueryData(updateKeys.check())).toBeNull();
   });
 
@@ -110,7 +115,42 @@ describe("AboutSection update block", () => {
     expect(
       await screen.findByRole("button", { name: /update to 0\.5\.0/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/faster imports/i)).toBeInTheDocument();
+    // Non-canonical text rides the plain-lines fallback.
+    expect(screen.getByText("Faster imports.")).toBeInTheDocument();
+  });
+
+  it("renders canonical notes as sections with PR tails stripped", async () => {
+    const notes = [
+      "### 新功能",
+      "",
+      "- 新增工作区记忆系统，回合结束自动提取沉淀要点 (PR [#1536](https://example.com/pull/1536))",
+      "",
+      "### 修复",
+      "",
+      "- 大型 Excel 工作簿引导导入全程只解析一次 (PR [#1555](https://example.com/pull/1555))",
+      "",
+      "---",
+      "",
+      "> Install tips belong to the release page.",
+    ].join("\n");
+    const { queryClient } = renderPane();
+    queryClient.setQueryData(updateKeys.check(), {
+      version: "0.5.0",
+      notes,
+      currentVersion: "0.4.0",
+    });
+
+    await screen.findByRole("button", { name: /update to 0\.5\.0/i });
+
+    // Section titles and cleaned items render as text nodes; provenance
+    // tails and the footer never surface.
+    expect(screen.getByText("新功能")).toBeInTheDocument();
+    expect(
+      screen.getByText("新增工作区记忆系统，回合结束自动提取沉淀要点"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("修复")).toBeInTheDocument();
+    expect(screen.queryByText(/install tips/i)).toBeNull();
+    expect(screen.queryByText(/PR \[/u)).toBeNull();
   });
 
   it("installs directly when no turn is in flight", async () => {

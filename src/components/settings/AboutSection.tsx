@@ -12,7 +12,8 @@ import { UpdateConfirmDialog } from "../../shell/UpdateConfirmDialog";
 import { fmtError } from "../../lib/error-presentation";
 import { TechnicalDetailsFold } from "../common/TechnicalDetailsFold";
 import { Button } from "../ui/button";
-import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
+import { NameBadge, PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
+import { ReleaseNotes } from "./ReleaseNotes";
 
 /** The About pane (ADR-0143, issue #1509): the app-identity surface --
  *  today the version + in-app update block, later the official-links home
@@ -49,8 +50,9 @@ export function AboutSection() {
   const [checkPhase, setCheckPhase] = useState<Phase>("idle");
   const [upToDate, setUpToDate] = useState(false);
 
-  // The running version (display only). getVersion never rejects on desktop;
-  // a non-resolving import (tests) leaves the version line hidden.
+  // The identity pill's version (display only). getVersion never rejects on
+  // desktop; a non-resolving import (tests) leaves the pill hidden. Bare
+  // semver is the display contract -- no `v` prefix anywhere.
   useEffect(() => {
     let cancelled = false;
     void getVersion()
@@ -144,19 +146,25 @@ export function AboutSection() {
         )}
       />
       <SettingsCard>
+        {/* The identity row (issue #1577): the brand + the current-version
+         *  pill sit together on the left -- the same `sidebar.brand` copy
+         *  the session sidebar header carries -- and the update button's
+         *  whole state machine rides the right slot. */}
         <SettingsRow
-          title={<FormattedMessage id="settings.update.title" defaultMessage="Updates" />}
-          description={appVersion !== null ? (
-            <FormattedMessage
-              id="settings.update.currentVersion"
-              defaultMessage="Current version: {version}"
-              values={{ version: appVersion }}
-            />
-          ) : undefined}
+          title={(
+            <span className="inline-flex items-center gap-2">
+              <FormattedMessage id="sidebar.brand" defaultMessage="TOPTOPDuck" />
+              {appVersion !== null && <NameBadge>{appVersion}</NameBadge>}
+            </span>
+          )}
           action={button}
-        >
+        />
+        {/* The update status rides a bare padded block under the identity
+         *  row -- its lines are self-explanatory, so no row title sits
+         *  between the brand and the content (issue #1577). */}
+        <div className="px-4 py-4">
           {update !== null ? (
-            <div className="grid gap-1">
+            <div className="grid gap-2">
               <p className="text-foreground text-sm">
                 <FormattedMessage
                   id="settings.update.available"
@@ -165,25 +173,15 @@ export function AboutSection() {
                 />
               </p>
               {update.notes !== null && update.notes.trim() !== "" && (
-                <p className="text-muted-foreground whitespace-pre-line text-xs leading-relaxed">
-                  {update.notes}
-                </p>
+                <ReleaseNotes notes={update.notes} />
               )}
             </div>
           ) : upToDate ? (
             <p className="text-muted-foreground text-sm">
-              {appVersion !== null ? (
-                <FormattedMessage
-                  id="settings.update.upToDate"
-                  defaultMessage="You're up to date ({version})."
-                  values={{ version: appVersion }}
-                />
-              ) : (
-                <FormattedMessage
-                  id="settings.update.upToDateShort"
-                  defaultMessage="You're up to date."
-                />
-              )}
+              <FormattedMessage
+                id="settings.update.upToDateShort"
+                defaultMessage="You're up to date."
+              />
             </p>
           ) : (
             <p className="text-muted-foreground text-sm">
@@ -193,7 +191,7 @@ export function AboutSection() {
               />
             </p>
           )}
-        </SettingsRow>
+        </div>
       </SettingsCard>
 
       {/* The settings-family error face: a sibling line BELOW the card (the
