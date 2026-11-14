@@ -735,7 +735,7 @@
   "thread.source.staleSuffix": " · invalidated {count}",
   "thread.selectionSurface.copied": "Copied to clipboard",
   "thread.selectionSurface.copy": "Copy",
-  "thread.selectionSurface.quote": "Quote to chat",
+  "thread.selectionSurface.quote": "Add to conversation",
   "thread.selectionSurface.toolbarAria": "Text actions",
   "thread.staleChip.aria": "Stale because {reason}, jump to the source event",
   "thread.staleChip.deleted": "Upstream deleted",

@@ -735,7 +735,7 @@
   "thread.source.staleSuffix": " · 失效 {count}",
   "thread.selectionSurface.copied": "已复制到剪贴板",
   "thread.selectionSurface.copy": "复制",
-  "thread.selectionSurface.quote": "引用到对话",
+  "thread.selectionSurface.quote": "添加到对话",
   "thread.selectionSurface.toolbarAria": "文本操作",
   "thread.staleChip.aria": "因{reason}而失效，跳转到对应源事件",
   "thread.staleChip.deleted": "上游已删除",

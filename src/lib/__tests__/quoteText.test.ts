@@ -40,15 +40,15 @@ describe("quoteExcerpt", () => {
     expect(quoteExcerpt("short")).toBe("short");
   });
 
-  it("caps long text at 30 chars with an ellipsis", () => {
+  it("caps long text at 8 chars with an ellipsis", () => {
     const long = "x".repeat(40);
-    expect(quoteExcerpt(long)).toBe(`${"x".repeat(30)}…`);
+    expect(quoteExcerpt(long)).toBe(`${"x".repeat(8)}…`);
   });
 
   it("does not split a surrogate pair at the cap", () => {
-    // 29 ASCII units + one 2-unit glyph = 31 units: the 30-unit cap would
+    // 7 ASCII units + one 2-unit glyph = 9 units: the 8-unit cap would
     // cut between the pair's halves, leaving an orphan high surrogate.
-    const text = `${"x".repeat(29)}𠮷`;
-    expect(quoteExcerpt(text)).toBe(`${"x".repeat(29)}…`);
+    const text = `${"x".repeat(7)}𠮷`;
+    expect(quoteExcerpt(text)).toBe(`${"x".repeat(7)}…`);
   });
 });

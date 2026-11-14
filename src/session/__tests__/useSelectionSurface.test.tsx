@@ -124,8 +124,11 @@ describe("useSelectionSurface (#1573 gesture machine)", () => {
     appearViaPointer();
     // The toolbar may be visibility:hidden under jsdom's zero geometry (the
     // placement hides what it cannot place) -- text queries see it anyway.
-    const quoteButton = (toolbarEl() as HTMLElement).querySelector("button");
-    expect(quoteButton?.textContent).toContain("Quote to chat");
+    // Copy leads the toolbar (#1573 reference shots); the quote button is
+    // found by its label, not by position.
+    const quoteButton = [...(toolbarEl() as HTMLElement).querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("Add to conversation"));
+    expect(quoteButton).toBeDefined();
     fireEvent.click(quoteButton as HTMLElement);
     expect(onQuote).toHaveBeenCalledWith("first passage");
     // The dismissal + selection clear rode the quote handler.

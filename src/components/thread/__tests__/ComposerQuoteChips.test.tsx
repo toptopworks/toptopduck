@@ -4,15 +4,19 @@ import { IntlProvider } from "react-intl";
 
 import { catalogFor } from "../../../i18n";
 import { ComposerQuoteChips } from "../ComposerQuoteChips";
+import { TooltipProvider } from "../../ui/tooltip";
 import type { QuoteEntry } from "../../../session/useComposerState";
 
 // Quote chips render zh-CN like the composer does (ADR-0052): the labels
-// assert through the zh-CN catalog's own wording.
+// assert through the zh-CN catalog's own wording. The Provider wrap mirrors
+// the App ancestor (each chip rides a hover tooltip).
 
 function renderChips(quotes: readonly QuoteEntry[], onRemove?: (id: number) => void) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-      <ComposerQuoteChips quotes={quotes} onRemove={onRemove} />
+      <TooltipProvider>
+        <ComposerQuoteChips quotes={quotes} onRemove={onRemove} />
+      </TooltipProvider>
     </IntlProvider>,
   );
 }
@@ -30,8 +34,10 @@ describe("ComposerQuoteChips (#1573)", () => {
     ]);
     expect(screen.getByLabelText("引用的段落")).toBeInTheDocument();
     expect(screen.getByText("精简")).toBeInTheDocument();
-    // The long text caps at 30 chars + ellipsis (the excerpt helper's cap).
-    expect(screen.getByText(`${"很".repeat(30)}…`)).toBeInTheDocument();
+    // The long text caps at 8 chars + ellipsis (the excerpt helper's cap);
+    // the full passage stays in the chip's hover tooltip, not the chip.
+    expect(screen.getByText(`${"很".repeat(8)}…`)).toBeInTheDocument();
+    expect(screen.queryByText("很".repeat(40))).not.toBeInTheDocument();
   });
 
   it("renders duplicated stagings as separate chips keyed by id", () => {

@@ -12,10 +12,11 @@ function normalizeNewlines(text: string): string {
 }
 
 /** The chip's display + accessible-name excerpt: the selection's head,
- *  capped at 30 characters with an ellipsis. A surrogate pair straddling
- *  the cap leaves the HIGH surrogate as the cap's last unit (its low half
- *  got cut); stepping back one keeps the glyph whole. */
-export function quoteExcerpt(text: string, cap = 30): string {
+ *  capped at 8 characters with an ellipsis (the reference chip's head
+ *  glance; the full text lives in the chip's hover tooltip). A surrogate
+ *  pair straddling the cap leaves the HIGH surrogate as the cap's last
+ *  unit (its low half got cut); stepping back one keeps the glyph whole. */
+export function quoteExcerpt(text: string, cap = 8): string {
   if (text.length <= cap) return text;
   const capped = text.slice(0, cap);
   const tail = capped.charCodeAt(cap - 1);
