@@ -11,8 +11,8 @@ import { CHIP_FACE } from "./chip-face";
 // (inline in the input area, the caret seats right after the last chip) and
 // always seated BEFORE the skill chips -- the quote is the question's
 // leading material. The chip is the quiet ground-relative pill (the
-// chip-surface token as its face, ink text, badge typography) wearing the boxed
-// glyph: a hairline box, an
+// chip-surface token as its face, ink text, 13px/500 text -- the
+// code-inline size) wearing the boxed glyph: a hairline 16px box, an
 // 8-character excerpt, and the full text on hover (the inverted-tier
 // tooltip). Withdrawal rides the per-chip button and the Backspace
 // at the draft start chain (the shell routes it: the last skill chip first,
@@ -50,7 +50,8 @@ export function ComposerQuoteChips({ quotes, onRemove }: ComposerQuoteChipsProps
                 fill -- one opaque value cannot serve both grounds -- and
                 the leading-5 line box that makes top alignment read as
                 center alignment). The glyph rides the reference's boxed
-                face: a hairline 4px box one step down from the pill. */}
+                face: a hairline 16px box (rounded-sm's 4px radius) one
+                step down from the pill. */}
             <span role="listitem" className={CHIP_FACE}>
               <span className="flex size-4 shrink-0 items-center justify-center rounded-sm border border-border">
                 <SquareLetterT className="size-3.5" aria-hidden />

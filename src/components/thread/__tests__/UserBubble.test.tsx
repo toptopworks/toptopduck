@@ -3,26 +3,15 @@
 // shape) lives on the component. The bare (no-invocation) bubble keeps the
 // exact pre-#993 markup: the question element IS the bubble.
 
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
 import { UserBubble } from "../UserBubble";
 
 function renderBubble(props: { isStale?: boolean; invokedSkills?: string[] }) {
-  return render(
-    <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-      <TooltipProvider>
-        <UserBubble
-          question="怎么跑这个查询"
-          askedAt={0}
-          isStale={props.isStale ?? false}
-          invokedSkills={props.invokedSkills ?? []}
-        />
-      </TooltipProvider>
-    </IntlProvider>,
-  );
+  return renderQuestion("怎么跑这个查询", props);
 }
 
 function renderQuestion(
@@ -70,12 +59,12 @@ describe("UserBubble invocation chips (issue #993)", () => {
     expect(q!.textContent).toBe("sql-coachchart-kit 怎么跑这个查询");
   });
 
-  it("wears the quiet muted pill face behind an aria-hidden Puzzle", () => {
+  it("wears the quiet chip-surface pill face behind an aria-hidden Puzzle", () => {
     const { container } = renderBubble({ invokedSkills: ["sql-coach"] });
     const items = container.querySelectorAll("[role=\"listitem\"]");
     expect(items).toHaveLength(1);
     // The reference-aligned recalibration: the chip wears the composer
-    // chips' ground-relative transit pill (metadata surface, not a
+    // chips' ground-relative chip-surface pill (metadata surface, not a
     // highlighted fragment).
     const classes = items[0].className.split(/\s+/);
     expect(classes).toContain("bg-chip-surface");
@@ -186,5 +175,41 @@ describe("UserBubble quote chips (#1573)", () => {
     expect(struck!.className.split(/\s+/)).toContain("decoration-dotted");
     const list = container.querySelector("[role=\"list\"]");
     expect(list!.className.split(/\s+/)).not.toContain("line-through");
+  });
+
+  it("strikes the chips' inner text on a stale quotes-only turn", () => {
+    const { container } = renderQuestion("> 只有引用", { isStale: true });
+    const q = container.querySelector(".turn-question");
+    // No draft text to strike: text-decoration does not propagate into
+    // the atomic chips, so the strike rides a container variant aimed at
+    // each chip's excerpt text.
+    expect(q!.className.split(/\s+/)).not.toContain("line-through");
+    expect(q!.className).toContain(
+      "[&_[role=listitem]_.truncate]:line-through",
+    );
+    expect(q!.className).toContain(
+      "[&_[role=listitem]_.truncate]:decoration-dotted",
+    );
+  });
+
+  it("keeps the quote-to-skill boundary space when the draft is empty", () => {
+    const { container } = renderQuestion("> 只有引用", {
+      invokedSkills: ["sql-coach"],
+    });
+    const q = container.querySelector(".turn-question");
+    // The literal space -- not mr-1 alone -- carries the quote-to-skill
+    // boundary when there is no draft to gap.
+    expect(q!.textContent).toBe("只有引用 sql-coach ");
+  });
+
+  it("copies the full verbatim question, blockquote included", () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    renderQuestion(QUOTED_QUESTION);
+    fireEvent.click(screen.getByRole("button", { name: "复制消息" }));
+    // Copy carries the verbatim question: the quoted passages ride along
+    // even though the bubble renders them as chips.
+    expect(writeText).toHaveBeenCalledWith(QUOTED_QUESTION);
+    vi.unstubAllGlobals();
   });
 });

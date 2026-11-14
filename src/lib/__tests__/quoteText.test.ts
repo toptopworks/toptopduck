@@ -74,6 +74,23 @@ describe("splitQuotedQuestion", () => {
       draft: "",
     });
   });
+
+  it("normalizes CRLF before splitting", () => {
+    expect(splitQuotedQuestion("> a\r\n\r\ndraft")).toEqual({
+      quotes: ["a"],
+      draft: "draft",
+    });
+  });
+
+  it("reads a draft opening with '>' after the quote block as one more chip", () => {
+    // The documented display-only stance: the parser cannot tell a
+    // materialized quote from a hand-typed '>' line, so the draft's
+    // leading '>' line rides along as chip text (de-prefixed by one '>').
+    expect(splitQuotedQuestion("> 甲\n\n>= 100")).toEqual({
+      quotes: ["甲", "= 100"],
+      draft: "",
+    });
+  });
 });
 
 describe("quoteExcerpt", () => {

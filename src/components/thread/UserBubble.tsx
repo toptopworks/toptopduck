@@ -29,6 +29,13 @@ import { formatTurnStamp } from "./turnStamp";
 // question span.
 const STALE_STRIKE = "stale line-through decoration-dotted";
 
+// A quotes-only stale turn has no draft text to strike and text-decoration
+// does not propagate into the atomic inline-flex chips, so the strike rides
+// the chips' inner text through a container variant -- the same dotted
+// decoration, aimed at the one strikable node each chip owns.
+const STALE_CHIP_STRIKE =
+  "stale [&_[role=listitem]_.truncate]:line-through [&_[role=listitem]_.truncate]:decoration-dotted";
+
 export function UserBubble({
   question,
   askedAt,
@@ -66,8 +73,8 @@ export function UserBubble({
           #993 bare-accent face was recalibrated (2026-11-14, the reference
           alignment) onto the quiet pill the composer chips now wear: the
           ground-relative chip-surface step (the same face on both the
-          bubble's secondary box and the composer's card), ink text, badge
-          typography
+          bubble's secondary box and the composer's card), ink text,
+          13px/500 text (the code-inline size)
           -- the chip reads as metadata, not as a highlighted fragment. A
           <ul> is flow content
           and may not nest in the <p>, so the list rides phrasing content
@@ -84,9 +91,11 @@ export function UserBubble({
           question span, scoping the decoration to the question text -- the
           chips are atomic inline boxes (inline-flex) that text-decoration
           does not propagate into, and the span pins that isolation even if
-          the chips' display ever changes. The bare (no-invocation) bubble
-          keeps the strike on the bubble element itself, exactly as before
-          the chips moved in. */}
+          the chips' display ever changes. A quotes-only stale turn has no
+          question span to carry the strike, so its variant aims the same
+          decoration at the chips' inner text. The bare (no-invocation)
+          bubble keeps the strike on the bubble element itself, exactly as
+          before the chips moved in. */}
       <p
         className={cn(
           "turn-question m-0 max-w-[85%] rounded-lg rounded-tr-sm bg-secondary px-3 py-2",
@@ -102,10 +111,14 @@ export function UserBubble({
           // and middle's x-height baseline math skews against CJK faces.
           "[&_[role=listitem]]:mr-1 [&_[role=listitem]]:align-top",
           isStale && !hasSkills && !hasQuotes && STALE_STRIKE,
+          isStale && hasQuotes && draft === "" && STALE_CHIP_STRIKE,
         )}
       >
         {hasQuotes && <ComposerQuoteChips quotes={quoteEntries} />}
-        {hasQuotes && draft !== "" && " "}
+        {/* The space is the quote list's only boundary carrier when the
+            draft is empty and skills follow -- mr-1 alone reads 4px against
+            the ~8px rhythm at every other chip boundary. */}
+        {hasQuotes && (draft !== "" || hasSkills) && " "}
         {hasSkills && (
           <span
             role="list"

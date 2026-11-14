@@ -73,7 +73,7 @@
      pill face. A dedicated ground-relative tint rather than the transit
      ramp -- chips are a STATIC surface, not hover feedback, and need a
      deeper step than the hover face to read as a pill at all (the hover
-     step's ~12/255 lift vanished against the bubble's secondary box, whose
+     step's ~10/255 lift vanished against the bubble's secondary box, whose
      dark token shares muted's exact value). */
   --chip-surface: rgb(0 0 0 / 6%);
   --destructive: #b00020;

@@ -49,7 +49,8 @@ export interface SplitQuestion {
   /** The leading blockquote block's quotes, de-prefixed, in order. */
   quotes: string[];
   /** Everything after the quote block -- the draft as submitted. Empty
-   *  when the question was the quotes alone. */
+   *  when the question was the quotes alone; the original question,
+   *  newlines untouched, when nothing parsed as a quote. */
   draft: string;
 }
 
