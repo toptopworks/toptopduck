@@ -56,6 +56,12 @@ jobs:
         with:
           targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
+      # rust-toolchain.toml pins the compiled-with toolchain (host-only std);
+      # the targets above land on the action's stable instead. Install the
+      # darwin std onto the pinned toolchain the sidecar build resolves.
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+        if: matrix.os == 'macos-latest'
+
       # Same cache setup as the CI rust job (keys are per job + OS, so legs warm
       # their own slice) — duckdb "bundled" compiles DuckDB from C++ source
       # (~5-8 min cold per OS).
