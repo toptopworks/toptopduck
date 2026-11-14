@@ -172,7 +172,7 @@ export function AboutSection() {
                   values={{ version: update.version }}
                 />
               </p>
-              {update.notes !== null && update.notes.trim() !== "" && (
+              {update.notes !== null && (
                 <ReleaseNotes notes={update.notes} />
               )}
             </div>

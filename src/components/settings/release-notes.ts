@@ -21,9 +21,11 @@ export type ParsedReleaseNotes =
 
 export type ReleaseNotesLang = "zh" | "en";
 
-/** Chinese locales read the Chinese segment; everything else reads English. */
+/** Chinese locales read the Chinese segment; everything else reads English.
+ *  Mirrors resolveLocaleTag's zh-prefix strategy (ADR-0052) so a widened
+ *  locale domain cannot split the two mappings. */
 export function releaseNotesLang(locale: string): ReleaseNotesLang {
-  return locale === "zh-CN" || locale === "zh-TW" ? "zh" : "en";
+  return locale.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
 
 /** The `<!-- en -->` split marker, tolerant of whitespace inside the comment. */
@@ -35,7 +37,7 @@ const EN_MARKER = /<!--\s*en\s*-->/;
  *  release-notes counting convention hit the same wall). */
 const PR_TAIL = /\s*\(PR .*$/u;
 
-/** Everything from the first line that is exactly `---` onward: the release
+/** Everything from the first line that trims to `---` onward: the release
  *  page's install-tip footer. */
 function cutFooter(text: string): string {
   const lines = text.split("\n");

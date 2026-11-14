@@ -34,6 +34,7 @@ describe("releaseNotesLang", () => {
   it("maps Chinese locales to the zh segment and everything else to en", () => {
     expect(releaseNotesLang("zh-CN")).toBe("zh");
     expect(releaseNotesLang("zh-TW")).toBe("zh");
+    expect(releaseNotesLang("zh-HK")).toBe("zh");
     expect(releaseNotesLang("en-US")).toBe("en");
     expect(releaseNotesLang("fr")).toBe("en");
   });
@@ -77,10 +78,24 @@ describe("parseReleaseNotes", () => {
   it("cuts the install-tip footer at the --- separator line", () => {
     const parsed = parseReleaseNotes(CN_SECTIONS + FOOTER, "zh");
 
+    expect(parsed.kind).toBe("sections");
     if (parsed.kind !== "sections") return;
     const rendered = JSON.stringify(parsed);
     expect(rendered).not.toContain("Install tips");
     expect(rendered).not.toContain("---");
+  });
+
+  it("cuts the install-tip footer in the plain fallback too", () => {
+    // The plain posture is where the cut alone carries the load: over a
+    // sections body the non-item drop rule removes the footer lines anyway.
+    const parsed = parseReleaseNotes(
+      "一行说明\n\n---\n\n> Install tips that belong to the release page only.",
+      "zh",
+    );
+
+    expect(parsed.kind).toBe("plain");
+    if (parsed.kind !== "plain") return;
+    expect(parsed.lines).toEqual(["一行说明"]);
   });
 
   it("strips a PR tail from the first (PR marker to the end of the line", () => {
@@ -88,6 +103,7 @@ describe("parseReleaseNotes", () => {
 
     const parsed = parseReleaseNotes(body, "zh");
 
+    expect(parsed.kind).toBe("sections");
     if (parsed.kind !== "sections") return;
     expect(parsed.sections[0]?.items).toEqual(["修复导入卡顿"]);
   });
@@ -97,8 +113,19 @@ describe("parseReleaseNotes", () => {
 
     const parsed = parseReleaseNotes(body, "zh");
 
+    expect(parsed.kind).toBe("sections");
     if (parsed.kind !== "sections") return;
     expect(parsed.sections[0]?.items).toEqual(["修复 (括号) 与 (嵌套 (更深)) 文本的解析"]);
+  });
+
+  it("drops item-less sections instead of rendering orphan titles", () => {
+    const body = ["### 新功能", "", "### 修复", "", "- 大型 Excel 工作簿导入只解析一次"].join("\n");
+
+    const parsed = parseReleaseNotes(body, "zh");
+
+    expect(parsed.kind).toBe("sections");
+    if (parsed.kind !== "sections") return;
+    expect(parsed.sections.map((s) => s.title)).toEqual(["修复"]);
   });
 
   it("falls back to plain lines for text without any section heading", () => {
@@ -121,6 +148,16 @@ describe("parseReleaseNotes", () => {
 
   it("falls back to the en segment when the zh segment is empty", () => {
     const body = "\n\n<!-- en -->\n\n" + EN_SECTIONS;
+
+    const parsed = parseReleaseNotes(body, "zh");
+
+    expect(parsed.kind).toBe("sections");
+    if (parsed.kind !== "sections") return;
+    expect(parsed.sections[0]?.title).toBe("New Features");
+  });
+
+  it("treats a heading-only segment as empty and falls back to the other side", () => {
+    const body = "### 新功能\n\n<!-- en -->\n\n" + EN_SECTIONS;
 
     const parsed = parseReleaseNotes(body, "zh");
 

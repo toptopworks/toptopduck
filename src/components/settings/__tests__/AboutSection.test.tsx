@@ -13,7 +13,7 @@ import { renderSettings } from "./helpers";
 
 // The About pane's update block (ADR-0143, issue #1509): the button state
 // machine (check -> up-to-date / update-to-X), the active-turn confirm gate,
-// and the manual check's mirror-write into the shared cache slice the topbar
+// and the manual check's mirror-write into the shared cache slice the sidebar
 // indicator subscribes to. Assertions anchor on the en-US catalog wording
 // (the shared seam's real-catalog posture, issue #1100).
 
