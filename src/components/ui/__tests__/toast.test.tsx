@@ -52,6 +52,9 @@ describe("ui toast face (issue #1494)", () => {
     act(() => {
       result.current.dismiss();
     });
+    // Suite-level stub hygiene: both RO stubs go through stubGlobal, so
+    // a mid-test failure must not leak the stub into later tests.
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -250,8 +253,7 @@ describe("ui toast face (issue #1494)", () => {
     // the naive midpoint parked the viewport at left:0 top:0,
     // half-translated offscreen. The RO firing on a zero-sized main
     // area must NOT re-anchor -- the in-flight toast holds its last
-    // measured position so the swap is invisible to it (user report,
-    // 2026-11-15).
+    // measured position so the swap is invisible to it (issue #1589).
     const instances: {
       cb: ResizeObserverCallback;
       targets: Element[];
@@ -299,7 +301,6 @@ describe("ui toast face (issue #1494)", () => {
     expect(vp.style.left).toBe("400px");
     expect(vp.style.top).toBe("64px");
     main.remove();
-    vi.unstubAllGlobals();
   });
 
   it("names and dismisses through the close button", () => {

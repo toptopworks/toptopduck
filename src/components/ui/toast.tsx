@@ -112,14 +112,13 @@ function ToastIcon({
   // The variant-led status glyph (decorative -- the title/description
   // carry the semantics, hence aria-hidden). Both variants are solid
   // discs with the glyph stroked in the inverse hue -- outline-only
-  // glyphs read as thin scratchwork on the solid toast faces (user
-  // review, 2026-11-15). Default rides the reference-app green the
-  // request pinned; the brand teal disc sat too dark against the
-  // inverted face to read as a success mark. One-off hex, not a token:
-  // the inverted face is dark in BOTH themes so no light/dark flip is
-  // needed; promote to a --success token (the #108 warning precedent)
-  // if a second consumer appears. If that promotion happens, it is a
-  // DESIGN.md color-table edit, not a toast-local one.
+  // glyphs read as thin scratchwork on the solid toast faces (issue
+  // #1589). Default rides a success green (#22c55e); the brand teal
+  // disc sat too dark against the inverted face to read as a success
+  // mark. One-off hex, not a token: the inverted face is dark in BOTH
+  // themes so no light/dark flip is needed; promote to a --success
+  // token (the #108 warning precedent) if a second consumer appears,
+  // which is a DESIGN.md color-table edit, not a toast-local one.
   if (variant === "destructive") {
     return (
       <CircleX
@@ -133,7 +132,7 @@ function ToastIcon({
     <CircleCheck
       data-slot="toast-icon"
       aria-hidden="true"
-      className="size-5 shrink-0 fill-[#22c55e] text-white"
+      className="size-5 shrink-0 fill-[#22c55e] text-inverted-foreground"
     />
   );
 }

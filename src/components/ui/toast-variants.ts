@@ -22,8 +22,7 @@ import { cva } from "class-variance-authority";
 // column's default stretch pulls every toast to the widest sibling --
 // a lone short hint stays compact while a stack reads as one aligned
 // block, neither stretched across a fixed full-width bar (the
-// recipe's w-full) nor raggedly center-stacked (user review,
-// 2026-11-15).
+// recipe's w-full) nor raggedly center-stacked (issue #1589).
 
 export const toastVariants = cva(
   "group pointer-events-auto relative flex items-center justify-between gap-2 overflow-hidden rounded-md p-4 pr-6 shadow-md transition-all data-[swipe=cancel]:translate-y-0 data-[swipe=end]:translate-y-(--radix-toast-swipe-end-y) data-[swipe=move]:translate-y-(--radix-toast-swipe-move-y) data-[swipe=move]:transition-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[swipe=end]:animate-out data-[state=closed]:fade-out-80 data-[state=closed]:slide-out-to-top-full data-[state=open]:slide-in-from-top-full",
