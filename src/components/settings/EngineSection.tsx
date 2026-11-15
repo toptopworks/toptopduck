@@ -198,8 +198,9 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
           action={saveButton("memory")}
         >
           {/* Number + unit compose the stored "512MB"-style string at save
-              time; the pair cannot express a value the backend gate rejects,
-              so the silent sanitize revert is unreachable from this UI. */}
+              time; the composer refuses any pair outside the gate's grammar,
+              so the composed value can never be one the gate rejects and the
+              silent sanitize revert is unreachable from this UI. */}
           <div className="flex items-center gap-2">
             <Input
               type="number"

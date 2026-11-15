@@ -1,8 +1,11 @@
 // EngineSection (issue #1583, ADR-0150): the extension-channel tier switch
 // pair. The main switch maps off↔core and the community child switch maps
 // core↔community; both commit through ONE read-modify-write patch, so the
-// pair can never persist two half-states. Pinned here: the off-tier render
-// (child disabled), each tier transition, and the failed-commit face.
+// pair can never persist two half-states. Pinned for the tiers: the off-tier
+// render (child disabled), each tier transition, and the failed-commit face.
+// Pinned for the memory limit (#1585): the stored-value parse-back, the
+// compose-on-save, and the keep-stored fallbacks (cleared / zero / exponent /
+// unpicked unit).
 
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
@@ -11,7 +14,7 @@ import type { Mock } from "vitest";
 import { baseAppConfig } from "../../../test-fixtures";
 import type { AppConfig } from "../../../types/app-config";
 import { EngineSection } from "../EngineSection";
-import { renderSettings } from "./helpers";
+import { chooseOption, openSelect, renderSettings } from "./helpers";
 
 function renderSection(
   engine: AppConfig["engine"],
@@ -69,6 +72,49 @@ describe("EngineSection memory limit draft (#1585)", () => {
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
     const mutate = onCommit.mock.calls[0][0] as (cfg: AppConfig) => AppConfig;
     expect(mutate(baseAppConfig()).engine.memory_limit).toBe("512MB");
+  });
+
+  // "0" rides the digit grammar, so the numeric guard is the only thing
+  // between a zero amount and the gate-rejected "0MB" the sanitize layer
+  // would silently revert at write time.
+  it("keeps the stored limit when the amount is zero", async () => {
+    const onCommit = renderSection({
+      memory_limit: "512MB", threads: 1, row_cap: 100, extension_channel: "off",
+    });
+    fireEvent.change(memoryAmount(), { target: { value: "0" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    const mutate = onCommit.mock.calls[0][0] as (cfg: AppConfig) => AppConfig;
+    expect(mutate(baseAppConfig()).engine.memory_limit).toBe("512MB");
+  });
+
+  // The backend accepts nine byte-multiple units; the UI offers MB/GB, so a
+  // stored value outside the list (hand-edited "512MiB") is a reachable
+  // state. It parses back to a filled amount plus an empty unit pick, and a
+  // save from that state keeps the stored value.
+  it("degrades a stored non-MB/GB unit to an empty pick that saves as a no-op", async () => {
+    const onCommit = renderSection({
+      memory_limit: "512MiB", threads: 1, row_cap: 100, extension_channel: "off",
+    });
+    expect(memoryAmount()).toHaveValue(512);
+    expect(memoryUnit()).toHaveTextContent(/^$/);
+    fireEvent.change(memoryAmount(), { target: { value: "768" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    const mutate = onCommit.mock.calls[0][0] as (cfg: AppConfig) => AppConfig;
+    expect(mutate(baseAppConfig()).engine.memory_limit).toBe("512MB");
+  });
+
+  it("composes the canonical value when a unit is re-picked over a degraded one", async () => {
+    const onCommit = renderSection({
+      memory_limit: "512MiB", threads: 1, row_cap: 100, extension_channel: "off",
+    });
+    openSelect(memoryUnit());
+    chooseOption("GB");
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    const mutate = onCommit.mock.calls[0][0] as (cfg: AppConfig) => AppConfig;
+    expect(mutate(baseAppConfig()).engine.memory_limit).toBe("512GB");
   });
 });
 

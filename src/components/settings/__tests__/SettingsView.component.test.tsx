@@ -618,7 +618,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(screen.getByText(/apply to sessions created afterwards/)).toBeInTheDocument();
     // Three independent Save buttons (memory limit / threads / row cap).
     expect(screen.getAllByRole("button", { name: "Save" })).toHaveLength(3);
-    // Edit the threads input (the first spinbutton) and save just that field.
+    // Edit the threads input (the second spinbutton) and save just that field.
     fireEvent.change(screen.getAllByRole("spinbutton")[1], { target: { value: "8" } });
     fireEvent.click(screen.getAllByRole("button", { name: "Save" })[1]);
     await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(1));
