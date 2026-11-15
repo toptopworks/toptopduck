@@ -22,8 +22,55 @@ function renderSection(
   return onCommit;
 }
 
-const mainSwitch = () => screen.getByRole("switch", { name: "Extension channel:" });
-const communitySwitch = () => screen.getByRole("switch", { name: "Community extensions:" });
+const mainSwitch = () => screen.getByRole("switch", { name: "Extension installs" });
+const communitySwitch = () => screen.getByRole("switch", { name: "Community extensions" });
+const memoryAmount = () => screen.getByRole("spinbutton", { name: "Memory limit" });
+const memoryUnit = () => screen.getByRole("combobox", { name: "Memory limit unit" });
+
+describe("EngineSection memory limit draft (#1585)", () => {
+  it("round-trips the stored limit into the amount + unit pair", () => {
+    renderSection({ memory_limit: "512MB", threads: 1, row_cap: 100, extension_channel: "off" });
+    expect(memoryAmount()).toHaveValue(512);
+    expect(memoryUnit()).toHaveTextContent("MB");
+  });
+
+  it("composes the structured draft into a well-formed limit on save", async () => {
+    const onCommit = renderSection({
+      memory_limit: "512MB", threads: 1, row_cap: 100, extension_channel: "off",
+    });
+    fireEvent.change(memoryAmount(), { target: { value: "768" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    const mutate = onCommit.mock.calls[0][0] as (cfg: AppConfig) => AppConfig;
+    expect(mutate(baseAppConfig()).engine.memory_limit).toBe("768MB");
+  });
+
+  it("keeps the stored limit when the amount is cleared", async () => {
+    const onCommit = renderSection({
+      memory_limit: "512MB", threads: 1, row_cap: 100, extension_channel: "off",
+    });
+    fireEvent.change(memoryAmount(), { target: { value: "" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    const mutate = onCommit.mock.calls[0][0] as (cfg: AppConfig) => AppConfig;
+    expect(mutate(baseAppConfig()).engine.memory_limit).toBe("512MB");
+  });
+
+  // A number input with step="any" delivers exponent notation ("1e3") in
+  // target.value; Number() accepts it, but the backend gate splits at the
+  // first letter and would reject "1e3MB" -- the composed string must ride
+  // the same digit/dot grammar so the silent sanitize revert stays dead.
+  it("keeps the stored limit when the amount is exponent notation", async () => {
+    const onCommit = renderSection({
+      memory_limit: "512MB", threads: 1, row_cap: 100, extension_channel: "off",
+    });
+    fireEvent.change(memoryAmount(), { target: { value: "1e3" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    const mutate = onCommit.mock.calls[0][0] as (cfg: AppConfig) => AppConfig;
+    expect(mutate(baseAppConfig()).engine.memory_limit).toBe("512MB");
+  });
+});
 
 describe("EngineSection extension channel (#1583)", () => {
   it("renders the off tier with the community child inoperable", () => {
