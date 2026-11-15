@@ -19,6 +19,6 @@ pub use io::{read_at, write_at, WriteError};
 // entries use as their source (issue #602). Read consumers keep `read_at`.
 pub(crate) use io::{parse_at, AppConfigReadError};
 pub use model::{
-    AppConfig, DefaultRuntime, EngineDefaults, ExportDefaults, LocalePreference, ModelPosture,
-    PrivacyDefaults, Theme, Tunables, APP_CONFIG_FORMAT_VERSION,
+    AppConfig, DefaultRuntime, EngineDefaults, ExportDefaults, ExtensionChannel, LocalePreference,
+    ModelPosture, PrivacyDefaults, Theme, Tunables, APP_CONFIG_FORMAT_VERSION,
 };

@@ -118,16 +118,27 @@ fn run_explore(
         }
         SharedRefError::Runtime(s) => s,
     })?;
-    // Gateway door (ADR-0013 stale-ref + ADR-0080 read_* whitelist), shared
-    // with the materialize path. Explore ignores the dependency set -- it
-    // never promotes, so it records no provenance.
-    preflight_read_sql(&sql, deps.working_set, deps.temp_path).map_err(|e| match e {
+    // Gateway door (ADR-0013 stale-ref + ADR-0080 read_* whitelist + the
+    // ADR-0150 extension-channel tier gate), shared with the materialize
+    // path. Explore ignores the dependency set -- it never promotes, so it
+    // records no provenance.
+    let analysis = preflight_read_sql(
+        &sql,
+        deps.working_set,
+        deps.temp_path,
+        deps.engine.engine_defaults().extension_channel,
+    )
+    .map_err(|e| match e {
         PreflightError::StaleReference(s) => {
             format!("stale reference: `{s}` has been invalidated and may not anchor a new query")
         }
         PreflightError::FsAcl(s)
         | PreflightError::NonLiteralPath(s)
-        | PreflightError::Unparseable(s) => s,
+        | PreflightError::Unparseable(s)
+        | PreflightError::ExtensionDisabled(s)
+        | PreflightError::CommunityDisabled(s)
+        | PreflightError::WriteFunction(s)
+        | PreflightError::MissingSelect(s) => s,
     })?;
 
     // First-SQL-need acquisition (ADR-0104 Decision 2): literal SQL on an
@@ -136,11 +147,12 @@ fn run_explore(
         .engine
         .acquire()
         .map_err(|e| format!("engine materialization failed: {e}"))?;
-    // Sandbox lifecycle + cap + cancel checkpoints, shared with the materialize
-    // path. The scratch table lives on the sandbox connection only (turn-local,
-    // no naming, no working-set entry -- AC #1).
+    // Sandbox lifecycle + extension prelude (ADR-0150) + cap + cancel
+    // checkpoints, shared with the materialize path. The scratch table lives
+    // on the sandbox connection only (turn-local, no naming, no working-set
+    // entry -- AC #1).
     let table = run_sandboxed_read(
-        &sql,
+        &analysis.select_sql,
         SCRATCH_TABLE,
         &SandboxDeps {
             admin_conn,
@@ -148,6 +160,7 @@ fn run_explore(
             working_set: deps.working_set,
             result_row_cap: deps.result_row_cap,
             engine_defaults: deps.engine.engine_defaults(),
+            prelude: &analysis.prelude,
         },
         cancel,
     )

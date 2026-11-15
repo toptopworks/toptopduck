@@ -324,20 +324,28 @@ impl Materializer for RealMaterializer {
             SharedRefError::Runtime(s) => ExecError::new(ExecErrorKind::Runtime, s),
         })?;
 
-        // Gateway door (ADR-0013 stale-ref + ADR-0080 read_* whitelist), shared
-        // with the explore path. The materialize path also runs the FsAcl
-        // whitelist (issue #334) so an out-of-bounds read_* becomes a
-        // structured "outside the allowed area" error.
+        // Gateway door (ADR-0013 stale-ref + ADR-0080 read_* whitelist + the
+        // ADR-0150 extension-channel tier gate), shared with the explore
+        // path. The materialize path also runs the FsAcl whitelist (issue
+        // #334) so an out-of-bounds read_* becomes a structured "outside the
+        // allowed area" error.
         // refs are held for the post-install provenance record (issue #40).
-        let analysis =
-            preflight_read_sql(&sql, deps.working_set, deps.temp_path).map_err(|e| match e {
-                PreflightError::StaleReference(s) => {
-                    ExecError::new(ExecErrorKind::StaleReference, s)
-                }
-                PreflightError::FsAcl(s)
-                | PreflightError::NonLiteralPath(s)
-                | PreflightError::Unparseable(s) => ExecError::new(ExecErrorKind::Runtime, s),
-            })?;
+        let analysis = preflight_read_sql(
+            &sql,
+            deps.working_set,
+            deps.temp_path,
+            deps.engine.engine_defaults().extension_channel,
+        )
+        .map_err(|e| match e {
+            PreflightError::StaleReference(s) => ExecError::new(ExecErrorKind::StaleReference, s),
+            PreflightError::FsAcl(s)
+            | PreflightError::NonLiteralPath(s)
+            | PreflightError::Unparseable(s)
+            | PreflightError::ExtensionDisabled(s)
+            | PreflightError::CommunityDisabled(s)
+            | PreflightError::WriteFunction(s)
+            | PreflightError::MissingSelect(s) => ExecError::new(ExecErrorKind::Runtime, s),
+        })?;
 
         // Acquire the admin connection once at this execution point (ADR-0104
         // Decision 2): this is the materialization point when the turn's SQL
@@ -350,11 +358,11 @@ impl Materializer for RealMaterializer {
             )
         })?;
 
-        // Sandbox lifecycle + cap + cancel checkpoints, shared with the explore
-        // path. The new result_N lands on the sandbox first; the tail below
-        // installs it onto admin.
+        // Sandbox lifecycle + extension prelude (ADR-0150) + cap + cancel
+        // checkpoints, shared with the explore path. The new result_N lands
+        // on the sandbox first; the tail below installs it onto admin.
         let table = run_sandboxed_read(
-            &sql,
+            &analysis.select_sql,
             &result_name,
             &SandboxDeps {
                 admin_conn: admin,
@@ -362,6 +370,7 @@ impl Materializer for RealMaterializer {
                 working_set: deps.working_set,
                 result_row_cap: deps.result_row_cap,
                 engine_defaults: deps.engine.engine_defaults(),
+                prelude: &analysis.prelude,
             },
             cancel,
         )

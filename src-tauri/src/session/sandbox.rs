@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use duckdb::types::Value;
 use duckdb::{appender_params_from_iter, Connection};
 
-use crate::app_config::model::EngineDefaults;
+use crate::app_config::model::{EngineDefaults, ExtensionChannel};
 use crate::guardrail::{apply_resource_caps, classify_duckdb_error, ExecError, ExecErrorKind};
 use crate::ingest::schema::{attach_sql, quote_ident};
 use crate::workingset::WorkingSet;
@@ -41,16 +41,66 @@ use crate::workingset::WorkingSet;
 /// Open a fresh sandbox instance with the engine resource caps from the
 /// session-level engine-defaults snapshot applied (issue #741: the LLM SQL
 /// the caps constrain runs HERE, so the sandbox must cap from the same
-/// snapshot the admin engine holds). Sources and results are
+/// snapshot the admin engine holds), plus the extension-channel tier settings
+/// (ADR-0150: implicit autoinstall/autoload zeroed in EVERY tier, the
+/// community gate opened only on the community tier, extension binaries
+/// redirected under the app-data dir). Sources and results are
 /// attached/mirrored after opening.
 pub(crate) fn open(engine_defaults: &EngineDefaults) -> Result<Connection, ExecError> {
-    let conn = Connection::open_in_memory().map_err(duck_err)?;
+    let config = extension_channel_config(engine_defaults.extension_channel)?;
+    let conn = Connection::open_in_memory_with_flags(config).map_err(duck_err)?;
     apply_resource_caps(
         &conn,
         &engine_defaults.memory_limit,
         engine_defaults.threads,
     );
     Ok(conn)
+}
+
+/// Build the STARTUP-TIME config carrying the ADR-0150 extension-channel tier
+/// settings. Unlike the resource caps (best-effort: a rejected setting only
+/// loosens a ceiling), these are SAFETY settings, and `allow_community_extensions`
+/// can only be set before the database runs -- so they ride the connection
+/// config, and any rejected key refuses the sandbox outright (fail-closed)
+/// instead of degrading.
+///
+/// - `autoinstall_known_extensions` / `autoload_known_extensions` are forced
+///   false in EVERY tier (the ADR's implicit-channel-to-zero): bundled static
+///   extensions are unaffected; everything else loads only through an
+///   explicit `INSTALL` / `LOAD` statement boundary.
+/// - `allow_community_extensions` is opened only on [`ExtensionChannel::Community`].
+/// - `extension_directory` is redirected under the app-data dir when the
+///   setup hook anchored one (never `~/.duckdb` in production).
+fn extension_channel_config(channel: ExtensionChannel) -> Result<duckdb::Config, ExecError> {
+    let refused = |what: &str, e: duckdb::Error| {
+        ExecError::new(
+            ExecErrorKind::Runtime,
+            format!("extension-channel setting {what} refused the sandbox (fail-closed): {e}"),
+        )
+    };
+    let config = duckdb::Config::default()
+        .with("autoinstall_known_extensions", "false")
+        .map_err(|e| refused("autoinstall zeroing", e))?
+        .with("autoload_known_extensions", "false")
+        .map_err(|e| refused("autoload zeroing", e))?
+        // Explicit in EVERY tier: this DuckDB build's observed default for
+        // allow_community_extensions is true, so off/core must pin it false
+        // rather than lean on the (wrong) default.
+        .with(
+            "allow_community_extensions",
+            if channel == ExtensionChannel::Community {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .map_err(|e| refused("allow_community_extensions", e))?;
+    match crate::paths::extensions_dir() {
+        Some(dir) => config
+            .with("extension_directory", dir.display().to_string())
+            .map_err(|e| refused("extension_directory", e)),
+        None => Ok(config),
+    }
 }
 
 /// Attach every loaded source into the sandbox READ_ONLY so the `"<ref>".data`
@@ -212,6 +262,7 @@ mod tests {
             memory_limit: "256MB".to_string(),
             threads: 2,
             row_cap: 500,
+            extension_channel: crate::app_config::ExtensionChannel::default(),
         };
         let conn = open(&snapshot).expect("sandbox opens");
         crate::guardrail::tests::assert_memory_cap_lands(&conn, 256e6);
@@ -229,6 +280,7 @@ mod tests {
             memory_limit: "not-a-limit".to_string(),
             threads: 1,
             row_cap: 100,
+            extension_channel: crate::app_config::ExtensionChannel::default(),
         };
         let conn = open(&snapshot).expect("sandbox opens despite malformed limit");
         let one: i64 = conn
@@ -240,6 +292,91 @@ mod tests {
         );
         let (_, threads) = crate::guardrail::tests::read_caps(&conn);
         assert_eq!(threads, "1", "the well-formed threads PRAGMA still lands");
+    }
+
+    // --- #1583: extension-channel tier settings (ADR-0150) -------------------
+
+    use crate::app_config::ExtensionChannel;
+
+    fn read_bool_setting(conn: &Connection, name: &str) -> bool {
+        conn.query_row(&format!("SELECT current_setting('{name}')"), [], |r| {
+            r.get(0)
+        })
+        .expect("setting readback")
+    }
+
+    fn read_string_setting(conn: &Connection, name: &str) -> String {
+        conn.query_row(&format!("SELECT current_setting('{name}')"), [], |r| {
+            r.get(0)
+        })
+        .expect("setting readback")
+    }
+
+    fn snapshot_for(channel: ExtensionChannel) -> EngineDefaults {
+        EngineDefaults {
+            memory_limit: "256MB".to_string(),
+            threads: 2,
+            row_cap: 500,
+            extension_channel: channel,
+        }
+    }
+
+    /// ADR-0150 AC: the implicit autoinstall/autoload channel is zeroed in
+    /// EVERY tier -- an extension reaches the engine only through an explicit
+    /// INSTALL / LOAD statement boundary.
+    #[test]
+    fn open_zeroes_the_implicit_extension_channels_in_every_tier() {
+        for channel in [
+            ExtensionChannel::Off,
+            ExtensionChannel::Core,
+            ExtensionChannel::Community,
+        ] {
+            let conn = open(&snapshot_for(channel)).expect("sandbox opens");
+            assert!(
+                !read_bool_setting(&conn, "autoinstall_known_extensions"),
+                "autoinstall zeroed on {channel:?}"
+            );
+            assert!(
+                !read_bool_setting(&conn, "autoload_known_extensions"),
+                "autoload zeroed on {channel:?}"
+            );
+        }
+    }
+
+    /// ADR-0150 AC: the community gate opens only on the community tier.
+    #[test]
+    fn open_gates_community_only_on_the_community_tier() {
+        for channel in [ExtensionChannel::Off, ExtensionChannel::Core] {
+            let conn = open(&snapshot_for(channel)).expect("sandbox opens");
+            assert!(
+                !read_bool_setting(&conn, "allow_community_extensions"),
+                "community gated on {channel:?}"
+            );
+        }
+        let conn = open(&snapshot_for(ExtensionChannel::Community)).expect("sandbox opens");
+        assert!(
+            read_bool_setting(&conn, "allow_community_extensions"),
+            "community tier opens the gate"
+        );
+    }
+
+    /// ADR-0150 AC: extension binaries land under the anchored app-data dir,
+    /// never `~/.duckdb`. The anchor is process-global; this test holds it
+    /// for the duration of its own assertions only (the only reset site is
+    /// this test's own tail, so no parallel test can strip it mid-assert).
+    #[test]
+    fn open_redirects_the_extension_directory_when_anchored() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        crate::paths::set_extensions_dir(dir.path().to_path_buf());
+        let conn = open(&snapshot_for(ExtensionChannel::Off)).expect("sandbox opens");
+        let landed = read_string_setting(&conn, "extension_directory");
+        assert_eq!(
+            landed,
+            dir.path().display().to_string(),
+            "extension_directory redirected under the app-data anchor"
+        );
+        crate::paths::reset_extensions_dir_for_tests();
     }
 
     // The shared mirror primitive carries prior results into the sandbox AND the

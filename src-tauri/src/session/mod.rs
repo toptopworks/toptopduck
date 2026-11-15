@@ -2004,6 +2004,7 @@ mod tests {
             memory_limit: "256MB".to_string(),
             threads: 2,
             row_cap: 500,
+            extension_channel: crate::app_config::ExtensionChannel::default(),
         };
         let session = Session::with_provider_and_cancel(
             Box::new(crate::provider::UnwiredProvider),

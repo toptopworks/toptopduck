@@ -35,6 +35,7 @@ pub mod window;
 // Primitives -- no `use crate::` imports.
 pub mod cancel;
 pub mod guardrail;
+pub mod paths;
 pub mod util;
 
 // Startup PATH hydration for non-Windows desktop launches (#1467): the
@@ -321,6 +322,30 @@ pub fn run() {
             // launch instead of persisting. The directory itself is minted
             // lazily on first create; a never-created registry lists empty.
             let skills_root = app_data_path(app.handle(), "skills", "skills registry");
+
+            // DuckDB extension install directory (ADR-0150, issue #1583):
+            // `<app_data_dir>/extensions` with the same honest temp-dir
+            // fallback, anchored process-globally so the sandbox layer (deep
+            // below Tauri state) can redirect `extension_directory` away from
+            // `~/.duckdb`. Created eagerly: DuckDB does not mkdir on INSTALL,
+            // so a missing dir would fail the first explicit INSTALL.
+            let extensions_dir = match app.path().app_data_dir() {
+                Ok(dir) => dir.join(paths::EXTENSIONS_DIR_NAME),
+                Err(e) => {
+                    log::warn!(
+                        "failed to resolve app-data dir; extension installs fall back to a \
+                         temp path: {e}"
+                    );
+                    std::env::temp_dir().join("toptopduck-extensions")
+                }
+            };
+            if let Err(e) = std::fs::create_dir_all(&extensions_dir) {
+                log::warn!(
+                    "failed to create extension dir {}: {e}; explicit INSTALL may fail",
+                    extensions_dir.display()
+                );
+            }
+            paths::set_extensions_dir(extensions_dir);
 
             // Agent-definitions registry root (issue #932, ADR-0117): the
             // same app-data-dir resolution + honest temp-dir fallback as the

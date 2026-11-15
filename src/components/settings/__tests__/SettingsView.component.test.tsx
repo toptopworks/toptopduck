@@ -107,7 +107,7 @@ function SettingsViewHarness({
 
 describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => {
   const baseConfig = baseAppConfig({
-    engine: { memory_limit: "512MB", threads: 2, row_cap: 1000 },
+    engine: { memory_limit: "512MB", threads: 2, row_cap: 1000, extension_channel: "off" },
     provider: {
       profiles: [
         {

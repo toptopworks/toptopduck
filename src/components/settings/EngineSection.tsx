@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { FormattedMessage } from "react-intl";
+import { FormattedMessage, useIntl } from "react-intl";
 
-import type { AppConfig, EngineDefaults } from "../../types/app-config";
+import type { AppConfig, EngineDefaults, ExtensionChannel } from "../../types/app-config";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Switch } from "../ui/switch";
 import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
 
 // Engine pane (ADR-0075, issue #281): the three DuckDB engine defaults
@@ -51,6 +52,15 @@ function patchEngine(cfg: AppConfig, field: keyof EngineDraft, raw: string): App
   return { ...cfg, engine };
 }
 
+/** Set the extension channel tier wholesale (ADR-0150, issue #1583). The tier
+ *  is one coupling unit -- the main switch maps off↔core, the community
+ *  child switch maps core↔community -- so both switches commit through this
+ *  single read-modify-write patch (no draft state: a two-state toggle's
+ *  clicked position IS the final value). */
+function patchExtensionChannel(cfg: AppConfig, next: ExtensionChannel): AppConfig {
+  return { ...cfg, engine: { ...cfg.engine, extension_channel: next } };
+}
+
 export type EngineSectionProps = {
   appConfig: AppConfig;
   /** Commit a patch (optimistic); on IPC failure the parent reverts + returns
@@ -58,11 +68,18 @@ export type EngineSectionProps = {
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
 };
 
+// The two tier-switch label descriptors (ADR-0150): one shape feeds both the
+// visible row title and the switch's accessible name.
+const CHANNEL_LABEL = { id: "settings.engine.extensionChannel", defaultMessage: "Extension channel:" };
+const COMMUNITY_LABEL = { id: "settings.engine.extensionChannel.community", defaultMessage: "Community extensions:" };
+
 export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
   // Local editable drafts, seeded from the committed engine defaults. Each
   // field commits independently; the drafts hold pending edits until saved.
+  const intl = useIntl();
   const [draft, setDraft] = useState<EngineDraft>(toEngineDraft(appConfig.engine));
   const [savingField, setSavingField] = useState<keyof EngineDraft | null>(null);
+  const [savingChannel, setSavingChannel] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function saveField(field: keyof EngineDraft) {
@@ -73,9 +90,23 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
     setSavingField(null);
   }
 
-  const saving = savingField !== null;
+  /** Commit a tier flip immediately (the toggle's clicked position is final).
+   *  The optimistic write flips the parent's app-config, so the switches
+   *  re-render from the new tier; on failure the parent reverts and the
+   *  error surfaces on the pane's shared error line. */
+  async function saveChannel(next: ExtensionChannel) {
+    setSavingChannel(true);
+    setError(null);
+    const err = await onCommit((cfg) => patchExtensionChannel(cfg, next));
+    setError(err);
+    setSavingChannel(false);
+  }
 
-  function saveButton(field: keyof EngineDefaults) {
+  const saving = savingField !== null;
+  const channel = appConfig.engine.extension_channel;
+  const channelDisabled = saving || savingChannel;
+
+  function saveButton(field: keyof EngineDraft) {
     return (
       <Button
         type="button"
@@ -160,6 +191,47 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
             value={draft.row_cap}
             onChange={(e) => setDraft({ ...draft, row_cap: e.target.value })}
             disabled={saving}
+          />
+        </SettingsRow>
+      </SettingsCard>
+
+      {/* ADR-0150: the extension-channel tier as a linked switch pair. The
+       *  main switch flips off↔core; the community child switch (operable
+       *  only while the main switch is on) flips core↔community. Both commit
+       *  through one read-modify-write patch -- the tier is a single coupling
+       *  unit, so the two switches can never save two half-states. */}
+      <SettingsCard>
+        <SettingsRow
+          title={<FormattedMessage {...CHANNEL_LABEL} />}
+          description={(
+            <FormattedMessage
+              id="settings.engine.extensionChannel.description"
+              defaultMessage="Allow the agent to run explicit INSTALL / LOAD statements for DuckDB extensions. Applies to new sessions."
+            />
+          )}
+        >
+          <Switch
+            checked={channel !== "off"}
+            disabled={channelDisabled}
+            aria-label={intl.formatMessage(CHANNEL_LABEL)}
+            onCheckedChange={(on) => void saveChannel(on ? "core" : "off")}
+          />
+        </SettingsRow>
+
+        <SettingsRow
+          title={<FormattedMessage {...COMMUNITY_LABEL} />}
+          description={(
+            <FormattedMessage
+              id="settings.engine.extensionChannel.community.description"
+              defaultMessage="Also allow INSTALL ... FROM community. Community builds ship without an official maintenance or security-response promise."
+            />
+          )}
+        >
+          <Switch
+            checked={channel === "community"}
+            disabled={channelDisabled || channel === "off"}
+            aria-label={intl.formatMessage(COMMUNITY_LABEL)}
+            onCheckedChange={(on) => void saveChannel(on ? "community" : "core")}
           />
         </SettingsRow>
       </SettingsCard>
