@@ -52,8 +52,10 @@ describe("ui toast face (issue #1494)", () => {
     act(() => {
       result.current.dismiss();
     });
-    // Suite-level stub hygiene: both RO stubs go through stubGlobal, so
-    // a mid-test failure must not leak the stub into later tests.
+    // Suite-level stub hygiene: both RO stubs go through stubGlobal.
+    // The setup's global afterEach already unstubs after every test
+    // (failing ones included); this local call is self-documentation,
+    // not a second defense.
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -82,6 +84,9 @@ describe("ui toast face (issue #1494)", () => {
     expect(check).toBeTruthy();
     expect(check).toHaveClass("lucide-circle-check");
     expect(check).toHaveAttribute("aria-hidden", "true");
+    // A deliberate one-off hex (not a token, so no design or lint
+    // gate protects it) -- pinned against a silent revert.
+    expect(check).toHaveClass("fill-[#22c55e]");
     const cross = toastEl("Glyphed failure").querySelector(
       "[data-slot=\"toast-icon\"]",
     );
@@ -186,12 +191,16 @@ describe("ui toast face (issue #1494)", () => {
   });
 
   it("pins the column-top fallback posture without a main area", () => {
+    // The width pair is the adjudicated content-hugging width (issue
+    // #1589): w-fit with the 420px cap, no full-width bar.
     expect(viewportEl()).toHaveClass(
       "fixed",
       "top-16",
       "left-1/2",
       "-translate-x-1/2",
       "z-[100]",
+      "w-fit",
+      "max-w-[420px]",
     );
   });
 
@@ -300,6 +309,36 @@ describe("ui toast face (issue #1494)", () => {
     });
     expect(vp.style.left).toBe("400px");
     expect(vp.style.top).toBe("64px");
+    // The swap reverts: the RO re-fires on the restored rect and the
+    // anchor follows it -- the round trip the measure guard promises.
+    rect.mockReturnValue({ left: 0, top: 100, width: 400 } as DOMRect);
+    act(() => {
+      observer!.cb(
+        [{ target: main } as unknown as ResizeObserverEntry],
+        observer as unknown as ResizeObserver,
+      );
+    });
+    expect(vp.style.left).toBe("200px");
+    expect(vp.style.top).toBe("100px");
+    main.remove();
+  });
+
+  it("keeps the centered fallback for a toast born while hidden", () => {
+    // The guard's other half: mounting with the main area already
+    // hidden (settings mode active before the first measure) leaves
+    // the anchor null -- the viewport keeps its CSS fallback rather
+    // than holding an anchor it never had (issue #1589).
+    const main = document.createElement("main");
+    main.className = "main-area";
+    document.body.appendChild(main);
+    const rect = vi.spyOn(main, "getBoundingClientRect");
+    rect.mockReturnValue({ left: 0, top: 0, width: 0, height: 0 } as DOMRect);
+    const { container } = render(<Toaster />);
+    const vp = container.querySelector(
+      "[data-slot=\"toast-viewport\"]",
+    ) as HTMLElement;
+    expect(vp.style.left).toBe("");
+    expect(vp.style.top).toBe("");
     main.remove();
   });
 

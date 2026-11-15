@@ -117,8 +117,9 @@ function ToastIcon({
   // disc sat too dark against the inverted face to read as a success
   // mark. One-off hex, not a token: the inverted face is dark in BOTH
   // themes so no light/dark flip is needed; promote to a --success
-  // token (the #108 warning precedent) if a second consumer appears,
-  // which is a DESIGN.md color-table edit, not a toast-local one.
+  // token if a second consumer appears -- the #108 warning precedent:
+  // app.css token wiring plus the DESIGN.md color-table row, not a
+  // toast-local edit.
   if (variant === "destructive") {
     return (
       <CircleX
