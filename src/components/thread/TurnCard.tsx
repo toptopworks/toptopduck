@@ -534,8 +534,14 @@ function TurnBody({
               caption-row -> prose -> note rhythm. */}
           {body && (
             // #1573 selection-source: the Materialized turn's prose answer
-            // is a quoting surface like the textual body.
-            <div data-selection-source="">
+            // is a quoting surface like the textual body. max-w-full: this
+            // wrapper IS the stream's non-stretched flex item (unlike the
+            // textual face, whose cap rides .turn-outcome.textual), so the
+            // prose root's own clamp cannot reach this layer -- a wide
+            // markdown table's min-content would stretch the wrapper past
+            // the card and the rail's overflow-x would crop it (the #860
+            // materialized twin).
+            <div data-selection-source="" className="max-w-full">
               <RoundProse text={body} onSelectViz={onSelectViz} selectedVizSpec={selectedVizSpec} />
             </div>
           )}

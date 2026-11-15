@@ -182,6 +182,18 @@ describe("TurnCard narrow-column width caps (issue #860)", () => {
     expect(prose?.closest("[data-selection-source]")).not.toBeNull();
   });
 
+  it("caps the materialized selection wrapper at the stream width (#1587)", () => {
+    // #1573's unclassed selection-source wrapper sits directly on the
+    // stream (flex-col items-start) as the face's own flex item -- unlike
+    // the textual face, whose cap rides .turn-outcome.textual. Without
+    // the cap the wrapper's min-content (a wide markdown table) blows it
+    // past the card and the rail's overflow-x crop hides the spill: the
+    // #860 materialized twin. jsdom cannot see the flex shrink chain, so
+    // the contract rides the class pin (the #826 precedent).
+    const { container } = renderCard(materializedRecord("物化正文回答"));
+    expect(container.querySelector("[data-selection-source]")).toHaveClass("max-w-full");
+  });
+
   it("aligns the preview card with the prose column and paces its top gap", () => {
     // ml-6 was the #298 anchor to the trace-call gutter; since #847 put
     // terminal prose between the link row and the card, the visual
