@@ -5,7 +5,12 @@ import type { ResumeProgress, TurnProgress } from "../../types/session";
 import type { ThreadEntry, TurnOutcome } from "../../types/thread";
 import type { AppConfig } from "../../types/app-config";
 import type { McpServerConfig } from "../../types/mcp";
-import type { SessionRuntimeChoice } from "../../types/runtime";
+import type { AdapterEntry, SessionRuntimeChoice } from "../../types/runtime";
+import type { SkillListing } from "../../types/skills";
+// Type-only: erased at runtime, so it does not re-enter the suite files'
+// vi.mock("../api") factories (the "without importing the api module" rule
+// below targets runtime imports only).
+import type * as Api from "../../api";
 import { baseAppConfig as sharedBaseAppConfig } from "../../test-fixtures";
 
 // Shared harness for the shell black-box suites (Shell.shellLayout /
@@ -36,6 +41,10 @@ type ShellCaptures = {
 // The webview drop router capture: the shell mounts a long-lived
 // onDragDropEvent listener; tests emit payload events through the captured
 // callback (issue #84 bisection / #501 empty-state drops).
+// Deliberately NOT reconciled against the real webviewWindow module surface
+// (unlike the api factory below): the real getCurrentWebviewWindow returns
+// the full WebviewWindow class while this one-key fake only carries the
+// drop listener, and the payload shape is already pinned by DropCapture.
 export function buildDropWindowMock(dropEvent: DropCapture) {
   return {
     getCurrentWebviewWindow: () => ({
@@ -72,6 +81,18 @@ function requireInstalledApi(): ReturnType<typeof buildShellApiMocks> {
 // inert, and the state-backed reads (working set / thread) flow through the
 // per-file hoisted `state` so a test seeds rows by assignment. Listener
 // registrations capture their callbacks into the per-file hoisted slots.
+
+// Type-level reconciliation with the real api export surface (issue #1581):
+// the `satisfies` below requires every mocked key to exist on `Api` with an
+// assignable signature, so a drifted mock (or a renamed api export) fails
+// `npx tsc --noEmit` here instead of surfacing later as a confusing
+// jsdom/Tauri error. api exports NOT mocked here intentionally pass through
+// the real implementation (the suite factories spread these over
+// importOriginal; settings/workspace/agent-panel reads are never touched by
+// shell scenarios). When a NEW api export is consumed by a shell path, add a
+// stub here or consciously accept the passthrough.
+type ShellApiMocks = Partial<typeof Api>;
+
 export function buildShellApiMocks({ state, turnProgressCb, resumeProgressCb }: ShellCaptures) {
   const mocks = {
     // Issue #842: the startup re-adoption sweep fires on mount; an empty
@@ -90,7 +111,7 @@ export function buildShellApiMocks({ state, turnProgressCb, resumeProgressCb }: 
     // handleAsk, but the turn stays in-flight without processing a result,
     // avoiding state updates that could leak across the test cleanup boundary.
     // Tests that need a result override via mockResolvedValueOnce.
-    askQuestion: vi.fn(() => new Promise(() => {})),
+    askQuestion: vi.fn((): Promise<TurnOutcome> => new Promise(() => {})),
     cancelQuery: vi.fn(async () => {}),
     conversation: vi.fn(async () => state.thread),
     // ADR-0059: capture the listener callback so a test can emit phases; the
@@ -150,15 +171,20 @@ export function buildShellApiMocks({ state, turnProgressCb, resumeProgressCb }: 
     // runtime switch, so the defaults keep the picker quiet.
     getSessionRuntime: vi.fn(async () => ({ kind: "built_in" }) as const),
     setSessionRuntime: vi.fn(async () => {}),
-    listAdapters: vi.fn(async () => [] as const),
-    rescanAdapters: vi.fn(async () => [] as const),
-    getAppConfig: vi.fn(async () => null),
+    listAdapters: vi.fn(async (): Promise<AdapterEntry[]> => []),
+    rescanAdapters: vi.fn(async (): Promise<AdapterEntry[]> => []),
+    // The null default is the "no persisted config yet" posture; the real
+    // signature omits null, so the cast keeps the runtime behavior the
+    // suites rely on while still reconciling the key against `Api`.
+    getAppConfig: vi.fn(async (): Promise<AppConfig> => null as unknown as AppConfig),
     setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
     // The skill picker reads the registry (issue #365, ADR-0086); the
     // staged invocations ride the ask itself (ADR-0119). Defaults: an empty
     // registry keeps the picker quiet.
-    listSkills: vi.fn(async () => ({ skills: [], ignored: [] })),
-  };
+    listSkills: vi.fn(
+      async (): Promise<SkillListing> => ({ skills: [], ignored: [], root_error: null }),
+    ),
+  } satisfies ShellApiMocks;
   installedApi = mocks;
   return mocks;
 }
