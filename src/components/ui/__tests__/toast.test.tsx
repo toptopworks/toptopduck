@@ -70,6 +70,23 @@ describe("ui toast face (issue #1494)", () => {
     );
   });
 
+  it("leads each variant with its aria-hidden status glyph", () => {
+    fireToast({ title: "Glyphed note" });
+    fireToast({ title: "Glyphed failure", variant: "destructive" });
+    const check = toastEl("Glyphed note").querySelector(
+      "[data-slot=\"toast-icon\"]",
+    );
+    expect(check).toBeTruthy();
+    expect(check).toHaveClass("lucide-circle-check");
+    expect(check).toHaveAttribute("aria-hidden", "true");
+    const cross = toastEl("Glyphed failure").querySelector(
+      "[data-slot=\"toast-icon\"]",
+    );
+    expect(cross).toBeTruthy();
+    expect(cross).toHaveClass("lucide-circle-x");
+    expect(cross).toHaveAttribute("aria-hidden", "true");
+  });
+
   it("re-tints the description on the destructive surface", () => {
     // The inverted-surface dim (inverted-foreground/75) is correct on the
     // dark face but lands as low-contrast gray-on-red without the group
@@ -226,6 +243,63 @@ describe("ui toast face (issue #1494)", () => {
     });
     expect(vp.style.left).toBe("200px");
     main.remove();
+  });
+
+  it("holds the last anchor when the main area collapses to zero", () => {
+    // The settings-mode display swap hides the main area (zero rect);
+    // the naive midpoint parked the viewport at left:0 top:0,
+    // half-translated offscreen. The RO firing on a zero-sized main
+    // area must NOT re-anchor -- the in-flight toast holds its last
+    // measured position so the swap is invisible to it (user report,
+    // 2026-11-15).
+    const instances: {
+      cb: ResizeObserverCallback;
+      targets: Element[];
+    }[] = [];
+    class FireableRO {
+      cb: ResizeObserverCallback;
+
+      targets: Element[] = [];
+
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb;
+        instances.push(this);
+      }
+
+      observe(target: Element) {
+        this.targets.push(target);
+      }
+
+      unobserve() {}
+
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", FireableRO);
+    const main = document.createElement("main");
+    main.className = "main-area";
+    document.body.appendChild(main);
+    const rect = vi.spyOn(main, "getBoundingClientRect");
+    rect.mockReturnValue({ left: 200, top: 64, width: 400 } as DOMRect);
+    const { container } = render(<Toaster />);
+    const vp = container.querySelector(
+      "[data-slot=\"toast-viewport\"]",
+    ) as HTMLElement;
+    expect(vp.style.left).toBe("400px");
+    const observer = instances.find((i) => i.targets.includes(main));
+    expect(observer).toBeTruthy();
+    // Settings-mode display swap: the main area goes display:none and
+    // the RO fires its zero-sized entry. The inline anchor survives.
+    rect.mockReturnValue({ left: 0, top: 0, width: 0, height: 0 } as DOMRect);
+    act(() => {
+      observer!.cb(
+        [{ target: main } as unknown as ResizeObserverEntry],
+        observer as unknown as ResizeObserver,
+      );
+    });
+    expect(vp.style.left).toBe("400px");
+    expect(vp.style.top).toBe("64px");
+    main.remove();
+    vi.unstubAllGlobals();
   });
 
   it("names and dismisses through the close button", () => {

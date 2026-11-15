@@ -6,7 +6,7 @@ import {
 } from "react";
 import * as ToastPrimitives from "@radix-ui/react-toast";
 import { type VariantProps } from "class-variance-authority";
-import { X } from "lucide-react";
+import { CircleCheck, CircleX, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { toastVariants } from "./toast-variants";
@@ -38,6 +38,19 @@ function useMainAreaAnchor(): { centerX: number; top: number } | null {
     if (!mainArea) return;
     const measure = () => {
       const rect = mainArea.getBoundingClientRect();
+      // The settings-mode display swap (styles.css) hides the shell's
+      // non-exempt children, main area included -- its rect collapses
+      // to zero, and the naive midpoint would park the viewport at
+      // left:0 top:0, half-translated offscreen. A zero-sized main
+      // area has no column to anchor to: hold the last measured
+      // anchor instead of re-anchoring, so an in-flight toast neither
+      // jumps to the viewport center nor leaves the screen -- the
+      // swap must be invisible to it. The RO re-fires when the swap
+      // reverts, re-measuring the restored rect. A toast born while
+      // no anchor exists yet keeps the viewport-centered fallback.
+      if (rect.width === 0 || rect.height === 0) {
+        return;
+      }
       setAnchor({ centerX: rect.left + rect.width / 2, top: rect.top });
     };
     measure();
@@ -68,7 +81,7 @@ function ToastViewport({
         ...(anchor ? { left: anchor.centerX, top: anchor.top } : {}),
       }}
       className={cn(
-        "fixed top-16 left-1/2 z-[100] flex max-h-screen w-full -translate-x-1/2 flex-col gap-2 p-4 md:max-w-[420px]",
+        "fixed top-16 left-1/2 z-[100] flex max-h-screen w-fit max-w-[420px] -translate-x-1/2 flex-col gap-2 p-4",
         className,
       )}
       {...props}
@@ -87,6 +100,40 @@ function Toast({
       data-slot="toast"
       className={cn(toastVariants({ variant }), className)}
       {...props}
+    />
+  );
+}
+
+function ToastIcon({
+  variant,
+}: {
+  variant?: VariantProps<typeof toastVariants>["variant"];
+}) {
+  // The variant-led status glyph (decorative -- the title/description
+  // carry the semantics, hence aria-hidden). Both variants are solid
+  // discs with the glyph stroked in the inverse hue -- outline-only
+  // glyphs read as thin scratchwork on the solid toast faces (user
+  // review, 2026-11-15). Default rides the reference-app green the
+  // request pinned; the brand teal disc sat too dark against the
+  // inverted face to read as a success mark. One-off hex, not a token:
+  // the inverted face is dark in BOTH themes so no light/dark flip is
+  // needed; promote to a --success token (the #108 warning precedent)
+  // if a second consumer appears. If that promotion happens, it is a
+  // DESIGN.md color-table edit, not a toast-local one.
+  if (variant === "destructive") {
+    return (
+      <CircleX
+        data-slot="toast-icon"
+        aria-hidden="true"
+        className="size-5 shrink-0 fill-destructive-foreground text-destructive"
+      />
+    );
+  }
+  return (
+    <CircleCheck
+      data-slot="toast-icon"
+      aria-hidden="true"
+      className="size-5 shrink-0 fill-[#22c55e] text-white"
     />
   );
 }
@@ -175,6 +222,7 @@ export {
   ToastAction,
   ToastClose,
   ToastDescription,
+  ToastIcon,
   ToastTitle,
   ToastViewport,
 };
