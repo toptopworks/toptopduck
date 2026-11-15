@@ -226,6 +226,7 @@ mod tests {
             memory_limit: "256MB".to_string(),
             threads: 2,
             row_cap: 500,
+            extension_channel: crate::app_config::ExtensionChannel::default(),
         };
         let engine = AdminEngine::new(snapshot);
         engine.materialize().expect("materialize");
@@ -244,6 +245,7 @@ mod tests {
             memory_limit: "128MB".to_string(),
             threads: 1,
             row_cap: 10,
+            extension_channel: crate::app_config::ExtensionChannel::default(),
         };
         let a = AdminEngine::new(tuned.clone());
         let b = AdminEngine::new(EngineDefaults::default());
@@ -267,6 +269,7 @@ mod tests {
             memory_limit: "abc".to_string(),
             threads: 3,
             row_cap: 100,
+            extension_channel: crate::app_config::ExtensionChannel::default(),
         };
         let engine = AdminEngine::new(snapshot);
         engine

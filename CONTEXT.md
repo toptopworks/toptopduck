@@ -101,6 +101,10 @@ _Avoid_: 代理(proxy)、中间件(middleware)、路由器(router)
 外部运行时回连网关的传输中介进程——由外部 CLI agent 按 MCP stdio 契约拉起（server 由 client 启动），携带会话寻址参数，把其工具调用透传到 app 网关。内置运行时不经桥接（进程内直接路由）。桥接是**纯传输**：不解析工具语义、不做审批、不执行工具——所有业务在网关。per-session 隔离（每外部 turn 一个桥接实例）。
 _Avoid_: 代理(proxy)——那是网关的别名；适配器(adapter)——那是 CLI 的数据定义；连接器(connector)
 
+**扩展通道 (Extension Channel)**:
+DuckDB 扩展的安装（`INSTALL` 联网拉取）与装载（`LOAD` 激活）治理面，配置三档、默认 off（见 ADR-0150）：off=通道全关；core=官方核心扩展可装可载；community=追加社区构建档（官方 CI 签名、无官方审计承诺）。隐式装载（autoinstall / autoload）全档恒归零——联网只发生在显式 `INSTALL` 语句边界；装载治理为函数面守卫（写函数拒绝清单保住会话临时目录写面语义），不设逐扩展白名单；扩展自带读函数随读面现状（任意绝对路径，见 ADR-0137）无新增权，远程 URL 读取维持拒绝（独立裁决另裁）。
+_Avoid_: 插件(plugin)、扩展白名单(extension whitelist)——已否决；自动装载(autoload)——隐式通道已归零
+
 **工具 (Tool)**:
 运行时在轮次内可调用的、带名称与参数 schema 的能力；所有调用经 app 网关统一路由（可审计、可限、可沙箱）。**内置工具**作用于工作集：探索查询（scratch，轮末即弃）与显式物化（晋升为中间结果、得 result_N 名、受上限约束）；**外部工具**来自外部工具源——MCP 服务器与 CLI 工具（见「CLI 工具」；CLI 注册项来源二分：用户与内置），审批 / 审计 / 轨迹语义不因配置或注册来源而异。工具调用是轮次的轨迹构成，**非轮次本身**，不推进计步序。
 _Avoid_: 命令(command)、扩展(extension)、接口(interface)

@@ -27,12 +27,21 @@ export type LocalePreference = "system" | "zh-CN" | "en-US";
 // `statement_timeout_ms` key in an older config file is ignored at parse and
 // dropped on the next write -- the field was retired with the timeout
 // mechanism itself (same precedent as `retry_budget`).
+// The DuckDB extension channel tier (ADR-0150): "off" refuses INSTALL/LOAD
+// at the preflight; "core" allows them against the official core channel;
+// "community" additionally allows `INSTALL ... FROM community`. The implicit
+// autoinstall/autoload channel stays off in every tier. Crosses IPC as the
+// bare lowercase tier name, mirroring the Rust enum's snake_case serde.
+export type ExtensionChannel = "off" | "core" | "community";
+
 export interface EngineDefaults {
   // DuckDB memory limit string (e.g. "512MB").
   memory_limit: string;
   threads: number;
   // Ceiling on a materialized result's row count.
   row_cap: number;
+  // The extension channel tier (ADR-0150, issue #1583).
+  extension_channel: ExtensionChannel;
 }
 
 // Default-for-new-datasets privacy knob (ADR-0011). Per-dataset overrides still

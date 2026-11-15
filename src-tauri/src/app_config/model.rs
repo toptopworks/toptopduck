@@ -115,6 +115,21 @@ pub struct ModelPosture {
     pub thought_level: Option<String>,
 }
 
+/// The DuckDB extension channel tier (ADR-0150, issue #1583): `Off` refuses
+/// `INSTALL` / `LOAD` at the preflight; `Core` allows them against the official
+/// core channel; `Community` additionally allows `INSTALL ... FROM community`
+/// (the DuckDB `allow_community_extensions` gate). The implicit
+/// autoinstall/autoload channel stays OFF in every tier -- an extension reaches
+/// the engine only through an explicit `INSTALL` / `LOAD` statement boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionChannel {
+    #[default]
+    Off,
+    Core,
+    Community,
+}
+
 /// Engine default parameters (ADR-0005 L3). Persisted so a user's preferred
 /// resource ceiling survives a restart, and consumed at session construction
 /// (issue #741): each new/resumed session reads the CURRENT config as its
@@ -132,6 +147,11 @@ pub struct EngineDefaults {
     pub threads: u32,
     /// Ceiling on a materialized result's row count (ADR-0005/0030).
     pub row_cap: u64,
+    /// The extension channel tier (ADR-0150). Forward-compat: a pre-#1583
+    /// file has no key, so serde(default) fills `Off` -- exactly the tier
+    /// flip the ADR mandates for existing installs.
+    #[serde(default)]
+    pub extension_channel: ExtensionChannel,
 }
 
 impl Default for EngineDefaults {
@@ -143,6 +163,7 @@ impl Default for EngineDefaults {
             memory_limit: MEMORY_LIMIT.to_string(),
             threads: MAX_THREADS,
             row_cap: DEFAULT_MAX_RESULT_ROWS,
+            extension_channel: ExtensionChannel::default(),
         }
     }
 }
@@ -982,6 +1003,51 @@ mod tests {
         };
         engine.sanitize();
         assert_eq!(engine.memory_limit, "1024MB");
+    }
+
+    // --- extension_channel (ADR-0150, issue #1583) ---------------------------
+
+    #[test]
+    fn extension_channel_defaults_to_off() {
+        // The ADR's tier flip: a fresh install (and a corrupt-config degrade)
+        // starts with the channel fully closed.
+        assert_eq!(
+            AppConfig::defaults().engine.extension_channel,
+            ExtensionChannel::Off
+        );
+    }
+
+    #[test]
+    fn extension_channel_absent_fills_off_for_forward_compat() {
+        // A pre-#1583 file has an `engine` object without the new key -- the
+        // field-level serde default fills `off` rather than rejecting the
+        // whole document (the `shell` / `default_runtime` additive precedent).
+        let json = serde_json::json!({
+            "memory_limit": "512MB", "threads": 4, "row_cap": 1000
+        });
+        let engine: EngineDefaults = serde_json::from_value(json).expect("absent key parses");
+        assert_eq!(engine.extension_channel, ExtensionChannel::Off);
+    }
+
+    #[test]
+    fn extension_channel_round_trips_through_serde() {
+        for channel in [
+            ExtensionChannel::Off,
+            ExtensionChannel::Core,
+            ExtensionChannel::Community,
+        ] {
+            let engine = EngineDefaults {
+                extension_channel: channel,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&engine).expect("serialize");
+            let back: EngineDefaults = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back.extension_channel, channel, "{json}");
+        }
+        // The wire shape is the snake_case tier name the TS mirror types.
+        let engine = EngineDefaults::default();
+        let json = serde_json::to_string(&engine).expect("serialize");
+        assert!(json.contains("\"extension_channel\":\"off\""), "{json}");
     }
 
     #[test]

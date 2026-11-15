@@ -2158,6 +2158,7 @@ mod tests {
             memory_limit: "2048MB".into(),
             threads: 0, // invalid -> normalize clamps to 1
             row_cap: 1000,
+            extension_channel: crate::app_config::ExtensionChannel::default(),
         };
         cfg.provider
             .active_mut()

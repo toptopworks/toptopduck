@@ -40,7 +40,7 @@ export function baseAppConfig(overrides?: Partial<AppConfig>): AppConfig {
     memory_extraction_profile: null,
     theme: "system",
     locale: "system",
-    engine: { memory_limit: "512MB", threads: 1, row_cap: 100 },
+    engine: { memory_limit: "512MB", threads: 1, row_cap: 100, extension_channel: "off" },
     privacy: { send_samples: true },
     provider: {
       profiles: [

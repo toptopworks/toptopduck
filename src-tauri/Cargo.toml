@@ -136,10 +136,11 @@ tauri-plugin-dialog = "2"
 tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# `parquet` statically compiles the DuckDB parquet extension into the binary so
-# `read_parquet` works offline (ADR-0014: extensions bundled, never autodownloaded).
-# CSV/JSON readers ship in DuckDB core; parquet needs this bundled extension.
-duckdb = { version = "1", features = ["bundled", "parquet"] }
+# `parquet` / `json` statically compile those DuckDB extensions into the binary
+# so `read_parquet` / `read_json` work offline (ADR-0014: extensions bundled,
+# never autodownloaded). `json` rides ADR-0150: base-format reads must not
+# depend on the extension channel (the pre-#1583 build left json dynamic).
+duckdb = { version = "1", features = ["bundled", "parquet", "json"] }
 sha2 = "0.10"
 anyhow = "1"
 tempfile = "3"

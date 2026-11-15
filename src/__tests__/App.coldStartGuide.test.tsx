@@ -72,7 +72,7 @@ const { appConfigWith, configHolder } = vi.hoisted(() => {
       format_version: 2,
       theme: "system" as const,
       locale: "en-US",
-      engine: { memory_limit: "512MB", threads: 1, row_cap: 100 },
+      engine: { memory_limit: "512MB", threads: 1, row_cap: 100, extension_channel: "off" },
       privacy: { send_samples: true },
       provider: {
         profiles: [

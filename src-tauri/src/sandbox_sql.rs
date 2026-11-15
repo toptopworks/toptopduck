@@ -25,10 +25,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use duckdb::Connection;
+use regex::Regex;
 
 use crate::analysis_tools::read_paths::extract_read_paths;
+use crate::app_config::model::ExtensionChannel;
 use crate::cancel::CancelToken;
 use crate::fs_acl::{AccessMode, FsAcl};
 use crate::guardrail::{classify_duckdb_error, ExecError, ExecErrorKind};
@@ -39,6 +42,241 @@ use crate::workingset::WorkingSet;
 
 // ============================== preflight ==============================
 
+// --- statement splitting (ADR-0150, issue #1583) ---------------------------
+
+/// Split SQL into top-level statements on `;`, respecting single-quoted
+/// string literals (with `''` escapes), double-quoted identifiers, and
+/// `--` / `/* */` comments -- a semicolon inside any of those never splits.
+/// Empty statements are dropped; each returned statement is trimmed.
+///
+/// Hand-rolled rather than riding sqlparser because the split runs BEFORE
+/// parsing: an `INSTALL <name> FROM community` tail is not a shape sqlparser
+/// 0.52 models, and the split must stay valid for text the parser would
+/// refuse.
+fn split_top_level(sql: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut chars = sql.chars().peekable();
+    let (mut in_single, mut in_double) = (false, false);
+    let (mut in_line_comment, mut in_block_comment) = (false, false);
+    while let Some(c) = chars.next() {
+        if in_line_comment {
+            current.push(c);
+            if c == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            current.push(c);
+            if c == '*' && chars.peek() == Some(&'/') {
+                current.push(chars.next().expect("peeked '/'"));
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if in_single {
+            current.push(c);
+            if c == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    current.push(chars.next().expect("peeked '\''"));
+                } else {
+                    in_single = false;
+                }
+            }
+            continue;
+        }
+        if in_double {
+            current.push(c);
+            if c == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        match c {
+            '\'' => {
+                in_single = true;
+                current.push(c);
+            }
+            '"' => {
+                in_double = true;
+                current.push(c);
+            }
+            '-' => {
+                current.push(c);
+                if chars.peek() == Some(&'-') {
+                    current.push(chars.next().expect("peeked '-'"));
+                    in_line_comment = true;
+                }
+            }
+            '/' => {
+                current.push(c);
+                if chars.peek() == Some(&'*') {
+                    current.push(chars.next().expect("peeked '*'"));
+                    in_block_comment = true;
+                }
+            }
+            ';' => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    out.push(trimmed);
+                }
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        out.push(trimmed);
+    }
+    out
+}
+
+/// Blank out `--` line comments and `/* */` block comments (which nest in
+/// DuckDB) for the write-function text scan: the lexer skips comments between
+/// tokens the same way it skips whitespace, so a call written as
+/// `st_write /*x*/ (...)` is real to DuckDB while a bare-whitespace gap
+/// pattern would miss it. Single-quoted literals (with `''` escapes) and
+/// double-quoted identifiers pass through verbatim -- the scan keeps its
+/// recorded conservative stance on literals shaped like the function name.
+fn blank_comments_for_scan(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let (mut in_single, mut in_double) = (false, false);
+    while let Some(c) = chars.next() {
+        if in_single {
+            out.push(c);
+            if c == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    out.push(chars.next().expect("peeked '\''"));
+                } else {
+                    in_single = false;
+                }
+            }
+            continue;
+        }
+        if in_double {
+            out.push(c);
+            if c == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        match c {
+            '\'' => {
+                in_single = true;
+                out.push(c);
+            }
+            '"' => {
+                in_double = true;
+                out.push(c);
+            }
+            '-' if chars.peek() == Some(&'-') => {
+                chars.next();
+                out.push(' ');
+                for nc in chars.by_ref() {
+                    if nc == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                out.push(' ');
+                let mut depth = 1usize;
+                while let Some(nc) = chars.next() {
+                    match nc {
+                        '/' if chars.peek() == Some(&'*') => {
+                            chars.next();
+                            depth += 1;
+                        }
+                        '*' if chars.peek() == Some(&'/') => {
+                            chars.next();
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        '\n' => out.push('\n'),
+                        _ => {}
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The recognized prelude statement shapes (ADR-0150): core-channel
+/// `INSTALL <name>` / `LOAD <name>`, and the community-channel tail
+/// `INSTALL <name> FROM community`. Whole-statement anchored (not a
+/// substring scan): a SELECT mentioning the word "install" never matches.
+static INSTALL_CORE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^install\s+[A-Za-z_][\w]*\s*$").expect("install-core statement regex")
+});
+static INSTALL_COMMUNITY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^install\s+[A-Za-z_][\w]*\s+from\s+community\s*$")
+        .expect("install-community statement regex")
+});
+static LOAD_STMT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^load\s+[A-Za-z_][\w]*\s*$").expect("load statement regex"));
+
+/// ADR-0150 write-function refusal list (first batch: spatial's `st_write`).
+/// A loaded extension's file-writing function bypasses the session-temp-dir
+/// write policy, so it is refused wherever it appears -- the agent is pointed
+/// at the session artifact surface instead. Text-level scan (not AST): it
+/// holds even where the read-path walker's rare-variant arms fall through.
+/// Incomplete by decision -- new write functions join this list on demand.
+const REFUSED_WRITE_FUNCTIONS: &[&str] = &["st_write"];
+
+static WRITE_FUNCTION_CALL: LazyLock<Regex> = LazyLock::new(|| {
+    let alternation = REFUSED_WRITE_FUNCTIONS.join("|");
+    Regex::new(&format!(r"(?i)\b(?:{alternation})\s*\(")).expect("write-function regex")
+});
+
+/// One split statement classified for the preflight door.
+#[derive(Debug, PartialEq, Eq)]
+enum SplitStatement {
+    /// An explicit extension statement (verbatim) with its community-tail flag.
+    Extension { sql: String, community: bool },
+    /// Anything else -- carried to the CTAS wrap as-is (the wrap itself is
+    /// the statement-level barrier: a COPY/ATTACH that parses here still
+    /// fails inside `CREATE TABLE ... AS SELECT * FROM (...)`, the
+    /// pre-#1583 behavior preserved verbatim).
+    Body(String),
+}
+
+/// Split + classify: mark `INSTALL`/`LOAD` statements as the prelude, leave
+/// everything else as body. Community-tail detection is a conservative
+/// regex on the whole statement -- only the two ADR-0150-blessed shapes
+/// (`INSTALL x` / `INSTALL x FROM community` / `LOAD x`) are recognized;
+/// anything else starting with INSTALL/LOAD that the regexes do not match
+/// (version pins, repository URLs) stays body and dies at the CTAS wrap,
+/// same as before the split existed.
+fn classify_statements(sql: &str) -> Vec<SplitStatement> {
+    split_top_level(sql)
+        .into_iter()
+        .map(|stmt| {
+            if INSTALL_COMMUNITY.is_match(&stmt) {
+                SplitStatement::Extension {
+                    sql: stmt,
+                    community: true,
+                }
+            } else if INSTALL_CORE.is_match(&stmt) || LOAD_STMT.is_match(&stmt) {
+                SplitStatement::Extension {
+                    sql: stmt,
+                    community: false,
+                }
+            } else {
+                SplitStatement::Body(stmt)
+            }
+        })
+        .collect()
+}
+
 /// The gateway analysis for a read-SQL call. The dependency set a successful
 /// materialize records for the stale-cascade (issue #40); explore ignores it
 /// (it never promotes, so it records nothing).
@@ -48,10 +286,18 @@ pub(crate) struct PreflightAnalysis {
     /// intersected with the live working set). Recorded on a successful
     /// materialize via `WorkingSet::record_provenance`; unused by explore.
     pub refs: HashSet<String>,
+    /// ADR-0150: the explicit `INSTALL` / `LOAD` statements, verbatim, that
+    /// the caller runs one by one on the sandbox BEFORE the CTAS-wrapped
+    /// SELECT -- the only boundary at which the network may act.
+    pub prelude: Vec<String>,
+    /// The remaining statement text (what the CTAS wrap takes). Empty when
+    /// the input held only extension statements; the door refuses that
+    /// shape (there is no result to read).
+    pub select_sql: String,
 }
 
 /// Why a read-SQL call was refused at the gateway door. A narrow enum -- only
-/// the two checks the door runs. Sandbox-execution failures are a separate
+/// the checks the door runs. Sandbox-execution failures are a separate
 /// concern ([`SandboxExecError`]); each caller handles the two enums by name
 /// so a stale reference or an out-of-bounds path never reads as a runtime
 /// error.
@@ -75,29 +321,98 @@ pub(crate) enum PreflightError {
     /// than letting it reach the engine with zero file-reachability checks, the
     /// preflight refuses it; the agent rewrites as a standard SELECT.
     Unparseable(String),
+    /// ADR-0150: an `INSTALL` / `LOAD` statement arrived while the extension
+    /// channel is `off`. Carries the structured message directing the user
+    /// to the settings pane (the agent cannot open the channel itself).
+    ExtensionDisabled(String),
+    /// ADR-0150: an `INSTALL ... FROM community` statement arrived while the
+    /// channel is `core` (community builds stay gated behind the explicit
+    /// community tier). Carries the structured message naming the missing
+    /// tier.
+    CommunityDisabled(String),
+    /// ADR-0150: a refused write function (first batch: `st_write`) was
+    /// called. Carries the message pointing the agent at the session
+    /// artifact surface.
+    WriteFunction(String),
+    /// ADR-0150: the input held only extension statements -- no SELECT
+    /// remains for the CTAS wrap to read.
+    MissingSelect(String),
 }
 
-/// The shared gateway door for both read-SQL paths: refuse a stale reference
-/// (ADR-0013 invariant 2), then refuse an unparseable SQL (ADR-0088 Why 4),
-/// then refuse a non-literal `read_*` path (ADR-0088 Decision 3), then refuse
-/// an out-of-bounds `read_*` path (ADR-0080). Pure -- parses SQL text +
-/// checks paths, never touches DuckDB.
+/// The shared gateway door for both read-SQL paths, now extension-aware
+/// (ADR-0150, issue #1583): split the input into extension prelude + body,
+/// refuse extension statements the channel tier does not admit, refuse
+/// refused-list write functions, then run the pre-existing body checks --
+/// stale reference (ADR-0013 invariant 2), unparseable SQL (ADR-0088 Why 4),
+/// non-literal `read_*` path (ADR-0088 Decision 3), out-of-bounds `read_*`
+/// path (ADR-0080). Pure -- parses SQL text + checks paths, never touches
+/// DuckDB.
 ///
-/// A stale reference is checked first: it is cheaper (the one parse is shared
-/// with the dependency extraction) and the earlier refusal is the more honest
-/// one (a stale anchor taints the whole call regardless of any `read_*`
-/// paths). The same parse yields [`PreflightAnalysis::refs`] for the
-/// materialize caller's provenance record.
+/// A stale reference is checked first among the body checks: it is cheaper
+/// (the one parse is shared with the dependency extraction) and the earlier
+/// refusal is the more honest one (a stale anchor taints the whole call
+/// regardless of any `read_*` paths). The same parse yields
+/// [`PreflightAnalysis::refs`] for the materialize caller's provenance record.
 pub(crate) fn preflight_read_sql(
     sql: &str,
     working_set: &WorkingSet,
     temp_path: &Path,
+    channel: ExtensionChannel,
 ) -> Result<PreflightAnalysis, PreflightError> {
-    let analyzed = provenance::analyze(sql, working_set);
+    // Tier gate first (ADR-0150): `off` refuses every extension statement;
+    // `core` refuses the community tail. Both refusals are structured --
+    // the message names the tier and the setting that opens it.
+    let mut prelude = Vec::new();
+    let mut body: Vec<String> = Vec::new();
+    for stmt in classify_statements(sql) {
+        match stmt {
+            SplitStatement::Extension { sql, community } => {
+                if channel == ExtensionChannel::Off {
+                    return Err(PreflightError::ExtensionDisabled(
+                        "extension statements (INSTALL/LOAD) are disabled: the extension \
+                         channel is off; ask the user to enable it in Settings → Analysis \
+                         Engine"
+                            .to_string(),
+                    ));
+                }
+                if community && channel == ExtensionChannel::Core {
+                    return Err(PreflightError::CommunityDisabled(
+                        "INSTALL ... FROM community requires the community extension tier: \
+                         the channel is core; ask the user to enable community extensions in \
+                         Settings → Analysis Engine"
+                            .to_string(),
+                    ));
+                }
+                prelude.push(sql);
+            }
+            SplitStatement::Body(sql) => body.push(sql),
+        }
+    }
+    // The write-function refusal list scans the WHOLE input (prelude + body):
+    // a refused write function is refused wherever it appears (ADR-0150's
+    // function-face guard, not an extension whitelist). The scan runs on a
+    // comment-blanked copy -- DuckDB skips comments between tokens like
+    // whitespace, so a comment interleaved before the paren is still a call.
+    if let Some(hit) = WRITE_FUNCTION_CALL.find(&blank_comments_for_scan(sql)) {
+        return Err(PreflightError::WriteFunction(format!(
+            "`{}` writes files outside the session artifact surface; export results via \
+             the session artifact tools instead",
+            hit.as_str().trim_end_matches('(').trim_end()
+        )));
+    }
+    if !prelude.is_empty() && body.is_empty() {
+        return Err(PreflightError::MissingSelect(
+            "the SQL contains only extension statements; add a SELECT for the CTAS wrap \
+             to read"
+                .to_string(),
+        ));
+    }
+    let select_sql = body.join("; ");
+    let analyzed = provenance::analyze(&select_sql, working_set);
     if let Some(stale_ref) = analyzed.stale_ref {
         return Err(PreflightError::StaleReference(stale_ref));
     }
-    let extraction = extract_read_paths(sql).map_err(|_| {
+    let extraction = extract_read_paths(&select_sql).map_err(|_| {
         PreflightError::Unparseable(
             "could not analyze SQL for file-path safety; rewrite as a standard SELECT".to_string(),
         )
@@ -115,6 +430,8 @@ pub(crate) fn preflight_read_sql(
     }
     Ok(PreflightAnalysis {
         refs: analyzed.refs,
+        prelude,
+        select_sql,
     })
 }
 
@@ -143,11 +460,17 @@ pub(crate) struct SandboxDeps<'a> {
     /// snapshot: the sandbox the provider SQL runs on is the object these
     /// caps constrain.
     pub engine_defaults: &'a crate::app_config::model::EngineDefaults,
+    /// ADR-0150: the explicit `INSTALL` / `LOAD` statements the preflight
+    /// lifted out, run one by one on the sandbox before the CTAS-wrapped
+    /// SELECT. The only boundary at which the network may act (the implicit
+    /// autoinstall/autoload channel is forced off at sandbox open).
+    pub prelude: &'a [String],
 }
 
 /// A sandbox table the runner hands back to the caller for its tail. Owns the
 /// sandbox connection, so dropping it cleans up the scratch/result table
 /// (per-turn isolation, ADR-0027).
+#[derive(Debug)]
 pub(crate) struct SandboxTable {
     /// The sandbox connection holding the table. The caller runs its
     /// tool-controlled tail against it (explore: DESCRIBE + sample;
@@ -185,16 +508,17 @@ pub(crate) enum SandboxExecError {
 }
 
 /// Run `sql` once on a sandboxed instance as `table_name`, handing back the
-/// owned sandbox table. Owns the whole sandbox lifecycle + the row-count cap
-/// + the cancel checkpoints, so both read-SQL paths enforce uniformly.
+/// owned sandbox table. Owns the whole sandbox lifecycle + the extension
+/// prelude (ADR-0150) + the row-count cap + the cancel checkpoints, so both
+/// read-SQL paths enforce uniformly.
 ///
 /// Cancel checkpoints (ADR-0021 / ADR-0077 honesty):
-/// 1. **Mid-check** -- after sandbox setup, before the CREATE. A cancel that
-///    arrived during setup is reported as Cancelled, not the later CREATE's
-///    generic engine error.
-/// 2. **Create-failure cancel priority** -- if the CREATE errors AND cancel is
-///    requested, report Cancelled (the interrupt surfaced as a generic DuckDB
-///    failure; the flag is the honest signal).
+/// 1. **Mid-check** -- after sandbox setup (incl. the extension prelude),
+///    before the CREATE. A cancel that arrived during setup is reported as
+///    Cancelled, not the later CREATE's generic engine error.
+/// 2. **Create/prelude-failure cancel priority** -- if the statement errors
+///    AND cancel is requested, report Cancelled (the interrupt surfaced as a
+///    generic DuckDB failure; the flag is the honest signal).
 /// 3. **Post-check** -- after the cap check, before returning. A cancel that
 ///    landed between the query's success and the caller's tail is reported as
 ///    Cancelled.
@@ -218,6 +542,26 @@ pub(crate) fn run_sandboxed_read(
         .map_err(lift_exec_error)?;
     sandbox::mirror_results(&sandbox_conn, deps.admin_conn, deps.working_set)
         .map_err(lift_exec_error)?;
+
+    // ADR-0150 extension prelude: run the explicit INSTALL / LOAD statements
+    // one by one under the interrupt handle (an INSTALL may hit the network).
+    // A failure folds the honest engine message (Runtime-kind: the agent
+    // self-corrects, e.g. INSTALL then LOAD), with the same cancel priority
+    // as the CREATE below.
+    if !deps.prelude.is_empty() {
+        cancel.set_interrupt(sandbox_conn.interrupt_handle());
+        for stmt in deps.prelude {
+            let outcome = sandbox_conn.execute_batch(stmt);
+            if let Some(e) = outcome.err() {
+                cancel.clear_interrupt();
+                if cancel.is_requested() {
+                    return Err(SandboxExecError::Cancelled);
+                }
+                return Err(runtime_from_duckdb(e));
+            }
+        }
+        cancel.clear_interrupt();
+    }
 
     // Mid-check: cancel arrived during setup -> honest Cancelled, not the
     // later CREATE's generic failure.
@@ -326,6 +670,7 @@ mod tests {
             memory_limit: "256MB".to_string(),
             threads: 2,
             row_cap: 500,
+            extension_channel: crate::app_config::ExtensionChannel::default(),
         };
         let deps = SandboxDeps {
             admin_conn: &admin,
@@ -333,6 +678,7 @@ mod tests {
             working_set: &WorkingSet::default(),
             result_row_cap: 500,
             engine_defaults: &snapshot,
+            prelude: &[],
         };
         let table = run_sandboxed_read(
             "SELECT value AS threads FROM duckdb_settings() WHERE name='threads'",
@@ -413,7 +759,13 @@ mod tests {
             "SELECT * FROM result_1 JOIN read_csv_auto('{}') ON TRUE",
             outside_file.to_string_lossy()
         );
-        let err = preflight_read_sql(&sql, &ws, temp.path()).unwrap_err();
+        let err = preflight_read_sql(
+            &sql,
+            &ws,
+            temp.path(),
+            crate::app_config::ExtensionChannel::Off,
+        )
+        .unwrap_err();
         assert_eq!(err, PreflightError::StaleReference("result_1".into()));
     }
 
@@ -433,8 +785,13 @@ mod tests {
             "SELECT * FROM read_csv_auto('{}')",
             outside_file.to_string_lossy()
         );
-        let analysis = preflight_read_sql(&sql, &ws, temp.path())
-            .expect("absolute spelling passes on the full-path face");
+        let analysis = preflight_read_sql(
+            &sql,
+            &ws,
+            temp.path(),
+            crate::app_config::ExtensionChannel::Off,
+        )
+        .expect("absolute spelling passes on the full-path face");
         assert!(analysis.refs.is_empty());
     }
 
@@ -449,6 +806,7 @@ mod tests {
             r#"SELECT COUNT(*) AS n FROM "people".data"#,
             &ws,
             temp.path(),
+            crate::app_config::ExtensionChannel::Off,
         )
         .expect("clean SQL passes preflight");
         assert_eq!(analysis.refs, ["people".to_string()].into_iter().collect(),);
@@ -484,14 +842,25 @@ y
 
         // File on disk: the absolute spelling passes on ADR-0137 D4's
         // full-path face -- no assets root needed.
-        preflight_read_sql(&sql(&dead_file), &ws, temp.path())
-            .expect("absolute spelling passes on the full-path face");
+        preflight_read_sql(
+            &sql(&dead_file),
+            &ws,
+            temp.path(),
+            crate::app_config::ExtensionChannel::Off,
+        )
+        .expect("absolute spelling passes on the full-path face");
 
         // File gone (the pre-#1383 session tree deleted): the same spelling
         // refuses before execution -- the legacy replay degrades per
         // ADR-0035, record intact.
         let gone = assets.join("gone.csv");
-        let err = preflight_read_sql(&sql(&gone), &ws, temp.path()).unwrap_err();
+        let err = preflight_read_sql(
+            &sql(&gone),
+            &ws,
+            temp.path(),
+            crate::app_config::ExtensionChannel::Off,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, PreflightError::FsAcl(_)),
             "dead assets path refuses at the preflight, got {err:?}"
@@ -504,8 +873,13 @@ y
     fn sql_reading_no_live_member_yields_empty_refs() {
         let temp = TempDir::new().unwrap();
         let ws = ws_with_people();
-        let analysis = preflight_read_sql("SELECT 1 AS x", &ws, temp.path())
-            .expect("SELECT 1 passes preflight");
+        let analysis = preflight_read_sql(
+            "SELECT 1 AS x",
+            &ws,
+            temp.path(),
+            crate::app_config::ExtensionChannel::Off,
+        )
+        .expect("SELECT 1 passes preflight");
         assert!(analysis.refs.is_empty(), "{:?}", analysis.refs);
     }
 
@@ -518,8 +892,13 @@ y
     fn non_literal_read_path_is_refused_by_preflight() {
         let temp = TempDir::new().unwrap();
         let ws = WorkingSet::default();
-        let err = preflight_read_sql("SELECT * FROM read_csv_auto(some_column)", &ws, temp.path())
-            .unwrap_err();
+        let err = preflight_read_sql(
+            "SELECT * FROM read_csv_auto(some_column)",
+            &ws,
+            temp.path(),
+            crate::app_config::ExtensionChannel::Off,
+        )
+        .unwrap_err();
         match err {
             PreflightError::NonLiteralPath(msg) => {
                 assert!(
@@ -538,7 +917,13 @@ y
     fn unparseable_sql_is_refused_by_preflight() {
         let temp = TempDir::new().unwrap();
         let ws = WorkingSet::default();
-        let err = preflight_read_sql("this is not sql at all", &ws, temp.path()).unwrap_err();
+        let err = preflight_read_sql(
+            "this is not sql at all",
+            &ws,
+            temp.path(),
+            crate::app_config::ExtensionChannel::Off,
+        )
+        .unwrap_err();
         match err {
             PreflightError::Unparseable(msg) => {
                 assert!(
@@ -547,6 +932,275 @@ y
                 );
             }
             other => panic!("expected Unparseable, got {other:?}"),
+        }
+    }
+
+    // --- #1583: extension-channel preflight (ADR-0150) -----------------------
+
+    use crate::app_config::ExtensionChannel as Channel;
+
+    #[test]
+    fn split_respects_literals_and_comments() {
+        assert_eq!(
+            split_top_level("SELECT ';' AS a; SELECT 2"),
+            vec!["SELECT ';' AS a".to_string(), "SELECT 2".to_string()]
+        );
+        assert_eq!(
+            split_top_level("SELECT 1 -- ; not a split\n"),
+            vec!["SELECT 1 -- ; not a split".to_string()]
+        );
+        assert_eq!(split_top_level("  ;  ; "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn off_channel_refuses_extension_statements() {
+        let temp = TempDir::new().unwrap();
+        let ws = WorkingSet::default();
+        let err = preflight_read_sql(
+            "INSTALL icu; LOAD icu; SELECT 1 AS x",
+            &ws,
+            temp.path(),
+            Channel::Off,
+        )
+        .unwrap_err();
+        match &err {
+            PreflightError::ExtensionDisabled(msg) => {
+                assert!(msg.contains("Settings"), "points at the setting: {msg}");
+            }
+            other => panic!("expected ExtensionDisabled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn core_channel_admits_core_and_refuses_the_community_tail() {
+        let temp = TempDir::new().unwrap();
+        let ws = WorkingSet::default();
+        // Core: a bare INSTALL/LOAD prelude passes and lifts out of the body.
+        let analysis = preflight_read_sql(
+            "INSTALL icu; LOAD icu; SELECT 1 AS x",
+            &ws,
+            temp.path(),
+            Channel::Core,
+        )
+        .expect("core tier admits bare INSTALL/LOAD");
+        assert_eq!(
+            analysis.prelude,
+            ["INSTALL icu".to_string(), "LOAD icu".to_string()]
+        );
+        assert_eq!(analysis.select_sql, "SELECT 1 AS x");
+        // Core: the community tail is refused.
+        let err = preflight_read_sql(
+            "INSTALL icu FROM community; SELECT 1 AS x",
+            &ws,
+            temp.path(),
+            Channel::Core,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, PreflightError::CommunityDisabled(_)),
+            "expected CommunityDisabled, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn community_channel_admits_the_community_tail() {
+        let temp = TempDir::new().unwrap();
+        let ws = WorkingSet::default();
+        let analysis = preflight_read_sql(
+            "INSTALL icu FROM community; SELECT 1 AS x",
+            &ws,
+            temp.path(),
+            Channel::Community,
+        )
+        .expect("community tier admits the community tail");
+        assert_eq!(analysis.prelude, ["INSTALL icu FROM community".to_string()]);
+    }
+
+    #[test]
+    fn extension_only_sql_is_refused_as_missing_select() {
+        let temp = TempDir::new().unwrap();
+        let ws = WorkingSet::default();
+        let err = preflight_read_sql("LOAD icu", &ws, temp.path(), Channel::Core).unwrap_err();
+        assert!(
+            matches!(err, PreflightError::MissingSelect(_)),
+            "expected MissingSelect, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn refused_write_functions_are_refused_in_every_tier() {
+        let temp = TempDir::new().unwrap();
+        let ws = WorkingSet::default();
+        for channel in [Channel::Off, Channel::Core, Channel::Community] {
+            let err = preflight_read_sql(
+                "SELECT COUNT(*) FROM ST_Write('out.gpkg', t)",
+                &ws,
+                temp.path(),
+                channel,
+            )
+            .unwrap_err();
+            match &err {
+                PreflightError::WriteFunction(msg) => {
+                    assert!(
+                        msg.to_ascii_lowercase().contains("st_write"),
+                        "names the refused function: {msg}"
+                    );
+                }
+                other => panic!("channel {channel:?}: expected WriteFunction, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn write_function_scan_blanks_interleaved_comments() {
+        // DuckDB's lexer skips comments between tokens the way it skips
+        // whitespace, so each of these is a real st_write call to the engine;
+        // the scan must see through the comment before the paren.
+        let temp = TempDir::new().unwrap();
+        let ws = WorkingSet::default();
+        for sql in [
+            "SELECT COUNT(*) FROM ST_Write /*x*/ ('out.gpkg', t)",
+            "SELECT COUNT(*) FROM ST_Write /* /* x */ */ ('out.gpkg', t)",
+            "SELECT COUNT(*) FROM ST_Write -- note\n ('out.gpkg', t)",
+        ] {
+            let err = preflight_read_sql(sql, &ws, temp.path(), Channel::Core).unwrap_err();
+            assert!(
+                matches!(err, PreflightError::WriteFunction(_)),
+                "expected WriteFunction for {sql:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_and_attach_stay_barred_by_the_ctas_wrap() {
+        // ADR-0150 AC: COPY/ATTACH stay statement-level barred -- the split
+        // leaves them in the body, so the pre-existing wrap barrier is the
+        // refuser (the body parses for path analysis but is not SELECT-shaped;
+        // pinned here as "the door itself does not refuse them").
+        let temp = TempDir::new().unwrap();
+        let ws = WorkingSet::default();
+        let outcome = preflight_read_sql(
+            "COPY (SELECT 1) TO 'x.csv'",
+            &ws,
+            temp.path(),
+            Channel::Community,
+        );
+        // The preflight is not the barrier for COPY: it either passes the
+        // door (and dies at the wrap) or refuses as unparseable for path
+        // analysis -- never as an extension-channel error.
+        assert!(
+            !matches!(
+                outcome,
+                Err(PreflightError::ExtensionDisabled(_))
+                    | Err(PreflightError::CommunityDisabled(_))
+                    | Err(PreflightError::MissingSelect(_))
+            ),
+            "COPY stays the wrap's business: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn prelude_runs_before_the_wrapped_select() {
+        // End to end (ADR-0150): a real LOAD of a statically-bundled
+        // extension (json rides the #1583 features) executes as a prelude
+        // statement, then the wrapped SELECT runs against the loaded state.
+        let admin = Connection::open_in_memory().unwrap();
+        let snapshot = crate::app_config::model::EngineDefaults {
+            memory_limit: "256MB".to_string(),
+            threads: 2,
+            row_cap: 500,
+            extension_channel: crate::app_config::ExtensionChannel::default(),
+        };
+        let prelude = vec!["LOAD json".to_string()];
+        let deps = SandboxDeps {
+            admin_conn: &admin,
+            source_files: &HashMap::new(),
+            working_set: &WorkingSet::default(),
+            result_row_cap: 500,
+            engine_defaults: &snapshot,
+            prelude: &prelude,
+        };
+        let table = run_sandboxed_read(
+            "SELECT json_valid('{}') AS ok",
+            "_probe",
+            &deps,
+            &CancelToken::new(),
+        )
+        .expect("prelude + wrapped select");
+        let ok: bool = table
+            .conn
+            .query_row("SELECT ok FROM _probe", [], |r| r.get(0))
+            .expect("probe row");
+        assert!(ok, "the json extension's function answers after LOAD json");
+    }
+
+    /// ADR-0150 AC: base-format json reads work at the OFF tier with an empty
+    /// prelude -- the `json` feature is statically bundled (#1583), so the
+    /// capability must not depend on the extension channel at all.
+    #[test]
+    fn json_reads_work_at_the_off_tier_with_no_prelude() {
+        let admin = Connection::open_in_memory().unwrap();
+        let snapshot = crate::app_config::model::EngineDefaults {
+            memory_limit: "256MB".to_string(),
+            threads: 2,
+            row_cap: 500,
+            extension_channel: crate::app_config::ExtensionChannel::Off,
+        };
+        let deps = SandboxDeps {
+            admin_conn: &admin,
+            source_files: &HashMap::new(),
+            working_set: &WorkingSet::default(),
+            result_row_cap: 500,
+            engine_defaults: &snapshot,
+            prelude: &[],
+        };
+        let table = run_sandboxed_read(
+            "SELECT json_valid('{\"a\": 1}') AS ok",
+            "_probe",
+            &deps,
+            &CancelToken::new(),
+        )
+        .expect("off-tier json read");
+        let ok: bool = table
+            .conn
+            .query_row("SELECT ok FROM _probe", [], |r| r.get(0))
+            .expect("probe row");
+        assert!(ok, "bundled json answers without any extension statement");
+    }
+
+    #[test]
+    fn a_failing_prelude_statement_surfaces_a_runtime_error() {
+        let admin = Connection::open_in_memory().unwrap();
+        let snapshot = crate::app_config::model::EngineDefaults {
+            memory_limit: "256MB".to_string(),
+            threads: 2,
+            row_cap: 500,
+            extension_channel: crate::app_config::ExtensionChannel::Core,
+        };
+        let prelude = vec!["LOAD nosuch_extension_xyz".to_string()];
+        let deps = SandboxDeps {
+            admin_conn: &admin,
+            source_files: &HashMap::new(),
+            working_set: &WorkingSet::default(),
+            result_row_cap: 500,
+            engine_defaults: &snapshot,
+            prelude: &prelude,
+        };
+        let err =
+            run_sandboxed_read("SELECT 1 AS x", "_probe", &deps, &CancelToken::new()).unwrap_err();
+        match err {
+            SandboxExecError::Runtime { kind, detail } => {
+                assert!(
+                    detail.to_ascii_lowercase().contains("extension"),
+                    "names the extension failure: {detail}"
+                );
+                assert_eq!(
+                    kind,
+                    crate::guardrail::ExecErrorKind::Runtime,
+                    "extension errors route Runtime (agent self-corrects)"
+                );
+            }
+            other => panic!("expected Runtime, got {other:?}"),
         }
     }
 }
