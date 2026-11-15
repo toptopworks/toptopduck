@@ -68,11 +68,6 @@ export type EngineSectionProps = {
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
 };
 
-// The two tier-switch label descriptors (ADR-0150): one shape feeds both the
-// visible row title and the switch's accessible name.
-const CHANNEL_LABEL = { id: "settings.engine.extensionChannel", defaultMessage: "Extension channel:" };
-const COMMUNITY_LABEL = { id: "settings.engine.extensionChannel.community", defaultMessage: "Community extensions:" };
-
 export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
   // Local editable drafts, seeded from the committed engine defaults. Each
   // field commits independently; the drafts hold pending edits until saved.
@@ -202,7 +197,12 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
        *  unit, so the two switches can never save two half-states. */}
       <SettingsCard>
         <SettingsRow
-          title={<FormattedMessage {...CHANNEL_LABEL} />}
+          title={(
+            <FormattedMessage
+              id="settings.engine.extensionChannel"
+              defaultMessage="Extension channel:"
+            />
+          )}
           description={(
             <FormattedMessage
               id="settings.engine.extensionChannel.description"
@@ -213,13 +213,21 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
           <Switch
             checked={channel !== "off"}
             disabled={channelDisabled}
-            aria-label={intl.formatMessage(CHANNEL_LABEL)}
+            aria-label={intl.formatMessage({
+              id: "settings.engine.extensionChannel",
+              defaultMessage: "Extension channel:",
+            })}
             onCheckedChange={(on) => void saveChannel(on ? "core" : "off")}
           />
         </SettingsRow>
 
         <SettingsRow
-          title={<FormattedMessage {...COMMUNITY_LABEL} />}
+          title={(
+            <FormattedMessage
+              id="settings.engine.extensionChannel.community"
+              defaultMessage="Community extensions:"
+            />
+          )}
           description={(
             <FormattedMessage
               id="settings.engine.extensionChannel.community.description"
@@ -230,7 +238,10 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
           <Switch
             checked={channel === "community"}
             disabled={channelDisabled || channel === "off"}
-            aria-label={intl.formatMessage(COMMUNITY_LABEL)}
+            aria-label={intl.formatMessage({
+              id: "settings.engine.extensionChannel.community",
+              defaultMessage: "Community extensions:",
+            })}
             onCheckedChange={(on) => void saveChannel(on ? "community" : "core")}
           />
         </SettingsRow>

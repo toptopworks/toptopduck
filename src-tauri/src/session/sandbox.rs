@@ -1,8 +1,11 @@
 //! LLM-SQL sandbox lifecycle (ADR-0005, ADR-0088).
 //!
 //! Provider SQL runs on a *separate* DuckDB instance per turn. The CTAS
-//! wrapping bars mutating statements (DROP/INSERT/COPY/ATTACH/INSTALL/LOAD),
-//! narrowing the in-SELECT file surface to `read_*` functions. File-
+//! wrapping bars mutating statements (DROP/INSERT/COPY/ATTACH), narrowing the
+//! in-SELECT file surface to `read_*` functions; INSTALL/LOAD are the ADR-0150
+//! exception -- the three blessed shapes ride the tier-gated extension
+//! prelude instead of the wrap, and unrecognized spellings still die there.
+//! File-
 //! reachability for `read_*` is constrained solely by the gateway FsAcl
 //! preflight (ADR-0080 + ADR-0088 Decision 2 + Decision 3: literal-path
 //! whitelist + non-literal refusal) -- the engine-level `disabled_filesystems` lockdown

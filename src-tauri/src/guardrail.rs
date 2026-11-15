@@ -16,8 +16,11 @@
 //!    (not retried -- the same SQL hits the same wall, ADR-0028).
 //!
 //! The filesystem-function guard (read_*/COPY/ATTACH/INSTALL/LOAD) is enforced
-//! two ways. COPY/ATTACH/INSTALL/LOAD are statements, not query expressions, so
-//! the `CREATE TABLE ... AS <query>` wrapping rejects them as syntax errors.
+//! two ways. COPY/ATTACH are statements, not query expressions, so the
+//! `CREATE TABLE ... AS <query>` wrapping rejects them as syntax errors.
+//! INSTALL/LOAD are routed by ADR-0150 instead: the three blessed shapes are
+//! lifted into the tier-gated extension prelude (see sandbox_sql), and every
+//! other spelling stays body and dies at the same wrap.
 //! The remaining surface -- read_* table functions (read_csv_auto / read_parquet
 //! / read_json_auto) in a SELECT -- is constrained by the gateway FsAcl
 //! whitelist (ADR-0080 + ADR-0088): read_* literal paths are classified against

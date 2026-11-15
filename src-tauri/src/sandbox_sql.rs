@@ -133,6 +133,83 @@ fn split_top_level(sql: &str) -> Vec<String> {
     out
 }
 
+/// Blank out `--` line comments and `/* */` block comments (which nest in
+/// DuckDB) for the write-function text scan: the lexer skips comments between
+/// tokens the same way it skips whitespace, so a call written as
+/// `st_write /*x*/ (...)` is real to DuckDB while a bare-whitespace gap
+/// pattern would miss it. Single-quoted literals (with `''` escapes) and
+/// double-quoted identifiers pass through verbatim -- the scan keeps its
+/// recorded conservative stance on literals shaped like the function name.
+fn blank_comments_for_scan(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let (mut in_single, mut in_double) = (false, false);
+    while let Some(c) = chars.next() {
+        if in_single {
+            out.push(c);
+            if c == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    out.push(chars.next().expect("peeked '\''"));
+                } else {
+                    in_single = false;
+                }
+            }
+            continue;
+        }
+        if in_double {
+            out.push(c);
+            if c == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        match c {
+            '\'' => {
+                in_single = true;
+                out.push(c);
+            }
+            '"' => {
+                in_double = true;
+                out.push(c);
+            }
+            '-' if chars.peek() == Some(&'-') => {
+                chars.next();
+                out.push(' ');
+                for nc in chars.by_ref() {
+                    if nc == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                out.push(' ');
+                let mut depth = 1usize;
+                while let Some(nc) = chars.next() {
+                    match nc {
+                        '/' if chars.peek() == Some(&'*') => {
+                            chars.next();
+                            depth += 1;
+                        }
+                        '*' if chars.peek() == Some(&'/') => {
+                            chars.next();
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        '\n' => out.push('\n'),
+                        _ => {}
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// The recognized prelude statement shapes (ADR-0150): core-channel
 /// `INSTALL <name>` / `LOAD <name>`, and the community-channel tail
 /// `INSTALL <name> FROM community`. Whole-statement anchored (not a
@@ -313,8 +390,10 @@ pub(crate) fn preflight_read_sql(
     }
     // The write-function refusal list scans the WHOLE input (prelude + body):
     // a refused write function is refused wherever it appears (ADR-0150's
-    // function-face guard, not an extension whitelist).
-    if let Some(hit) = WRITE_FUNCTION_CALL.find(sql) {
+    // function-face guard, not an extension whitelist). The scan runs on a
+    // comment-blanked copy -- DuckDB skips comments between tokens like
+    // whitespace, so a comment interleaved before the paren is still a call.
+    if let Some(hit) = WRITE_FUNCTION_CALL.find(&blank_comments_for_scan(sql)) {
         return Err(PreflightError::WriteFunction(format!(
             "`{}` writes files outside the session artifact surface; export results via \
              the session artifact tools instead",
@@ -969,6 +1048,26 @@ y
                 }
                 other => panic!("channel {channel:?}: expected WriteFunction, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn write_function_scan_blanks_interleaved_comments() {
+        // DuckDB's lexer skips comments between tokens the way it skips
+        // whitespace, so each of these is a real st_write call to the engine;
+        // the scan must see through the comment before the paren.
+        let temp = TempDir::new().unwrap();
+        let ws = WorkingSet::default();
+        for sql in [
+            "SELECT COUNT(*) FROM ST_Write /*x*/ ('out.gpkg', t)",
+            "SELECT COUNT(*) FROM ST_Write /* /* x */ */ ('out.gpkg', t)",
+            "SELECT COUNT(*) FROM ST_Write -- note\n ('out.gpkg', t)",
+        ] {
+            let err = preflight_read_sql(sql, &ws, temp.path(), Channel::Core).unwrap_err();
+            assert!(
+                matches!(err, PreflightError::WriteFunction(_)),
+                "expected WriteFunction for {sql:?}, got {err:?}"
+            );
         }
     }
 
