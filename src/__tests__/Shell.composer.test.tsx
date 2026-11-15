@@ -91,17 +91,16 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // useState(null) initial and the picker bundle stays absent (per-test
     // overrides resolve it).
     vi.mocked(getAppConfig).mockImplementation(() => new Promise<AppConfig>(() => {}));
-    // Same trap for the session-scoped mocks the pane rides: the resume /
-    // delete / error-boundary / soft-cap describes swap implementations that
-    // survive clearAllMocks, and this describe's ingest / badge assertions
-    // depend on the exact sessionId + clean reads. Pin the factory behavior
-    // back (mirrors the error-boundary describe's conversation reset).
+    // Same trap for the session-scoped mocks the pane rides: earlier tests in
+    // this file override createSession with implementations that survive
+    // clearAllMocks, and this describe's ingest / badge assertions depend on
+    // the exact sessionId + clean reads. Pin the factory behavior back each run.
     vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
     vi.mocked(conversation).mockImplementation(async () => state.thread);
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
     vi.mocked(activeDataset).mockImplementation(async () => null);
-    // Same pin for the auth-mode chip IPC pair (issue #352): the resume
-    // describe's overrides survive clearAllMocks.
+    // Same pin for the auth-mode chip IPC pair (issue #352): earlier tests'
+    // overrides survive clearAllMocks.
     vi.mocked(getAuthorizationMode).mockResolvedValue("per_call");
     vi.mocked(setAuthorizationMode).mockResolvedValue(undefined);
     // Same pin for the runtime picker IPC quartet (issue #353).

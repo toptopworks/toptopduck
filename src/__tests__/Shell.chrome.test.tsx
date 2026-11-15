@@ -252,7 +252,7 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
     // openRecipe never resolves -> resumeStatus sticks at "opening" -> busy=true,
     // which the App-level busyRef gate reads to drop the second Ctrl/⌘+K. This
     // is the keyboard-side mirror of the sidebar search button's disabled-when-
-    // busy contract (SessionSidebar.shell.test.tsx); the two gates are独立.
+    // busy contract (SessionSidebar.shell.test.tsx); the two gates are independent.
     vi.mocked(openRecipe).mockReturnValue(new Promise(() => {}));
     render(<App />);
     await waitFor(() => expect(listSessions).toHaveBeenCalled());

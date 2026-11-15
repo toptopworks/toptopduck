@@ -8,14 +8,15 @@ import type { McpServerConfig } from "../../types/mcp";
 import type { SessionRuntimeChoice } from "../../types/runtime";
 import { baseAppConfig as sharedBaseAppConfig } from "../../test-fixtures";
 
-// Shared harness for the shell black-box suites (Shell.render / Shell.coldStart /
-// Shell.stage / Shell.windowDnd / Shell.composer / Shell.picker / Shell.chrome).
+// Shared harness for the shell black-box suites (Shell.shellLayout /
+// Shell.sessions / Shell.turnFlow / Shell.resultStage / Shell.windowDnd /
+// Shell.composer / Shell.composerSubmit / Shell.chrome).
 // Each suite drives the rendered three-column App like a user and asserts
 // VISIBLE DOM / structure signals -- never the Query cache internals. The api
 // mock factory + the listener captures live here; the vi.mock declarations
 // stay in each suite file (vitest hoists them per file).
 
-export type ShellState = {
+type ShellState = {
   workingSet: DatasetDescriptor[];
   thread: ThreadEntry[];
 };
@@ -26,7 +27,7 @@ export type DropCapture = {
   }) => void);
 };
 
-export type ShellCaptures = {
+type ShellCaptures = {
   state: ShellState;
   turnProgressCb: { current: null | ((ev: TurnProgress) => void) };
   resumeProgressCb: { current: null | ((ev: ResumeProgress) => void) };
@@ -39,7 +40,7 @@ export function buildDropWindowMock(dropEvent: DropCapture) {
   return {
     getCurrentWebviewWindow: () => ({
       onDragDropEvent: (
-        cb: (e: { payload: { type: string; paths: string[]; position?: { x: number; y: number } } }) => void,
+        cb: NonNullable<DropCapture["handler"]>,
       ) => {
         dropEvent.handler = cb;
         return Promise.resolve(() => {});
@@ -50,8 +51,22 @@ export function buildDropWindowMock(dropEvent: DropCapture) {
 
 // The installed api mock fns (the same instances the suite file's vi.mock
 // factory spreads into the mocked module), so harness helpers drive the exact
-// mocks the App consumes without importing the api module here.
+// mocks the App consumes without importing the api module here. Assumes
+// vitest's per-file module isolation: one install per suite file, so the
+// single slot always reflects the importing file's own mocks.
 let installedApi: ReturnType<typeof buildShellApiMocks> | null = null;
+
+// Helper precondition: the suite file's vi.mock("../api") factory must have
+// run (i.e. the file imports the mocked ../api or renders App) before any
+// harness helper is called.
+function requireInstalledApi(): ReturnType<typeof buildShellApiMocks> {
+  if (!installedApi) {
+    throw new Error(
+      "shellFixtures: no api mocks installed -- the suite file must import (a mock of) ../api first",
+    );
+  }
+  return installedApi;
+}
 
 // The shell suite's api posture: everything the App calls on mount is mocked
 // inert, and the state-backed reads (working set / thread) flow through the
@@ -95,7 +110,7 @@ export function buildShellApiMocks({ state, turnProgressCb, resumeProgressCb }: 
     // inert no-op keeps jsdom off the real Tauri listen.
     onSessionNamed: vi.fn(async () => () => {}),
     // The app-level approval channel (issue #297) mounts on App render; no
-    // Shell.test scenario drives approvals, so inert no-op listeners keep the
+    // shell-suite scenario drives approvals, so inert no-op listeners keep the
     // real @tauri-apps/api/event listen (absent in jsdom) from firing.
     onApprovalRequest: vi.fn(async () => () => {}),
     onApprovalResolved: vi.fn(async () => () => {}),
@@ -131,7 +146,7 @@ export function buildShellApiMocks({ state, turnProgressCb, resumeProgressCb }: 
     setAuthorizationMode: vi.fn(async () => {}),
     // The composer runtime picker reads / writes the session's runtime choice
     // + the v1 adapter table (issue #353). Default built-in read + empty
-    // adapter list + no-op write/rescan; no Shell.test scenario drives a
+    // adapter list + no-op write/rescan; no shell-suite scenario drives a
     // runtime switch, so the defaults keep the picker quiet.
     getSessionRuntime: vi.fn(async () => ({ kind: "built_in" }) as const),
     setSessionRuntime: vi.fn(async () => {}),
@@ -154,7 +169,7 @@ export function buildShellApiMocks({ state, turnProgressCb, resumeProgressCb }: 
 // bar. Can be called multiple times: each call navigates to the empty state
 // first, then creates.
 export async function openSession(): Promise<void> {
-  const { askQuestion } = installedApi!;
+  const { askQuestion } = requireInstalledApi();
   // Navigate to empty state (sidebar "+"). No-op on fresh render.
   fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
   // ADR-0092: submitting from the centered bar creates the session AND fires the
@@ -238,13 +253,22 @@ export const ROW_PAGE: RowPage = {
 // was called).
 export function pendingAsk(): { resolve: (o: TurnOutcome) => void } {
   const ref: { current: ((o: TurnOutcome) => void) | null } = { current: null };
-  installedApi!.askQuestion.mockImplementation(
+  requireInstalledApi().askQuestion.mockImplementation(
     () =>
       new Promise<TurnOutcome>((r) => {
         ref.current = r;
       }),
   );
-  return { resolve: (o) => ref.current?.(o) };
+  // Throw rather than no-op when the ask never fired: a silent skip would let
+  // negative assertions pass vacuously.
+  return {
+    resolve: (o) => {
+      if (!ref.current) {
+        throw new Error("pendingAsk: askQuestion was never called (no resolver captured)");
+      }
+      ref.current(o);
+    },
+  };
 }
 
 // A malformed turn (unknown outcome kind) for the ADR-0058 boundary tests:
