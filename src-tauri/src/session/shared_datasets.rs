@@ -101,17 +101,14 @@ impl SharedAttaches {
     }
 }
 
-/// ADR-0141 D6 私有让位: the shared vocabulary joins a private
-/// registration's de-conflict occupancy -- the bound workspace's manifest
-/// entry names plus the session's attach reservations (sticky 挂名s, empty
-/// card-time reservations included: a name a card showed must never be lost
-/// to a later private registration -- the dead-card rule, D3).
-pub(crate) fn deconflict_with_shared(
-    candidate: &str,
-    working_set: &WorkingSet,
+/// The shared vocabulary's reservation set: the session's sticky 挂名s
+/// (empty card-time reservations included) plus the bound workspace's
+/// manifest entry names. The occupancy every private registration face
+/// yields to; an unreadable manifest degrades to the attaches table alone.
+pub(crate) fn shared_reserved_names(
     workspace: Option<&Path>,
     attaches: Option<&SharedAttaches>,
-) -> String {
+) -> HashSet<String> {
     let mut reserved: HashSet<String> = HashSet::new();
     if let Some(table) = attaches {
         reserved.extend(table.attaches.keys().cloned());
@@ -125,7 +122,21 @@ pub(crate) fn deconflict_with_shared(
             ),
         }
     }
-    working_set.deconflict_with(candidate, &reserved)
+    reserved
+}
+
+/// ADR-0141 D6 私有让位: the shared vocabulary joins a private
+/// registration's de-conflict occupancy -- the bound workspace's manifest
+/// entry names plus the session's attach reservations (sticky 挂名s, empty
+/// card-time reservations included: a name a card showed must never be lost
+/// to a later private registration -- the dead-card rule, D3).
+pub(crate) fn deconflict_with_shared(
+    candidate: &str,
+    working_set: &WorkingSet,
+    workspace: Option<&Path>,
+    attaches: Option<&SharedAttaches>,
+) -> String {
+    working_set.deconflict_with(candidate, &shared_reserved_names(workspace, attaches))
 }
 
 /// Link the store file into the session tree (hard link preferred -- the

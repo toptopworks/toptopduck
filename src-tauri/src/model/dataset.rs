@@ -220,6 +220,52 @@ pub struct StaleAnchor {
     pub reason: StaleReason,
 }
 
+/// Where a working-set entry came from (issue #1597): the read-face derivation
+/// over the runtime truth -- the working set's results set (a materialized
+/// turn result, ADR-0024) and the session's shared-attach table (a workspace
+/// manifest entry under its sticky alias, ADR-0141) -- everything else is a
+/// session-private upload. Derivation, not persistence: the origin is
+/// reconstructible at every read (resume restores the attach records before
+/// replay and replay re-registers the results), so no stored copy exists to
+/// drift (ADR-0141 D8's derived-read-face posture). Every assignment face
+/// keeps the three apart -- the attach resolver de-conflicts against every
+/// held name (results included) and each private registration yields to the
+/// shared vocabulary -- so within a live session one name is never both an
+/// alias and a result. The single exception is mint-side and pre-existing:
+/// a manifest entry literally named `result_N` (the result mint scans only
+/// the results set), and the derivation reads such a name as a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatasetProvenance {
+    /// A session-private upload (the private ingest's registered source).
+    Uploaded,
+    /// A workspace manifest entry attached under its (possibly de-conflicted)
+    /// session alias; `WorkingSetRow::shared_entry_name` names the manifest
+    /// entry. Sticky: a retired alias keeps the origin (the record survives
+    /// the gone entry, D7).
+    Shared,
+    /// A materialized turn result (`result_N`, main-DB physical table).
+    Materialized,
+}
+
+/// One row of the session working-set list face (issue #1597): the descriptor
+/// flattened verbatim plus the derived origin. A read-face wrapper only --
+/// `DatasetDescriptor` itself stays clean so recipes never carry a redundant
+/// provenance copy.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkingSetRow {
+    /// The row's descriptor, flattened (the JSON stays one object; the
+    /// frontend reads it as the same descriptor shape it already knows).
+    #[serde(flatten)]
+    pub descriptor: DatasetDescriptor,
+    /// The derived origin (see [`DatasetProvenance`]).
+    pub provenance: DatasetProvenance,
+    /// For a shared row: the manifest entry name behind the (possibly
+    /// de-conflicted) session alias. Omitted on the wire otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_entry_name: Option<String>,
+}
+
 /// Why auto-tidy couldn't confidently rectify one sheet (issue #750). The
 /// variants mirror `auto_tidy`'s [`NeedsGuidance`](crate::ingest::tidy::TidyOutcome)
 /// discrimination points one for one, so the guided-load dialog can name under

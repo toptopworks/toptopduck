@@ -2,7 +2,8 @@ import { useRef, useState, type RefObject } from "react";
 
 // The working-set row-hint protocol (issues #865 and #759, converged into
 // this one owner by issue #1073): every tooltip on a working-set row -- the
-// three action hints (rename / replace / delete) and the stale chip -- is a
+// three action hints (rename / replace / delete), the stale chip, and the
+// provenance badge -- is a
 // controlled Radix Tooltip driven by ONE open slot keyed by row + kind.
 // This module is the protocol's sole owner: the pure
 // transfer rules (reduceTip / sameTipKey / the suppression-window predicate)
@@ -15,8 +16,8 @@ import { useRef, useState, type RefObject } from "react";
 //    rejected OS-native titles for them (chrome follows the OS, not the
 //    theme tokens) -- and the controlled opens are what need this slot.
 //    Two mechanisms share the job. Radix-internal opens (the pointermove path
-//    every trigger carries; the stale chip is the only row tooltip without
-//    our own handlers) broadcast a document tooltip.open event that every
+//    every trigger carries; the stale chip and the provenance badge are the
+//    row tooltips without our own handlers) broadcast a document tooltip.open event that every
 //    MOUNTED TooltipContent answers by closing itself -- peers are gone
 //    before the opener's onOpenChange reaches the slot. Our direct opens
 //    (the hints' pointer handlers) set the slot without broadcasting (the
@@ -24,8 +25,8 @@ import { useRef, useState, type RefObject } from "react";
 //    never emits it), and the single-source key is what excludes those. The
 //    pointermove path is also transit-gated by the provider
 //    (isPointerInTransit, set while the pointer crosses a HOVERABLE
-//    tooltip's exit grace area -- the stale chip's, the one row tooltip
-//    without disableHoverableContent), so a sweep can silently swallow a
+//    tooltip's exit grace area -- the stale chip's or the provenance
+//    badge's, the row tooltips without disableHoverableContent), so a sweep can silently swallow a
 //    Radix-side open; the direct handlers are what actually open the hints.
 //    Opens take the slot unconditionally: Radix's own opens arrive on an
 //    empty slot anyway (the broadcast has already closed the mounted peers),
@@ -80,7 +81,7 @@ import { useRef, useState, type RefObject } from "react";
 
 // The row-tooltip slot identity: which tooltip (kind) on which row owns the
 // mutex.
-export type RowTipKind = "rename" | "replace" | "delete" | "stale";
+export type RowTipKind = "rename" | "replace" | "delete" | "stale" | "provenance";
 export interface TipKey {
   row: string;
   kind: RowTipKind;

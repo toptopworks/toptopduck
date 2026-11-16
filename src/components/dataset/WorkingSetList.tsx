@@ -29,7 +29,7 @@ import {
   type TipKey,
 } from "./rowHints";
 import { cn } from "../../lib/utils";
-import type { DatasetDescriptor } from "../../types/dataset";
+import type { DatasetDescriptor, WorkingSetRow } from "../../types/dataset";
 
 // ADR-0067 (issue #184): the .working-set button rule (all: unset + cursor +
 // padding + radius + display:block + width:100%) retired onto Tailwind
@@ -176,7 +176,7 @@ function DatasetRow({
   onOpenDelete,
   onPickReplace,
 }: {
-  d: DatasetDescriptor;
+  d: WorkingSetRow;
   // The ACTIVE dataset (server truth): bolds the label. The accent band is
   // NOT this state's -- it follows the selection (see isSelected), since a
   // management click must move the highlight with the detail pane.
@@ -214,6 +214,47 @@ function DatasetRow({
         { name: d.stale.display_name, reason: d.stale.reason },
       )
     : undefined;
+  // The origin sentence (issue #1597): the shared/materialized row's full
+  // cross-reference, formatted once for the tooltip AND the badge's
+  // aria-label (the #1062 one-source pattern). A de-conflicted alias names
+  // its manifest entry; a same-name attach (and a materialized result) needs
+  // no alias arm. An uploaded row derives null -- no badge, the quiet default.
+  const provenanceSentence = (() => {
+    switch (d.provenance) {
+      case "shared": {
+        const entry = d.shared_entry_name ?? d.reference_name;
+        return d.reference_name !== entry
+          ? intl.formatMessage(
+              {
+                id: "workingSet.provenance.sharedHint",
+                defaultMessage: "Workspace shared \"{entry}\" · attached as \"{alias}\"",
+              },
+              { entry, alias: d.reference_name },
+            )
+          : intl.formatMessage(
+              { id: "workingSet.provenance.sharedHintPlain", defaultMessage: "Workspace shared \"{entry}\"" },
+              { entry },
+            );
+      }
+      case "materialized":
+        return intl.formatMessage({
+          id: "workingSet.provenance.materializedHint",
+          defaultMessage: "Materialized SQL result (this session)",
+        });
+      case "uploaded":
+      case undefined:
+        // An uploaded row and the manifest face (a plain descriptor): no
+        // badge, the quiet default.
+        return null;
+      default: {
+        // Exhaustiveness guard: `d.provenance` narrows to never here, so a
+        // future provenance variant is a compile error instead of a silent
+        // badge gap (the ResumeProgress issue #205 posture).
+        const unhandled: never = d.provenance;
+        throw new Error(`Unhandled DatasetProvenance: ${JSON.stringify(unhandled)}`);
+      }
+    }
+  })();
   // The context menu captures its target from the row it opens on (#1570):
   // the <li> is both the trigger and the focus-restorable opener element, so
   // the dialog-close restore lands back on the row (mirroring the pill
@@ -331,6 +372,39 @@ function DatasetRow({
             </div>
           </div>
           {extraBadge}
+          {provenanceSentence !== null && (
+          // The origin badge (issue #1597): the short 共享/物化 pill beside the
+          // stale chip's slot; the full sentence rides the tooltip and the
+          // aria-label above (one formatted string, two consumers). The stale
+          // chip's controlled-tooltip posture applies verbatim: the rowHints
+          // mutex owns the open (the "provenance" kind), the badge keeps no
+          // handlers of its own, and tabIndex + aria-label put the sentence in
+          // the keyboard/a11y path (#1062). The label is two static
+          // <FormattedMessage> literals -- a dynamic id would be invisible to
+          // the formatjs tooling (the delete-dialog precedent).
+            <Tooltip open={isTipOpen("provenance")} onOpenChange={(next) => setTip(key("provenance"), next)}>
+              <TooltipTrigger asChild>
+                <Badge
+                  variant="secondary"
+                  className="provenance-badge focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                  tabIndex={0}
+                  aria-label={provenanceSentence}
+                >
+                  {d.provenance === "shared" ? (
+                    <FormattedMessage id="workingSet.provenance.sharedLabel" defaultMessage="Shared" />
+                  ) : (
+                    <FormattedMessage id="workingSet.provenance.materializedLabel" defaultMessage="Materialized" />
+                  )}
+                </Badge>
+              </TooltipTrigger>
+              <TooltipContent
+                data-hit-transparent
+                className="pointer-events-none data-[state=closed]:animate-none!"
+              >
+                {provenanceSentence}
+              </TooltipContent>
+            </Tooltip>
+          )}
           {d.stale && (
           // #793: a short chip with the full causal sentence on the tooltip --
           // the sentence used to wrap inside the badge and break the chip shape
@@ -569,7 +643,7 @@ export function WorkingSetList({
   // the right-sidebar panel (no session) omits it, and its delete confirm
   // renders without the impact preview.
   sessionId?: string;
-  datasets: DatasetDescriptor[];
+  datasets: WorkingSetRow[];
   // The ACTIVE dataset (server truth, ADR-0051): bolds the row's label. The
   // authoritative naming is the tab header's Targets chip; bold is the row's
   // only VISUAL in-list active marker (since #793 retired the " · current
@@ -616,7 +690,7 @@ export function WorkingSetList({
   // An extra per-row marker beside the stale chip's slot: the right-sidebar
   // panel flags a missing store file. Undefined rows render nothing; the
   // private face passes none.
-  badgeFor?: (d: DatasetDescriptor) => ReactNode;
+  badgeFor?: (d: WorkingSetRow) => ReactNode;
   // The delete confirm's title copy slot (see WorkingSetDeleteDialog); the
   // private face keeps its working-set wording.
   deleteTitleFor?: (name: string) => ReactNode;

@@ -44,9 +44,9 @@ use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, Appro
 use crate::cancel::CancelToken;
 use crate::ingest::schema::quote_ident;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, ExportRowsError, RenameError, RowPage,
-    RowReadError, SkillLifecycleEvent, SkillProvenance, SourceLifecycleEvent, ThreadEntry,
-    TraceRound, TurnOutcome, TurnProvenance, TurnRecord, TurnRuntime,
+    DatasetDescriptor, DatasetPrivacy, DatasetProvenance, DeleteImpactEntry, ExportRowsError,
+    RenameError, RowPage, RowReadError, SkillLifecycleEvent, SkillProvenance, SourceLifecycleEvent,
+    ThreadEntry, TraceRound, TurnOutcome, TurnProvenance, TurnRecord, TurnRuntime, WorkingSetRow,
 };
 use crate::persistence::recipe::{
     LastRuntime, Recipe, RecipeTraceRound, RecipeTurn, RuntimeKind,
@@ -1242,6 +1242,40 @@ impl Session {
 
     pub fn list(&self) -> Vec<DatasetDescriptor> {
         self.working_set.list().to_vec()
+    }
+
+    /// The list face with each row's origin derived at read time (issue
+    /// #1597): a held result name is materialized, a name in the shared-attach
+    /// table is a workspace alias (the row rides its manifest entry name for
+    /// the alias-to-entry cross-reference), everything else is a private
+    /// upload. The derivation reads only the two runtime-truth structures --
+    /// the engine and workspace stay untouched, so the read face costs no
+    /// more than [`Self::list`]. A stale alias derives `Shared` like any
+    /// other: the record is sticky (D7), the stale anchor stays the row's
+    /// separate liveness signal.
+    pub fn list_rows(&self) -> Vec<WorkingSetRow> {
+        self.working_set
+            .list()
+            .iter()
+            .map(|d| {
+                let name = d.reference_name.as_str();
+                let (provenance, shared_entry_name) = if self.working_set.is_result(name) {
+                    (DatasetProvenance::Materialized, None)
+                } else {
+                    match self.shared_attaches.record(name) {
+                        Some(record) => {
+                            (DatasetProvenance::Shared, Some(record.entry_name.clone()))
+                        }
+                        None => (DatasetProvenance::Uploaded, None),
+                    }
+                };
+                WorkingSetRow {
+                    descriptor: d.clone(),
+                    provenance,
+                    shared_entry_name,
+                }
+            })
+            .collect()
     }
 
     /// The delete-impact preview (issue #1063): the live results a source
@@ -4521,5 +4555,117 @@ mod tests {
             )
         });
         assert!(!any_failed, "a hit reopen never degrades");
+    }
+
+    /// A working-set descriptor fixture with the minimal filled shape (issue
+    /// #1597's derivation tests need distinct names, not real schemas).
+    fn provenance_descriptor(name: &str) -> crate::model::DatasetDescriptor {
+        crate::model::DatasetDescriptor {
+            reference_name: name.to_string(),
+            display_name: name.to_string(),
+            source_path: format!("/{name}.csv"),
+            columns: vec![],
+            row_count: 1,
+            sample: vec![],
+            fingerprint: "f".into(),
+            rectify: crate::model::RectifyProvenance::NotApplicable,
+            privacy: crate::model::DatasetPrivacy::default(),
+            size_bytes: 0,
+            stale: None,
+        }
+    }
+
+    /// The list face's provenance derivation (issue #1597): the three origins
+    /// -- uploaded source, materialized result, shared attach -- derive at read
+    /// time from the runtime truth (the results set + the attach table), and a
+    /// de-conflicted attach name carries its manifest entry name for the
+    /// alias-to-entry cross-reference.
+    #[test]
+    fn list_rows_derives_the_three_provenances() {
+        let mut session = Session::new().expect("session");
+        // Uploaded: a plain registered source.
+        session
+            .working_set
+            .register(provenance_descriptor("orders"));
+        // Materialized: a registered result (the results set, not a name
+        // pattern, is the truth -- the derivation reads the set).
+        session
+            .working_set
+            .register_result(provenance_descriptor("result_1"));
+        // Shared attach under a de-conflicted alias: the private upload below
+        // holds "people" first, so the manifest entry "people" resolves to
+        // "people_2" (D6 私有让位). resolve_or_assign writes the attach record;
+        // the register half of attach_shared is simulated by hand -- the
+        // derivation reads only the record, never the engine or workspace.
+        session
+            .working_set
+            .register(provenance_descriptor("people"));
+        let alias = session
+            .shared_attaches
+            .resolve_or_assign("people", &session.working_set);
+        assert_eq!(alias, "people_2", "the alias de-conflicts");
+        session
+            .working_set
+            .register(provenance_descriptor("people_2"));
+
+        let rows = session.list_rows();
+        let by_name = |name: &str| {
+            rows.iter()
+                .find(|r| r.descriptor.reference_name == name)
+                .unwrap_or_else(|| panic!("row {name} missing"))
+        };
+        assert_eq!(
+            by_name("orders").provenance,
+            crate::model::DatasetProvenance::Uploaded
+        );
+        assert!(
+            by_name("orders").shared_entry_name.is_none(),
+            "an upload carries no manifest entry name"
+        );
+        assert_eq!(
+            by_name("result_1").provenance,
+            crate::model::DatasetProvenance::Materialized
+        );
+        assert_eq!(
+            by_name("people_2").provenance,
+            crate::model::DatasetProvenance::Shared
+        );
+        assert_eq!(
+            by_name("people_2").shared_entry_name.as_deref(),
+            Some("people"),
+            "the alias rides its manifest entry name"
+        );
+    }
+
+    /// A stale attach keeps its shared origin (issue #1597): the attach record
+    /// is sticky (D7 retire never deletes it), so the provenance derivation
+    /// reads the origin as a historical fact -- the stale anchor stays the
+    /// row's separate liveness signal, never a provenance rewrite.
+    #[test]
+    fn a_stale_attach_still_derives_shared() {
+        let mut session = Session::new().expect("session");
+        let alias = session
+            .shared_attaches
+            .resolve_or_assign("people", &session.working_set);
+        assert_eq!(alias, "people");
+        let mut stale = provenance_descriptor("people");
+        stale.stale = Some(crate::model::StaleAnchor {
+            reference_name: "people".into(),
+            display_name: "people".into(),
+            reason: crate::model::StaleReason::Deleted,
+        });
+        session.working_set.register(stale);
+
+        let rows = session.list_rows();
+        let row = rows
+            .iter()
+            .find(|r| r.descriptor.reference_name == "people")
+            .expect("row present");
+        assert_eq!(
+            row.provenance,
+            crate::model::DatasetProvenance::Shared,
+            "stale never rewrites the origin"
+        );
+        assert_eq!(row.shared_entry_name.as_deref(), Some("people"));
     }
 }
