@@ -69,7 +69,7 @@ export function MemorySection() {
   return (
     <div>
       <PaneHeader
-        title={<FormattedMessage id="settings.nav.memory" defaultMessage="Memory" />}
+        title={<FormattedMessage id="settings.memory.title" defaultMessage="Memory" />}
         description={(
           <FormattedMessage
             id="settings.memory.description"

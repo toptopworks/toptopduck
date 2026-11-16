@@ -645,6 +645,7 @@ pub fn run() {
             commands::list_workspace_memory,
             commands::list_user_memory,
             commands::create_workspace_memory,
+            commands::delete_workspace_memory,
             commands::open_workspace_memory_dir,
             commands::open_user_memory_dir,
             commands::get_workspace_memory_enabled,
