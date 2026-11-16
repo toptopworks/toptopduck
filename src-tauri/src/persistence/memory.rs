@@ -606,8 +606,8 @@ pub fn save_entry(
 
 /// Create a memory from the panel's form (issue #1538): the host stamps
 /// `source: manual` + today's absolute date + no origin session, and the
-/// body carries the description verbatim -- the form's textarea is
-/// multi-line, and only the frontmatter line folds. The blank-title
+/// body carries the description verbatim (the form's single-line input
+/// IS the body, #1591) -- only the frontmatter line folds. The blank-title
 /// guard lives HERE, not in the UI alone -- every future caller of the
 /// store inherits it. Rides [`save_entry`], so the caps, the global save
 /// lock, and the index reconcile all apply unchanged. Workspace-layer
@@ -647,23 +647,25 @@ pub fn ensure_memory_dir(dir: &Path) -> std::io::Result<PathBuf> {
 }
 
 /// The delete guard (issue #1591): the name arrives over IPC. Only a bare
-/// `.md` file name inside the memory directory is deletable -- separators,
-/// hidden names, and non-`.md` names are refused, so no caller (panel bug,
-/// hostile script) can take a path outside the directory or delete the
-/// index. Deliberately NOT a strict `<type>-<slug>.md` whitelist: a
-/// hand-written file the panel lists (any parseable `.md`) is deletable
-/// too -- the panel must never show a row it cannot act on.
+/// `.md` file name inside the memory directory is deletable -- separators
+/// and non-`.md` names are refused, so no caller (panel bug, hostile
+/// script) can take a path outside the directory or delete the index
+/// (case-insensitively: NTFS resolves a case variant to the same file).
+/// Deliberately NOT a strict `<type>-<slug>.md` whitelist, and
+/// dot-prefixed names pass: the scan lists every parseable `.md` it
+/// meets (a dot-prefixed draft included), and the panel must never show
+/// a row it cannot act on.
 fn guard_deletable_file_name(file: &str) -> Result<(), MemoryError> {
     let refused = |detail: String| MemoryError::Invalid { detail };
     if !file.ends_with(".md") {
         return Err(refused(format!("{file:?} is not a .md file name")));
     }
-    if file == MEMORY_INDEX_NAME {
+    if file.eq_ignore_ascii_case(MEMORY_INDEX_NAME) {
         return Err(refused(
             "the derived index is not a memory file".to_string(),
         ));
     }
-    if file.starts_with('.') || file.contains('/') || file.contains('\\') || file.ends_with(' ') {
+    if file.contains('/') || file.contains('\\') || file.ends_with(' ') {
         return Err(refused(format!("{file:?} is not a bare file name")));
     }
     Ok(())
@@ -999,19 +1001,20 @@ mod tests {
 
     /// The delete guard (issue #1591): the name arrives over IPC. Only a
     /// bare `.md` file name inside the memory directory is deletable --
-    /// separators, the index itself, hidden names, and non-.md names are
-    /// refused BEFORE any filesystem effect.
+    /// separators, the index itself (in any case: NTFS resolves a case
+    /// variant to the same file), and non-.md names are refused BEFORE
+    /// any filesystem effect.
     #[test]
     fn delete_entry_refuses_names_that_are_not_bare_md_files() {
         let dir = mem_dir();
         save_entry(dir.path(), &entry("kept"), "b\n").expect("save");
         for bad in [
             "MEMORY.md",          // the derived index, not a memory
+            "memory.md",          // the index, lowercase (NTFS resolves it)
             "",                   // nothing
             "feedback-x.txt",     // not a .md file
             "sub/feedback-x.md",  // a path, not a bare name
             "sub\\feedback-x.md", // a Windows path
-            ".hidden.md",         // a hidden file
             "feedback-x.md ",     // trailing space (a sibling name)
         ] {
             let err = delete_entry(dir.path(), bad).expect_err(bad);
@@ -1023,7 +1026,10 @@ mod tests {
 
     /// A hand-written file the panel lists (a parseable .md without the
     /// `<type>-<slug>` prefix) is deletable -- the guard's invariant is
-    /// "a bare .md inside the directory", not "protocol-shaped".
+    /// "a bare .md inside the directory", not "protocol-shaped". A
+    /// dot-prefixed draft the scan also lists deletes too: the guard
+    /// matches the scan surface, so the panel never lists an undeletable
+    /// row.
     #[test]
     fn delete_entry_takes_a_hand_written_non_protocol_name() {
         let dir = mem_dir();
@@ -1031,9 +1037,14 @@ mod tests {
         let text = render_memory_file(&entry("hand note"), "b\n");
         let path = dir.path().join("my-own-notes.md");
         std::fs::create_dir_all(dir.path()).unwrap();
-        std::fs::write(&path, text).unwrap();
+        std::fs::write(&path, &text).unwrap();
         delete_entry(dir.path(), "my-own-notes.md").expect("delete");
         assert!(!path.exists());
+        // The dot-prefixed draft rides the same ruling.
+        let draft = dir.path().join(".draft.md");
+        std::fs::write(&draft, &text).unwrap();
+        delete_entry(dir.path(), ".draft.md").expect("delete");
+        assert!(!draft.exists());
     }
 
     /// Already-gone is success (idempotent): the panel may retry, the

@@ -1,10 +1,11 @@
-// The workspace memory panel (issue #1529, P0 read path): a read-only modal
-// off the sidebar's workspace-section menu. The list shows each memory's
-// title, category badge, and hook (the same row content the built-in
-// engine's injection block carries); reveal-in-folder opens the OS file
-// manager on the memory file (`.toptopduck/memory/<type>-<slug>.md`).
-// Editing lives outside the shell by design (any editor, via the reveal) --
-// the in-shell editor is a P2 question. The header's switch is the
+// The workspace memory panel (issue #1529, P0 read path): a modal off the
+// sidebar's workspace-section menu. The list shows each memory's title,
+// category badge, and hook (the same row content the built-in engine's
+// injection block carries); the row's open action hands the memory file
+// (`.toptopduck/memory/<type>-<slug>.md`) to the system editor (#1591 --
+// editing lives outside the shell by design, any editor, the in-shell
+// editor is a P2 question), and the workspace-only row delete (#1591)
+// rides a confirm dialog. The header's switch is the
 // workspace-level `memory_enabled` toggle: off stops the built-in engine's
 // injection (BOTH layers -- the user layer rides the same gate, ADR-0147
 // Decision 6) and deactivates the list (the off note replaces it), on
@@ -32,6 +33,7 @@ import {
   AlertDialogTitle,
 } from "../components/ui/alert-dialog";
 import { Button } from "../components/ui/button";
+import { buttonVariants } from "../components/ui/button-variants";
 import {
   Dialog,
   DialogContent,
@@ -530,12 +532,15 @@ export function WorkspaceMemoryDialog({
             The cost hint hangs straight off the label -- hover the text
             and the tooltip surfaces (the same inverted-surface FieldHint
             posture as the settings chrome). Off hides
-            the footer's control (a refused toggle or folder-open write
-            keeps the footer for its banner line), and so does the create
-            face -- the form
+            the footer's control (a refused toggle, folder-open, or delete
+            write keeps the footer for its banner line), and so does the
+            create face -- the form
             owns the bottom while mounted. */}
         {!creating &&
-          (isOn || toggleFailure?.path === path || openFailure?.path === path) && (
+          (isOn ||
+            toggleFailure?.path === path ||
+            openFailure?.path === path ||
+            deleteFailure?.path === path) && (
           <footer className="flex flex-col gap-2 border-t pt-3">
             {isOn && (
               <div className="flex items-center justify-end gap-2">
@@ -624,7 +629,8 @@ export function WorkspaceMemoryDialog({
                 <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
               </AlertDialogCancel>
               <AlertDialogAction
-                className="bg-destructive text-white hover:bg-destructive/90"
+                className={buttonVariants({ variant: "destructive" })}
+                disabled={deleteMemory.isPending}
                 onClick={(e) => {
                   // The radix action auto-closes the alert; the mutation
                   // carries the outcome (refresh or the footer banner).

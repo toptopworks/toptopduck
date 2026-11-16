@@ -2,8 +2,9 @@
 // the list (title + category badge + hook), the open wiring, the
 // confirm-gated row delete, the empty guide, the toggle-off deactivated
 // face, and the listing error banner. The suite mocks the api module (the
-// IPC boundary) and the opener plugin; the component owns no mutation
-// machine beyond the toggle boolean, so there is no seam module to stub.
+// IPC boundary) and the opener plugin; the component owns its mutations
+// directly against the api module (the toggle, the auto-extraction
+// switch, and the row delete), so there is no seam module to stub.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -318,6 +319,27 @@ describe("WorkspaceMemoryDialog", () => {
       within(await screen.findByRole("alertdialog")).getByRole("button", { name: "删除" }),
     );
     expect(await screen.findByRole("alert")).toHaveTextContent("guard refused");
+    // The error leg closes the confirm (the action's preventDefault means
+    // radix will not): no stuck alertdialog behind the banner.
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+    );
+  });
+
+  // The delete confirm is scoped to ONE panel open: closing the dialog
+  // with the confirm half-open (the workspace prop nulls, the component
+  // stays mounted) discards the target, so the alert never reopens
+  // pointing at another workspace's row (#1591).
+  it("discards a half-confirmed delete when the dialog closes and reopens", async () => {
+    mockedEnabled.mockResolvedValue(true);
+    mockedList.mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
+    const { closeAndReopen } = renderMountedPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "删除" }));
+    expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
+    closeAndReopen();
+    expect(await screen.findByText("季度报表走 DuckDB")).toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(mockedDelete).not.toHaveBeenCalled();
   });
 
   it("renders the empty guide when the workspace has no memories", async () => {
@@ -428,7 +450,9 @@ describe("WorkspaceMemoryDialog", () => {
     });
     // The single-line description rides verbatim -- the input IS the body
     // (#1591: the multi-line prose is the row's edit-in-editor action's
-    // job, the form captures the one-line hook).
+    // job, the form captures the one-line hook). The tagName pins the
+    // single-line posture: a Textarea revert reddens here.
+    expect(screen.getByLabelText("说明").tagName).toBe("INPUT");
     fireEvent.change(screen.getByLabelText("说明"), {
       target: { value: "始终用简体中文回复" },
     });
