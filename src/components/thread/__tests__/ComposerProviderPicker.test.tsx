@@ -36,10 +36,11 @@ import type {
   SessionModelConfig,
   SessionRuntimeChoice,
 } from "../../../types/runtime";
+import { MENU_REENTRY_GRACE_MS } from "../../../session/sidebarHoverCard";
 
 // ComposerProviderPicker tests (ADR-0099, issue #574): the flattened
-// runtime popover (direct level-2 rows, no nested Select) + the icon
-// trigger + the posture text button's
+// runtime select (direct option rows in one dropdown, no nested Select)
+// + the icon trigger + the posture text button's
 // integration (posture label, set-IPC writes, cold-start pending
 // channel). Rendered inside an empty-catalog English IntlProvider so
 // assertions anchor on stable English strings. The IPC surface is mocked so
@@ -271,7 +272,7 @@ beforeEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Trigger + two-level popover (ADR-0099 Decisions 1/2)
+// Trigger + flattened runtime select (issue #1595)
 // ---------------------------------------------------------------------------
 
 describe("ComposerProviderPicker runtime popover (ADR-0099)", () => {
@@ -369,15 +370,18 @@ describe("ComposerProviderPicker runtime popover (ADR-0099)", () => {
   });
 
   it("reverts the runtime to built-in when a profile option is picked while external", async () => {
+    const onSwitchActive = vi.fn();
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
       data: "qwen-code",
     });
     vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
-    renderPicker(pickerJsx());
+    renderPicker(pickerJsx({ onSwitchActive }));
     await screen.findByRole("combobox", { name: /Runtime: qwen-code/ });
     await openRuntimeSelect(/Runtime: qwen-code/);
     pickOption(/GLM/);
+    // Both halves of the coupling: the profile switch AND the revert.
+    expect(onSwitchActive).toHaveBeenCalledWith("glm");
     await waitFor(() =>
       expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", { kind: "built_in" }),
     );
@@ -537,6 +541,26 @@ describe("ComposerProviderPicker runtime popover (ADR-0099)", () => {
     expect(screen.getByRole("option", { name: "qwen-code" })).toBeTruthy();
   });
 
+  it("drops a click on the stale synthetic option (disabled rows never write)", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "gemini-cli",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    renderPicker(pickerJsx());
+    await screen.findByRole("combobox", { name: /Runtime: gemini-cli/ });
+    await openRuntimeSelect(/Runtime: gemini-cli/);
+    const staleOption = screen.getByRole("option", {
+      name: "gemini-cli (no longer detected)",
+    });
+    fireEvent.pointerUp(staleOption, { button: 0, pointerType: "mouse" });
+    fireEvent.click(staleOption);
+    // The disabled synthetic row sits in the REAL writable namespace --
+    // a click that slipped through would write the undetected id.
+    expect(setSessionRuntime).not.toHaveBeenCalled();
+    expect(screen.getByRole("option", { name: "qwen-code" })).toBeTruthy();
+  });
+
   it("retires the settings-test guidance from the dropdown when the active CLI has no catalog", async () => {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
@@ -553,14 +577,40 @@ describe("ComposerProviderPicker runtime popover (ADR-0099)", () => {
 
   it("opens settings from the Manage runtimes option and closes the dropdown", async () => {
     const onOpenSettings = vi.fn();
-    renderPicker(pickerJsx({ onOpenSettings }));
+    const onSwitchActive = vi.fn();
+    renderPicker(pickerJsx({ onOpenSettings, onSwitchActive }));
     await openRuntimeSelect();
     pickOption("Manage runtimes");
     expect(onOpenSettings).toHaveBeenCalledWith();
+    // The sentinel is navigation only: no runtime write, no profile
+    // switch (falling through the value parse would corrupt
+    // active_profile).
+    expect(setSessionRuntime).not.toHaveBeenCalled();
+    expect(onSwitchActive).not.toHaveBeenCalled();
     // The dropdown ACTUALLY closes (the content unmounts), not just the
     // callback firing -- the portaled content would otherwise stay visible
     // atop the settings overlay.
     await waitFor(() => expect(screen.queryByRole("option")).toBeNull());
+  });
+
+  it("disables the select while a runtime write is in flight", async () => {
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    // A write that never settles pins switching=true.
+    vi.mocked(setSessionRuntime).mockImplementation(
+      () => new Promise<void>(() => {}),
+    );
+    renderPicker(pickerJsx());
+    await openRuntimeSelect();
+    pickOption("qwen-code");
+    await waitFor(() => expect(screen.queryByRole("option")).toBeNull(), {
+      timeout: 3000,
+    });
+    // The write window's visible half: the whole select disables for the
+    // in-flight IPC.
+    const trigger = screen.getByRole("combobox", {
+      name: BUILTIN_TRIGGER,
+    }) as HTMLButtonElement;
+    expect(trigger.disabled).toBe(true);
   });
 
   it("does not call getSessionRuntime when sessionId is null", () => {
@@ -1575,5 +1625,112 @@ describe("ComposerProviderPicker trigger tooltip (ADR-0099)", () => {
     fireEvent.pointerEnter(trigger);
     fireEvent.pointerMove(trigger);
     expect(await screen.findByText("External runtime: Qwen Code")).toBeTruthy();
+  });
+
+  // The #1438 gate's refusal legs: the select-open leg, the close-grace
+  // leg, the pointer leg, and the native pointerleave backstop. The
+  // ArtifactHeader tests (same ruling) demonstrate the harness.
+  it("refuses a hover intent while the select is open and inside the close grace, then restores real hover (issue #1438)", async () => {
+    vi.mocked(listProviderProfiles).mockResolvedValue(
+      keyStatus([["anthropic", true]]),
+    );
+    renderPicker(pickerJsx());
+    const trigger = screen.getByRole("combobox", { name: BUILTIN_TRIGGER });
+    // A genuine hover opens (pointerEnter marks the pointer leg; Radix's
+    // open gesture keys on the move).
+    fireEvent.pointerEnter(trigger);
+    fireEvent.pointerMove(trigger);
+    await screen.findByText("Anthropic · claude-sonnet-4-6");
+    // Open the select: the render face (tipOpen gated on !selectOpen)
+    // retires the tooltip...
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+    fireEvent.click(trigger);
+    await screen.findByRole("option", { name: "Anthropic" });
+    expect(screen.queryByText("Anthropic · claude-sonnet-4-6")).toBeNull();
+    // ...and while the select is open a hover intent on the trigger is
+    // refused outright.
+    fireEvent.pointerMove(trigger);
+    expect(screen.queryByText("Anthropic · claude-sonnet-4-6")).toBeNull();
+    // Pick an option: the select closes and restores focus to the trigger
+    // in the same gesture -- inside MENU_REENTRY_GRACE_MS the re-open
+    // intent must be refused or the tooltip resurrects itself (the
+    // phantom #1438 exists to kill).
+    pickOption("GLM");
+    fireEvent.pointerMove(trigger);
+    expect(screen.queryByText("Anthropic · claude-sonnet-4-6")).toBeNull();
+    // Past the grace a genuine hover (leave + re-enter) opens as usual.
+    fireEvent.pointerLeave(trigger);
+    await new Promise((r) => setTimeout(r, MENU_REENTRY_GRACE_MS + 50));
+    fireEvent.pointerEnter(trigger);
+    fireEvent.pointerMove(trigger);
+    await screen.findByText("Anthropic · claude-sonnet-4-6");
+  });
+
+  it("refuses the late focus return via the pointer leg (issue #1438)", async () => {
+    vi.mocked(listProviderProfiles).mockResolvedValue(
+      keyStatus([["anthropic", true]]),
+    );
+    renderPicker(pickerJsx());
+    const trigger = screen.getByRole("combobox", { name: BUILTIN_TRIGGER });
+    // The pointer hovers, then departs BEFORE opening the select.
+    fireEvent.pointerEnter(trigger);
+    fireEvent.pointerMove(trigger);
+    fireEvent.pointerLeave(trigger);
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+    fireEvent.click(trigger);
+    await screen.findByRole("option", { name: "Anthropic" });
+    pickOption("GLM");
+    await waitFor(() => expect(screen.queryByRole("option")).toBeNull(), {
+      timeout: 3000,
+    });
+    // Long after the close grace a focus event lands on the trigger with
+    // the pointer still away -- the pointer leg, not the grace leg, must
+    // refuse it.
+    await new Promise((r) => setTimeout(r, MENU_REENTRY_GRACE_MS + 50));
+    fireEvent.focus(trigger);
+    await waitFor(() => {});
+    expect(screen.queryByText("Anthropic · claude-sonnet-4-6")).toBeNull();
+    // A genuine hover still opens.
+    fireEvent.pointerEnter(trigger);
+    fireEvent.pointerMove(trigger);
+    await screen.findByText("Anthropic · claude-sonnet-4-6");
+  });
+
+  it("refuses the focus return when the synthetic leave cannot derive -- the native backstop clears the marker (issue #1438)", async () => {
+    vi.mocked(listProviderProfiles).mockResolvedValue(
+      keyStatus([["anthropic", true]]),
+    );
+    renderPicker(pickerJsx());
+    const trigger = screen.getByRole("combobox", { name: BUILTIN_TRIGGER });
+    // The pointer OPENS the select while on the trigger, then moves into
+    // the dropdown portal. In the real app the open layer's pointer-events
+    // suppression can keep React from deriving the synthetic
+    // onPointerLeave there (the sidebar hover-card machine's CDP-measured
+    // artifact), so NO synthetic leave is fired here -- the native
+    // backstop must clear the marker.
+    fireEvent.pointerEnter(trigger);
+    fireEvent.pointerMove(trigger);
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+    fireEvent.click(trigger);
+    await screen.findByRole("option", { name: "Anthropic" });
+    // A non-bubbling native pointerleave: the backstop's listener sees it,
+    // React's synthetic derivation (root-level, bubble-fed) does not.
+    trigger.dispatchEvent(new Event("pointerleave"));
+    pickOption("GLM");
+    await waitFor(() => expect(screen.queryByRole("option")).toBeNull(), {
+      timeout: 3000,
+    });
+    await new Promise((r) => setTimeout(r, MENU_REENTRY_GRACE_MS + 50));
+    fireEvent.focus(trigger);
+    await waitFor(() => {});
+    // Without the backstop the marker strands "on" and this focus return
+    // sails through the pointer leg -- the phantom again.
+    expect(screen.queryByText("Anthropic · claude-sonnet-4-6")).toBeNull();
+    // The pointer's proper exit restores the normal cycle (the synthetic
+    // leave also resets Radix's one-shot pointermove edge lock).
+    fireEvent.pointerLeave(trigger);
+    fireEvent.pointerEnter(trigger);
+    fireEvent.pointerMove(trigger);
+    await screen.findByText("Anthropic · claude-sonnet-4-6");
   });
 });

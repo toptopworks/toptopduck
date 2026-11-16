@@ -145,21 +145,6 @@ export function ComposerProviderPicker({
   const [tipOpen, setTipOpen] = useState(false);
   const selectClosedAtRef = useRef(0);
   const pointerOnTriggerRef = useRef(false);
-  const runtimeTriggerRef = useRef<HTMLButtonElement | null>(null);
-  // Native pointerleave backstop: when the pointer leaves the trigger INTO
-  // the select's portal, the layer's pointer-events suppression can keep
-  // React from deriving the synthetic onPointerLeave -- the marker would
-  // strand "on" and the pointer leg would wave a phantom open through. The
-  // native event is authoritative; a double-run is idempotent.
-  useEffect(() => {
-    const el = runtimeTriggerRef.current;
-    if (!el) return;
-    const onNativeLeave = () => {
-      pointerOnTriggerRef.current = false;
-    };
-    el.addEventListener("pointerleave", onNativeLeave);
-    return () => el.removeEventListener("pointerleave", onNativeLeave);
-  }, []);
 
   // Per-profile has_key overlay (issue #154 / ADR-0029). Fetched on mount AND
   // on a profileKeyEpoch bump -- App bumps the epoch on settings-close so a
@@ -471,6 +456,10 @@ export function ComposerProviderPicker({
 
   // The select's controlled value: the runtime choice namespaced under its
   // kind so a profile id and an adapter id cannot collide in one option set.
+  // The `?? ""` fallbacks (zero profiles; a dangling active pointer) yield
+  // values matching no item on purpose: the icon-only trigger echoes
+  // nothing, and mapping them onto the placeholder sentinels would wrongly
+  // check a disabled row.
   const runtimeValue = isExternal
     ? `adapter:${activeAdapterId ?? ""}`
     : `profile:${provider.active_profile ?? ""}`;
@@ -663,7 +652,26 @@ export function ComposerProviderPicker({
           >
             <TooltipTrigger asChild>
               <SelectTrigger
-                ref={runtimeTriggerRef}
+                ref={(el) => {
+                  if (!el) return;
+                  // Native pointerleave backstop: when the pointer leaves
+                  // the trigger INTO the select's portal, the layer's
+                  // pointer-events suppression can keep React from deriving
+                  // the synthetic onPointerLeave -- the marker would strand
+                  // "on" and the pointer leg would wave a phantom open
+                  // through. The native event is authoritative; a double
+                  // run is idempotent. A ref callback (not a mount effect)
+                  // because the trigger unmounts and remounts across a
+                  // runtimeError transition -- the listener must rebind to
+                  // the new node, where a mount effect would stay attached
+                  // to the detached one.
+                  const onNativeLeave = () => {
+                    pointerOnTriggerRef.current = false;
+                  };
+                  el.addEventListener("pointerleave", onNativeLeave);
+                  return () =>
+                    el.removeEventListener("pointerleave", onNativeLeave);
+                }}
                 aria-label={intl.formatMessage(
                   {
                     id: "composer.providerPicker.triggerAria",

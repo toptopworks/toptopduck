@@ -21,7 +21,10 @@ import { SelectContent, SelectGroup, SelectLabel, SelectSeparator } from "../ui/
 // runtimes trailing item.
 
 // Sentinel option values the picker branches on in onValueChange (never
-// colliding with the `profile:`/`adapter:` namespaced real choices).
+// colliding with the `profile:`/`adapter:` namespaced real choices: profile
+// ids are UUIDs from the skeleton factory and adapter ids are built-in
+// slugs or server-minted `user:`-prefixed strings -- none can carry the
+// sentinel or a namespace prefix).
 export const MANAGE_RUNTIMES_VALUE = "__manage_runtimes__";
 const NOT_CONFIGURED_VALUE = "__not_configured__";
 const NONE_DETECTED_VALUE = "__none_detected__";
