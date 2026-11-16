@@ -5,7 +5,7 @@ import type { ResumeProgress, TurnProgress } from "../types/session";
 import type { DropCapture } from "./setup/shellFixtures";
 import type { ThreadEntry, TurnOutcome } from "../types/thread";
 import embed from "vega-embed";
-import { activeDataset, askQuestion, closeSession, conversation, createSession, listSessions, listWorkingSet, openRecipe, readRows } from "../api";
+import { activeDataset, askQuestion, closeSession, conversation, createSession, listSessions, listWorkingSet, openRecipe, readArtifactText, readRows } from "../api";
 import { artifactTurn, textual } from "../session/__tests__/fixtures";
 import { embedOk } from "../components/common/__tests__/helpers";
 import { buildTauriWindowMock } from "./setup/tauriWindowMock";
@@ -367,6 +367,62 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     expect(frame.getAttribute("src")).toContain("report.pdf");
     // The header carries the name as the stage chrome.
     expect(document.querySelector("[data-testid=\"artifact-header\"]")).toHaveTextContent("report.pdf");
+  });
+
+  it("re-reads the markdown body when a live turn re-delivers the same path (the pane-to-view delivery wiring)", async () => {
+    // The composition leg the unit suites cannot pin: the pane suite mocks
+    // ArtifactView (the delivery prop is unread) and the view suite receives
+    // delivery directly, so only this end-to-end stage proves the pane
+    // threads the derivation's delivery into the view's read key. A second
+    // turn re-delivering the SAME md path remounts the boundary
+    // (path:delivery) and the fresh body must be read off disk -- a
+    // delivery pinned to the wrong position re-observes the cached first
+    // read under staleTime Infinity and the stale body survives.
+    state.workingSet = [src("people")];
+    const MD = "/sessions/sess-1/artifacts/notes.md";
+    state.thread = [artifactTurn([MD])];
+    render(<App />);
+    await openSession();
+    vi.mocked(readArtifactText)
+      .mockResolvedValueOnce("# One\n\nFirst body")
+      .mockResolvedValue("# Two\n\nSecond body");
+    // Resume posture (#771): no Materialized turn, so the manifest spends
+    // silently and the row click is what opens the file stage.
+    fireEvent.click(await screen.findByRole("button", { name: /notes\.md/ }));
+    expect(await screen.findByText("First body")).toBeInTheDocument();
+
+    // The second round: a live ask resolves textual, and the gated turn-end
+    // refetch lands the recorded rows -- the SAME manifest on a NEW turn.
+    const outcome = {
+      kind: "Textual",
+      data: { text_kind: "Agent", body: "report regenerated", assumption: null },
+    } satisfies TurnOutcome;
+    vi.mocked(askQuestion).mockResolvedValue(outcome);
+    let releaseRefetch: (() => void) | null = null;
+    let conversationCalls = 1; // the mount's initial load already ran
+    vi.mocked(conversation).mockImplementation(async () => {
+      conversationCalls += 1;
+      if (conversationCalls > 1) {
+        await new Promise<void>((resolve) => {
+          releaseRefetch = resolve;
+        });
+      }
+      return state.thread;
+    });
+    state.thread = [artifactTurn([MD]), artifactTurn([MD], outcome)];
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "再写一版" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // The optimistic append commits first (the rail shows the round-2
+    // question); releasing the refetch lands the authoritative rows.
+    const rail = document.querySelector<HTMLElement>(".session-rail")!;
+    await waitFor(() => expect(within(rail).getByText("再写一版")).toBeInTheDocument());
+    expect(releaseRefetch).not.toBeNull();
+    releaseRefetch!();
+    // The re-delivery remounts the stage at the new delivery and the
+    // regenerated body is read off disk: exactly two reads across the two
+    // deliveries.
+    expect(await screen.findByText("Second body")).toBeInTheDocument();
+    expect(vi.mocked(readArtifactText)).toHaveBeenCalledTimes(2);
   });
 });
 

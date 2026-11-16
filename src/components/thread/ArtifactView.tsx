@@ -39,12 +39,18 @@ import { ArtifactHeader } from "./ArtifactHeader";
 export function ArtifactView({
   artifact,
   render,
+  delivery,
 }: {
   /** The manifest entry the view resolves (thread-derived, settle-frozen):
    *  the path (identity) + file_name (display) the derivation carries. */
   artifact: { path: string; file_name: string };
   /** The derived render matrix branch (deriveRightSidebarContent's output). */
   render: ArtifactRenderKind;
+  /** The delivering turn's thread position (the derivation's `delivery`):
+   *  pins the md read's cache key so a same-path re-delivery (a regenerated
+   *  file) refetches despite staleTime Infinity. The iframe branches don't
+   *  read it -- their remount rides the keyed boundary in SessionPane. */
+  delivery: number;
 }) {
   // One existence read for the whole stage: the header's action gate and the
   // body's degrade share the entry (and the rail row's cache -- the same
@@ -65,7 +71,7 @@ export function ArtifactView({
     // disk, and the stage's observer is always active so the fresh gate
     // value lands before the re-key. The iframe branches need nothing (no
     // query; the re-key remount re-reads from disk).
-    await queryClient.invalidateQueries({ queryKey: artifactKeys.text(artifact.path) });
+    await queryClient.invalidateQueries({ queryKey: artifactKeys.textFamily(artifact.path) });
     await queryClient.invalidateQueries({ queryKey: artifactKeys.exists(artifact.path) });
     setRefreshKey((k) => k + 1);
   };
@@ -77,6 +83,7 @@ export function ArtifactView({
           key={refreshKey}
           artifact={artifact}
           render={render}
+          delivery={delivery}
           exists={exists}
         />
       </div>
@@ -91,10 +98,12 @@ export function ArtifactView({
 function ArtifactStageBody({
   artifact,
   render,
+  delivery,
   exists,
 }: {
   artifact: { path: string; file_name: string };
   render: ArtifactRenderKind;
+  delivery: number;
   exists: boolean;
 }) {
   // The iframe branches share one degrade gate (Decision 2): existence is a
@@ -124,7 +133,7 @@ function ArtifactStageBody({
     // scrollbars).
     return (
       <div className="p-4">
-        <MarkdownArtifact path={artifact.path} exists={exists} />
+        <MarkdownArtifact path={artifact.path} delivery={delivery} exists={exists} />
       </div>
     );
   }
@@ -197,12 +206,22 @@ function PdfArtifactShell({ path, fileName }: { path: string; fileName: string }
  *  into the shared prose renderer -- the same pipeline as an agent answer,
  *  settled mode (no live fences to placeholder). A refusal (over the cap)
  *  or any read failure degrades to the face, never a partial render. */
-function MarkdownArtifact({ path, exists }: { path: string; exists: boolean }) {
+function MarkdownArtifact({
+  path,
+  delivery,
+  exists,
+}: {
+  path: string;
+  delivery: number;
+  exists: boolean;
+}) {
   const text = useQuery({
-    queryKey: artifactKeys.text(path),
+    queryKey: artifactKeys.text(path, delivery),
     queryFn: () => readArtifactText(path),
-    // One read per path (the manifest is settle-frozen): never stale and
-    // focus refetch is off app-wide, so the text re-reads only when the
+    // One read per delivery (the manifest is settle-frozen): never stale and
+    // focus refetch is off app-wide, so outside the header's refresh verb
+    // (which invalidates the entry -- handleRefresh above) the text re-reads
+    // only when the delivery re-keys the read (a regenerated file) or the
     // cache entry ages out (gcTime after the last observer unmounts) and a
     // later mount re-observes it.
     staleTime: Infinity,

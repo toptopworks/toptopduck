@@ -478,7 +478,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // resetSessionCache never touches them.
   const resetArtifactCache = (path: string) => {
     queryClient.removeQueries({ queryKey: artifactKeys.exists(path) });
-    queryClient.removeQueries({ queryKey: artifactKeys.text(path) });
+    queryClient.removeQueries({ queryKey: artifactKeys.textFamily(path) });
   };
 
   // Issue #758: the ask-again sink -- the stale banner's rerun and the rail's
@@ -1107,13 +1107,18 @@ function RightSidebarResult({
       // fallback card).
       return (
         <ErrorBoundary
-          key={content.path}
+          // The delivery rides the path identity: a re-delivery of the SAME
+          // path (a regenerated file) remounts too -- the body re-reads the
+          // file and a crash degrade never pins the new delivery to the old
+          // card (the #1199 rationale, extended to the delivery axis).
+          key={`${content.path}:${content.delivery}`}
           name="artifact"
           onReset={() => onResetArtifact(content.path)}
         >
           <ArtifactView
             artifact={{ path: content.path, file_name: content.fileName }}
             render={content.render}
+            delivery={content.delivery}
           />
         </ErrorBoundary>
       );
