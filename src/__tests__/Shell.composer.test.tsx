@@ -253,7 +253,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // The picker trigger (ADR-0071 + issue #353) lands inside the question-bar
     // toolbar -- not as a loose sibling. Its accessible name carries the active
     // runtime (built-in -> the active provider's preset name).
-    const trigger = await screen.findByRole("button", { name: "运行时：Anthropic" });
+    const trigger = await screen.findByRole("combobox", { name: "运行时：Anthropic" });
     const bar = document.querySelector(".question-bar") as HTMLElement;
     expect(bar.contains(trigger)).toBe(true);
   });
@@ -264,7 +264,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // picker trigger is absent until app-config resolves.
     render(<App />);
     await openSession();
-    expect(screen.queryByRole("button", { name: /运行时/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /运行时/ })).not.toBeInTheDocument();
   });
 });
 
@@ -361,13 +361,15 @@ describe("App composer refactor follow-ups (issue #504)", () => {
       render(<App />);
       await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
       await waitFor(() =>
-        expect(screen.getByRole("button", { name: /运行时/ })).toBeInTheDocument(),
+        expect(screen.getByRole("combobox", { name: /运行时/ })).toBeInTheDocument(),
       );
-      // Pick the external adapter from the level-2 CLI select.
-      fireEvent.click(screen.getByRole("button", { name: /运行时/ }));
-      const cliTrigger = await screen.findByRole("combobox", { name: "本机 CLI" });
-      fireEvent.pointerDown(cliTrigger, { button: 0, pointerType: "mouse" });
-      fireEvent.click(cliTrigger);
+      // Pick the external adapter option directly (the optgroup select).
+      // One trigger query: once the dropdown is open Radix aria-hides the
+      // outside tree, so a second getByRole would miss (the hidden-attr
+      // query behavior).
+      const runtimeTrigger = screen.getByRole("combobox", { name: /运行时/ });
+      fireEvent.pointerDown(runtimeTrigger, { button: 0, pointerType: "mouse" });
+      fireEvent.click(runtimeTrigger);
       const cliOption = await screen.findByRole("option", { name: "gemini-cli" });
       fireEvent.pointerUp(cliOption, { button: 0, pointerType: "mouse" });
       fireEvent.click(cliOption);

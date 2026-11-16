@@ -37,8 +37,9 @@ import type {
   SessionRuntimeChoice,
 } from "../../../types/runtime";
 
-// ComposerProviderPicker tests (ADR-0099, issue #574): the two-level
-// runtime popover + the brain-icon trigger + the posture text button's
+// ComposerProviderPicker tests (ADR-0099, issue #574): the flattened
+// runtime popover (direct level-2 rows, no nested Select) + the icon
+// trigger + the posture text button's
 // integration (posture label, set-IPC writes, cold-start pending
 // channel). Rendered inside an empty-catalog English IntlProvider so
 // assertions anchor on stable English strings. The IPC surface is mocked so
@@ -233,17 +234,9 @@ function staticColdStartChannel(
   };
 }
 
-async function openPopover() {
-  fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-  await screen.findByText("API Access");
-}
-
-// The level-2 selects' aria labels (stable anchors for the combobox queries).
-const PROFILE_SELECT = "API profile";
-const CLI_SELECT = "Local CLI";
-
-/** Opens a Radix Select (pointerDown + click, the jsdom-verified sequence). */
-async function openSelect(trigger: Element) {
+/** Opens the runtime Select (pointerDown + click, the jsdom-verified Radix sequence). */
+async function openRuntimeSelect(triggerName: string | RegExp = BUILTIN_TRIGGER) {
+  const trigger = screen.getByRole("combobox", { name: triggerName });
   fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
   fireEvent.click(trigger);
   // A wildcard findByRole("option") throws on multiple matches; wait on the
@@ -253,10 +246,9 @@ async function openSelect(trigger: Element) {
   );
 }
 
-/** Opens a Radix Select and clicks the option matching the given text. */
-async function selectOption(trigger: Element, optionText: RegExp): Promise<void> {
-  await openSelect(trigger);
-  const option = screen.getByRole("option", { name: optionText });
+/** Picks the option matching the name (pointerUp + click, the jsdom sequence). */
+function pickOption(name: string | RegExp) {
+  const option = screen.getByRole("option", { name });
   fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
   fireEvent.click(option);
 }
@@ -282,23 +274,25 @@ beforeEach(() => {
 // Trigger + two-level popover (ADR-0099 Decisions 1/2)
 // ---------------------------------------------------------------------------
 
-describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
-  it("renders the icon trigger with an accessible name carrying the active provider", () => {
+describe("ComposerProviderPicker runtime popover (ADR-0099)", () => {
+  it("renders the select trigger with an accessible name carrying the active provider", () => {
     renderPicker(pickerJsx());
-    expect(screen.getByRole("button", { name: BUILTIN_TRIGGER })).toBeTruthy();
+    // Icon-only face: the runtime name rides the aria-label alone (the bar
+    // never echoes it visually; the tooltip is the read surface).
+    expect(screen.getByRole("combobox", { name: BUILTIN_TRIGGER })).toBeTruthy();
   });
 
-  it("opens the popover with the two level-1 radio groups mirroring the settings tab names", async () => {
+  it("opens the dropdown with the two optgroup labels mirroring the settings tab names", async () => {
     renderPicker(pickerJsx());
-    await openPopover();
+    await openRuntimeSelect();
     expect(screen.getByText("API Access")).toBeTruthy();
     expect(screen.getByText("Local CLI")).toBeTruthy();
   });
 
-  it("retires the configuration surfaces from the popover (model input, key block, open-settings)", async () => {
+  it("retires the configuration surfaces from the dropdown (model input, key block, open-settings)", async () => {
     renderPicker(pickerJsx());
-    await openPopover();
-    // ADR-0099 Decision 1: the popover is a pure selector -- configuration
+    await openRuntimeSelect();
+    // ADR-0099 Decision 1: the dropdown is a pure selector -- configuration
     // lives in Settings.
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.queryByText("Key set")).toBeNull();
@@ -306,81 +300,40 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     expect(screen.queryByText("Open settings")).toBeNull();
   });
 
-  // Close-focus restore (usePointerCloseIntent): the trigger is a Radix
-  // Tooltip trigger, so a pointer-initiated close must drop the default
-  // refocus -- the tooltip would strand open with no hover. Keyboard closes
-  // keep the restore (the a11y return path).
-  it("a pointer-initiated close (outside pointerdown) drops the trigger refocus", async () => {
-    renderPicker(pickerJsx());
-    await openPopover();
-    // The outside pointerdown marks the gesture pointer-initiated; the
-    // dismissal itself rides the deferred click (DismissableLayer defers a
-    // button-0 pointerdown-outside to the follow-up click).
-    fireEvent.pointerDown(document.body);
-    fireEvent.click(document.body);
-    // Radix defers the layer's pointerdown listener and the Presence unmount
-    // by timers; under loaded workers the default 1s waitFor headroom is tight.
-    await waitFor(
-      () => expect(screen.queryByText("API Access")).not.toBeInTheDocument(),
-      { timeout: 3000 },
-    );
-    // The commit's stated end state: the skipped restore leaves focus at
-    // body, not merely off the trigger.
-    expect(document.activeElement).toBe(document.body);
-  });
-
-  it("a pointer-initiated in-content close drops the trigger refocus", async () => {
-    // The gate's own protection (issue #1309): an in-content click close is
-    // where Radix's default handler WOULD refocus the Tooltip-wrapped
-    // trigger -- the outside-pointerdown skip above does not apply -- and
-    // that refocus is the tooltip-strand path.
-    renderPicker(pickerJsx());
-    await openPopover();
-    const manage = screen.getByText("Manage runtimes");
-    fireEvent.pointerDown(manage);
-    fireEvent.click(manage);
-    await waitFor(
-      () => expect(screen.queryByText("API Access")).not.toBeInTheDocument(),
-      { timeout: 3000 },
-    );
-    expect(document.activeElement).toBe(document.body);
-  });
-
+  // Keyboard close (Radix Select's own contract): ESC closes and returns
+  // focus to the trigger (the a11y return path). The pointer-close focus
+  // behavior is Radix-internal (no seam) -- the #1438 tooltip gate covers
+  // the strand risk instead of a focus pin.
   it("a keyboard close (ESC) keeps the trigger refocus", async () => {
     renderPicker(pickerJsx());
-    // Open with a pointer (the realistic entry): the pointerdown marks the
-    // gesture pointer-initiated and the ESC keydown must clear it for the
-    // restore to survive -- the pointer-open/keyboard-close interleaving.
-    const trigger = screen.getByRole("button", { name: BUILTIN_TRIGGER });
-    fireEvent.pointerDown(trigger);
-    fireEvent.click(trigger);
-    await screen.findByText("API Access");
+    const trigger = screen.getByRole("combobox", { name: BUILTIN_TRIGGER });
+    await openRuntimeSelect();
     fireEvent.keyDown(document.body, { key: "Escape" });
     await waitFor(
-      () => expect(screen.queryByText("API Access")).not.toBeInTheDocument(),
+      () => expect(screen.queryByRole("option")).toBeNull(),
       { timeout: 3000 },
     );
     expect(document.activeElement).toBe(trigger);
   });
 
-  it("echoes the active profile in the level-2 profile select and lists every profile", async () => {
+  it("lists every profile as an option with the active one checked", async () => {
     renderPicker(pickerJsx());
-    await openPopover();
-    const trigger = screen.getByRole("combobox", { name: PROFILE_SELECT });
-    expect(trigger.textContent).toContain("Anthropic");
-    await openSelect(trigger);
-    expect(screen.getByRole("option", { name: "Anthropic" })).toBeTruthy();
-    expect(screen.getByRole("option", { name: "GLM" })).toBeTruthy();
+    await openRuntimeSelect();
+    // The active choice's check rides the controlled value (the ItemText
+    // echo source stays the label alone; the mark never joins it).
+    expect(
+      screen.getByRole("option", { name: "Anthropic" }).getAttribute("data-state"),
+    ).toBe("checked");
+    expect(
+      screen.getByRole("option", { name: "GLM" }).getAttribute("data-state"),
+    ).toBe("unchecked");
   });
 
   it("switches active_profile when a profile option is picked", async () => {
     const onSwitchActive = vi.fn();
     renderPicker(pickerJsx({ onSwitchActive }));
-    await openPopover();
-    await selectOption(
-      screen.getByRole("combobox", { name: PROFILE_SELECT }),
-      /GLM/,
-    );
+    await openRuntimeSelect();
+    pickOption("GLM");
     expect(onSwitchActive).toHaveBeenCalledWith("glm");
     // Already on the built-in runtime: no runtime write fires.
     expect(setSessionRuntime).not.toHaveBeenCalled();
@@ -399,7 +352,7 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
       adapter("user:ba3b2de2", "My local CLI", false),
     ]);
     renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: "Runtime: My local CLI" });
+    await screen.findByRole("combobox", { name: "Runtime: My local CLI" });
   });
 
   it("falls to the raw id on the trigger when the adapter row is gone", async () => {
@@ -412,7 +365,7 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     });
     vi.mocked(listAdapters).mockResolvedValue([]);
     renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: "Runtime: user:ba3b2de2" });
+    await screen.findByRole("combobox", { name: "Runtime: user:ba3b2de2" });
   });
 
   it("reverts the runtime to built-in when a profile option is picked while external", async () => {
@@ -422,13 +375,9 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     });
     vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
-    fireEvent.click(screen.getByRole("button", { name: /Runtime: qwen-code/ }));
-    await screen.findByText("Local CLI");
-    await selectOption(
-      screen.getByRole("combobox", { name: PROFILE_SELECT }),
-      /GLM/,
-    );
+    await screen.findByRole("combobox", { name: /Runtime: qwen-code/ });
+    await openRuntimeSelect(/Runtime: qwen-code/);
+    pickOption(/GLM/);
     await waitFor(() =>
       expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", { kind: "built_in" }),
     );
@@ -439,12 +388,14 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
       pickerJsx({ provider: { profiles: [], active_profile: null } }),
     );
     // Zero profiles: the trigger's readout is itself "Not configured".
-    fireEvent.click(screen.getByRole("button", { name: "Runtime: Not configured" }));
-    await screen.findByText("API Access");
-    // The popover's level-2 placeholder + the posture label both read
-    // "Not configured"; the assertion pins that no profile select renders.
-    expect(screen.getAllByText("Not configured").length).toBeGreaterThanOrEqual(2);
-    expect(screen.queryByRole("combobox", { name: PROFILE_SELECT })).toBeNull();
+    await openRuntimeSelect("Runtime: Not configured");
+    // The posture label and the dropdown's disabled placeholder read
+    // "Not configured"; the assertion pins that no real profile option
+    // renders.
+    expect(screen.getAllByText("Not configured").length).toBe(2);
+    const placeholder = screen.getByRole("option", { name: "Not configured" });
+    expect(placeholder.getAttribute("aria-disabled")).toBe("true");
+    expect(screen.queryByRole("option", { name: "Anthropic" })).toBeNull();
   });
 
   it("marks keyless profiles at the option level (ADR-0019/0099)", async () => {
@@ -455,14 +406,12 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
       ]),
     );
     renderPicker(pickerJsx());
-    await openPopover();
+    await openRuntimeSelect();
     // The mark lands on the Anthropic option (await: the key overlay fetch
     // is a mount-time effect), never on the keyed GLM option.
-    const trigger = screen.getByRole("combobox", { name: PROFILE_SELECT });
-    await openSelect(trigger);
     const mark = await screen.findByText("no key");
     expect(mark.closest("[role=\"option\"]")?.textContent).toContain("Anthropic");
-    const glmOption = screen.getByRole("option", { name: /GLM/ });
+    const glmOption = screen.getByRole("option", { name: "GLM" });
     expect(glmOption.textContent).not.toContain("no key");
   });
 
@@ -471,56 +420,51 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
       keyStatus([["anthropic", false, "keychain locked"]]),
     );
     renderPicker(pickerJsx());
-    await openPopover();
-    const trigger = screen.getByRole("combobox", { name: PROFILE_SELECT });
-    await openSelect(trigger);
+    await openRuntimeSelect();
     const mark = await screen.findByText("Credential store unavailable");
     expect(mark.closest("[role=\"option\"]")?.textContent).toContain("Anthropic");
   });
 
-  it("never echoes the keyless mark in the closed profile select (dropdown-only, ADR-0099)", async () => {
+  it("keeps the keyless mark off the trigger's accessible name (row-level mark surface)", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue(
       keyStatus([["anthropic", false]]),
     );
     renderPicker(pickerJsx());
-    await openPopover();
-    const trigger = screen.getByRole("combobox", { name: PROFILE_SELECT });
-    // The mark exists in the dropdown (contrast anchor) but the CLOSED
-    // trigger echoes the profile name alone.
-    await openSelect(trigger);
+    // Query the trigger BEFORE opening: once the dropdown is open Radix
+    // aria-hides the outside tree, so getByRole would miss it.
+    const trigger = screen.getByRole("combobox", { name: BUILTIN_TRIGGER });
+    await openRuntimeSelect();
+    // The mark lives on the dropdown option; the icon trigger's accessible
+    // name carries the runtime readout alone.
     expect(await screen.findByText("no key")).toBeTruthy();
-    expect(trigger.textContent).toContain("Anthropic");
-    expect(trigger.textContent).not.toContain("no key");
+    expect(trigger.getAttribute("aria-label")).not.toContain("no key");
   });
 
-  it("shows the None detected placeholder in the closed CLI select when no adapter is detected", async () => {
+  it("shows the None detected placeholder when no adapter is detected", async () => {
     // beforeEach seeds an empty adapter table: the honest empty-list
-    // placeholder, not a blank echo.
+    // placeholder option, not a blank group.
     renderPicker(pickerJsx());
-    await openPopover();
-    expect(screen.getByLabelText(CLI_SELECT).textContent).toBe("None detected");
+    await openRuntimeSelect();
+    const placeholder = screen.getByRole("option", { name: "None detected" });
+    expect(placeholder.getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("offers only detected external adapters as level-2 CLI options", async () => {
+  it("offers only detected external adapters as CLI options", async () => {
     vi.mocked(listAdapters).mockResolvedValue([
       adapter("qwen-code", "qwen-code", true),
       adapter("gemini-cli", "gemini-cli", false),
     ]);
     renderPicker(pickerJsx());
-    await openPopover();
-    await openSelect(screen.getByRole("combobox", { name: CLI_SELECT }));
-    expect(screen.getByRole("option", { name: /qwen-code/ })).toBeTruthy();
-    expect(screen.queryByRole("option", { name: /gemini-cli/ })).toBeNull();
+    await openRuntimeSelect();
+    expect(screen.getByRole("option", { name: "qwen-code" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "gemini-cli" })).toBeNull();
   });
 
   it("writes the external choice when a detected CLI option is picked", async () => {
     vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     renderPicker(pickerJsx());
-    await openPopover();
-    await selectOption(
-      screen.getByRole("combobox", { name: CLI_SELECT }),
-      /qwen-code/,
-    );
+    await openRuntimeSelect();
+    pickOption("qwen-code");
     await waitFor(() =>
       expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
         kind: "external",
@@ -555,11 +499,8 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     // racing the first load would invalidate mid-flight and blur the
     // two-call count the test pins).
     await waitFor(() => expect(getSessionModelConfig).toHaveBeenCalledTimes(1));
-    await openPopover();
-    await selectOption(
-      screen.getByRole("combobox", { name: CLI_SELECT }),
-      /qwen-code/,
-    );
+    await openRuntimeSelect();
+    pickOption("qwen-code");
     await waitFor(() =>
       expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
         kind: "external",
@@ -572,120 +513,54 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     expect(getSessionModelConfig).toHaveBeenCalledTimes(2);
   });
 
-  it("selects the first detected CLI when the Local CLI level-1 row is picked from built-in", async () => {
-    vi.mocked(listAdapters).mockResolvedValue([
-      adapter("qwen-code"),
-      adapter("codex"),
-    ]);
-    renderPicker(pickerJsx());
-    await openPopover();
-    fireEvent.click(screen.getByRole("button", { name: "Local CLI" }));
-    await waitFor(() =>
-      expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
-        kind: "external",
-        data: "qwen-code",
-      }),
-    );
-  });
-
-  it("carries the level-1 selection state on the rows' aria-pressed", async () => {
-    // ADR-0099 Decision 2: the group rows are radio-style targets, so the
-    // selection state rides aria-pressed (the dot itself is aria-hidden).
-    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
-    renderPicker(pickerJsx());
-    await openPopover();
-    expect(
-      screen.getByRole("button", { name: "API Access" }).getAttribute("aria-pressed"),
-    ).toBe("true");
-    expect(
-      screen.getByRole("button", { name: "Local CLI" }).getAttribute("aria-pressed"),
-    ).toBe("false");
-    fireEvent.click(screen.getByRole("button", { name: "Local CLI" }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Local CLI" }).getAttribute("aria-pressed"),
-      ).toBe("true"),
-    );
-    expect(
-      screen.getByRole("button", { name: "API Access" }).getAttribute("aria-pressed"),
-    ).toBe("false");
-  });
-
-  it("keeps the CLI select echo honest when switching back to built-in within one popover visit", async () => {
-    // The CLI Select must stay controlled across the runtime switch: an
-    // uncontrolled fallback would re-echo the previously picked adapter
-    // while level 1 already shows API Access selected.
-    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
-    renderPicker(pickerJsx());
-    await openPopover();
-    await selectOption(screen.getByLabelText(CLI_SELECT), /qwen-code/);
-    await waitFor(() =>
-      expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
-        kind: "external",
-        data: "qwen-code",
-      }),
-    );
-    // Switch back via the API Access level-1 row.
-    fireEvent.click(screen.getByRole("button", { name: "API Access" }));
-    await waitFor(() =>
-      expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
-        kind: "built_in",
-      }),
-    );
-    // The CLI trigger falls back to the placeholder, not the stale echo.
-    expect(screen.getByLabelText(CLI_SELECT).textContent).toBe("—");
-  });
-
-  it("shows a stale-adapter warning when the held CLI is no longer detected", async () => {
+  it("shows a stale-adapter warning with the held adapter as a disabled synthetic option", async () => {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
       data: "gemini-cli",
     });
     vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: gemini-cli/ });
-    fireEvent.click(screen.getByRole("button", { name: /Runtime: gemini-cli/ }));
+    await screen.findByRole("combobox", { name: /Runtime: gemini-cli/ });
+    await openRuntimeSelect(/Runtime: gemini-cli/);
     expect(
       await screen.findByText(/Selected adapter is no longer detected/),
     ).toBeTruthy();
-    // The closed CLI select still echoes the held (undetected) adapter via
-    // the disabled synthetic option -- a blank echo would hide the breakage.
-    const cliTrigger = screen.getByRole("combobox", { name: CLI_SELECT });
-    expect(cliTrigger.textContent).toContain("gemini-cli");
-    // The synthetic option itself is labeled and DISABLED -- visible as the
-    // held value, but not a pickable row.
-    await openSelect(cliTrigger);
+    // The held (undetected) adapter stays visible as the DISABLED synthetic
+    // option carrying the check -- a value with no matching item would
+    // leave the dropdown with no visible selection (issue #490).
     const staleOption = screen.getByRole("option", {
-      name: /gemini-cli \(no longer detected\)/,
+      name: "gemini-cli (no longer detected)",
     });
     expect(staleOption.getAttribute("aria-disabled")).toBe("true");
+    expect(staleOption.getAttribute("data-state")).toBe("checked");
+    // The detected table renders alongside.
+    expect(screen.getByRole("option", { name: "qwen-code" })).toBeTruthy();
   });
 
-  it("retires the settings-test guidance from the popover when the active CLI has no catalog", async () => {
+  it("retires the settings-test guidance from the dropdown when the active CLI has no catalog", async () => {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
       data: "qwen-code",
     });
     vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
-    fireEvent.click(screen.getByRole("button", { name: /Runtime: qwen-code/ }));
-    await screen.findByText("Manage runtimes");
+    await screen.findByRole("combobox", { name: /Runtime: qwen-code/ });
+    await openRuntimeSelect(/Runtime: qwen-code/);
     expect(
       screen.queryByText(/Test the runtime in settings/),
     ).toBeNull();
   });
 
-  it("opens settings from the Manage link and closes the popover", async () => {
+  it("opens settings from the Manage runtimes option and closes the dropdown", async () => {
     const onOpenSettings = vi.fn();
     renderPicker(pickerJsx({ onOpenSettings }));
-    await openPopover();
-    fireEvent.click(screen.getByText("Manage runtimes"));
+    await openRuntimeSelect();
+    pickOption("Manage runtimes");
     expect(onOpenSettings).toHaveBeenCalledWith();
-    // The popover ACTUALLY closes (the content unmounts), not just the
+    // The dropdown ACTUALLY closes (the content unmounts), not just the
     // callback firing -- the portaled content would otherwise stay visible
     // atop the settings overlay.
-    await waitFor(() => expect(screen.queryByText("API Access")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("option")).toBeNull());
   });
 
   it("does not call getSessionRuntime when sessionId is null", () => {
@@ -697,7 +572,7 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     );
     expect(getSessionRuntime).not.toHaveBeenCalled();
     expect(
-      screen.getByRole("button", { name: BUILTIN_TRIGGER }),
+      screen.getByRole("combobox", { name: BUILTIN_TRIGGER }),
     ).toBeTruthy();
   });
 
@@ -709,18 +584,18 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
         coldStart: staticColdStartChannel(),
       }),
     );
-    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    await screen.findByRole("combobox", { name: /Runtime: qwen-code/ });
   });
 
   it("renders the runtime read failure as the chip's fault line instead of the control (issue #600)", async () => {
     // The #529 convention's runtime-side twin: a rejected runtime read must
     // not masquerade as the built-in default -- the destructive status line
-    // replaces the Popover control entirely (the modelConfig configFault
+    // replaces the Select control entirely (the modelConfig configFault
     // treatment on its sibling query).
     vi.mocked(getSessionRuntime).mockRejectedValue(new Error("ipc down"));
     renderPicker(pickerJsx());
     expect(await screen.findByRole("status")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: BUILTIN_TRIGGER })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: BUILTIN_TRIGGER })).toBeNull();
   });
 });
 
@@ -750,7 +625,7 @@ async function renderExternalPicker(
   });
   renderPicker(pickerJsx(overrides));
   // The posture trigger renders once the runtime query lands.
-  await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+  await screen.findByRole("combobox", { name: /Runtime: qwen-code/ });
 }
 
 describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)", () => {
@@ -762,23 +637,22 @@ describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)"
     expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
   });
 
-  it("switches the label with the runtime within one popover visit", async () => {
+  it("switches the label with the runtime within one dropdown visit", async () => {
     vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     renderPicker(pickerJsx());
     // Built-in: the label is the active profile's model.
     expect(screen.getByText("claude-sonnet-4-6")).toBeTruthy();
-    await openPopover();
-    await selectOption(
-      screen.getByRole("combobox", { name: CLI_SELECT }),
-      /qwen-code/,
-    );
+    await openRuntimeSelect();
+    pickOption("qwen-code");
     // External with no catalog: the label switches to the CLI default and
     // the profile model readout is gone.
     expect(await screen.findByText("Default (recommended)")).toBeTruthy();
     expect(screen.queryByText("claude-sonnet-4-6")).toBeNull();
-    // Back to built-in via the level-1 row: the label returns to the
-    // profile model and the CLI default readout is gone.
-    fireEvent.click(screen.getByRole("button", { name: "API Access" }));
+    // Back to built-in via the profile option (a profile pick IS the
+    // built-in pick): the label returns to the profile model and the CLI
+    // default readout is gone.
+    await openRuntimeSelect(/Runtime: qwen-code/);
+    pickOption(/Anthropic/);
     expect(await screen.findByText("claude-sonnet-4-6")).toBeTruthy();
     expect(screen.queryByText("Default (recommended)")).toBeNull();
   });
@@ -792,7 +666,9 @@ describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)"
     renderPicker(
       pickerJsx({ provider: { profiles: [], active_profile: null } }),
     );
-    expect(screen.getByText("Not configured")).toBeTruthy();
+    // Icon-only face: the posture label is the only "Not configured" text
+    // (the select trigger's accessible name is not a text node).
+    expect(screen.getAllByText("Not configured").length).toBe(1);
     // "Default (recommended)" is the CLI unselected state's copy: the
     // built-in zero-profile state must never borrow it (ADR-0100 anchor).
     expect(screen.queryByText("Default (recommended)")).toBeNull();
@@ -989,7 +865,7 @@ describe("ComposerProviderPicker posture label live rendering (issue #586)", () 
         coldStart: staticColdStartChannel(),
       }),
     );
-    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    await screen.findByRole("combobox", { name: /Runtime: qwen-code/ });
     const trigger = screen.getByRole("button", {
       name: "Model: Default (recommended)",
     });
@@ -1045,7 +921,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
       },
     });
     renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: claude-code/ });
+    await screen.findByRole("combobox", { name: /Runtime: claude-code/ });
     fireEvent.click(screen.getByRole("menuitemradio", { name: "sonnet" }));
     await waitFor(() =>
       expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: "sonnet", thought_level: null }),
@@ -1102,7 +978,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
     });
     vi.mocked(getAdapterCatalogs).mockResolvedValue(codexProbeEntry(CODEX_MODELS));
     renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: codex/ });
+    await screen.findByRole("combobox", { name: /Runtime: codex/ });
     fireEvent.click(screen.getByRole("menuitemradio", { name: "gpt-5-codex" }));
     // The linkage clear rides the SAME wire submit (issues #537 + #603):
     // one call carries the model pick AND the level null.
@@ -1129,7 +1005,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
     });
     vi.mocked(getAdapterCatalogs).mockResolvedValue(codexProbeEntry(CODEX_MODELS));
     renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: codex/ });
+    await screen.findByRole("combobox", { name: /Runtime: codex/ });
     fireEvent.click(screen.getByRole("menuitemradio", { name: "gpt-5" }));
     await waitFor(() =>
       expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: "gpt-5", thought_level: "medium" }),
@@ -1155,7 +1031,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
       () => new Promise<SessionModelConfig>(() => {}),
     );
     renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: codex/ });
+    await screen.findByRole("combobox", { name: /Runtime: codex/ });
     const trigger = screen.getByRole("button", { name: /^Model: / });
     expect((trigger as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("menuitemradio", { name: "gpt-5" }));
@@ -1179,7 +1055,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
     vi.mocked(getAdapterCatalogs).mockResolvedValue(codexProbeEntry(CODEX_MODELS));
     vi.mocked(setSessionPosture).mockRejectedValueOnce(new Error("write refused"));
     renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: codex/ });
+    await screen.findByRole("combobox", { name: /Runtime: codex/ });
     fireEvent.click(screen.getByRole("menuitemradio", { name: "gpt-5-codex" }));
     await waitFor(() =>
       expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: "gpt-5-codex", thought_level: null }),
@@ -1301,7 +1177,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
         ...overrides,
       }),
     );
-    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    await screen.findByRole("combobox", { name: /Runtime: qwen-code/ });
     await settlePostureSurface();
   }
 
@@ -1338,7 +1214,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
   ) {
     seedColdStartCatalog();
     renderPicker(<ColdStartHost onPostureChange={onPostureChange} />);
-    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    await screen.findByRole("combobox", { name: /Runtime: qwen-code/ });
     await settlePostureSurface();
   }
 
@@ -1433,7 +1309,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
       { kind: "external", data: "codex" },
     );
     renderPicker(pickerJsx({ sessionId: null, coldStart: channel }));
-    await screen.findByRole("button", { name: /Runtime: codex/ });
+    await screen.findByRole("combobox", { name: /Runtime: codex/ });
     // This render is inline (its own codex seed, not the helpers), so await
     // the catalog-gated row directly -- the same second-hop settle the
     // cold-start helpers perform.
@@ -1460,14 +1336,10 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     vi.mocked(getAdapterCatalogs).mockResolvedValue(acpProbeEntry(CATALOG));
     const channel = staticColdStartChannel();
     renderPicker(pickerJsx({ sessionId: null, coldStart: channel }));
-    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    await screen.findByRole("combobox", { name: /Runtime: qwen-code/ });
     await settlePostureSurface();
-    fireEvent.click(screen.getByRole("button", { name: /Runtime: qwen-code/ }));
-    await screen.findByRole("combobox", { name: CLI_SELECT });
-    await selectOption(
-      screen.getByRole("combobox", { name: CLI_SELECT }),
-      /codex/,
-    );
+    await openRuntimeSelect(/Runtime: qwen-code/);
+    pickOption("codex");
     await waitFor(() =>
       expect(channel.port.writeRuntime).toHaveBeenCalledWith({
         kind: "external",
@@ -1489,7 +1361,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     });
     const channel = staticColdStartChannel();
     renderPicker(pickerJsx({ sessionId: null, coldStart: channel }));
-    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    await screen.findByRole("combobox", { name: /Runtime: qwen-code/ });
     await settlePostureSurface();
     fireEvent.click(screen.getByRole("menuitemradio", { name: "high" }));
     expect(channel.port.writePosture).toHaveBeenCalledWith(
@@ -1514,7 +1386,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     });
     const channel = staticColdStartChannel();
     renderPicker(pickerJsx({ sessionId: null, coldStart: channel }));
-    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    await screen.findByRole("combobox", { name: /Runtime: qwen-code/ });
     await settlePostureSurface();
     // The always-open menu holds two clear rows -- the level dimension's
     // is the second ("Default (recommended)" on both).
@@ -1601,7 +1473,7 @@ describe("ComposerProviderPicker backfill cache coherence (ADR-0100 single write
         coldStart: staticColdStartChannel(null, { kind: "built_in" }),
       }),
     );
-    await screen.findByRole("button", { name: BUILTIN_TRIGGER });
+    await screen.findByRole("combobox", { name: BUILTIN_TRIGGER });
     expect(getLastModelPosture).not.toHaveBeenCalled();
   });
 });
@@ -1645,7 +1517,7 @@ describe("ComposerProviderPicker key overlay refetch (issue #154)", () => {
       defaultOptions: { queries: { retry: false } },
     });
     const { rerender } = render(wrap(pickerJsx(), queryClient));
-    await openPopover();
+    await openRuntimeSelect();
     expect(await screen.findByText(/ipc down/)).toBeTruthy();
     rerender(wrap(pickerJsx({ profileKeyEpoch: 1 }), queryClient));
     await waitFor(() => expect(screen.queryByText(/ipc down/)).toBeNull());
@@ -1664,7 +1536,15 @@ describe("ComposerProviderPicker trigger tooltip (ADR-0099)", () => {
       keyStatus([["anthropic", true]]),
     );
     renderPicker(pickerJsx());
-    fireEvent.pointerMove(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
+    // The tooltip is permanently controlled with the #1438 gate: a genuine
+    // hover is pointerEnter (the pointer-leg marker) + pointerMove (Radix's
+    // open gesture keys on the move).
+    fireEvent.pointerEnter(
+      screen.getByRole("combobox", { name: BUILTIN_TRIGGER }),
+    );
+    fireEvent.pointerMove(
+      screen.getByRole("combobox", { name: BUILTIN_TRIGGER }),
+    );
     expect(await screen.findByText("Anthropic · claude-sonnet-4-6")).toBeTruthy();
   });
 
@@ -1673,7 +1553,12 @@ describe("ComposerProviderPicker trigger tooltip (ADR-0099)", () => {
       keyStatus([["anthropic", false]]),
     );
     renderPicker(pickerJsx());
-    fireEvent.pointerMove(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
+    fireEvent.pointerEnter(
+      screen.getByRole("combobox", { name: BUILTIN_TRIGGER }),
+    );
+    fireEvent.pointerMove(
+      screen.getByRole("combobox", { name: BUILTIN_TRIGGER }),
+    );
     expect(
       await screen.findByText("Anthropic · claude-sonnet-4-6 · no key"),
     ).toBeTruthy();
@@ -1686,7 +1571,8 @@ describe("ComposerProviderPicker trigger tooltip (ADR-0099)", () => {
     });
     vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code", "Qwen Code")]);
     renderPicker(pickerJsx());
-    const trigger = await screen.findByRole("button", { name: /Runtime: Qwen Code/ });
+    const trigger = await screen.findByRole("combobox", { name: /Runtime: Qwen Code/ });
+    fireEvent.pointerEnter(trigger);
     fireEvent.pointerMove(trigger);
     expect(await screen.findByText("External runtime: Qwen Code")).toBeTruthy();
   });

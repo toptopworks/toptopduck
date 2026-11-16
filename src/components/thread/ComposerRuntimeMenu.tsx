@@ -5,32 +5,29 @@ import { Check, ChevronRight } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import type { ProfileKeyStatus, ProviderConfig } from "../../types/provider";
-import type { AdapterEntry, SessionRuntimeChoice } from "../../types/runtime";
-import { Select, SelectContent, SelectTrigger, SelectValue } from "../ui/select";
+import type { AdapterEntry } from "../../types/runtime";
+import { SelectContent, SelectGroup, SelectLabel, SelectSeparator } from "../ui/select";
 
-// The two-level runtime selector menu body (ADR-0099 Decision 2, split out of
-// ComposerProviderPicker, issue #592): level 1 mirrors the Settings runtime
-// sub-tab names as radio-style group rows; level 2 is one Select per group --
-// the profiles under API Access, the detected CLIs under Local CLI. Pure
-// selector -- all configuration actions live in Settings (ADR-0099 Decision 1);
-// the only navigation out is the Manage runtimes footer affordance. The picker
-// owns the queries and write paths; this module renders the popover content
-// from the resolved data and forwards gestures through its callbacks.
+// The runtime selector's option content (ADR-0099 Decision 2, split out of
+// ComposerProviderPicker, issue #592; select-shaped): one SelectContent with
+// two SelectGroups mirroring the Settings runtime sub-tab names -- the
+// profiles under API Access, the detected CLIs under Local CLI -- so every
+// target is one click from the open dropdown (native optgroup semantics:
+// the group labels are headings, not selectable targets). The selected row's
+// check rides the root Select's controlled value. Pure content -- the picker
+// owns the queries, the value mapping, and the write paths, and this module
+// renders the options from the resolved data. Configuration lives in
+// Settings (ADR-0099 Decision 1); the only navigation out is the Manage
+// runtimes trailing item.
 
-// The two level-2 selects' shared trigger classes: indented under the level-1
-// group row and inset to the remaining width (the dot column).
-const LEVEL2_SELECT_TRIGGER_CLASS =
-  "ml-6 w-[calc(100%-1.5rem)] border-border bg-card hover:bg-transit";
+// Sentinel option values the picker branches on in onValueChange (never
+// colliding with the `profile:`/`adapter:` namespaced real choices).
+export const MANAGE_RUNTIMES_VALUE = "__manage_runtimes__";
+const NOT_CONFIGURED_VALUE = "__not_configured__";
+const NONE_DETECTED_VALUE = "__none_detected__";
 
 export type ComposerRuntimeMenuProps = {
-  // Whether the session runs an external adapter (the Local CLI group is the
-  // selected side; a profile pick under API Access reverts the runtime).
-  isExternal: boolean;
-  // The runtime-write window guard: the level-1 rows and both Selects
-  // disable while a set IPC is in flight.
-  switching: boolean;
-  // The non-secret provider config (profiles list + active id), read-only
-  // here like in the picker.
+  // The non-secret provider config (profiles list + active id), read-only.
   provider: ProviderConfig;
   // Per-profile has_key overlay (the option-row marks, ADR-0019/0099) + the
   // overlay read's failure line.
@@ -38,38 +35,20 @@ export type ComposerRuntimeMenuProps = {
   keysError: string | null;
   // Only the DETECTED adapter rows render (issue #490).
   adapters: AdapterEntry[];
+  // The held adapter id (null when built-in).
   activeAdapterId: string | null;
-  // The session's external adapter is no longer detected (issue #490): the
-  // warning line + the disabled synthetic option.
+  // The held adapter is no longer detected (issue #490): the warning line
+  // + the disabled synthetic option.
   activeAdapterStale: boolean;
-  // Commit a new active_profile id (the picker's onSwitchActive pass-through).
-  onSwitchActive: (id: string) => void;
-  // Write a runtime choice (in-session IPC or the cold-start pending channel,
-  // whichever the picker owns for this render). The in-session form is an
-  // async IPC write; call sites fire-and-forget it (the picker's own
-  // implementation never rejects).
-  onSelectRuntime: (next: SessionRuntimeChoice) => void | Promise<void>;
-  // Level-1 "Local CLI" click with no external runtime held: select the first
-  // detected CLI so the group header is itself an operable radio target.
-  onSelectLocalCliGroup: () => void;
-  // The popover-footer affordance: close the popover, then open Settings →
-  // Runtime (ADR-0091, issue #490).
-  onManageRuntimes: () => void;
 };
 
 export function ComposerRuntimeMenu({
-  isExternal,
-  switching,
   provider,
   profileKeys,
   keysError,
   adapters,
   activeAdapterId,
   activeAdapterStale,
-  onSwitchActive,
-  onSelectRuntime,
-  onSelectLocalCliGroup,
-  onManageRuntimes,
 }: ComposerRuntimeMenuProps) {
   const intl = useIntl();
 
@@ -81,17 +60,6 @@ export function ComposerRuntimeMenu({
   const notConfigured = intl.formatMessage({
     id: "composer.providerPicker.notConfigured",
     defaultMessage: "Not configured",
-  });
-
-  // Level-2 select aria labels (each Select announces its dimension) + the
-  // honest empty-CLI placeholder.
-  const profileSelectAria = intl.formatMessage({
-    id: "composer.runtimePicker.profileSelectAria",
-    defaultMessage: "API profile",
-  });
-  const cliSelectAria = intl.formatMessage({
-    id: "common.localCli",
-    defaultMessage: "Local CLI",
   });
   const noCliDetected = intl.formatMessage({
     id: "composer.runtimePicker.noCliDetected",
@@ -105,109 +73,71 @@ export function ComposerRuntimeMenu({
     id: "composer.providerPicker.keychainUnavailable",
     defaultMessage: "Credential store unavailable",
   });
-
-  // The synthetic option for a held adapter the detected table no longer
-  // offers (issue #490): keeps the closed CLI select's echo honest (a value
-  // with no matching item would echo blank) while staying unselectable.
-  const staleAdapterOption =
-    activeAdapterStale && activeAdapterId != null
-      ? {
-          value: activeAdapterId,
-          label: intl.formatMessage(
-            {
-              id: "composer.runtimePicker.unrepresentedAdapter",
-              defaultMessage: "{id} (no longer detected)",
-            },
-            { id: activeAdapterId },
-          ),
-        }
-      : null;
+  // The synthetic option's label for a held adapter the detected table no
+  // longer offers (issue #490).
+  const staleAdapterLabel = intl.formatMessage(
+    {
+      id: "composer.runtimePicker.unrepresentedAdapter",
+      defaultMessage: "{id} (no longer detected)",
+    },
+    { id: activeAdapterId ?? "" },
+  );
 
   return (
-    <div className="grid gap-1.5">
-      {/* --- Level 1 + 2: API Access (= the built-in runtime) --------- */}
-      <section className="grid gap-1">
-        <RuntimeGroupRow
-          selected={!isExternal}
-          disabled={switching}
-          onClick={() => void onSelectRuntime({ kind: "built_in" })}
-        >
+    <SelectContent className="w-72">
+      {/* --- API Access (= the built-in runtime) ---------------------- */}
+      <SelectGroup>
+        <SelectLabel>
           <FormattedMessage
             id="common.apiAccess"
             defaultMessage="API Access"
           />
-        </RuntimeGroupRow>
-        {/* Level 2: the profile Select. A pick switches active_profile
-            (global semantics unchanged) AND reverts the runtime to
-            built-in when an external adapter was active -- picking a
-            profile IS picking the built-in runtime. The keyless /
-            keychain-fault marks ride the option rows (dropdown-only,
-            never echoed in the trigger; ADR-0019/0099). Zero profiles:
-            the honest "Not configured" placeholder, nothing to switch
-            (ADR-0098 D1). */}
+        </SelectLabel>
         {noProfiles ? (
-          <p className="text-muted-foreground ml-6 px-2 py-1.5 text-sm">
-            {notConfigured}
-          </p>
+          // The honest "Not configured" placeholder, nothing to switch
+          // (ADR-0098 D1).
+          <RuntimeSelectItem
+            value={NOT_CONFIGURED_VALUE}
+            label={notConfigured}
+            disabled
+          />
         ) : (
-          // Permanently controlled ("" = the placeholder state):
-          // toggling between a value and undefined would flip Radix
-          // between controlled and uncontrolled, and a switch back
-          // would re-echo the stale internal value.
-          <Select
-            value={provider.active_profile ?? ""}
-            onValueChange={(id) => {
-              onSwitchActive(id);
-              if (isExternal) void onSelectRuntime({ kind: "built_in" });
-            }}
-            disabled={switching}
-          >
-            <SelectTrigger
-              aria-label={profileSelectAria}
-              className={LEVEL2_SELECT_TRIGGER_CLASS}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {provider.profiles.map((p) => {
-                const status = profileKeys[p.id];
-                const mark = status
-                  ? status.keychain_fault
-                    ? keychainUnavailableMark
-                    : status.has_key
-                      ? null
-                      : noKeyMark
-                  : null;
-                return (
-                  <RuntimeSelectItem
-                    key={p.id}
-                    value={p.id}
-                    label={p.display_name.trim() || unnamed}
-                    mark={mark ?? undefined}
-                    title={status?.keychain_fault ?? undefined}
-                  />
-                );
-              })}
-            </SelectContent>
-          </Select>
+          // The keyless / keychain-fault marks ride the option rows
+          // (ADR-0019/0099). Picking a profile IS picking the built-in
+          // runtime -- the picker's onValueChange couples the writes.
+          provider.profiles.map((p) => {
+            const status = profileKeys[p.id];
+            const mark = status
+              ? status.keychain_fault
+                ? keychainUnavailableMark
+                : status.has_key
+                  ? null
+                  : noKeyMark
+              : null;
+            return (
+              <RuntimeSelectItem
+                key={p.id}
+                value={`profile:${p.id}`}
+                label={p.display_name.trim() || unnamed}
+                mark={mark ?? undefined}
+                title={status?.keychain_fault ?? undefined}
+              />
+            );
+          })
         )}
         {keysError && <p className="text-destructive px-2 text-xs">{keysError}</p>}
-      </section>
+      </SelectGroup>
 
-      <div className="border-t border-border" />
+      <SelectSeparator />
 
-      {/* --- Level 1 + 2: Local CLI (= the external runtime) ---------- */}
-      <section className="grid gap-1">
-        <RuntimeGroupRow
-          selected={isExternal}
-          disabled={switching}
-          onClick={onSelectLocalCliGroup}
-        >
+      {/* --- Local CLI (= the external runtime) ----------------------- */}
+      <SelectGroup>
+        <SelectLabel>
           <FormattedMessage
             id="common.localCli"
             defaultMessage="Local CLI"
           />
-        </RuntimeGroupRow>
+        </SelectLabel>
         {activeAdapterStale && (
           <p className="text-destructive px-2 pb-1 text-xs">
             <FormattedMessage
@@ -216,134 +146,71 @@ export function ComposerRuntimeMenu({
             />
           </p>
         )}
-        {/* Level 2: the CLI Select. Only detected adapters are offered;
-            a held adapter the detected table no longer offers surfaces
-            as a disabled synthetic option so the closed trigger's echo
-            stays honest (issue #490). No detected CLI: the honest
-            "None detected" placeholder. */}
-        {/* Permanently controlled ("" = the placeholder state): an
-            undefined value would make Radix fall back to its internal
-            (uncontrolled) state, so switching back to built-in within
-            one popover visit would keep echoing the previous adapter
-            while level 1 already shows API Access selected. */}
-        <Select
-          value={activeAdapterId ?? ""}
-          onValueChange={(id) =>
-            void onSelectRuntime({ kind: "external", data: id })}
-          disabled={switching}
-        >
-          <SelectTrigger
-            aria-label={cliSelectAria}
-            className={LEVEL2_SELECT_TRIGGER_CLASS}
-          >
-            <SelectValue
-              placeholder={adapters.length === 0 ? noCliDetected : "—"}
-            />
-          </SelectTrigger>
-          <SelectContent>
-            {staleAdapterOption != null && (
-              <RuntimeSelectItem
-                value={staleAdapterOption.value}
-                label={staleAdapterOption.label}
-                disabled
-                muted
-              />
-            )}
-            {adapters.map((a) => (
-              <RuntimeSelectItem
-                key={a.id}
-                value={a.id}
-                label={a.display_name}
-              />
-            ))}
-          </SelectContent>
-        </Select>
-      </section>
+        {adapters.length === 0 && !activeAdapterStale && (
+          // The honest "None detected" placeholder for an empty table.
+          <RuntimeSelectItem
+            value={NONE_DETECTED_VALUE}
+            label={noCliDetected}
+            disabled
+          />
+        )}
+        {activeAdapterStale && activeAdapterId != null && (
+          // The held (undetected) adapter renders as a disabled synthetic
+          // row so the checked option exists -- a value with no matching
+          // item would leave the dropdown with no visible selection
+          // (issue #490).
+          <RuntimeSelectItem
+            value={`adapter:${activeAdapterId}`}
+            label={staleAdapterLabel}
+            disabled
+            muted
+          />
+        )}
+        {adapters.map((a) => (
+          <RuntimeSelectItem
+            key={a.id}
+            value={`adapter:${a.id}`}
+            label={a.display_name}
+          />
+        ))}
+      </SelectGroup>
 
-      {/* Manage runtimes -- opens Settings → Runtime (its default
-          sub-tab; ADR-0091, issue #490). A popover-footer affordance
-          independent of either runtime group, seated at the right
-          edge. */}
-      <div className="border-t border-border" />
-      <button
-        type="button"
-        onClick={onManageRuntimes}
-        className="inline-flex items-center gap-0.5 justify-self-end text-xs text-muted-foreground hover:text-foreground transition-colors"
-      >
-        <FormattedMessage
-          id="composer.runtimePicker.manageRuntimes"
-          defaultMessage="Manage runtimes"
-        />
-        <ChevronRight className="size-3.5" aria-hidden />
-      </button>
-    </div>
+      <SelectSeparator />
+
+      {/* Manage runtimes -- opens Settings → Runtime (its default sub-tab;
+          ADR-0091, issue #490). A trailing item independent of either
+          runtime group; the picker branches on the sentinel in
+          onValueChange (the Select closes itself on item select). */}
+      <RuntimeSelectItem
+        value={MANAGE_RUNTIMES_VALUE}
+        label={intl.formatMessage({
+          id: "composer.runtimePicker.manageRuntimes",
+          defaultMessage: "Manage runtimes",
+        })}
+        trailing={<ChevronRight className="size-3.5" aria-hidden />}
+      />
+    </SelectContent>
   );
 }
 
-// One level-1 runtime group row (ADR-0099 Decision 2): the radio-style dot +
-// the group label as a full-row button. aria-pressed carries the selection
-// state for assistive tech (the dot itself is aria-hidden).
-function RuntimeGroupRow({
-  selected,
-  disabled,
-  onClick,
-  children,
-}: {
-  selected: boolean;
-  disabled: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      aria-pressed={selected}
-      className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium hover:bg-transit disabled:pointer-events-none disabled:opacity-50"
-    >
-      <RuntimeDot selected={selected} />
-      {children}
-    </button>
-  );
-}
-
-// A radio-style selection dot for the runtime groups: a filled ring with a
-// check when selected, a hollow ring otherwise. aria-hidden -- the selecting
-// button carries aria-pressed, so the dot is purely visual (announcing it
-// would duplicate the pressed state).
-function RuntimeDot({ selected }: { selected: boolean }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex size-4 shrink-0 items-center justify-center rounded-full border",
-        selected
-          ? "border-primary text-primary"
-          : "border-muted-foreground/50 text-transparent",
-      )}
-      aria-hidden
-    >
-      <Check className="size-3" />
-    </span>
-  );
-}
-
-// A SelectPrimitive.Item variant for the two level-2 selects: the label
-// alone rides ItemText (the closed trigger's echo source); the optional
-// key-status mark sits as a sibling -- dropdown-only, never echoed in the
-// trigger. Uses SelectPrimitive.Item directly instead of the shared
-// SelectItem wrapper, which places ALL children inside ItemText and cannot
-// express the mark slot (the AuthModeItem pattern).
+// A SelectPrimitive.Item variant (the AuthModeItem pattern): the label alone
+// rides ItemText (the typeahead text), the optional key-status mark and the
+// trailing glyph sit as siblings -- dropdown-only, never in the typeahead
+// text. Uses SelectPrimitive.Item directly instead of the shared SelectItem
+// wrapper, which places ALL children inside ItemText and cannot express the
+// mark slot.
 type RuntimeSelectItemProps = {
   value: string;
   label: string;
-  /** Dropdown-only trailing mark (the keyless / keychain-fault note). */
+  /** Trailing mark (the keyless / keychain-fault note). */
   mark?: string;
   /** Hover text for the mark (the keychain fault detail). */
   title?: string;
   disabled?: boolean;
   /** Renders the label in the muted tone (the stale synthetic option). */
   muted?: boolean;
+  /** A trailing glyph (the Manage runtimes chevron). */
+  trailing?: ReactNode;
 };
 
 function RuntimeSelectItem({
@@ -353,6 +220,7 @@ function RuntimeSelectItem({
   title,
   disabled = false,
   muted = false,
+  trailing,
 }: RuntimeSelectItemProps) {
   return (
     <SelectPrimitive.Item
@@ -385,6 +253,7 @@ function RuntimeSelectItem({
           {mark}
         </span>
       )}
+      {trailing}
     </SelectPrimitive.Item>
   );
 }

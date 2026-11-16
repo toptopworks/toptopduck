@@ -192,14 +192,15 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
       // Wait for app-config to resolve so the picker trigger renders.
       await waitFor(() =>
-        expect(screen.getByRole("button", { name: /运行时/ })).toBeInTheDocument(),
+        expect(screen.getByRole("combobox", { name: /运行时/ })).toBeInTheDocument(),
       );
-      // Open the picker popover and select the external adapter from the
-      // level-2 CLI select.
-      fireEvent.click(screen.getByRole("button", { name: /运行时/ }));
-      const cliTrigger = await screen.findByRole("combobox", { name: "本机 CLI" });
-      fireEvent.pointerDown(cliTrigger, { button: 0, pointerType: "mouse" });
-      fireEvent.click(cliTrigger);
+      // Open the picker select and pick the external adapter option
+      // directly (the optgroup select). One trigger query: once the
+      // dropdown is open Radix aria-hides the outside tree, so a second
+      // getByRole would miss (the hidden-attr query behavior).
+      const runtimeTrigger = screen.getByRole("combobox", { name: /运行时/ });
+      fireEvent.pointerDown(runtimeTrigger, { button: 0, pointerType: "mouse" });
+      fireEvent.click(runtimeTrigger);
       const cliOption = await screen.findByRole("option", { name: "gemini-cli" });
       fireEvent.pointerUp(cliOption, { button: 0, pointerType: "mouse" });
       fireEvent.click(cliOption);
@@ -245,7 +246,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       // no picker interaction needed.
       await waitFor(() =>
         expect(
-          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+          screen.getByRole("combobox", { name: "运行时：gemini-cli" }),
         ).toBeInTheDocument(),
       );
       // Submit straight away: the external default bypasses the built-in key
@@ -288,7 +289,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       // The trigger opens on the resolved external default...
       await waitFor(() =>
         expect(
-          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+          screen.getByRole("combobox", { name: "运行时：gemini-cli" }),
         ).toBeInTheDocument(),
       );
       // ...and the keyless overlay settles BEFORE the submit, so the gate
@@ -342,13 +343,17 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       // The trigger opens on the resolved external default...
       await waitFor(() =>
         expect(
-          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+          screen.getByRole("combobox", { name: "运行时：gemini-cli" }),
         ).toBeInTheDocument(),
       );
       // ...then the user explicitly reverts to built-in.
-      fireEvent.click(screen.getByRole("button", { name: "运行时：gemini-cli" }));
-      const builtinHeader = await screen.findByRole("button", { name: "API 接入配置" });
-      fireEvent.click(builtinHeader);
+      const runtimeTrigger = screen.getByRole("combobox", { name: "运行时：gemini-cli" });
+      fireEvent.pointerDown(runtimeTrigger, { button: 0, pointerType: "mouse" });
+      fireEvent.click(runtimeTrigger);
+      // A profile pick IS the built-in pick in the optgroup select.
+      const profileOption = await screen.findByRole("option", { name: "Anthropic" });
+      fireEvent.pointerUp(profileOption, { button: 0, pointerType: "mouse" });
+      fireEvent.click(profileOption);
       fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
       fireEvent.click(screen.getByRole("button", { name: "提问" }));
       await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
@@ -390,14 +395,18 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
       await waitFor(() =>
         expect(
-          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+          screen.getByRole("combobox", { name: "运行时：gemini-cli" }),
         ).toBeInTheDocument(),
       );
       // Visit 1: explicitly pick built-in against the external default and
       // mint — the pick lands as one setSessionRuntime write.
-      fireEvent.click(screen.getByRole("button", { name: "运行时：gemini-cli" }));
-      const builtinHeader = await screen.findByRole("button", { name: "API 接入配置" });
-      fireEvent.click(builtinHeader);
+      const runtimeTrigger = screen.getByRole("combobox", { name: "运行时：gemini-cli" });
+      fireEvent.pointerDown(runtimeTrigger, { button: 0, pointerType: "mouse" });
+      fireEvent.click(runtimeTrigger);
+      // A profile pick IS the built-in pick in the optgroup select.
+      const profileOption = await screen.findByRole("option", { name: "Anthropic" });
+      fireEvent.pointerUp(profileOption, { button: 0, pointerType: "mouse" });
+      fireEvent.click(profileOption);
       fireEvent.change(screen.getByLabelText("提问"), { target: { value: "first question" } });
       fireEvent.click(screen.getByRole("button", { name: "提问" }));
       await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
@@ -418,11 +427,11 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       // built-in pick is gone.
       await waitFor(() =>
         expect(
-          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+          screen.getByRole("combobox", { name: "运行时：gemini-cli" }),
         ).toBeInTheDocument(),
       );
       expect(
-        screen.queryByRole("button", { name: "运行时：Anthropic" }),
+        screen.queryByRole("combobox", { name: "运行时：Anthropic" }),
       ).not.toBeInTheDocument();
       // Visit 2: an unmodified submit mints again WITHOUT a runtime write —
       // setSessionRuntime stays at the single visit-1 call.
@@ -458,12 +467,12 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
       await waitFor(() =>
         expect(
-          screen.getByRole("button", { name: "运行时：Anthropic" }),
+          screen.getByRole("combobox", { name: "运行时：Anthropic" }),
         ).toBeInTheDocument(),
       );
       // The degraded external default is NOT the trigger readout.
       expect(
-        screen.queryByRole("button", { name: "运行时：gemini-cli" }),
+        screen.queryByRole("combobox", { name: "运行时：gemini-cli" }),
       ).not.toBeInTheDocument();
     } finally {
       vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
@@ -501,7 +510,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       ).toBe(true);
       // The runtime picker trailing slot.
       expect(
-        bar.contains(await screen.findByRole("button", { name: /运行时/ })),
+        bar.contains(await screen.findByRole("combobox", { name: /运行时/ })),
       ).toBe(true);
       // Draft mode fires NO per-session IPC.
       expect(getAuthorizationMode).not.toHaveBeenCalled();
