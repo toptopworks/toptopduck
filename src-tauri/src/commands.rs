@@ -38,7 +38,7 @@ use crate::model::{
     DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, GuidanceRequest, LoadOutcome, ProfileId,
     ProfileKeyStatus, ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView,
     RemoveSourceError, RowPage, SessionNamedPayload, SheetGuidance, ThreadEntry, TurnOutcome,
-    TurnProgress,
+    TurnProgress, WorkingSetRow,
 };
 use crate::persistence::recipe::LastRuntime;
 use crate::persistence::{
@@ -1322,9 +1322,9 @@ pub async fn discard_guided_retention(
 pub async fn list_working_set(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
-) -> Result<Vec<DatasetDescriptor>, SessionError> {
+) -> Result<Vec<WorkingSetRow>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock_off_thread(&handle, |s| Ok(s.list())).await
+    with_session_lock_off_thread(&handle, |s| Ok(s.list_rows())).await
 }
 
 #[tauri::command]

@@ -80,7 +80,7 @@ import { useRef, useState, type RefObject } from "react";
 
 // The row-tooltip slot identity: which tooltip (kind) on which row owns the
 // mutex.
-export type RowTipKind = "rename" | "replace" | "delete" | "stale";
+export type RowTipKind = "rename" | "replace" | "delete" | "stale" | "provenance";
 export interface TipKey {
   row: string;
   kind: RowTipKind;

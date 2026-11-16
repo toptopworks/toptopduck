@@ -12,6 +12,7 @@ import type {
   LoadOutcome,
   RowPage,
   SheetGuidance,
+  WorkingSetRow,
 } from "./types/dataset";
 import type {
   DiscoveryResult,
@@ -488,8 +489,10 @@ export async function discardGuidedRetention(sessionId: string): Promise<void> {
   await invoke<void>("discard_guided_retention", { sessionId });
 }
 
-export async function listWorkingSet(sessionId: string): Promise<DatasetDescriptor[]> {
-  return invoke<DatasetDescriptor[]>("list_working_set", { sessionId });
+// Each row rides its derived origin (issue #1597): uploaded / shared / the
+// materialized result_N, read from the backend's runtime truth at list time.
+export async function listWorkingSet(sessionId: string): Promise<WorkingSetRow[]> {
+  return invoke<WorkingSetRow[]>("list_working_set", { sessionId });
 }
 
 export async function activeDataset(sessionId: string): Promise<DatasetDescriptor | null> {

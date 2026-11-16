@@ -788,6 +788,64 @@ describe("WorkingSetList", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已删除而失效");
   });
 
+  it("badges a shared row with the alias-to-entry sentence on the tooltip (issue #1597)", async () => {
+    // The origin badge is the short "共享" pill beside the stale chip's slot;
+    // the alias-to-entry sentence -- the de-conflicted session alias (people_2)
+    // against its manifest entry (people) -- rides the tooltip AND the
+    // aria-label (the #1062 one-source pattern), so the keyboard path and the
+    // hover path can never drift apart.
+    const aliased = {
+      ...mockDataset,
+      reference_name: "people_2",
+      display_name: "员工表",
+      provenance: "shared" as const,
+      shared_entry_name: "people",
+    };
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[aliased]}
+        activeName={null}
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const badge = screen.getByText("共享").closest(".provenance-badge")!;
+    expect(badge).toHaveAttribute(
+      "aria-label",
+      "工作区共享「people」 · 本会话挂名「people_2」",
+    );
+    fireEvent.pointerMove(badge);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "工作区共享「people」 · 本会话挂名「people_2」",
+    );
+  });
+
+  it("badges a materialized row and leaves an uploaded row quiet (issue #1597)", () => {
+    // The three origins diverge: a materialized result carries the 物化 pill
+    // (its sentence needs no cross-reference), an uploaded source renders no
+    // badge at all -- the quiet default.
+    const materialized = {
+      ...mockDataset,
+      reference_name: "result_1",
+      display_name: "count",
+      provenance: "materialized" as const,
+    };
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[materialized, mockDataset]}
+        activeName="people"
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    expect(screen.getByText("物化")).toBeInTheDocument();
+    expect(screen.queryByText("共享")).toBeNull();
+  });
+
   it("renders the row-count plural 'one' branch via the en defaultMessage (ADR-0052)", () => {
     // The zh-CN catalog collapses workingSet.rowCount to "{count} 行", so the
     // en {count, plural, ...} branches are reachable only via defaultMessage.

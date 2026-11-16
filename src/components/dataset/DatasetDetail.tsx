@@ -1,5 +1,5 @@
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
-import type { ColumnSchema, DatasetDescriptor, DatasetPrivacy } from "../../types/dataset";
+import type { ColumnSchema, DatasetPrivacy, WorkingSetRow } from "../../types/dataset";
 import { PrivacyControls } from "./PrivacyControls";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import { Badge } from "../ui/badge";
@@ -15,7 +15,7 @@ export interface DatasetSamplePage {
 }
 
 interface DatasetDetailProps {
-  dataset: DatasetDescriptor;
+  dataset: WorkingSetRow;
   // The live preview state, owned by the working-set container (issue
   // #1061): the fetched page (null = nothing yet), its in-flight flag, and
   // the raw read error (formatted one-line inside). Error wins over a stale
@@ -83,6 +83,42 @@ export function DatasetDetail({
       : sample && sample.rows.length > 0
         ? ("table" as const)
         : null;
+  // The origin sentence (issue #1597): one wording per derived origin; a
+  // de-conflicted shared alias names its manifest entry, a same-name attach
+  // needs no alias arm, and a plain descriptor (the manifest face) renders
+  // no line at all.
+  const originSentence = (() => {
+    switch (dataset.provenance) {
+      case "uploaded":
+        return intl.formatMessage({
+          id: "workingSet.detail.provenance.uploaded",
+          defaultMessage: "Uploaded in this session",
+        });
+      case "shared": {
+        const entry = dataset.shared_entry_name ?? dataset.reference_name;
+        return dataset.reference_name !== entry
+          ? intl.formatMessage(
+              {
+                id: "workingSet.detail.provenance.shared",
+                defaultMessage:
+                  "From the workspace shared dataset \"{entry}\", attached in this session as \"{alias}\"",
+              },
+              { entry, alias: dataset.reference_name },
+            )
+          : intl.formatMessage(
+              { id: "workingSet.detail.provenance.sharedPlain", defaultMessage: "From the workspace shared dataset \"{entry}\"" },
+              { entry },
+            );
+      }
+      case "materialized":
+        return intl.formatMessage({
+          id: "workingSet.detail.provenance.materialized",
+          defaultMessage: "Materialized SQL result (this session)",
+        });
+      default:
+        return null;
+    }
+  })();
   return (
     // ADR-0067 (issue #184): the caller-scoped visual rules that lived under
     // .dataset-detail h2 / .dataset-detail small / .meta / .source / .schema td
@@ -142,6 +178,17 @@ export function DatasetDetail({
           </>
         )}
       </p>
+
+      {originSentence !== null && (
+        // The origin line (issue #1597): the row's derived origin as one
+        // sentence, under the meta line and before the schema -- the user
+        // reads where this dataset came from before trusting anything below.
+        // A plain descriptor (the manifest face) carries no origin and
+        // renders nothing.
+        <p className="provenance text-muted-foreground mt-0 mb-3 text-[0.85rem]">
+          {originSentence}
+        </p>
+      )}
 
       {isProbableSnifferFallback(dataset.columns) && (
         // The warning rides under the meta line, before the schema table: the

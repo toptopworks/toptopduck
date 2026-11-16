@@ -30,6 +30,7 @@ import type {
   DeleteImpactEntry,
   RowPage,
   StaleAnchor,
+  WorkingSetRow,
 } from "../types/dataset";
 
 // The working-set seam (ADR-0123): the single owner of the working-set
@@ -83,14 +84,14 @@ import type {
 // Module-level empty constant so `query.data ?? EMPTY` keeps a stable
 // reference across renders while the query is still loading (avoids
 // cascading re-renders in the derivations that consume `datasets`).
-const EMPTY_DATASETS: DatasetDescriptor[] = [];
+const EMPTY_DATASETS: WorkingSetRow[] = [];
 
 /** The working-set read slice: the two descriptor queries plus their
  *  derivations. Single wiring site for the workingSet / active queries --
  *  useWorkingSet (below) and useSessionState's pane reads both consume this
  *  slice, sharing the same cache entries, never a second wiring. */
 export interface WorkingSetData {
-  datasets: DatasetDescriptor[];
+  datasets: WorkingSetRow[];
   activeName: string | null;
   /** Stale map derived from the working set (runtime truth, ADR-0051):
    *  feeds the rail's stale badges + the workspace content derivation. */
@@ -212,11 +213,11 @@ export type ReplaceProgress = Extract<BatchProgress, { referenceName: string }>;
 
 export interface UseWorkingSet {
   // Data plane.
-  datasets: DatasetDescriptor[];
+  datasets: WorkingSetRow[];
   activeName: string | null;
   /** The resolved detail target: the pick, else the active, else the first
    *  list item; null only while the set is empty. */
-  shown: DatasetDescriptor | null;
+  shown: WorkingSetRow | null;
   // Sample preview (issue #1061): the fetched first window, its in-flight
   // flag, and the raw read error (formatted one-line by the renderer).
   sample: RowPage | null;

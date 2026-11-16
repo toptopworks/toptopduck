@@ -300,11 +300,14 @@ export function deriveRightSidebarContent(
  * then to the first list item. While the list is non-empty the detail always
  * shows SOMETHING -- the empty working set is the empty-state card, never a
  * placeholder detail pane. Pure in (datasets, selected, activeName). */
-export function resolveWorkingSetDetail(
-  datasets: DatasetDescriptor[],
+// Generic over the row shape (issue #1597): the session face passes the
+// provenance-carrying list rows, the manifest face passes plain descriptors --
+// the resolution preserves whichever row type the caller holds.
+export function resolveWorkingSetDetail<T extends DatasetDescriptor>(
+  datasets: T[],
   selected: string | null,
   activeName: string | null,
-): DatasetDescriptor | null {
+): T | null {
   const byName = (name: string | null) =>
     name === null ? undefined : datasets.find((d) => d.reference_name === name);
   return byName(selected) ?? byName(activeName) ?? datasets[0] ?? null;
