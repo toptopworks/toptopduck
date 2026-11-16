@@ -76,7 +76,6 @@
   "composer.runtimePicker.persistFault": "Selection not saved: {reason}",
   "composer.runtimePicker.persistSuspended": "Selection not saved: the session file was changed outside the app, so autosave is paused until you resolve the conflict.",
   "composer.runtimePicker.pickModelFirst": "Pick a model first.",
-  "composer.runtimePicker.profileSelectAria": "API profile",
   "composer.runtimePicker.staleAdapter": "Selected adapter is no longer detected — pick another or manage in settings.",
   "composer.runtimePicker.staleCatalog": "These options were discovered on a different runtime — they will refresh after this runtime's next turn.",
   "composer.runtimePicker.thoughtLevelLabel": "Thinking",

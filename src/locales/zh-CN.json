@@ -76,7 +76,6 @@
   "composer.runtimePicker.persistFault": "选择未保存：{reason}",
   "composer.runtimePicker.persistSuspended": "选择未保存：会话文件在应用外被修改，自动保存已暂停，请先解决冲突。",
   "composer.runtimePicker.pickModelFirst": "请先选择模型",
-  "composer.runtimePicker.profileSelectAria": "大模型 API 接入配置",
   "composer.runtimePicker.staleAdapter": "所选适配器已不再检测到——请另选一个或在设置中管理。",
   "composer.runtimePicker.staleCatalog": "这些选项发现自另一个运行时——将在当前运行时完成下一轮后刷新。",
   "composer.runtimePicker.thoughtLevelLabel": "思考强度",
