@@ -219,10 +219,11 @@ function MarkdownArtifact({
     queryKey: artifactKeys.text(path, delivery),
     queryFn: () => readArtifactText(path),
     // One read per delivery (the manifest is settle-frozen): never stale and
-    // focus refetch is off app-wide, so the text re-reads only when the
-    // delivery re-keys the read (a regenerated file) or the cache entry ages
-    // out (gcTime after the last observer unmounts) and a later mount
-    // re-observes it.
+    // focus refetch is off app-wide, so outside the header's refresh verb
+    // (which invalidates the entry -- handleRefresh above) the text re-reads
+    // only when the delivery re-keys the read (a regenerated file) or the
+    // cache entry ages out (gcTime after the last observer unmounts) and a
+    // later mount re-observes it.
     staleTime: Infinity,
     retry: false,
   });

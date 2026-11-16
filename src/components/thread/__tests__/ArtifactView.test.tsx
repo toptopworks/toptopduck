@@ -108,6 +108,23 @@ describe("ArtifactView", () => {
       expect(readArtifactText).toHaveBeenCalledTimes(2);
     });
 
+    it("re-reads on refresh at a re-delivered mount (the family sweep reaches the pinned key)", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      vi.mocked(readArtifactText)
+        .mockResolvedValueOnce("# One\n\nFirst body")
+        .mockResolvedValue("# Two\n\nSecond body");
+      // The stage sits at delivery 1 (a regenerated file): the refresh verb
+      // must sweep the family onto the MOUNTED key -- an invalidate pinned
+      // to a single (wrong) delivery leaves the body un-read under staleTime
+      // Infinity and the stale text survives the refresh.
+      renderView("C:/sessions/s1/artifacts/notes.md", "markdown", 1);
+      expect(await screen.findByText("First body")).toBeInTheDocument();
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "刷新" }));
+      expect(await screen.findByText("Second body")).toBeInTheDocument();
+      expect(readArtifactText).toHaveBeenCalledTimes(2);
+    });
+
     it("remounts the iframe on refresh, the loading indicator returning", async () => {
       vi.mocked(artifactExists).mockResolvedValue(true);
       renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");

@@ -304,6 +304,9 @@ describe("SessionPane artifact stage boundary", () => {
     // unseeded cache is already empty and the removal would pass vacuously.
     queryClient.setQueryData(artifactKeys.exists(BAD_ARTIFACT_PATH), true);
     queryClient.setQueryData(artifactKeys.text(BAD_ARTIFACT_PATH, 0), "# poisoned");
+    // A retired delivery's entry rides the same drop: seeding a second
+    // delivery discriminates the family sweep from a single-delivery key.
+    queryClient.setQueryData(artifactKeys.text(BAD_ARTIFACT_PATH, 1), "# poisoned too");
 
     // Flip the probe BEFORE the click: the boundary's retry runs onReset
     // (the synchronous cache drop) before clearing the error, so the
@@ -316,6 +319,9 @@ describe("SessionPane artifact stage boundary", () => {
     ).toBeUndefined();
     expect(
       queryClient.getQueryState(artifactKeys.text(BAD_ARTIFACT_PATH, 0)),
+    ).toBeUndefined();
+    expect(
+      queryClient.getQueryState(artifactKeys.text(BAD_ARTIFACT_PATH, 1)),
     ).toBeUndefined();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByTestId("artifact-stub")).toHaveTextContent("bad.md");
