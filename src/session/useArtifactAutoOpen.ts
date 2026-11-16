@@ -9,12 +9,14 @@ import type { ThreadEntry } from "../types/thread";
 // semantics (the view follows the produced dataset, notePromotion expands):
 // the artifact arrives without stealing the stage.
 //
-// Consumption is keyed by the candidate's signature (the manifest's paths)
-// so the ONE candidate never fires twice however often it is re-seen -- a
-// rerender, a refetch rebuilding the thread array, a late duplicate arrival
-// -- while a genuinely fresh delivery (a different manifest) re-arms. The
-// consumption ref (not state): nothing renders off it, it only guards the
-// transition -- the same shape as useRightSidebarCollapse's autoExpandedRef.
+// Consumption is keyed by the candidate's signature (the owning turn's
+// thread position + the manifest's paths) so the ONE candidate never fires
+// twice however often it is re-seen -- a rerender, a refetch rebuilding the
+// thread array, a late duplicate arrival -- while a fresh delivery re-arms,
+// including a new turn re-delivering the same paths (a regenerated file:
+// the position changes even though the paths don't). The consumption ref
+// (not state): nothing renders off it, it only guards the transition -- the
+// same shape as useRightSidebarCollapse's autoExpandedRef.
 //
 // Resume posture mirrors #771: the first time the thread resolves WITH
 // content, a session whose manifest already landed has nothing left to

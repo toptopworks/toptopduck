@@ -149,7 +149,16 @@ export const agentKeys = {
  *  removeQueries dropping them is harmless (the next check re-runs). */
 export const artifactKeys = {
   exists: (path: string) => ["artifact", "exists", path] as const,
-  text: (path: string) => ["artifact", "text", path] as const,
+  /** One delivery's text read: the delivery pin (the delivering turn's
+   *  thread position) re-keys the read when the same path is re-delivered --
+   *  a regenerated file refetches despite the md read's staleTime Infinity,
+   *  which never re-reads a same-key entry. */
+  text: (path: string, delivery: number) =>
+    ["artifact", "text", path, delivery] as const,
+  /** The path family -- the invalidate/remove target that sweeps every
+   *  delivery of one file (the refresh verb, the retry-after-crash
+   *  cleanup). */
+  textFamily: (path: string) => ["artifact", "text", path] as const,
 } as const;
 
 /** Session-AGNOSTIC workspace registry (ADR-0138, issue #1384) -- the

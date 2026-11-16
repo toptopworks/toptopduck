@@ -4,7 +4,7 @@ import { IntlProvider } from "react-intl";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { SessionPane } from "../SessionPane";
-import { artifactKeys } from "../queryKeys";
+import { artifactKeys, sessionKeys } from "../queryKeys";
 import {
   artifactExists,
   askQuestion,
@@ -303,7 +303,7 @@ describe("SessionPane artifact stage boundary", () => {
     // Seed both per-path entries so the drop assertion discriminates: an
     // unseeded cache is already empty and the removal would pass vacuously.
     queryClient.setQueryData(artifactKeys.exists(BAD_ARTIFACT_PATH), true);
-    queryClient.setQueryData(artifactKeys.text(BAD_ARTIFACT_PATH), "# poisoned");
+    queryClient.setQueryData(artifactKeys.text(BAD_ARTIFACT_PATH, 0), "# poisoned");
 
     // Flip the probe BEFORE the click: the boundary's retry runs onReset
     // (the synchronous cache drop) before clearing the error, so the
@@ -315,10 +315,36 @@ describe("SessionPane artifact stage boundary", () => {
       queryClient.getQueryState(artifactKeys.exists(BAD_ARTIFACT_PATH)),
     ).toBeUndefined();
     expect(
-      queryClient.getQueryState(artifactKeys.text(BAD_ARTIFACT_PATH)),
+      queryClient.getQueryState(artifactKeys.text(BAD_ARTIFACT_PATH, 0)),
     ).toBeUndefined();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByTestId("artifact-stub")).toHaveTextContent("bad.md");
+  });
+
+  it("renders after a same-path re-delivery -- the delivery key resets the boundary", async () => {
+    // A regenerated file arrives as a fresh turn re-presenting the SAME
+    // path. The boundary key carries the delivering turn's position, so the
+    // re-delivery remounts -- a crash degrade never pins the new delivery
+    // (the #1199 file-to-file reset, extended to the delivery axis).
+    const { queryClient } = renderPane({ thread: [artifactTurn([BAD_ARTIFACT_PATH])] });
+    await openArtifact("bad.md");
+    expect(screen.getByRole("alert")).toHaveAttribute("data-region", "artifact");
+
+    // The turn-end refetch lands the second round's manifest (same path,
+    // new turn) and the regenerated file renders clean.
+    artifactProbe.recovered = true;
+    await act(async () => {
+      queryClient.setQueryData(sessionKeys.thread(SID), [
+        artifactTurn([BAD_ARTIFACT_PATH]),
+        artifactTurn([BAD_ARTIFACT_PATH]),
+      ]);
+    });
+
+    // The cache write lands through the notify manager's scheduled batch, so
+    // the remount arrives on a later tick -- findBy waits it out (an inline
+    // not.toBeInTheDocument would race the notification).
+    expect(await screen.findByTestId("artifact-stub")).toHaveTextContent("bad.md");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
 

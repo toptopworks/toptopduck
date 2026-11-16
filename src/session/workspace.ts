@@ -121,21 +121,30 @@ export function artifactRenderKind(path: string): ArtifactRenderKind {
   return "card";
 }
 
+/** The view's resolved manifest entry plus the delivering turn's thread
+ * position: `delivery` is the content identity a same-path re-delivery
+ * (a regenerated file) re-keys the stage body by. */
+export interface ResolvedArtifact {
+  artifact: TurnArtifact;
+  delivery: number;
+}
+
 /** Look up a manifest entry by its absolute path (the viewed file's thin
  * reference, ADR-0124 Decision 3). Tail-first like the dataset scans: the
  * same path re-delivered by a later turn resolves to that turn's entry --
- * the newest delivery owns the display facts. null when no turn in the
- * thread carries the path (the manifest is settle-frozen and the thread is
+ * the newest delivery owns the display facts. The owning turn's thread
+ * position rides along as `delivery`. null when no turn in the thread
+ * carries the path (the manifest is settle-frozen and the thread is
  * append-only, so this is a foreign view, not a GC race). */
 export function findArtifact(
   thread: ThreadEntry[],
   path: string,
-): TurnArtifact | null {
+): ResolvedArtifact | null {
   for (let i = thread.length - 1; i >= 0; i--) {
     const entry = thread[i];
     if (entry.entry !== "Turn") continue;
     const hit = entry.data.artifacts?.find((a) => a.path === path);
-    if (hit) return hit;
+    if (hit) return { artifact: hit, delivery: i };
   }
   return null;
 }
@@ -145,9 +154,11 @@ export function findArtifact(
  * like the dataset scans -- a trailing turn that delivered nothing never
  * re-arms an older turn's auto-open. */
 export interface ArtifactAutoOpenCandidate {
-  /** The one-shot consumption key: the manifest's paths in order. The same
-   * candidate arriving again (a rerender, a duplicate refetch) never
-   * re-consumes; a fresh delivery (a different manifest) does. */
+  /** The one-shot consumption key: the owning turn's thread position plus
+   * the manifest's paths in order. The same candidate arriving again (a
+   * rerender, a duplicate refetch) never re-consumes; a fresh delivery -- a
+   * new turn, even one re-delivering the same paths (a regenerated file) --
+   * does. */
   signature: string;
   /** The manifest's primary -- the first entry (#1090: derived order, never
    * a stored flag). */
@@ -167,7 +178,11 @@ export function latestArtifactCandidate(
     const artifacts = entry.data.artifacts;
     if (artifacts === undefined || artifacts.length === 0) continue;
     return {
-      signature: artifacts.map((a) => a.path).join("\n"),
+      // The owning turn's thread position leads: the thread is append-only,
+      // so the position is the delivery's stable identity -- a refetch
+      // rebuilding the array keeps it (still deduped) while a fresh turn
+      // re-delivering the same paths yields a new signature and re-arms.
+      signature: `${i}:${artifacts.map((a) => a.path).join("\n")}`,
       primaryPath: artifacts[0].path,
       turnMaterialized: entry.data.outcome.kind === "Materialized",
     };
@@ -211,6 +226,10 @@ export type RightSidebarContent =
     fileName: string;
     /** The render matrix branch for this path (Decision 4). */
     render: ArtifactRenderKind;
+    /** The delivering turn's thread position -- the stage's content
+     *  identity: a re-delivery of the same path (a regenerated file) re-keys
+     *  the stage so the body re-reads the file off disk. */
+    delivery: number;
   }
   | {
     kind: "viz";
@@ -238,13 +257,14 @@ export function deriveRightSidebarContent(
       return { kind: "viz", spec: viewedResult.spec };
     }
     if (viewedResult.kind === "file") {
-      const artifact = findArtifact(thread, viewedResult.path);
-      if (artifact) {
+      const resolved = findArtifact(thread, viewedResult.path);
+      if (resolved) {
         return {
           kind: "file",
-          path: artifact.path,
-          fileName: artifact.file_name,
-          render: artifactRenderKind(artifact.path),
+          path: resolved.artifact.path,
+          fileName: resolved.artifact.file_name,
+          render: artifactRenderKind(resolved.artifact.path),
+          delivery: resolved.delivery,
         };
       }
       // The view names a path no turn in the thread carries (a foreign /

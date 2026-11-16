@@ -37,7 +37,11 @@ vi.mock("vega-embed", () => ({
   default: vi.fn().mockResolvedValue({ finalize: vi.fn(), view: { resize: vi.fn() } }),
 }));
 
-function renderView(path: string, renderKind: "html" | "pdf" | "markdown" | "card") {
+function renderView(
+  path: string,
+  renderKind: "html" | "pdf" | "markdown" | "card",
+  delivery = 0,
+) {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
@@ -45,6 +49,7 @@ function renderView(path: string, renderKind: "html" | "pdf" | "markdown" | "car
           <ArtifactView
             artifact={{ path, file_name: path.split("/").pop() ?? path }}
             render={renderKind}
+            delivery={delivery}
           />
         </TooltipProvider>
       </IntlProvider>
@@ -233,6 +238,35 @@ describe("ArtifactView", () => {
       // The loading overlay belongs to the frame branches only (issue
       // #1201): md rides the IPC text read, so no indicator ever mounts.
       expect(screen.queryByRole("status", { name: /正在加载|Loading/ })).not.toBeInTheDocument();
+    });
+
+    it("re-reads on a same-path re-delivery: the delivery re-keys the read", async () => {
+      // The regenerated file (a fresh turn re-presenting the SAME path) must
+      // refetch: staleTime Infinity never re-reads a same-key entry, so the
+      // delivery pins the key. One client across the rerender -- the new key
+      // alone drives the fetch, no remount needed.
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const view = (delivery: number) => (
+        <QueryClientProvider client={client}>
+          <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+            <TooltipProvider>
+              <ArtifactView
+                artifact={{ path: "C:/sessions/s1/artifacts/notes.md", file_name: "notes.md" }}
+                render="markdown"
+                delivery={delivery}
+              />
+            </TooltipProvider>
+          </IntlProvider>
+        </QueryClientProvider>
+      );
+      vi.mocked(readArtifactText)
+        .mockResolvedValueOnce("# One\n\nFirst body")
+        .mockResolvedValue("# Two\n\nSecond body");
+      const { rerender } = render(view(0));
+      expect(await screen.findByText("First body")).toBeInTheDocument();
+      rerender(view(1));
+      expect(await screen.findByText("Second body")).toBeInTheDocument();
+      expect(readArtifactText).toHaveBeenCalledTimes(2);
     });
 
     it("degrades a refused read (over the size cap) to the face under the intact header", async () => {

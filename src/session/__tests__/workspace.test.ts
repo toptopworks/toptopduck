@@ -311,12 +311,16 @@ describe("artifact derivation (ADR-0124, issue #1088)", () => {
   });
 
   describe("findArtifact (the file view's thread resolve)", () => {
-    it("resolves the entry by absolute path, newest turn wins", () => {
+    it("resolves the entry by absolute path, newest turn wins, delivery pinned", () => {
       const old = artifactTurn(["/a/first.pdf"]);
       const fresh = artifactTurn(["/a/first.pdf", "/a/second.pdf"]);
-      expect(findArtifact([old, fresh], "/a/first.pdf")).toBe(
+      expect(findArtifact([old, fresh], "/a/first.pdf")?.artifact).toBe(
         (fresh.data as TurnRecord).artifacts?.[0],
       );
+      // The delivery is the owning turn's thread position -- the content
+      // identity a same-path re-delivery re-keys the stage by.
+      expect(findArtifact([old, fresh], "/a/first.pdf")?.delivery).toBe(1);
+      expect(findArtifact([old], "/a/first.pdf")?.delivery).toBe(0);
     });
 
     it("returns null for a path no turn carries", () => {
@@ -331,8 +335,19 @@ describe("artifact derivation (ADR-0124, issue #1088)", () => {
       const latest = artifactTurn(["/a/page.html", "/a/report.pdf"]);
       const candidate = latestArtifactCandidate([older, latest]);
       expect(candidate?.primaryPath).toBe("/a/page.html");
-      expect(candidate?.signature).toBe("/a/page.html\n/a/report.pdf");
+      // The owning turn's thread position leads the paths (the delivery
+      // identity -- see the same-path re-arm test below).
+      expect(candidate?.signature).toBe("1:/a/page.html\n/a/report.pdf");
       expect(candidate?.turnMaterialized).toBe(false);
+    });
+
+    it("a new turn re-delivering the same paths yields a fresh signature (re-arms)", () => {
+      const first = latestArtifactCandidate([artifactTurn(["/a/report.pdf"])]);
+      const second = latestArtifactCandidate([
+        artifactTurn(["/a/report.pdf"]),
+        artifactTurn(["/a/report.pdf"]),
+      ]);
+      expect(second?.signature).not.toBe(first?.signature);
     });
 
     it("flags a both-present turn (no stage steal) and skips artifact-less tails", () => {
@@ -361,6 +376,7 @@ describe("artifact derivation (ADR-0124, issue #1088)", () => {
         path: HTML,
         fileName: "page.html",
         render: "html",
+        delivery: 0,
       });
     });
 
