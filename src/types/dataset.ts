@@ -75,8 +75,11 @@ export interface DatasetDescriptor {
 
 // Where a working-set entry came from (issue #1597, mirrors the Rust
 // DatasetProvenance): derived at the read face over the runtime truth (the
-// backend's results set + shared-attach table), never persisted. The three
-// values are mutually exclusive by construction.
+// backend's results set + shared-attach table), never persisted. The
+// assignment faces keep the three apart (the attach resolver de-conflicts
+// against every held name and private registration yields to the shared
+// vocabulary); the one mint-side corner -- a manifest entry literally named
+// result_N -- derives as a materialized result.
 export type DatasetProvenance = "uploaded" | "shared" | "materialized";
 
 // One row of the session working-set list face (issue #1597): the descriptor

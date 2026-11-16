@@ -115,8 +115,17 @@ export function DatasetDetail({
           id: "workingSet.detail.provenance.materialized",
           defaultMessage: "Materialized SQL result (this session)",
         });
-      default:
+      case undefined:
+        // The manifest face (a plain descriptor): no origin line at all.
         return null;
+      default: {
+        // Exhaustiveness guard: `dataset.provenance` narrows to never here,
+        // so a future provenance variant is a compile error instead of a
+        // silently missing origin line (the ResumeProgress issue #205
+        // posture).
+        const unhandled: never = dataset.provenance;
+        throw new Error(`Unhandled DatasetProvenance: ${JSON.stringify(unhandled)}`);
+      }
     }
   })();
   return (

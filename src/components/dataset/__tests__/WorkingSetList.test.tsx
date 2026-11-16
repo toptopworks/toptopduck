@@ -822,6 +822,33 @@ describe("WorkingSetList", () => {
     );
   });
 
+  it("badges a same-name shared row with the plain sentence (issue #1597)", async () => {
+    // The alias-equals-entry arm (the common no-collision attach): the
+    // tooltip and the aria-label carry the plain shared sentence -- no
+    // alias cross-reference arm to render.
+    const sameName = {
+      ...mockDataset,
+      reference_name: "people",
+      display_name: "员工表",
+      provenance: "shared" as const,
+      shared_entry_name: "people",
+    };
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[sameName]}
+        activeName="people"
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const badge = screen.getByText("共享").closest(".provenance-badge")!;
+    expect(badge).toHaveAttribute("aria-label", "工作区共享「people」");
+    fireEvent.pointerMove(badge);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("工作区共享「people」");
+  });
+
   it("badges a materialized row and leaves an uploaded row quiet (issue #1597)", () => {
     // The three origins diverge: a materialized result carries the 物化 pill
     // (its sentence needs no cross-reference), an uploaded source renders no

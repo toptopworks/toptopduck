@@ -241,8 +241,18 @@ function DatasetRow({
           id: "workingSet.provenance.materializedHint",
           defaultMessage: "Materialized SQL result (this session)",
         });
-      default:
+      case "uploaded":
+      case undefined:
+        // An uploaded row and the manifest face (a plain descriptor): no
+        // badge, the quiet default.
         return null;
+      default: {
+        // Exhaustiveness guard: `d.provenance` narrows to never here, so a
+        // future provenance variant is a compile error instead of a silent
+        // badge gap (the ResumeProgress issue #205 posture).
+        const unhandled: never = d.provenance;
+        throw new Error(`Unhandled DatasetProvenance: ${JSON.stringify(unhandled)}`);
+      }
     }
   })();
   // The context menu captures its target from the row it opens on (#1570):

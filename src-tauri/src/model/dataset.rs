@@ -227,9 +227,13 @@ pub struct StaleAnchor {
 /// session-private upload. Derivation, not persistence: the origin is
 /// reconstructible at every read (resume restores the attach records before
 /// replay and replay re-registers the results), so no stored copy exists to
-/// drift (ADR-0141 D8's derived-read-face posture). The three are mutually
-/// exclusive by construction: the attach resolver de-conflicts against every
-/// held name, so one name can never be both an alias and a result.
+/// drift (ADR-0141 D8's derived-read-face posture). Every assignment face
+/// keeps the three apart -- the attach resolver de-conflicts against every
+/// held name (results included) and each private registration yields to the
+/// shared vocabulary -- so within a live session one name is never both an
+/// alias and a result. The single exception is mint-side and pre-existing:
+/// a manifest entry literally named `result_N` (the result mint scans only
+/// the results set), and the derivation reads such a name as a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DatasetProvenance {
