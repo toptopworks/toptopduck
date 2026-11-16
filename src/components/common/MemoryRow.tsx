@@ -1,18 +1,21 @@
-// Shared memory-list pieces (issues #1529/#1531): the row + badge the
+// Shared memory-list pieces (issues #1529/#1531/#1591): the row + badge the
 // workspace memory panel and the settings user-memory pane both render --
 // one implementation so the two surfaces read as one family. Row content is
 // the same shape the built-in engine's injection block carries (title +
-// category badge + hook); reveal-in-folder opens the OS file manager on the
-// memory file. The non-component list tokens live in memory-list.ts
-// (react-refresh: a component file only exports components).
+// category badge + hook). The row's actions: open the memory file in the
+// system editor (the editing surface -- any editor, the #1540 ruling; the
+// folder stays reachable at the panel's header), and when the host passes
+// a callback, delete (workspace-layer only -- the user layer is
+// hand-written files, #1531 D4). The non-component list tokens live in
+// memory-list.ts (react-refresh: a component file only exports components).
 
 import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { FolderSearch } from "lucide-react";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { FilePenLine, Trash2 } from "lucide-react";
+import { openPath } from "@tauri-apps/plugin-opener";
 
 import { Badge } from "../ui/badge";
-import { HeaderActionButton } from "../settings/settings-chrome";
+import { RowActionButton } from "../settings/settings-chrome";
 import { log } from "../../lib/log";
 import { describeError } from "../../lib/error-presentation";
 import type { ListedMemory, MemoryType } from "../../types/workspace-memory";
@@ -24,30 +27,41 @@ function TypeBadge({ type }: { type: MemoryType }) {
   return (
     <Badge variant="secondary" className="shrink-0">
       {type === "user" ? (
-        <FormattedMessage id="workspace.memory.type.user" defaultMessage="user" />
+        <FormattedMessage id="workspace.memory.type.user" defaultMessage="User" />
       ) : type === "feedback" ? (
-        <FormattedMessage id="workspace.memory.type.feedback" defaultMessage="feedback" />
+        <FormattedMessage id="workspace.memory.type.feedback" defaultMessage="Feedback" />
       ) : type === "project" ? (
-        <FormattedMessage id="workspace.memory.type.project" defaultMessage="project" />
+        <FormattedMessage id="workspace.memory.type.project" defaultMessage="Project" />
       ) : (
-        <FormattedMessage id="workspace.memory.type.reference" defaultMessage="reference" />
+        <FormattedMessage id="workspace.memory.type.reference" defaultMessage="Reference" />
       )}
     </Badge>
   );
 }
 
-/** One read-only memory row: title + category badge + hook + the reveal
- * button (the row's only action). */
-export function MemoryRow({ memory }: { memory: ListedMemory }) {
+/** One memory row: title + category badge + hook + the row actions (open
+ * in the system editor, and delete when the host supplies the callback --
+ * the confirm lives with the host, which owns the workspace scope). */
+export function MemoryRow({
+  memory,
+  onDelete,
+}: {
+  memory: ListedMemory;
+  onDelete?: (memory: ListedMemory) => void;
+}) {
   const intl = useIntl();
-  // A refused reveal (#1543): the opener can refuse (a file deleted after
-  // the listing). Row-local state -- the two hosts (the workspace panel and
-  // the settings pane) get the same face by construction, and a successful
-  // retry clears it.
-  const [revealFailure, setRevealFailure] = useState<string | null>(null);
-  const revealLabel = intl.formatMessage({
-    id: "workspace.memory.reveal",
-    defaultMessage: "Reveal in folder",
+  // A refused file open (#1543): the opener can refuse (a file deleted
+  // after the listing). Row-local state -- the two hosts (the workspace
+  // panel and the settings pane) get the same face by construction, and a
+  // successful retry clears it.
+  const [openFailure, setOpenFailure] = useState<string | null>(null);
+  const openLabel = intl.formatMessage({
+    id: "workspace.memory.open",
+    defaultMessage: "Open",
+  });
+  const deleteLabel = intl.formatMessage({
+    id: "common.delete",
+    defaultMessage: "Delete",
   });
   return (
     <li className="flex items-start gap-2 border-b border-border py-2 last:border-b-0">
@@ -61,24 +75,34 @@ export function MemoryRow({ memory }: { memory: ListedMemory }) {
             {memory.hook}
           </p>
         )}
-        {revealFailure !== null && (
+        {openFailure !== null && (
           <p className="m-0 text-xs text-destructive" role="alert">
-            {revealFailure}
+            {openFailure}
           </p>
         )}
       </div>
-      <HeaderActionButton
-        label={revealLabel}
-        icon={FolderSearch}
+      <RowActionButton
+        label={openLabel}
+        icon={FilePenLine}
         onClick={() => {
-          revealItemInDir(memory.file_path)
-            .then(() => setRevealFailure(null))
+          openPath(memory.file_path)
+            .then(() => setOpenFailure(null))
             .catch((e: unknown) => {
-              log.warn("MemoryRow", "revealItemInDir failed", e);
-              setRevealFailure(describeError(e, intl));
+              log.warn("MemoryRow", "open memory file failed", e);
+              setOpenFailure(describeError(e, intl));
             });
         }}
       />
+      {onDelete !== undefined && (
+        // Delete rides the row-action family's destructive hover (the
+        // #958 convention: Delete hovers red, the rest to foreground).
+        <RowActionButton
+          label={deleteLabel}
+          icon={Trash2}
+          destructive
+          onClick={() => onDelete(memory)}
+        />
+      )}
     </li>
   );
 }

@@ -365,6 +365,16 @@ export async function createWorkspaceMemory(
   });
 }
 
+// Delete a workspace memory from the panel's row action (issue #1591):
+// the backend guards the file name and the index self-heals on the next
+// read. Workspace-layer only -- the user layer has no delete.
+export async function deleteWorkspaceMemory(
+  workspace: string,
+  file: string,
+): Promise<void> {
+  return invoke<void>("delete_workspace_memory", { workspace, file });
+}
+
 // Open the workspace's memory directory (issue #1538): the backend creates
 // the directory family on demand (the zero-footprint fresh workspace
 // included) and returns the absolute path for the opener.

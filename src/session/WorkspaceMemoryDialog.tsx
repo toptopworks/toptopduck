@@ -1,10 +1,11 @@
-// The workspace memory panel (issue #1529, P0 read path): a read-only modal
-// off the sidebar's workspace-section menu. The list shows each memory's
-// title, category badge, and hook (the same row content the built-in
-// engine's injection block carries); reveal-in-folder opens the OS file
-// manager on the memory file (`.toptopduck/memory/<type>-<slug>.md`).
-// Editing lives outside the shell by design (any editor, via the reveal) --
-// the in-shell editor is a P2 question. The header's switch is the
+// The workspace memory panel (issue #1529, P0 read path): a modal off the
+// sidebar's workspace-section menu. The list shows each memory's title,
+// category badge, and hook (the same row content the built-in engine's
+// injection block carries); the row's open action hands the memory file
+// (`.toptopduck/memory/<type>-<slug>.md`) to the system editor (#1591 --
+// editing lives outside the shell by design, any editor, the in-shell
+// editor is a P2 question), and the workspace-only row delete (#1591)
+// rides a confirm dialog. The header's switch is the
 // workspace-level `memory_enabled` toggle: off stops the built-in engine's
 // injection (BOTH layers -- the user layer rides the same gate, ADR-0147
 // Decision 6) and deactivates the list (the off note replaces it), on
@@ -21,7 +22,18 @@ import { FormattedMessage, useIntl } from "react-intl";
 import { FolderOpen, Plus } from "lucide-react";
 import { openPath } from "@tauri-apps/plugin-opener";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../components/ui/alert-dialog";
 import { Button } from "../components/ui/button";
+import { buttonVariants } from "../components/ui/button-variants";
 import {
   Dialog,
   DialogContent,
@@ -46,6 +58,7 @@ import {
 import { log } from "../lib/log";
 import { describeError } from "../lib/error-presentation";
 import {
+  deleteWorkspaceMemory,
   getWorkspaceAutoExtraction,
   getWorkspaceExtractionStatus,
   getWorkspaceMemoryEnabled,
@@ -57,7 +70,7 @@ import {
 import { workspaceMemoryKeys } from "./queryKeys";
 import { MemoryCreateForm } from "./MemoryCreateForm";
 import type { WorkspaceTarget } from "./useWorkspaceDatasets";
-import type { ExtractionStatus } from "../types/workspace-memory";
+import type { ExtractionStatus, ListedMemory } from "../types/workspace-memory";
 
 // The list card's chrome -- the datasets panel's PANEL_CARD_BASE form, so
 // the two workspace management faces read as one family.
@@ -144,6 +157,17 @@ function ExtractionStatusLine({ status }: { status: ExtractionStatus }) {
   }
 }
 
+/** The footer's destructive banner face: one shape, three failures (the
+ * toggle write, the folder open, the row delete) -- the third copy
+ * triggered this extraction (the FieldHint precedent). */
+function FooterAlert({ message }: { message: string }) {
+  return (
+    <p className="text-destructive m-0 text-sm" role="alert">
+      {message}
+    </p>
+  );
+}
+
 export function WorkspaceMemoryDialog({
   workspace,
   onOpenChange,
@@ -170,6 +194,14 @@ export function WorkspaceMemoryDialog({
   const [creating, setCreating] = useState(false);
   if (workspace !== panel && creating) {
     setCreating(false);
+  }
+  // The row delete's confirm target (#1591), scoped to ONE panel open the
+  // same way as the create form: a close or a workspace swap discards a
+  // half-confirmed delete, so the alert never reopens pointing at another
+  // workspace's row.
+  const [pendingDelete, setPendingDelete] = useState<ListedMemory | null>(null);
+  if (workspace !== panel && pendingDelete !== null) {
+    setPendingDelete(null);
   }
   const path = panel?.path ?? "";
   const label = panel?.label ?? "";
@@ -246,6 +278,31 @@ export function WorkspaceMemoryDialog({
     onError: (e) => {
       log.warn("WorkspaceMemoryDialog", "set extraction toggle failed", e);
       setToggleFailure({ path, message: describeError(e, intl) });
+    },
+  });
+
+  // The row delete (#1591): the confirm dialog hands the row over; the
+  // backend guards the file name and the index self-heals on the next
+  // read, so the success leg just refreshes the listing. A refused delete
+  // closes the alert and surfaces through the footer banner (the toggle
+  // failure's posture) -- never a silently surviving row.
+  const [deleteFailure, setDeleteFailure] = useState<{
+    path: string;
+    message: string;
+  } | null>(null);
+  const deleteMemory = useMutation({
+    mutationFn: (file: string) => deleteWorkspaceMemory(path, file),
+    onMutate: () => setDeleteFailure(null),
+    onSuccess: () => {
+      setPendingDelete(null);
+      void queryClient.invalidateQueries({
+        queryKey: workspaceMemoryKeys.listing(path),
+      });
+    },
+    onError: (e) => {
+      log.warn("WorkspaceMemoryDialog", "delete memory failed", e);
+      setDeleteFailure({ path, message: describeError(e, intl) });
+      setPendingDelete(null);
     },
   });
 
@@ -443,7 +500,11 @@ export function WorkspaceMemoryDialog({
               </h2>
               <ul className={`m-0 list-none overflow-y-auto p-0 ${LIST_MAX_HEIGHT_CLASS}`}>
                 {rows.map((memory) => (
-                  <MemoryRow key={memory.file} memory={memory} />
+                  <MemoryRow
+                    key={memory.file}
+                    memory={memory}
+                    onDelete={(m) => setPendingDelete(m)}
+                  />
                 ))}
               </ul>
               {unreadable.length > 0 && (
@@ -471,12 +532,15 @@ export function WorkspaceMemoryDialog({
             The cost hint hangs straight off the label -- hover the text
             and the tooltip surfaces (the same inverted-surface FieldHint
             posture as the settings chrome). Off hides
-            the footer's control (a refused toggle or folder-open write
-            keeps the footer for its banner line), and so does the create
-            face -- the form
+            the footer's control (a refused toggle, folder-open, or delete
+            write keeps the footer for its banner line), and so does the
+            create face -- the form
             owns the bottom while mounted. */}
         {!creating &&
-          (isOn || toggleFailure?.path === path || openFailure?.path === path) && (
+          (isOn ||
+            toggleFailure?.path === path ||
+            openFailure?.path === path ||
+            deleteFailure?.path === path) && (
           <footer className="flex flex-col gap-2 border-t pt-3">
             {isOn && (
               <div className="flex items-center justify-end gap-2">
@@ -520,19 +584,65 @@ export function WorkspaceMemoryDialog({
               // A refused toggle write (locked ledger, missing record)
               // surfaces right under the switch -- never a silently
               // unmoved control.
-              <p className="text-destructive m-0 text-sm" role="alert">
-                {toggleFailure.message}
-              </p>
+              <FooterAlert message={toggleFailure.message} />
             )}
             {openFailure?.path === path && (
               // A refused folder open (backend mint or front-end opener,
               // #1543) rides the same footer banner posture.
-              <p className="text-destructive m-0 text-sm" role="alert">
-                {openFailure.message}
-              </p>
+              <FooterAlert message={openFailure.message} />
+            )}
+            {deleteFailure?.path === path && (
+              // A refused row delete (#1591): the guard or the filesystem
+              // said no -- the banner keeps the row's fate explicit.
+              <FooterAlert message={deleteFailure.message} />
             )}
           </footer>
         )}
+
+        {/* The row delete's confirm (#1591): two-sentence description --
+            the permanent removal AND the re-extraction semantics (the
+            dedupe rides the existing-titles prompt list, so a deleted
+            fact can return). Cancel keeps everything as it was. */}
+        <AlertDialog
+          open={pendingDelete !== null}
+          onOpenChange={(o) => {
+            if (!o) setPendingDelete(null);
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                <FormattedMessage
+                  id="workspace.memory.deleteTitle"
+                  defaultMessage="Delete this memory?"
+                />
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                <FormattedMessage
+                  id="workspace.memory.deleteDescription"
+                  defaultMessage="This can't be undone. If the same point comes up in a later conversation, it may be saved again."
+                />
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>
+                <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
+              </AlertDialogCancel>
+              <AlertDialogAction
+                className={buttonVariants({ variant: "destructive" })}
+                disabled={deleteMemory.isPending}
+                onClick={(e) => {
+                  // The radix action auto-closes the alert; the mutation
+                  // carries the outcome (refresh or the footer banner).
+                  e.preventDefault();
+                  if (pendingDelete !== null) deleteMemory.mutate(pendingDelete.file);
+                }}
+              >
+                <FormattedMessage id="common.delete" defaultMessage="Delete" />
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </DialogContent>
     </Dialog>
   );

@@ -1,16 +1,17 @@
-// The user-memory settings pane's render contract (issue #1531): the
-// read-only list (title + category badge + hook) with the reveal wiring,
-// the MCP-style count line + title-and-hook search filter above the card,
-// the empty guide (the folder is the hand-write entry point), the folder
-// open, and the listing error face. The suite mocks the api module (the
-// IPC boundary) and the opener plugin, rendered through the settings seam
-// (the REAL en-US catalog, issue #1100).
+// The user-memory settings pane's render contract (issue #1531, row
+// actions reworked by #1591): the read-only list (title + category badge
+// + hook) with the open wiring, the MCP-style count line +
+// title-and-hook search filter above the card, the empty guide (the
+// folder is the hand-write entry point), the folder open, and the listing
+// error face. No delete action renders here -- the row delete is
+// workspace-layer only. The suite mocks the api module (the IPC boundary)
+// and the opener plugin, rendered through the settings seam (the REAL
+// en-US catalog, issue #1100).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
-  revealItemInDir: vi.fn(),
   openPath: vi.fn(),
 }));
 
@@ -23,7 +24,7 @@ vi.mock("../../../api", async (importOriginal) => {
   };
 });
 
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { listUserMemory, openUserMemoryDir } from "../../../api";
 import { MemorySection } from "../MemorySection";
 import { renderSettings } from "./helpers";
@@ -31,7 +32,6 @@ import type { ListedMemory } from "../../../types/workspace-memory";
 
 const mockedList = vi.mocked(listUserMemory);
 const mockedOpenDir = vi.mocked(openUserMemoryDir);
-const mockedReveal = vi.mocked(revealItemInDir);
 const mockedOpenPath = vi.mocked(openPath);
 
 function memory(overrides: Partial<ListedMemory> = {}): ListedMemory {
@@ -53,7 +53,6 @@ describe("MemorySection", () => {
   beforeEach(() => {
     mockedOpenDir.mockResolvedValue("/appdata/memory");
     mockedOpenPath.mockResolvedValue(undefined);
-    mockedReveal.mockResolvedValue(undefined);
   });
 
   it("renders the rows with title, badge, hook, and the count", async () => {
@@ -102,30 +101,36 @@ describe("MemorySection", () => {
     expect(screen.getByText(/No memories match the current search/)).toBeInTheDocument();
   });
 
-  it("reveals the row's memory file in the folder", async () => {
+  // The row's open action (#1591) opens the FILE in the system editor via
+  // the opener -- the user layer's hand-write surface, one hop faster than
+  // the folder. The shared MemoryRow renders it here unprompted (the host
+  // passes no delete callback).
+  it("opens the row's memory file in the system editor", async () => {
     mockedList.mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
     renderSettings(<MemorySection />);
     fireEvent.click(
-      await screen.findByRole("button", { name: "Reveal in folder" }),
+      await screen.findByRole("button", { name: "Open" }),
     );
     await waitFor(() =>
-      expect(mockedReveal).toHaveBeenCalledWith("/appdata/memory/user-language.md"),
+      expect(mockedOpenPath).toHaveBeenCalledWith("/appdata/memory/user-language.md"),
     );
+    // The workspace-only ruling: no delete action on the user layer's rows.
+    expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
   });
 
-  // A refused reveal (#1543) surfaces as the row's own alert -- the shared
-  // MemoryRow's face, pinned through this host -- and a successful retry
-  // clears it.
-  it("surfaces a reveal failure as the row's alert and clears on retry", async () => {
+  // A refused file open (#1543) surfaces as the row's own alert -- the
+  // shared MemoryRow's face, pinned through this host -- and a successful
+  // retry clears it.
+  it("surfaces an open failure as the row's alert and clears on retry", async () => {
     mockedList.mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
-    mockedReveal.mockRejectedValueOnce(new Error("file gone"));
+    mockedOpenPath.mockRejectedValueOnce(new Error("file gone"));
     renderSettings(<MemorySection />);
     fireEvent.click(
-      await screen.findByRole("button", { name: "Reveal in folder" }),
+      await screen.findByRole("button", { name: "Open" }),
     );
     expect(await screen.findByRole("alert")).toHaveTextContent("file gone");
     // The beforeEach resolve takes over: a successful retry clears the alert.
-    fireEvent.click(screen.getByRole("button", { name: "Reveal in folder" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
     await waitFor(() =>
       expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
     );

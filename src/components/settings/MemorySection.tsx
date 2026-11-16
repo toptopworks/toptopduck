@@ -2,8 +2,8 @@
 // memory layer that rides EVERY workspace's conversations -- global
 // semantics, so it lives in settings, not inside any one workspace's
 // memory panel. Read-only by design (the layer is hand-written files only,
-// #1531 D1/D4): the folder open is the hand-write entry point, reveal jumps
-// to a single file, and the workspace layer keeps its own panel inside each
+// #1531 D1/D4): the folder open is the hand-write entry point, the row's
+// open action jumps to a single file, and the workspace layer keeps its own panel inside each
 // workspace. The listing polls while the pane stands so a hand edit in the
 // folder lands within one interval (the workspace panel's posture).
 
@@ -69,7 +69,7 @@ export function MemorySection() {
   return (
     <div>
       <PaneHeader
-        title={<FormattedMessage id="settings.nav.memory" defaultMessage="Memory" />}
+        title={<FormattedMessage id="settings.memory.title" defaultMessage="Memory" />}
         description={(
           <FormattedMessage
             id="settings.memory.description"
