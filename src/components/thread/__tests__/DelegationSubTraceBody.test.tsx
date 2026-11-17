@@ -93,7 +93,7 @@ describe("DelegationSubTraceBody inline panel (issue #1355)", () => {
     // step fold (the main trace's posture), collapsed by default.
     expect(screen.getByText("Checking the sheet first.")).toBeInTheDocument();
     expect(screen.queryByText("SELECT count(*) AS n FROM result_1")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /trace · 2 calls/i }));
+    fireEvent.click(screen.getByRole("button", { name: /explore ×1 · materialize ×1/i }));
     expect(screen.getByText("SELECT count(*) AS n FROM result_1")).toBeInTheDocument();
     // The failed sub-call keeps its bounded excerpt -- the cross-turn
     // failure anchor.

@@ -4,8 +4,10 @@ import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 
 import { LiveRow } from "../TraceView";
+import { TraceStepFold } from "../TraceRow";
 import type { LiveRoundRow } from "../../../session/useTurnFlow";
 import type { FileAttachment } from "../../../types/approval";
+import type { TraceEntry } from "../../../types/thread";
 
 // LiveRow's pending approval card (ADR-0083) + the file-delivery
 // expand-on-demand view (issue #672, ADR-0109 Decision 8): the snapshot
@@ -170,12 +172,12 @@ describe("LiveRow caption tokens (issue #826)", () => {
   });
 });
 
-describe("LiveRow excerpt gate (issue #1047)", () => {
-  it("renders a capped delegation's truncation notice under a success row, muted", () => {
+describe("LiveRow excerpt gate (issue #1047, #1604)", () => {
+  it("folds a capped delegation's truncation notice into the expand block", () => {
     // The one success whose excerpt survives the projection is a capped
-    // delegation report's marker-bearing notice (#1047): it renders under
-    // the check glyph muted -- the call completed, the answer was just cut
-    // -- while the failure excerpt keeps the destructive anchor styling.
+    // delegation report's marker-bearing notice (#1047). Issue #1604 moves
+    // it off the row line into the summary fold's expand block, beside the
+    // argument summary: the row stays single-line.
     const capped = renderWithProviders(
       <LiveRow
         row={rowWith({
@@ -187,14 +189,18 @@ describe("LiveRow excerpt gate (issue #1047)", () => {
         onRespond={vi.fn()}
       />,
     );
-    const notice = capped.container.querySelector(".trace-excerpt");
-    expect(notice).not.toBeNull();
-    expect(notice).toHaveTextContent("[output truncated at the token cap]");
-    expect(notice).toHaveClass("text-muted-foreground");
-    // The two stylings are mutually exclusive (cn dedupes the family), and
-    // the negative assertion keeps it that way through any regression to
-    // plain concatenation.
-    expect(notice).not.toHaveClass("text-destructive");
+    expect(capped.container.querySelector(".trace-excerpt")).toBeNull();
+    fireEvent.click(summaryFoldToggle(capped.container));
+    const block = foldBlock(capped.container);
+    expect(block).not.toBeNull();
+    expect(block).toHaveTextContent(SUMMARY);
+    expect(block).toHaveTextContent("[output truncated at the token cap]");
+  });
+
+  it("keeps a failure excerpt un-folded under the row, scroll-capped", () => {
+    // The failure excerpt is the cross-turn retrospection anchor (ADR-0078):
+    // visible without a click, destructive-styled, now height-capped so a
+    // multi-KB error cannot push the whole screen out of view (#1604).
     const failed = renderWithProviders(
       <LiveRow
         row={rowWith({
@@ -207,8 +213,12 @@ describe("LiveRow excerpt gate (issue #1047)", () => {
       />,
     );
     const failedExcerpt = failed.container.querySelector(".trace-excerpt");
-    expect(failedExcerpt).toHaveClass("text-destructive");
+    expect(failedExcerpt).toHaveTextContent("boom");
+    expect(failedExcerpt).toHaveClass("text-destructive", "max-h-48", "overflow-y-auto");
     expect(failedExcerpt).not.toHaveClass("text-muted-foreground");
+  });
+
+  it("renders neither excerpt face for a clean success row", () => {
     const clean = renderWithProviders(
       <LiveRow
         row={rowWith({
@@ -221,6 +231,66 @@ describe("LiveRow excerpt gate (issue #1047)", () => {
       />,
     );
     expect(clean.container.querySelector(".trace-excerpt")).toBeNull();
+    fireEvent.click(summaryFoldToggle(clean.container));
+    expect(foldBlock(clean.container)).toHaveTextContent(SUMMARY);
+  });
+});
+
+// The step fold's head label (#1604, recalibrated on the real device):
+// per-tool call counts in first-appearance order -- the tool name is the
+// call's identity, the operation category alone collapses to noise on a
+// single-category round. Tool names are untranslated data, so the order
+// is stable across re-renders and locale switches.
+describe("TraceStepFold fold label (issue #1604)", () => {
+  const call = (over: Partial<TraceEntry> = {}): TraceEntry => ({
+    name: "explore",
+    operation_kind: "read",
+    summary: "SELECT 1",
+    success: true,
+    result_excerpt: "",
+    ...over,
+  });
+
+  it("counts each tool in first-appearance order", () => {
+    const { container } = renderWithProviders(
+      <TraceStepFold
+        calls={[
+          call(),
+          call({ name: "describe", success: false, result_excerpt: "boom" }),
+          call(),
+        ]}
+      />,
+    );
+    expect(container.querySelector(".trace-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(
+      screen.getByRole("button", { name: "explore ×2 · describe ×1" }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not reorder alphabetically -- first appearance leads", () => {
+    renderWithProviders(
+      <TraceStepFold
+        calls={[call({ name: "web_search" }), call(), call({ name: "web_search" })]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "web_search ×2 · explore ×1" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the count form for a single tool", () => {
+    renderWithProviders(
+      <TraceStepFold calls={[call(), call(), call()]} />,
+    );
+    expect(screen.getByRole("button", { name: "explore ×3" })).toBeInTheDocument();
+  });
+
+  it("renders no fold for a zero-call round", () => {
+    const { container } = renderWithProviders(<TraceStepFold calls={[]} />);
+    expect(container.querySelector(".trace-toggle")).toBeNull();
   });
 });
 

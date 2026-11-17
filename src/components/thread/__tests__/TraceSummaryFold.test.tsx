@@ -47,3 +47,34 @@ describe("TraceSummaryFold scroll container (issue #1363)", () => {
     expect(screen.queryByText(/Keyboard-reachable/)).not.toBeInTheDocument();
   });
 });
+
+// Issue #1604: a success row's result excerpt folds into the expand block
+// beside the argument summary -- same capped block, two columns.
+describe("TraceSummaryFold result excerpt column (issue #1604)", () => {
+  it("shows the summary and the result excerpt as columns of one block", () => {
+    const { container } = renderWithProviders(
+      <TraceSummaryFold
+        summary="SELECT * FROM result_1"
+        summaryClassName="trace-summary"
+        resultExcerpt="42 rows returned"
+      />,
+    );
+    fireEvent.click(container.querySelector(".summary-fold-toggle") as Element);
+    const block = document.querySelector(".summary-fold-block");
+    expect(block).not.toBeNull();
+    expect(block).toHaveTextContent("SELECT * FROM result_1");
+    expect(block).toHaveTextContent("42 rows returned");
+  });
+
+  it("keeps the single-column block when no excerpt is given", () => {
+    const { container } = renderWithProviders(
+      <TraceSummaryFold
+        summary="SELECT * FROM result_1"
+        summaryClassName="trace-summary"
+      />,
+    );
+    fireEvent.click(container.querySelector(".summary-fold-toggle") as Element);
+    const block = document.querySelector(".summary-fold-block");
+    expect(block?.textContent).toBe("SELECT * FROM result_1");
+  });
+});
