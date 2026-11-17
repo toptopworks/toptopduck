@@ -302,7 +302,12 @@ components:
     rounded: "{rounded.md}"
     padding: 2px 8px
   badge-secondary-dark:
-    backgroundColor: "{colors.muted-dark}"
+    # White-alpha chip face, not muted's opaque value: #232723 sits ~1.2:1 on
+    # the dark card and reads as no chip at all. Ground-relative alpha, same
+    # lesson as transit and chip-surface. The step keeps the chip clearly
+    # visible without reading as a highlight (face luminance 44 over the
+    # card's 26).
+    backgroundColor: "rgb(255 255 255 / 8%)"
     textColor: "{colors.muted-foreground-dark}"
   badge-accent:
     backgroundColor: "{colors.accent}"
@@ -417,7 +422,7 @@ The structural signature is a **three-column shell**: session sidebar (280px) + 
 - **Popover Dark** (`{colors.popover-dark}` — #181b18): Dialog surface. Same as card.
 - **Inverted Dark** (`{colors.inverted-dark}` — #3d433f): The inverted floating-surface tier in dark mode — two brightness steps above popover, so the hint plane lifts off the near-black ground instead of inverting against it.
 - **Secondary Dark** (`{colors.secondary-dark}` — #232723): Secondary button background in dark mode.
-- **Muted Dark** (`{colors.muted-dark}` — #232723): Badge backgrounds, subdued zones. Same value as secondary-dark.
+- **Muted Dark** (`{colors.muted-dark}` — #232723): Subdued zones. Same value as secondary-dark — badges in dark mode lift off it with the white-alpha `badge-secondary-dark` face instead, since the opaque value sits ~1.2:1 on the dark card.
 - **Border Dark** (`{colors.border-dark}` — #2a2f2a): Hairline color in dark mode. Greenish gray.
 
 ### Dark Mode Text
@@ -588,7 +593,7 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 **`badge-primary`** — Teal pill. Background `{colors.primary}`, text white, type `{typography.badge}` (12px / 500, no uppercase), rounded `{rounded.md}` (6px), padding 2px × 8px. Used for the active-dataset chip.
 
-**`badge-secondary` / `badge-secondary-dark`** — Muted pill. Background `{colors.muted}`, text `{colors.muted-foreground}`. Used for session count, metadata tags.
+**`badge-secondary` / `badge-secondary-dark`** — Muted pill. Background `{colors.muted}`, text `{colors.muted-foreground}`; dark mode swaps the face to a ground-relative `rgb(255 255 255 / 8%)` layer, since muted's opaque value reads as no chip on the dark card. Used for session count, metadata tags, row source annotations — settings rows ride it through `NameBadge` on this `{colors.muted}` face; the working-set chips ride `Badge` secondary, whose light face is the hair-off `{colors.secondary}` and which shares the white-alpha dark face.
 
 **`badge-accent` / `badge-accent-dark`** — Teal-tinted pill. Background `{colors.accent}`, text `{colors.accent-foreground}`. Used for highlighted/active states in lists.
 
@@ -638,3 +643,4 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 - Don't use pure `#ffffff` for dark-mode text. `{colors.ink-dark}` (#d5d9d5) is softer for long sessions. The inverted floating tier's `{colors.inverted-foreground}` is the one exception — its ground is a transient hint surface, not a reading canvas.
 - Don't create new radius values. All corners derive from the 6px `{rounded.md}` token.
 - Don't place large areas of white body text on teal `{colors.primary}` (#0d9488). The contrast ratio is 3.75:1 — passes WCAG AA Large (3:1, suitable for button labels and short badges at 14px/500) but not AA normal text (4.5:1). For body text on teal surfaces, use `{colors.ink-dark}` on a darker teal tint instead.
+- Don't name external products in code comments or docs as design references. Competitor borrowings ride neutral shape descriptions plus in-project measures (a luminance step, a surface value) — the shape carries the value, not the brand.
