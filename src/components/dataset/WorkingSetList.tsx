@@ -222,24 +222,33 @@ function DatasetRow({
         { name: d.stale.display_name, reason: d.stale.reason },
       )
     : undefined;
-  // The origin label (issue #1597): the badge's short tooltip text, formatted
-  // once for the tooltip AND the aria-label (the #1062 one-source pattern).
-  // The S/M letter is the glanceable form; this two-word label is the
-  // meaning. The long cross-reference sentence (the de-conflicted alias arm)
-  // retired with the letter swap -- the full origin stays on the detail face.
-  // An uploaded row derives null -- no badge, the quiet default.
-  const provenanceLabel = (() => {
+  // The origin face (issue #1597): the badge's short tooltip label and its
+  // locale-neutral monogram letter as ONE mapping, so a future provenance
+  // variant can never render a stale letter -- the two axes move together.
+  // The label is formatted once for the tooltip AND the keyboard carrier
+  // (the #1062 one-source pattern: the sr-only aria-describedby node at the
+  // row level; the badge itself carries no aria-label). The long
+  // cross-reference sentence (the de-conflicted alias arm) retired with the
+  // letter swap -- the full origin stays on the detail face. An uploaded row
+  // derives null -- no badge, the quiet default.
+  const provenanceFace = (() => {
     switch (d.provenance) {
       case "shared":
-        return intl.formatMessage({
-          id: "workingSet.provenance.sharedShort",
-          defaultMessage: "Shared dataset",
-        });
+        return {
+          letter: "S",
+          label: intl.formatMessage({
+            id: "workingSet.provenance.sharedShort",
+            defaultMessage: "Shared dataset",
+          }),
+        };
       case "materialized":
-        return intl.formatMessage({
-          id: "workingSet.provenance.materializedShort",
-          defaultMessage: "Materialized result",
-        });
+        return {
+          letter: "M",
+          label: intl.formatMessage({
+            id: "workingSet.provenance.materializedShort",
+            defaultMessage: "Materialized result",
+          }),
+        };
       case "uploaded":
       case undefined:
         // An uploaded row and the manifest face (a plain descriptor): no
@@ -254,6 +263,17 @@ function DatasetRow({
       }
     }
   })();
+  // The keyboard/a11y carriers (#1062): the sentences live in sr-only nodes
+  // at the row level and ride the select button's aria-describedby -- the
+  // badges sit INSIDE the button (phrasing content, hugging the label), and
+  // a tabIndex there would be an invalid interactive descendant. Described-by
+  // keeps the sentence in the AT read on button focus without a nested tab
+  // stop -- and without polluting the button's accessible name: the carriers
+  // are button SIBLINGS, not button content.
+  const originDescIds = [
+    provenanceFace !== null ? `${d.reference_name}-origin-desc` : null,
+    d.stale ? `${d.reference_name}-stale-desc` : null,
+  ].filter((id): id is string => id !== null);
   // The context menu captures its target from the row it opens on (#1570):
   // the <li> is both the trigger and the focus-restorable opener element, so
   // the dialog-close restore lands back on the row (mirroring the pill
@@ -284,6 +304,7 @@ function DatasetRow({
               type="button"
               className={cn(SELECT_BUTTON_BASE, isActive && "font-semibold")}
               onClick={() => onSelect(d.reference_name)}
+              aria-describedby={originDescIds.length > 0 ? originDescIds.join(" ") : undefined}
             >
               {/* The truncated label's full text rides the OS-native title:
             truncation recovery without any Radix machinery (no popper to
@@ -296,37 +317,36 @@ function DatasetRow({
               <span className="min-w-0 truncate" title={d.display_name}>
                 {d.display_name}
               </span>
-              {provenanceLabel !== null && (
+              {provenanceFace !== null && (
               // The origin badge (issue #1597): the single-letter S/M monogram
               // pill riding right after the label (never the row tail -- a
               // tail-side chip collides with the hover pill over narrow
-              // counts). The short label (provenanceLabel above) rides the
-              // tooltip and the aria-label (one formatted string, two
-              // consumers); the letter is the glanceable form. The letter is a
+              // counts). A plain, NON-interactive span: the tooltip is the
+              // pointer path; the keyboard path rides the button's
+              // aria-describedby via the row-level sr-only carrier (#1062) --
+              // a tabIndex inside the button would be an invalid interactive
+              // descendant. stopPropagation keeps a stray click on the
+              // informational chip from selecting the row. The letter is a
               // hardcoded literal, not an i18n key: S/M are locale-neutral
               // monograms, so no catalog entry exists for them (the
               // delete-dialog precedent does not apply -- there is no message
-              // here to translate). The stale chip's
-              // controlled-tooltip posture applies verbatim: the rowHints
-              // mutex owns the open (the "provenance" kind), the badge keeps no
-              // handlers of its own, and tabIndex + aria-label put the sentence in
-              // the keyboard/a11y path (#1062).
+              // here to translate). The rowHints mutex owns the open (the
+              // "provenance" kind); the badge keeps no handlers of its own.
                 <Tooltip open={isTipOpen("provenance")} onOpenChange={(next) => setTip(key("provenance"), next)}>
                   <TooltipTrigger asChild>
                     <Badge
                       variant="secondary"
-                      className="provenance-badge focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                      tabIndex={0}
-                      aria-label={provenanceLabel}
+                      className="provenance-badge"
+                      onClick={(e) => e.stopPropagation()}
                     >
-                      {d.provenance === "shared" ? "S" : "M"}
+                      {provenanceFace.letter}
                     </Badge>
                   </TooltipTrigger>
                   <TooltipContent
                     data-hit-transparent
                     className="pointer-events-none data-[state=closed]:animate-none!"
                   >
-                    {provenanceLabel}
+                    {provenanceFace.label}
                   </TooltipContent>
                 </Tooltip>
               )}
@@ -334,22 +354,18 @@ function DatasetRow({
               // #793: a short chip with the full causal sentence on the tooltip --
               // the sentence used to wrap inside the badge and break the chip shape
               // in narrow columns. No action outlet here: the rerun path lives with
-              // the result panel's stale banner (#758). #1062 makes the sentence
-              // keyboard-reachable too: tabIndex + the staleCause aria-label put it in
-              // the tab order and the a11y tree, and Radix's own focus path opens
-              // the tooltip through the controlled slot (the chip keeps no
-              // handlers of its own; its opens need no restore gate -- the
-              // dialog-close restore never lands on the chip, the rowHints setTip
-              // note). The focus ring follows the action buttons' outline tokens
-              // so tabbing reads the same across the row, and the badge-variants
-              // base already carries shrink-0, so the call site stays lean.
+              // the result panel's stale banner (#758). Same non-interactive
+              // posture as the origin badge: the keyboard path rides the
+              // button's aria-describedby carrier (#1062), not a nested tab
+              // stop; stopPropagation keeps the click from selecting the row.
+              // The badge-variants base already carries shrink-0, so the call
+              // site stays lean.
                 <Tooltip open={isTipOpen("stale")} onOpenChange={(next) => setTip(key("stale"), next)}>
                   <TooltipTrigger asChild>
                     <Badge
                       variant="secondary"
-                      className="stale-badge focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                      tabIndex={0}
-                      aria-label={staleCause}
+                      className="stale-badge"
+                      onClick={(e) => e.stopPropagation()}
                     >
                       <FormattedMessage id="workingSet.staleRow" defaultMessage="Stale" />
                     </Badge>
@@ -445,6 +461,20 @@ function DatasetRow({
             </div>
           </div>
           {extraBadge}
+          {/* The #1062 keyboard carriers: sr-only sentence nodes referenced
+          by the select button's aria-describedby (see originDescIds). Row
+          SIBLINGS, not button content -- a described-by target inside the
+          button would join its accessible-name computation. */}
+          {provenanceFace !== null && (
+            <span id={`${d.reference_name}-origin-desc`} className="sr-only">
+              {provenanceFace.label}
+            </span>
+          )}
+          {d.stale && (
+            <span id={`${d.reference_name}-stale-desc`} className="sr-only">
+              {staleCause}
+            </span>
+          )}
         </li>
       </ContextMenuTrigger>
       <ContextMenuContent aria-label={d.display_name}>

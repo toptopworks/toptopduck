@@ -813,7 +813,16 @@ describe("WorkingSetList", () => {
       />,
     );
     const badge = screen.getByText("S").closest(".provenance-badge")!;
-    expect(badge).toHaveAttribute("aria-label", "共享数据集");
+    // Plain, non-interactive span: no aria-label of its own -- the sentence
+    // rides the select button's aria-describedby carrier (#1062).
+    expect(badge).not.toHaveAttribute("aria-label");
+    expect(badge).not.toHaveAttribute("tabindex");
+    const carrier = screen.getByText("共享数据集", { selector: ".sr-only" });
+    expect(carrier.id).toBe("people_2-origin-desc");
+    expect(badge.closest("li")!.querySelector("button")!).toHaveAttribute(
+      "aria-describedby",
+      "people_2-origin-desc",
+    );
     fireEvent.pointerMove(badge);
     expect(await screen.findByRole("tooltip")).toHaveTextContent("共享数据集");
   });
@@ -840,7 +849,12 @@ describe("WorkingSetList", () => {
       />,
     );
     const badge = screen.getByText("S").closest(".provenance-badge")!;
-    expect(badge).toHaveAttribute("aria-label", "共享数据集");
+    const carrier = screen.getByText("共享数据集", { selector: ".sr-only" });
+    expect(carrier.id).toBe("people-origin-desc");
+    expect(badge.closest("li")!.querySelector("button")!).toHaveAttribute(
+      "aria-describedby",
+      "people-origin-desc",
+    );
     fireEvent.pointerMove(badge);
     expect(await screen.findByRole("tooltip")).toHaveTextContent("共享数据集");
   });
@@ -936,8 +950,8 @@ describe("WorkingSetList", () => {
     );
     expect(screen.getByText("Stale")).toBeInTheDocument();
     const chip = screen.getByText("Stale").closest(".stale-badge")!;
-    expect(chip).toHaveAttribute("aria-label", "Invalidated because people was deleted");
-    fireEvent.focus(chip);
+    expect(chip).not.toHaveAttribute("aria-label");
+    fireEvent.pointerMove(chip);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       "Invalidated because people was deleted",
     );
@@ -973,14 +987,14 @@ describe("WorkingSetList", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已更新而失效");
   });
 
-  it("focuses the stale chip in the Tab order and opens its tooltip on keyboard focus (issue #1062)", async () => {
+  it("carries the stale sentence through the row button's aria-describedby (issue #1062)", async () => {
     // #1062: hover was the only path to the causal sentence -- a span chip
-    // neither tabs nor announces. The chip now carries tabIndex and the
-    // causal sentence as aria-label (same formatted output as the tooltip
-    // copy), and Radix's own focus path bridges into the controlled open
-    // slot: the chip keeps no handlers of its own, and its opens need no
-    // restore gate -- the dialog-close restore never lands on the chip (the
-    // rowHints setTip note).
+    // neither tabs nor announces. The sentence now rides the row's select
+    // button as its aria-describedby (an sr-only carrier span at the ROW
+    // level, a button sibling so it never joins the button's accessible
+    // name): focus lands on the button and the AT reads the description.
+    // The badge itself stays a plain, non-interactive span -- a tabIndex
+    // inside the button would be an invalid interactive descendant.
     // The neighboring stale fixtures carry a zh display name so the causal
     // sentence reads fully in zh.
     const stale: DatasetDescriptor = {
@@ -998,27 +1012,25 @@ describe("WorkingSetList", () => {
       />,
     );
     const chip = screen.getByText("已失效").closest(".stale-badge")!;
-    expect(chip).toHaveAttribute("tabindex", "0");
-    // The ring is the visible half of keyboard reach: the three outline
-    // tokens mirror the row's action buttons, so tabbing reads the same.
-    // Pinned at class level -- jsdom renders no actual outline.
-    const chipClasses = chip.className.split(/\s+/);
-    expect(chipClasses).toContain("focus-visible:outline-2");
-    expect(chipClasses).toContain("focus-visible:outline-offset-2");
-    expect(chipClasses).toContain("focus-visible:outline-ring");
+    expect(chip).not.toHaveAttribute("tabindex");
+    expect(chip).not.toHaveAttribute("aria-label");
     expect(chip).not.toHaveAttribute("title");
-    expect(chip).toHaveAttribute("aria-label", "因「员工表」已删除而失效");
-    fireEvent.focus(chip);
+    const row = chip.closest("li")!;
+    const button = row.querySelector("button")!;
+    expect(button).toHaveAttribute("aria-describedby", "people-stale-desc");
+    const carrier = row.querySelector("#people-stale-desc")!;
+    expect(carrier).toHaveTextContent("因「员工表」已删除而失效");
+    // The pointer path still opens the tooltip through the controlled slot.
+    fireEvent.pointerMove(chip);
     expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已删除而失效");
-    fireEvent.blur(chip);
-    await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
   });
 
-  it("yields a held hint to the chip's focus open -- opens take the slot (rowHints sequence 1, issue #1062)", async () => {
-    // Keyboard tab order runs action buttons -> chip; the chip's Radix
-    // focus open takes the mutex slot from a pointer-opened hint without an
-    // explicit close (reduceTip: opens take the slot), so the two tooltips
-    // never coexist on one row.
+  it("yields a held hint to the chip's hover open -- opens take the slot (rowHints sequence 1, issue #1062)", async () => {
+    // The chip's pointer open takes the mutex slot from a pointer-opened
+    // hint without an explicit close (reduceTip: opens take the slot), so
+    // the two tooltips never coexist on one row. (The chip's focus leg
+    // retired with the non-interactive badge -- the keyboard path is the
+    // row button's aria-describedby carrier now, which opens no tooltip.)
     const stale: DatasetDescriptor = {
       ...staleDataset("Deleted"),
       stale: { reference_name: "people", display_name: "员工表", reason: "Deleted" },
@@ -1036,8 +1048,13 @@ describe("WorkingSetList", () => {
     const rename = screen.getByRole("button", { name: /重命名/ });
     fireEvent.pointerEnter(rename, { pointerType: "mouse" });
     expect(await screen.findByRole("tooltip")).toHaveTextContent("重命名");
-    fireEvent.focus(screen.getByText("已失效").closest(".stale-badge")!);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已删除而失效");
+    fireEvent.pointerMove(screen.getByText("已失效").closest(".stale-badge")!);
+    // The chip's open rides Radix's delayed-open timer (setTimeout even at
+    // delayDuration 0), and the rename tooltip still matches role=tooltip
+    // during that window -- waitFor the TEXT, not the role.
+    await waitFor(() =>
+      expect(screen.getByRole("tooltip")).toHaveTextContent("因「员工表」已删除而失效"),
+    );
     expect(screen.getAllByRole("tooltip")).toHaveLength(1);
   });
 
@@ -1404,7 +1421,11 @@ describe("WorkingSetList", () => {
     expect(rowClasses).toContain("flex");
     expect(rowClasses).not.toContain("flex-wrap");
     const children = [...row.children];
-    expect(children).toHaveLength(1);
+    // Two flow children: the wrapper, plus the #1062 sr-only sentence
+    // carrier (a deliberate row SIBLING of the button -- see the stale
+    // described-by test).
+    expect(children).toHaveLength(2);
+    expect(children[1].className.split(/\s+/)).toContain("sr-only");
     const wrapper = children[0];
     expect(wrapper.tagName).toBe("DIV");
     expect(wrapper.className.split(/\s+/)).toContain("flex-1");
@@ -1426,10 +1447,8 @@ describe("WorkingSetList", () => {
     );
     // The badge and the count both trail the label inside the button, count
     // last (the row's far right).
-    const order = [...button.children].map((el) => el.className);
-    expect(order.indexOf(count.className)).toBeGreaterThan(
-      order.indexOf(badge.className),
-    );
+    const order = [...button.children];
+    expect(order.indexOf(count)).toBeGreaterThan(order.indexOf(badge));
   });
 
   it("retires the ' · current table' suffix; the active fact rides the bold label alone (issue #793)", () => {
