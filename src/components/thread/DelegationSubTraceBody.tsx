@@ -10,7 +10,7 @@ import type { TokenUsage, TraceRound } from "../../types/thread";
 // settled by issue #1355, replacing the #934 modal): the row head carries
 // the fold toggle (TraceRow owns it), and the panel renders full width
 // beneath the row -- the sub-agent's rounds in the main trace's folding
-// posture (each round's thinking fold + connective prose + its per-kind
+// posture (each round's thinking fold + connective prose + its per-tool
 // count step fold, stacked flush exactly as the main trace stacks its
 // rounds), the running face's task head above them, the usage subtotal as
 // the closing receipt -- so a sub-round reads exactly like a main round.

@@ -751,6 +751,7 @@
   "thread.trace.delegationBatch": "{total} 个中 {done} 个完成，{running} 个运行中",
   "thread.trace.delegationStep": "第 {n} 步",
   "thread.trace.delegationTaskAria": "委派任务",
+  "thread.trace.excerptAria": "错误摘要",
   "thread.trace.errorStackAria": "错误堆栈",
   "thread.trace.successAria": "调用成功",
   "thread.trace.summaryBlockAria": "完整摘要",

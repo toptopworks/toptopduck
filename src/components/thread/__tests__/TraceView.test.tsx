@@ -216,6 +216,17 @@ describe("LiveRow excerpt gate (issue #1047, #1604)", () => {
     expect(failedExcerpt).toHaveTextContent("boom");
     expect(failedExcerpt).toHaveClass("text-destructive", "max-h-48", "overflow-y-auto");
     expect(failedExcerpt).not.toHaveClass("text-muted-foreground");
+    // The cap carries the #1363 keyboard-reachable posture the other
+    // height-capped regions hold: focusable, named, scrollable by arrows.
+    expect(failedExcerpt).toHaveAttribute("tabindex", "0");
+    expect(failedExcerpt).toHaveAttribute("role", "region");
+    expect(failedExcerpt).toHaveAttribute("aria-label", "Error excerpt");
+    // The success gate keeps the failure OUT of the summary fold's block
+    // (#1604): expanding the row shows the argument summary alone, not a
+    // second copy of the error as the block's right column.
+    fireEvent.click(summaryFoldToggle(failed.container));
+    expect(foldBlock(failed.container)).toHaveTextContent(SUMMARY);
+    expect(foldBlock(failed.container)).not.toHaveTextContent("boom");
   });
 
   it("renders neither excerpt face for a clean success row", () => {

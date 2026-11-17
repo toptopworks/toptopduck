@@ -89,20 +89,18 @@ function SuccessGlyph({ success }: { success: boolean }) {
 // tool names are untranslated data, so locale switches cannot either.
 // The category stays on the row's OperationBadge.
 function foldLabel(intl: IntlShape, calls: ReadonlyArray<TraceEntry>): string {
-  const order: string[] = [];
+  // A Map keeps its insertion order, which over an append-only trace is
+  // the first-appearance order above.
   const counts = new Map<string, number>();
   for (const call of calls) {
-    if (!counts.has(call.name)) order.push(call.name);
     counts.set(call.name, (counts.get(call.name) ?? 0) + 1);
   }
-  return order
-    .map((name) =>
-      intl.formatMessage(
-        { id: "thread.trace.toolCount", defaultMessage: "{tool} ×{count}" },
-        { tool: name, count: counts.get(name) ?? 0 },
-      ),
-    )
-    .join(" · ");
+  return Array.from(counts, ([tool, count]) =>
+    intl.formatMessage(
+      { id: "thread.trace.toolCount", defaultMessage: "{tool} ×{count}" },
+      { tool, count },
+    ),
+  ).join(" · ");
 }
 
 // One round's step fold (ADR-0078's folding discipline): the fold head
@@ -158,6 +156,7 @@ export function TraceRow({
   subTrace?: ReactNode;
 }) {
   const [subOpen, setSubOpen] = useState(false);
+  const intl = useIntl();
   // The gate lives here, once: a row whose entry carries no sub-rounds (or
   // whose caller supplied no body) renders neither the toggle nor the panel,
   // so the callers inject the body unconditionally over their row lists.
@@ -212,13 +211,22 @@ export function TraceRow({
         {/* The failure excerpt is the cross-turn retrospection anchor
          * (ADR-0078): visible without a click, destructive-styled, and
          * height-capped since #1604 so a multi-KB error cannot push the
-         * whole screen out of view (same cap face as the thinking fold's
-         * expand block). A success never renders here anymore (#1604) --
-         * the one success excerpt the projections keep, the capped
-         * delegation report's truncation notice (issue #1047), folds into
-         * the summary expand block above. */}
+         * whole screen out of view (the thinking fold's cap face and its
+         * #1363 keyboard-reachable region posture). A success never
+         * renders here anymore (#1604) -- the one success excerpt the
+         * projections keep, the capped delegation report's truncation
+         * notice (issue #1047), folds into the summary expand block
+         * above. */}
         {!entry.success && entry.result_excerpt !== "" && (
-          <span className="trace-excerpt block whitespace-pre-wrap break-words text-xs max-h-48 overflow-y-auto text-destructive">
+          <span
+            className="trace-excerpt block whitespace-pre-wrap break-words text-xs max-h-48 overflow-y-auto text-destructive"
+            tabIndex={0}
+            role="region"
+            aria-label={intl.formatMessage({
+              id: "thread.trace.excerptAria",
+              defaultMessage: "Error excerpt",
+            })}
+          >
             {entry.result_excerpt}
           </span>
         )}

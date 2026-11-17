@@ -123,9 +123,9 @@ describe("DelegationSubTraceBody inline panel (issue #1355)", () => {
     const toggles = container.querySelectorAll(".thinking-toggle");
     expect(toggles).toHaveLength(1);
     expect(toggles[0].getAttribute("aria-expanded")).toBe("false");
-    // A sub-round with no calls renders no step fold at all -- the "Trace
-    // · 0 calls" head must not appear (TraceStepFold's empty guard, the
-    // only line of defense on this face).
+    // A sub-round with no calls renders no step fold at all -- no count
+    // head must appear (TraceStepFold's empty guard, the only line of
+    // defense on this face).
     expect(container.querySelectorAll(".trace-toggle")).toHaveLength(0);
     expect(screen.queryByText("inner reasoning")).not.toBeInTheDocument();
     fireEvent.click(toggles[0]);
