@@ -885,7 +885,7 @@ describe("selection toolbar copy (#1573)", () => {
     expect(toolbar).not.toBeNull();
     fireEvent.click(copyButton(toolbar as HTMLElement));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("copy this passage"));
-    // The WorkBuddy shape rode the success leg: the toolbar leaves and the
+    // The success leg carries the shape: the toolbar leaves and the
     // selection clears.
     expect(document.querySelector("[data-selection-toolbar]")).toBeNull();
     expect(document.getSelection()?.isCollapsed ?? true).toBe(true);

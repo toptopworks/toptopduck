@@ -38,7 +38,7 @@
    The WebView2 default classic bar is ~17px and visually dominates the
    three-column shell; a 10px band with a 2px transparent inset (the thumb's
    background clips to the padding box) yields a 6px rounded thumb matching the
-   thin-bar reference look (ChatGPT desktop, WorkBuddy). Space-taking on
+   thin-bar reference look. Space-taking on
    purpose: the runtime scrollbar probe (--rail-sb-w in App.tsx) and the
    scrollbar-gutter reservations measure the styled band width, so the layout
    machinery keeps working unchanged. Thumb color rides the shadcn token system,
@@ -932,7 +932,7 @@
   flex-direction: column;
   overflow: hidden;
   /* The column divider lives HERE, not on the scroll container: the header
-     row sits inside this column (WorkBuddy topology), so the line runs
+     row sits inside this column, so the line runs
      unbroken from the pane top through the header to the rail's tail. The
      white ground rides the column too, so the relocated header floats on
      the same field as the rail. */

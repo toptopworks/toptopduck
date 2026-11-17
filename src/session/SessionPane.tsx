@@ -163,7 +163,7 @@ type RightSidebarTab = (typeof RIGHT_SIDEBAR_TABS)[number];
  * panel's pt stacks on the host's for a doubled 32px. */
 const EDGE_DOCKED_SCROLL_CLASS = "-m-4 overflow-y-auto p-4";
 
-/** The file stage posture (the WorkBuddy report pane): the panel retires as
+/** The file stage posture (the report pane): the panel retires as
  * a scroll container -- a breakout inside a scroll container enters its
  * scrollable overflow region (margins don't shrink it), so the panel would
  * grow scrollbars that re-indent the very edges the breakout opened. The
@@ -417,7 +417,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     const text = selectionActive?.text;
     if (text === undefined) return;
     // Success: the toast announces, the toolbar leaves, the selection
-    // clears (the WorkBuddy shape). Failure: log + the toolbar stays put --
+    // clears. Failure: log + the toolbar stays put --
     // nothing was copied, so nothing may close.
     navigator.clipboard
       .writeText(text)
@@ -566,7 +566,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           (issue #512): the `⋯` management menu (Rename / Close / Delete)
           follows the name. The header now lives INSIDE the conversation
           column (see session-body below) so the column divider runs
-          unbroken from the pane top -- WorkBuddy topology, no line break
+          unbroken from the pane top -- full-height topology, no line break
           at the header row. The right-sidebar toggle (ADR-0083, issue #298)
           rides the right-sidebar tab row's far edge while the panel is
           expanded, and falls back to this header's right edge while folded

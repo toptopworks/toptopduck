@@ -129,7 +129,7 @@ function ArtifactStageBody({
     // the prose re-wraps its own padding: the scrollbar docks to the pane edge
     // while the text keeps its breathing room. The iframe branches stay
     // full-bleed -- the frame's own document scrolls inside its viewport edge
-    // (the WorkBuddy stage posture: the report fills the pane and owns its
+    // (the stage posture: the report fills the pane and owns its
     // scrollbars).
     return (
       <div className="p-4">
