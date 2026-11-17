@@ -5,7 +5,7 @@ import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 import { TooltipProvider } from "../../ui/tooltip";
 import { WorkingSetList } from "../WorkingSetList";
-import type { DatasetDescriptor, StaleReason } from "../../../types/dataset";
+import type { DatasetDescriptor, StaleReason, WorkingSetRow } from "../../../types/dataset";
 import { mockDataset, staleDataset } from "./helpers";
 import { withIntl } from "../../common/__tests__/helpers";
 
@@ -791,8 +791,9 @@ describe("WorkingSetList", () => {
   it("badges a shared row with the alias-to-entry sentence on the tooltip (issue #1597)", async () => {
     // The origin badge is the hardcoded "S" monogram pill after the label
     // (locale-neutral literal, no i18n key); the short 共享数据集 label rides
-    // the tooltip AND the aria-label (the #1062 one-source pattern), so the
-    // keyboard path and the hover path can never drift apart. The aliased
+    // the tooltip AND the button's aria-describedby carrier (the #1062
+    // one-source pattern), so the keyboard path and the hover path can never
+    // drift apart. The aliased
     // fixture shape renders the same short label -- the alias cross-reference
     // retired with the letter swap (the full origin lives on the detail face).
     const aliased = {
@@ -829,8 +830,8 @@ describe("WorkingSetList", () => {
 
   it("badges a same-name shared row with the plain sentence (issue #1597)", async () => {
     // The alias-equals-entry arm (the common no-collision attach): the
-    // tooltip and the aria-label carry the plain shared sentence -- no
-    // alias cross-reference arm to render.
+    // tooltip and the described-by carrier carry the plain shared sentence
+    // -- no alias cross-reference arm to render.
     const sameName = {
       ...mockDataset,
       reference_name: "people",
@@ -933,7 +934,7 @@ describe("WorkingSetList", () => {
     // either defaultMessage stayed green behind the zh hits. The empty
     // English provider (the rowCount plural precedent above) routes both
     // keys to the canonical copy -- chip label and causal sentence alike
-    // (the aria-label shares the hint's formatted output).
+    // (the described-by carrier shares the hint's formatted output).
     render(
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
         <TooltipProvider>
@@ -1023,6 +1024,46 @@ describe("WorkingSetList", () => {
     // The pointer path still opens the tooltip through the controlled slot.
     fireEvent.pointerMove(chip);
     expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已删除而失效");
+  });
+
+  it("joins both carrier ids on the button when origin and stale coexist (issue #1062)", () => {
+    // The common stale case is a materialized result (the rerun path), so a
+    // row often carries BOTH sentences: the origin carrier and the stale
+    // carrier ride the select button's aria-describedby together -- two
+    // whitespace-free ids joined by one space, origin first (the
+    // originDescIds build order), each carrier span a row-level sibling
+    // after the label-tail wrapper.
+    const row: WorkingSetRow = {
+      ...mockDataset,
+      reference_name: "result_1",
+      display_name: "result_1",
+      provenance: "materialized",
+      stale: { reference_name: "people", display_name: "员工表", reason: "Deleted" },
+    };
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[row]}
+        activeName={null}
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    // The action buttons' aria-labels embed the dataset name too, so the
+    // row-scoped first button (the select button) is the safe query here.
+    const button = screen.getByText("result_1").closest("li")!.querySelector("button")!;
+    expect(button).toHaveAttribute(
+      "aria-describedby",
+      "result_1-origin-desc result_1-stale-desc",
+    );
+    const li = button.closest("li")!;
+    // The wrapper plus the two sr-only carriers: the combined row's shape.
+    expect(li.children).toHaveLength(3);
+    expect(li.querySelector("#result_1-origin-desc")).toHaveTextContent("物化结果");
+    expect(li.querySelector("#result_1-stale-desc")).toHaveTextContent(
+      "因「员工表」已删除而失效",
+    );
   });
 
   it("yields a held hint to the chip's hover open -- opens take the slot (rowHints sequence 1, issue #1062)", async () => {
@@ -1131,8 +1172,9 @@ describe("WorkingSetList", () => {
     const selectClasses = select.className.split(/\s+/);
     expect(selectClasses).toContain("flex-1");
     expect(selectClasses).toContain("min-w-0");
-    // All four controls share one row <li>, which is itself the flex container
-    // and the overlay pill's positioning anchor.
+    // All four controls share one row <li>: the li is the flex container,
+    // while the label-tail wrapper inside it owns the overlay pill's
+    // positioning anchor.
     const row = select.closest("li")!;
     expect(row.querySelectorAll("button")).toHaveLength(4);
     const rowClasses = row.className.split(/\s+/);
@@ -1383,7 +1425,7 @@ describe("WorkingSetList", () => {
   // the opens-take-the-slot rule there (issue #1073 moved the protocol's
   // authority into that module).
 
-  it("renders the stale chip inline after the row actions, retiring the wrapped second line (issue #790, #793)", () => {
+  it("renders the stale chip inline inside the select button, retiring the wrapped second line (issue #790, #793)", () => {
     const stale: DatasetDescriptor = {
       ...mockDataset,
       stale: {
@@ -1445,6 +1487,9 @@ describe("WorkingSetList", () => {
     expect(countClasses).toContain(
       "group-has-[.working-set-row-actions_:focus-visible]:opacity-0",
     );
+    // The count owns the row tail alone (ml-auto) -- the pill's only cover
+    // target on hover; the cover posture depends on this far-right pin.
+    expect(countClasses).toContain("ml-auto");
     // The badge and the count both trail the label inside the button, count
     // last (the row's far right).
     const order = [...button.children];

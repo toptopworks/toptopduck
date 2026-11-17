@@ -168,10 +168,11 @@ function RowActionButton({
   );
 }
 
-// One working-set row: the select button (label + row count), the floating
-// action pill (rename / replace / delete via RowActionButton), and the stale
-// chip. See the constants above for the band / pill / icon contracts and
-// rowHints.ts for the row-tooltip mutex the hints share.
+// One working-set row: the select button (label + S/M / stale badges + row
+// count inside it), the floating action pill (rename / replace / delete via
+// RowActionButton), and the row-level sr-only described-by carriers. See
+// the constants above for the band / pill / icon contracts and rowHints.ts
+// for the row-tooltip mutex the hints share.
 function DatasetRow({
   d,
   isActive,
@@ -195,8 +196,9 @@ function DatasetRow({
   isSelected: boolean;
   loading: boolean;
   tip: RowTipControls;
-  // An optional extra marker beside the stale chip's slot (the right-sidebar
-  // panel flags a missing store file here); the private face passes none.
+  // An optional extra marker at the row's tail, after the label-tail
+  // wrapper (the right-sidebar panel flags a missing store file here); the
+  // private face passes none.
   extraBadge?: ReactNode;
   onSelect: (referenceName: string) => void;
   // The trigger argument is the focus-restorable opener element: the pill
@@ -210,8 +212,9 @@ function DatasetRow({
   const key = (kind: RowTipKind): TipKey => ({ row: d.reference_name, kind });
   const isTipOpen = (kind: RowTipKind) => openKey !== null && sameTipKey(openKey, key(kind));
   // The stale causal sentence, formatted once for both consumers (#1062):
-  // the tooltip's copy and the chip's aria-label stay one source, so the
-  // keyboard/AT path and the visual hover path can never drift apart.
+  // the tooltip's copy and the sr-only described-by carrier stay one
+  // source, so the keyboard/AT path and the visual hover path can never
+  // drift apart.
   const staleCause = d.stale
     ? intl.formatMessage(
         {
@@ -725,9 +728,9 @@ export function WorkingSetList({
   // window: ask in flight -> source management disabled), preventing concurrent
   // IPC and source-vs-turn interleaving.
   loading?: boolean;
-  // An extra per-row marker beside the stale chip's slot: the right-sidebar
-  // panel flags a missing store file. Undefined rows render nothing; the
-  // private face passes none.
+  // An extra per-row marker at the row's tail, after the label-tail
+  // wrapper: the right-sidebar panel flags a missing store file. Undefined
+  // rows render nothing; the private face passes none.
   badgeFor?: (d: WorkingSetRow) => ReactNode;
   // The delete confirm's title copy slot (see WorkingSetDeleteDialog); the
   // private face keeps its working-set wording.

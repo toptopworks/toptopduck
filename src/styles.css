@@ -104,12 +104,17 @@
 
 /* Working-set tab grid (legacy .layout). ADR-0067 Decision 1: a two-column
    master-detail grid is layout semantics, not a utility long-string, so the
-   grid stays here; per-consumer margins live on the consumer
-   (SessionPane RightSidebarWorkingSet) as utility. Single consumer. The master
-   track is minmax(280px, 2fr) -- a 280px floor in the 320-600px sidebar band
-   that flexes to a 2:3 share on a widened/maximized sidebar, so long dataset
-   names (the list row truncates first) gain the width instead of feeding an
-   ever-wider detail column. The detail track is minmax(0, 3fr) and the panels
+   grid stays here; per-consumer margins live on the consumer as utility. Two
+   consumers: the session pane's RightSidebarWorkingSet (inside the
+   .session-right-sidebar container, so the stacking query below applies to
+   it) and the workspace datasets dialog (outside any right-sidebar container
+   -- it keeps the two-column shape at every width, its master column now
+   flexing with the dialog, accepted). The master track is minmax(280px, 2fr)
+   -- a 280px floor that binds while the 2fr share stays under 280px (the
+   600-720px band, just above the stacking query), flexing to a 2:3 share on
+   a widened/maximized sidebar, so long dataset names (the list row truncates
+   first) gain the width instead of feeding an ever-wider detail column. The
+   detail track is minmax(0, 3fr) and the panels
    carry min-width: 0 -- a bare fr track resolves its automatic minimum to the
    content's min-content, so a wide dataset (a 40-column preview table)
    re-widens the column into right-sidebar-body overflow instead of scrolling
