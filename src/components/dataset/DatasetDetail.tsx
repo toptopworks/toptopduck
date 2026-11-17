@@ -83,17 +83,13 @@ export function DatasetDetail({
       : sample && sample.rows.length > 0
         ? ("table" as const)
         : null;
-  // The origin sentence (issue #1597): one wording per derived origin; a
-  // de-conflicted shared alias names its manifest entry, a same-name attach
-  // needs no alias arm, and a plain descriptor (the manifest face) renders
-  // no line at all.
+  // The origin line (issue #1597): derived origins only -- shared names its
+  // manifest entry (a de-conflicted alias adds the reference arm) and
+  // materialized states its SQL birth. An uploaded row IS the session
+  // default, so it renders no line (neither does the manifest face's plain
+  // descriptor).
   const originSentence = (() => {
     switch (dataset.provenance) {
-      case "uploaded":
-        return intl.formatMessage({
-          id: "workingSet.detail.provenance.uploaded",
-          defaultMessage: "Uploaded in this session",
-        });
       case "shared": {
         const entry = dataset.shared_entry_name ?? dataset.reference_name;
         return dataset.reference_name !== entry
@@ -101,7 +97,7 @@ export function DatasetDetail({
               {
                 id: "workingSet.detail.provenance.shared",
                 defaultMessage:
-                  "From the workspace shared dataset \"{entry}\", attached in this session as \"{alias}\"",
+                  "From the workspace shared dataset \"{entry}\", referenced in this session as \"{alias}\"",
               },
               { entry, alias: dataset.reference_name },
             )
@@ -113,10 +109,12 @@ export function DatasetDetail({
       case "materialized":
         return intl.formatMessage({
           id: "workingSet.detail.provenance.materialized",
-          defaultMessage: "Materialized SQL result (this session)",
+          defaultMessage: "SQL query result materialized in this session",
         });
+      case "uploaded":
       case undefined:
-        // The manifest face (a plain descriptor): no origin line at all.
+        // An uploaded row is the session default -- no origin line; the
+        // manifest face (a plain descriptor) likewise carries none.
         return null;
       default: {
         // Exhaustiveness guard: `dataset.provenance` narrows to never here,

@@ -277,14 +277,14 @@ describe("DatasetDetail size line (issue #1485)", () => {
 });
 
 describe("DatasetDetail origin line (issue #1597)", () => {
-  it("renders the session-upload sentence for an uploaded row", () => {
+  it("renders no origin line for an uploaded row (the session default)", () => {
     renderI18n(
       <DatasetDetail
         dataset={{ ...mockDataset, provenance: "uploaded" }}
         {...LOADED_PREVIEW}
       />,
     );
-    expect(screen.getByText("本会话上传")).toBeInTheDocument();
+    expect(screen.queryByText("本会话上传")).toBeNull();
   });
 
   it("renders the shared origin with the alias cross-reference when the alias differs", () => {
@@ -300,7 +300,7 @@ describe("DatasetDetail origin line (issue #1597)", () => {
       />,
     );
     expect(
-      screen.getByText("来自工作区共享数据集「people」，本会话挂名「people_2」"),
+      screen.getByText("来自工作区共享数据集「people」，本会话中以「people_2」引用"),
     ).toBeInTheDocument();
   });
 
@@ -325,7 +325,7 @@ describe("DatasetDetail origin line (issue #1597)", () => {
         {...LOADED_PREVIEW}
       />,
     );
-    expect(screen.getByText("SQL 物化结果（本会话）")).toBeInTheDocument();
+    expect(screen.getByText("本会话内 SQL 查询物化的结果")).toBeInTheDocument();
   });
 
   it("renders no origin line for a plain descriptor (the manifest face carries no origin)", () => {
