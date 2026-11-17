@@ -102,19 +102,22 @@
    scenegraph (and the #1093 exports) are unaffected. */
 .viz-chart svg { max-width: 100%; height: auto; }
 
-/* Working-set tab grid (legacy .layout). ADR-0067 Decision 1: a 280px/1fr
-   two-column master-detail grid is layout semantics, not a utility long-string,
-   so the grid stays here; per-consumer margins live on the consumer
-   (SessionPane RightSidebarWorkingSet) as utility. Single consumer. The detail
-   track is minmax(0, 1fr) and the panels carry min-width: 0 -- a bare 1fr
-   track resolves its automatic minimum to the content's min-content, so a
-   wide dataset (a 40-column preview table) re-widens the column into
-   right-sidebar-body overflow instead of scrolling inside the Table primitive's
-   overflow-x-auto container (ADR-0057). Same pin the narrow fallback below
-   carries. */
+/* Working-set tab grid (legacy .layout). ADR-0067 Decision 1: a two-column
+   master-detail grid is layout semantics, not a utility long-string, so the
+   grid stays here; per-consumer margins live on the consumer
+   (SessionPane RightSidebarWorkingSet) as utility. Single consumer. The master
+   track is minmax(280px, 2fr) -- a 280px floor in the 320-600px sidebar band
+   that flexes to a 2:3 share on a widened/maximized sidebar, so long dataset
+   names (the list row truncates first) gain the width instead of feeding an
+   ever-wider detail column. The detail track is minmax(0, 3fr) and the panels
+   carry min-width: 0 -- a bare fr track resolves its automatic minimum to the
+   content's min-content, so a wide dataset (a 40-column preview table)
+   re-widens the column into right-sidebar-body overflow instead of scrolling
+   inside the Table primitive's overflow-x-auto container (ADR-0057). Same pin
+   the narrow fallback below carries. */
 .layout {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: minmax(280px, 2fr) minmax(0, 3fr);
   gap: 1.25rem;
 }
 .layout > .panel { min-width: 0; }
@@ -122,7 +125,7 @@
 /* Narrow-right-sidebar fallback (issue #791): .session-right-sidebar is an
    inline-size container (rule with .session-right-sidebar below); when the
    panel lands in the 320px track floor (issue #770) to 600px band, the
-   280px/1fr pair starves the detail column (280px list + 1.25rem gap), so
+   master track's 280px floor + the 1.25rem gap starve the detail column, so
    the grid stacks one column -- list first, detail below (DOM order).
    minmax(0, 1fr) + the items' min-width: 0 pin the track and the panels
    to the container's free space (a bare 1fr track and the items' auto

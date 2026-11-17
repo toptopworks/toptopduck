@@ -789,11 +789,12 @@ describe("WorkingSetList", () => {
   });
 
   it("badges a shared row with the alias-to-entry sentence on the tooltip (issue #1597)", async () => {
-    // The origin badge is the short "共享" pill beside the stale chip's slot;
-    // the alias-to-entry sentence -- the de-conflicted session alias (people_2)
-    // against its manifest entry (people) -- rides the tooltip AND the
-    // aria-label (the #1062 one-source pattern), so the keyboard path and the
-    // hover path can never drift apart.
+    // The origin badge is the hardcoded "S" monogram pill after the label
+    // (locale-neutral literal, no i18n key); the short 共享数据集 label rides
+    // the tooltip AND the aria-label (the #1062 one-source pattern), so the
+    // keyboard path and the hover path can never drift apart. The aliased
+    // fixture shape renders the same short label -- the alias cross-reference
+    // retired with the letter swap (the full origin lives on the detail face).
     const aliased = {
       ...mockDataset,
       reference_name: "people_2",
@@ -811,15 +812,10 @@ describe("WorkingSetList", () => {
         onRename={() => {}}
       />,
     );
-    const badge = screen.getByText("共享").closest(".provenance-badge")!;
-    expect(badge).toHaveAttribute(
-      "aria-label",
-      "工作区共享「people」 · 本会话挂名「people_2」",
-    );
+    const badge = screen.getByText("S").closest(".provenance-badge")!;
+    expect(badge).toHaveAttribute("aria-label", "共享数据集");
     fireEvent.pointerMove(badge);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "工作区共享「people」 · 本会话挂名「people_2」",
-    );
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("共享数据集");
   });
 
   it("badges a same-name shared row with the plain sentence (issue #1597)", async () => {
@@ -843,16 +839,16 @@ describe("WorkingSetList", () => {
         onRename={() => {}}
       />,
     );
-    const badge = screen.getByText("共享").closest(".provenance-badge")!;
-    expect(badge).toHaveAttribute("aria-label", "工作区共享「people」");
+    const badge = screen.getByText("S").closest(".provenance-badge")!;
+    expect(badge).toHaveAttribute("aria-label", "共享数据集");
     fireEvent.pointerMove(badge);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("工作区共享「people」");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("共享数据集");
   });
 
   it("badges a materialized row and leaves an uploaded row quiet (issue #1597)", () => {
-    // The three origins diverge: a materialized result carries the 物化 pill
-    // (its sentence needs no cross-reference), an uploaded source renders no
-    // badge at all -- the quiet default.
+    // The three origins diverge: a materialized result carries the "M"
+    // monogram pill (its sentence needs no cross-reference), an uploaded
+    // source renders no badge at all -- the quiet default.
     const materialized = {
       ...mockDataset,
       reference_name: "result_1",
@@ -869,8 +865,8 @@ describe("WorkingSetList", () => {
         onRename={() => {}}
       />,
     );
-    expect(screen.getByText("物化")).toBeInTheDocument();
-    expect(screen.queryByText("共享")).toBeNull();
+    expect(screen.getByText("M")).toBeInTheDocument();
+    expect(screen.queryByText("S")).toBeNull();
   });
 
   it("renders the row-count plural 'one' branch via the en defaultMessage (ADR-0052)", () => {
@@ -1190,15 +1186,14 @@ describe("WorkingSetList", () => {
     const classes = pill.className.split(/\s+/);
     expect(classes).toContain("absolute");
     // The pill anchors to the label-tail wrapper's trailing edge: right-1 +
-    // z-10 float it over the label's tail, clear of the chip that follows in
-    // flow (see the DOM-order pin in the stale-chip layout test).
+    // z-10 float it over the row-count zone, whose small fades under the
+    // revealed pill (see the DOM-order pin in the stale-chip layout test).
     expect(classes).toContain("right-1");
     expect(classes).toContain("z-10");
     // The pill carries no ground: the hover band underneath (the li's
     // transit tint) shows straight through, so the strip reads as part of
     // the row -- a translucent pill would double-tint the band, an opaque
-    // one can never match an alpha band. The label keeps clear via the
-    // select button's static pr-24 reserve.
+    // one can never match an alpha band.
     expect(classes).not.toContain("bg-transit");
     expect(classes).not.toContain("bg-card");
     expect(classes).not.toContain("shadow-md");
@@ -1395,30 +1390,46 @@ describe("WorkingSetList", () => {
     // jsdom has no layout engine, so the guard pins the DOM order and the
     // class contract the single-line layout depends on: the label-tail
     // wrapper (select button + the overlay pill with the three icon actions
-    // anchored inside it) first, then the short chip as the row's trailing
-    // flow child -- the pill's anchor stays structurally clear of the chip,
-    // so the chip keeps its hover beside the revealed pill (#865). The #790
-    // shape (basis-full badge wrapping onto its own line via flex-wrap) is
-    // retired with #793 -- the chip is a shrink-0 inline peer that never
-    // compresses and never needs to wrap, so the row stays one flex line.
+    // anchored inside it) is the row's only flow child, and the row's info
+    // group (origin badge / stale chip / row count) rides INSIDE the select
+    // button after the label -- the count is the group's last member and the
+    // pill's cover target, so it fades under the same two reveal conditions
+    // the pill has (row hover / focus inside the pill; the session sidebar's
+    // actions-over-timestamp posture). The #790 shape (basis-full badge
+    // wrapping onto its own line via flex-wrap) stays retired -- the chips
+    // are shrink-0 inline peers that never compress, so the row stays one
+    // flex line.
     const row = screen.getByRole("button", { name: /^people/ }).closest("li")!;
     const rowClasses = row.className.split(/\s+/);
     expect(rowClasses).toContain("flex");
     expect(rowClasses).not.toContain("flex-wrap");
     const children = [...row.children];
-    expect(children).toHaveLength(2);
+    expect(children).toHaveLength(1);
     const wrapper = children[0];
     expect(wrapper.tagName).toBe("DIV");
     expect(wrapper.className.split(/\s+/)).toContain("flex-1");
-    expect(wrapper.querySelector("button")).not.toBeNull();
+    const button = wrapper.querySelector("button")!;
     const pill = wrapper.children[wrapper.children.length - 1];
     expect(pill.tagName).toBe("DIV");
+    // The pill's hook class is what the count's has() hide leg scopes to.
+    expect(pill.className.split(/\s+/)).toContain("working-set-row-actions");
     expect(pill.querySelectorAll("button")).toHaveLength(3);
-    const badge = children[children.length - 1];
+    const badge = button.querySelector(".stale-badge")!;
     const badgeClasses = badge.className.split(/\s+/);
-    expect(badgeClasses).toContain("stale-badge");
     expect(badgeClasses).toContain("shrink-0");
     expect(badgeClasses).not.toContain("basis-full");
+    const count = button.querySelector("small")!;
+    const countClasses = count.className.split(/\s+/);
+    expect(countClasses).toContain("group-hover:opacity-0");
+    expect(countClasses).toContain(
+      "group-has-[.working-set-row-actions_:focus-visible]:opacity-0",
+    );
+    // The badge and the count both trail the label inside the button, count
+    // last (the row's far right).
+    const order = [...button.children].map((el) => el.className);
+    expect(order.indexOf(count.className)).toBeGreaterThan(
+      order.indexOf(badge.className),
+    );
   });
 
   it("retires the ' · current table' suffix; the active fact rides the bold label alone (issue #793)", () => {
