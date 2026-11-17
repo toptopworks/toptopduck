@@ -1270,7 +1270,7 @@ export default function App() {
                           selection binds the session the bar is about to
                           mint; with a session active the binding is
                           immutable, so the selector would be a dead
-                          control. The ChatGPT/WorkBuddy pedestal: a fully
+                          control. The pedestal posture: a fully
                           rounded strip, inset on both flanks, whose top
                           slides BEHIND the card (negative margin; the card
                           is positioned and paints above this unpositioned

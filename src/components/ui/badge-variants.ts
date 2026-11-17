@@ -24,7 +24,13 @@ export const badgeVariants = cva(
         default:
           "border-transparent bg-primary text-primary-foreground [a&]:hover:bg-primary/90",
         secondary:
-          "border-transparent bg-secondary text-secondary-foreground [a&]:hover:bg-secondary/80",
+          // The dark lift rides a white-alpha layer, not --secondary: that
+          // token (#232723) sits ~1.2:1 on the dark card (#181b18), which
+          // reads as no chip at all (the transit calibration's "lift off
+          // the deepest floor" law). 8% white lands ~#2b2e2b on card -- a
+          // quiet but clearly-visible step (face luminance 44 over the
+          // card's 26).
+          "border-transparent bg-secondary text-secondary-foreground dark:bg-white/[0.08] [a&]:hover:bg-secondary/80",
         destructive:
           "border-transparent bg-destructive text-white [a&]:hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40",
         outline:

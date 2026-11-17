@@ -338,7 +338,10 @@ export function NameBadge({
         "shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none",
         variant === "destructive" && "bg-destructive text-white",
         variant === "success" && "bg-green-500/10 text-green-600 dark:text-green-400",
-        variant === "default" && "bg-muted text-muted-foreground",
+        // Same dark lift as badge-variants secondary: bg-muted (#232723) is
+        // invisible on the dark card floor; 8% white restores the chip at
+        // a quiet, clearly-visible step.
+        variant === "default" && "bg-muted text-muted-foreground dark:bg-white/[0.08]",
       )}
     >
       {children}
