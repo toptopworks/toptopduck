@@ -725,9 +725,7 @@ describe("SessionPane composer queue behind an in-flight replace (#1512)", () =>
     expect(askQuestion).not.toHaveBeenCalled();
 
     // The swap lands -> the flight verdict true -> auto-send, and the rail
-    // line clears with the settle (asserted by text: the auto-sent turn's
-    // own wait-status line is a second role="status" element, so the role
-    // query never returns to null).
+    // line clears with the settle (asserted by text).
     await act(async () => {
       resolveReplace({ kind: "Loaded", data: replaceDataset });
     });

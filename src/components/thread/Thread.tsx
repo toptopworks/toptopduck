@@ -142,9 +142,8 @@ interface ThreadProps {
 // reference across renders (the module-level-constant convention the sidebar
 // / pane use for their empty defaults).
 const NOOP_RESPOND: (requestId: string, response: ApprovalResponse) => void = () => {};
-// The empty fold-posture set, module-level for the same identity-stability
-// reason (the live swap's collector starts and resets to it).
-// The empty lifecycle-fold posture set (issue #737), same convention.
+// The empty lifecycle-fold posture set (issue #737), module-level for
+// identity stability (the collector starts and resets to it).
 const NO_EXPANDED_LIFECYCLE_FOLDS: ReadonlySet<number> = new Set();
 
 export function Thread({
@@ -196,11 +195,10 @@ export function Thread({
   // read once at submit and constant within the turn, so it IS the turn
   // identity. Adjusted during render -- the React-blessed "state on prop
   // change" pattern, no effect (an effect would land a frame too late for
-  // the seed below, which must ride the swap's mounting frame).
+  // the seed below, which must ride the swap's mounting frame). The line's
+  // report lands directly on the setter (referentially stable, so the
+  // report effect never re-fires on identity churn).
   const [liveActivityExpanded, setLiveActivityExpanded] = useState(false);
-  const handleLiveActivityExpanded = useCallback((expanded: boolean) => {
-    setLiveActivityExpanded(expanded);
-  }, []);
   const [prevAskedAt, setPrevAskedAt] = useState<number | null>(null);
   const askedAt = liveTurn?.askedAt ?? null;
   if (prevAskedAt !== askedAt) {
@@ -209,7 +207,6 @@ export function Thread({
       setLiveActivityExpanded(false);
     }
   }
-  const activitySeed = liveTurn === null && liveActivityExpanded ? true : undefined;
   // The index of the last recorded turn -- on the swap frame this is the
   // optimistic append the settle just landed (the timeline's tail turn).
   let lastTurnIdx = -1;
@@ -417,7 +414,7 @@ export function Thread({
                   // swap-frame detection is needed -- only the last turn
                   // entry is a fresh mount while no turn runs.
                   processInitiallyExpanded={
-                    liveTurn === null && i === lastTurnIdx && activitySeed !== undefined
+                    liveTurn === null && i === lastTurnIdx && liveActivityExpanded
                       ? true
                       : undefined
                   }
@@ -533,7 +530,7 @@ export function Thread({
           mentionedDataset={findMentionedDataset(liveTurn.question, datasetLabels)}
           onRespondApproval={onRespondApproval}
           onLoadApprovalAttachments={onLoadApprovalAttachments}
-          onActivityExpandedChange={handleLiveActivityExpanded}
+          onActivityExpandedChange={setLiveActivityExpanded}
         />
       )}
     </section>

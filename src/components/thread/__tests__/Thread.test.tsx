@@ -1966,6 +1966,78 @@ describe("Thread", () => {
       expect(processHead).toHaveAttribute("aria-expanded", "false");
       expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
     });
+
+    it("the posture survives identity churn and never leaks across turns (issue #1606)", () => {
+      // Two edges, one behavior: the posture must SURVIVE every progress
+      // re-render (a new liveTurn identity under the same askedAt -- an
+      // identity edge would wipe the seed mid-turn), and one turn's open
+      // line must not seed the NEXT turn's process fold. The fresh-ask
+      // reset is defense in depth: the new line's mount report (folded)
+      // carries the posture back to false either way, so this pins the
+      // behavior, not one mechanism.
+      const cancelledRecord = (question: string): TurnRecord => ({
+        question,
+        outcome: { kind: "Cancelled", data: null },
+        trace: [
+          {
+            calls: [
+              {
+                name: "explore",
+                operation_kind: "read",
+                summary: "SELECT 1",
+                success: true,
+                result_excerpt: "",
+              },
+            ],
+          },
+        ],
+        provenance: { skills: [] },
+      });
+      const turnOne: LiveTurn = {
+        question: "q1",
+        askedAt: ASKED_AT,
+        invocationNames: [],
+        step: 1,
+        rounds: [liveRound({ rows: [liveRow({ key: "call-0", running: false, success: true })] })],
+      };
+      const { rerender } = renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={turnOne} />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "思考中…" }));
+      // A progress event re-renders under a NEW liveTurn identity but the
+      // SAME submit stamp -- the posture survives (the identity must not
+      // be the reset edge).
+      rerender(
+        threadTree({
+          entries: [],
+          liveTurn: { ...turnOne, step: 2, rounds: [...turnOne.rounds, liveRound({})] },
+        }),
+      );
+      rerender(threadTree({ entries: [turnEntry(cancelledRecord("q1"))], liveTurn: null }));
+      expect(screen.getByRole("button", { name: /已取消/ })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+      // A FRESH ask (a new askedAt) resets the posture: the second turn's
+      // line never expanded, so its settle lands collapsed -- the first
+      // turn's open posture does not leak forward.
+      const turnTwo: LiveTurn = {
+        question: "q2",
+        askedAt: ASKED_AT + 1000,
+        invocationNames: [],
+        step: 1,
+        rounds: [liveRound({ rows: [liveRow({ key: "call-1", running: false, success: true })] })],
+      };
+      rerender(threadTree({ entries: [turnEntry(cancelledRecord("q1"))], liveTurn: turnTwo }));
+      rerender(
+        threadTree({
+          entries: [turnEntry(cancelledRecord("q1")), turnEntry(cancelledRecord("q2"))],
+          liveTurn: null,
+        }),
+      );
+      const heads = screen.getAllByRole("button", { name: /已取消/ });
+      expect(heads[heads.length - 1]).toHaveAttribute("aria-expanded", "false");
+    });
   });
 
   describe("result preview card (ADR-0083 / ADR-0026, issue #298)", () => {

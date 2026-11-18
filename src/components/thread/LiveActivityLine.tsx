@@ -13,15 +13,12 @@
 // reveal line, liveRoundRevealed): their completed calls ride the head's
 // count, their thinking + calls sit in the expand face, the running call
 // is absorbed by the head. Sealed rounds -- everything the last prose
-// section covers -- land as fold lines in the exchange, NOT here. The
-// face rotates between the thinking phase and the running call ONLY: the
-// streaming tail steps the line aside (the prose + caret carry the
-// liveness; an output face beside visibly streaming text doubled the
-// signal and flipped against the thinking face -- the device ruling).
-// With nothing behind the fold -- no thinking, no rows in the line's
-// rounds -- the line is a plain status line: no hover, no click (the
-// user ruling). The expand posture seeds the settled turn-level process
-// fold across the swap.
+// section covers -- land as fold lines in the exchange, NOT here.
+// With nothing behind the fold -- no thinking, no settled or running row
+// in the line's rounds (a lone pending card does not count: the card
+// renders at the tail, outside the fold) -- the line is a plain status
+// line: no hover, no click (the user ruling). The expand posture seeds
+// the settled turn-level process fold across the swap.
 
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
@@ -29,6 +26,7 @@ import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { FoldToggle } from "./FoldToggle";
 import { ThinkingFold } from "./ThinkingFold";
 import { LiveRow } from "./TraceView";
+import { TraceList } from "./TraceList";
 import { isRoundTripWait, isSettledRow } from "../../session/useTurnFlow";
 import type { ApprovalResponse, FileAttachment, OperationKind } from "../../types/approval";
 import type { LiveTurn } from "../../session/useTurnFlow";
@@ -84,7 +82,9 @@ export function LiveActivityLine({
   /** Reports the line's posture whenever it changes (mount included) --
    *  the collector no-ops a report matching its current state. Pass a
    *  stable callback: the report effect re-fires on identity churn
-   *  otherwise. */
+   *  otherwise. The effect deliberately has no cleanup: unmounting must
+   *  NOT re-report, or the settle seed would read the last posture wrong
+   *  -- leave the report un-cleaned. */
   onExpandedChange: (expanded: boolean) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -103,21 +103,23 @@ export function LiveActivityLine({
   const lineRows = lineRounds.flatMap((round) => round.rows);
   const completedCount = lineRows.filter(isSettledRow).length;
   const running = allRows.find((row) => row.running);
-  // The gate hold (a pending approval card holds the turn): the activity
-  // line KEEPS the tool face -- the call is about to run, and the card (the
-  // answer surface) renders beside it; the line vanishing entirely read as
-  // the process dying on the device. The verb keeps the last activity kind
-  // (the pending call's own kind when nothing completed yet).
-  const gateHold = !running && allRows.some((row) => row.approval !== null && row.approval.response === null);
+  // The gate hold (an approval-channel row the gateway has not completed):
+  // the activity line KEEPS the tool face while a pending card waits (the
+  // call is about to run, the card -- the answer surface -- beside it; the
+  // line vanishing entirely read as the process dying on the device) and,
+  // by the same mechanism, while a resolved row awaits its completion
+  // event (a deny between its optimistic resolve and the gateway's
+  // completed broadcast) or an abandoned call rides the turn forever
+  // (#1267) -- those rows are not settled, so the fold faces admit none
+  // of them and the held face plus the tail badge row are their surfaces.
+  // The verb names the held row's own kind -- the imminent activity for a
+  // pending card; a denial's completion is a network window away.
+  const heldRow = allRows.find(
+    (row) => row.approval !== null && !isSettledRow(row) && !row.running,
+  );
+  const gateHold = !running && heldRow !== undefined;
   const toolKind: OperationKind | undefined =
-    running?.operationKind ??
-    (gateHold
-      ? // The pending call IS the imminent activity -- its kind names the
-        // face; with none (never possible in practice), the last completed.
-        (allRows.find((row) => row.approval !== null && row.approval.response === null)
-          ?.operationKind ??
-          [...allRows].reverse().find(isSettledRow)?.operationKind)
-      : undefined);
+    running?.operationKind ?? (gateHold ? heldRow?.operationKind : undefined);
   const waiting = isRoundTripWait(liveTurn);
   // The tool face's presence and verb, one piece of state: faceKind is the
   // verb while the face shows the tool side, undefined while the thinking
@@ -215,31 +217,32 @@ export function LiveActivityLine({
           {face}
         </div>
       )}
-      {expanded && (
+      {expanded &&
         // The fold's face: the line's rounds (after the last prose
-        // section) -- per round, the thinking fold then its call rows
-        // laid flat; the running call unfurls in its round. Revealed
-        // rounds never render here -- they live at their sections.
-        lineRounds.map((round, i) => (
-          <div key={i + 1} className="trace-round max-w-full">
-            {round.thinking !== undefined && <ThinkingFold thinking={round.thinking} />}
-            {round.rows
-              .filter((row) => isSettledRow(row) || row.running)
-              .map((row) => (
-                // LiveRow for every row: the settled face renders the
-                // ordinary TraceRow with the resolved-approval badge riding
-                // afterName (a deny's answer marker survives the fold), and
-                // a running row renders its spinner face.
-                <LiveRow
-                  key={row.key}
-                  row={row}
-                  onRespond={onRespond}
-                  onLoadAttachments={onLoadAttachments}
-                />
-              ))}
-          </div>
-        ))
-      )}
+        // section) -- per round, the thinking fold then its call rows on
+        // the shared left-rail list (the settled face's chrome); the
+        // running call unfurls in its round. Revealed rounds never render
+        // here -- they live at their sections.
+        lineRounds.map((round, i) => {
+          const rows = round.rows.filter((row) => isSettledRow(row) || row.running);
+          return (
+            <div key={i + 1} className="trace-round max-w-full">
+              {round.thinking !== undefined && <ThinkingFold thinking={round.thinking} />}
+              {rows.length > 0 && (
+                <TraceList>
+                  {rows.map((row) => (
+                    <LiveRow
+                      key={row.key}
+                      row={row}
+                      onRespond={onRespond}
+                      onLoadAttachments={onLoadAttachments}
+                    />
+                  ))}
+                </TraceList>
+              )}
+            </div>
+          );
+        })}
     </>
   );
 }

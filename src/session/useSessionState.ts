@@ -90,9 +90,10 @@ export interface UseSessionState {
    *  (ADR-0051 single truth: the thread holds completed TurnRecords; phase is
    *  a transient hint). Drives the QuestionBar's compact label. */
   phase: TurnPhase | null;
-  /** The in-flight turn's live trace (ADR-0078, issue #297): the rail renders
-   *  it as a progressive turn card (question + tool-call rows + approval
-   *  cards). null when no turn is running. Client UI state only; folds into
+  /** The in-flight turn's live trace (ADR-0078, issue #297; process face
+   *  ADR-0151): the rail renders it as a live chat exchange (question +
+   *  prose segments + the activity line + sealed folds). null when no turn
+   *  is running. Client UI state only; folds into
    *  the optimistic TurnRecord.trace when the turn settles. */
   liveTurn: LiveTurn | null;
   /** The turn clock (issue #1264 turn-clock ruling): the bar's phase label

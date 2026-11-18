@@ -199,7 +199,7 @@ export function TurnCard({
     >
       <TurnProcessFold
         trace={record.trace}
-        initialExpanded={processInitiallyExpanded ?? false}
+        initialExpanded={processInitiallyExpanded}
         label={outcome.label}
         askedAt={record.asked_at}
         settledAt={record.settled_at}

@@ -1,16 +1,17 @@
 // The swap-stable round skeleton (ADR-0103 live isomorphism, issues
-// #610/#620): the settled TraceRoundBlock and the streaming LiveRoundBlock
-// mount the SAME wrapper + empty guard + thinking fold + connective prose, so
-// the settle swap does not move them. The round's third member -- the tool
-// rows -- is genuinely different (the settled step fold + subtrace slot vs
-// the live streaming rows) and rides the `children` slot. The max-w-full cap
+// #610/#620): the settled TraceRoundBlock and the live exchange's prose
+// sections mount the SAME wrapper + connective prose, so the settle swap
+// does not move them. The settled round's other members ride this module
+// too (the thinking fold below) or the `children` slot (the step fold +
+// subtrace); the live side mounts it prose-only (ADR-0151 -- the live
+// calls and thinking live in the activity line and the sealed fold lines,
+// not in per-round blocks). The max-w-full cap
 // is unconditional: a non-stretched flex item (the stream's items-start)
 // sizes its width by fit-content, which floors at min-content -- a nowrap
 // summary then stretches the round past the card instead of truncating, and
 // the cap hands the overflow back to the row's truncate (issue #826). Absent
 // members render nothing (honest degrade: an entirely empty round -> no
-// chrome at all); the guard consumes a falsy `children`, so adapters pass
-// `rows.length > 0 && <...>` rather than hoisting the emptiness check.
+// chrome at all); the guard consumes a falsy `children`.
 
 import type { ReactNode } from "react";
 import { RoundProse, type RoundProseMode } from "./RoundProse";

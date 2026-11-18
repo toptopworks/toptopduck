@@ -42,19 +42,20 @@ import { type DatasetLabel } from "./turn-visual";
 
 // The sealed segment's fold line (ADR-0151): everything between two prose
 // sections lands as ONE line -- "Completed · N calls" -- clickable to the
-// segment's thinking folds + call rows in settle order. One line per
-// sealed segment is the progressive feel (a long call-only stretch
-// between two prose sections never dumps a block per round); the fold
-// keeps its own session-ephemeral state and does not seed the settled
-// process fold.
+// segment's thinking folds + call rows in settle order (the rows on the
+// shared left-rail list, the settled face's chrome). One line per sealed
+// segment is the progressive feel (a long call-only stretch between two
+// prose sections never dumps a block per round); the fold keeps its own
+// session-ephemeral state and does not seed the settled process fold.
 function RoundSegmentFold({
   rounds,
-  roundIdxs,
   onRespond,
   onLoadAttachments,
 }: {
+  /** The segment's rounds, pre-sliced by the caller -- the fold never
+   *  indexes back into the turn's array, so no cross-prop invariant
+   *  exists to keep. */
   rounds: LiveRound[];
-  roundIdxs: number[];
   onRespond: (requestId: string, response: ApprovalResponse) => void;
   /** Pulls the full (uncapped) file values for a pending approval card
    * (issue #1009); optional -- absent loaders keep the capped broadcast
@@ -63,8 +64,8 @@ function RoundSegmentFold({
 }) {
   const [expanded, setExpanded] = useState(false);
   const intl = useIntl();
-  const callCount = roundIdxs.reduce(
-    (n, i) => n + rounds[i]!.rows.filter(isSettledRow).length,
+  const callCount = rounds.reduce(
+    (n, round) => n + round.rows.filter(isSettledRow).length,
     0,
   );
   return (
@@ -79,21 +80,23 @@ function RoundSegmentFold({
         )}
       </FoldToggle>
       {expanded &&
-        roundIdxs.map((i) => {
-          const round = rounds[i]!;
+        rounds.map((round, i) => {
+          const rows = round.rows.filter(isSettledRow);
           return (
             <Fragment key={i + 1}>
               {round.thinking !== undefined && <ThinkingFold thinking={round.thinking} />}
-              {round.rows
-                .filter(isSettledRow)
-                .map((row) => (
-                  <LiveRow
-                    key={row.key}
-                    row={row}
-                    onRespond={onRespond}
-                    onLoadAttachments={onLoadAttachments}
-                  />
-                ))}
+              {rows.length > 0 && (
+                <TraceList>
+                  {rows.map((row) => (
+                    <LiveRow
+                      key={row.key}
+                      row={row}
+                      onRespond={onRespond}
+                      onLoadAttachments={onLoadAttachments}
+                    />
+                  ))}
+                </TraceList>
+              )}
             </Fragment>
           );
         })}
@@ -130,24 +133,36 @@ export function LiveTurnExchange({
   // round) -- the thinking phase rides the line's folded face, so the
   // retired trailing status line's duty merged into it.
   const tailIndex = liveTurn.rounds.length - 1;
-  // The gate-pending cards render at the turn tail, always visible (ADR-0083's
-  // flow face): a card is never folded into the activity line.
-  const pendingRows = liveTurn.rounds
+  // The turn-tail rows that stay OUTSIDE every fold (ADR-0083's flow face):
+  // the gate-pending approval cards, plus the terminal-approved rows whose
+  // calls never completed -- a gate-denied call between its optimistic
+  // resolve and the gateway's completion event, an abandoned call forever
+  // (#1267). The fold faces admit only settled rows, so this tail is the
+  // one surface keeping those answer markers visible; a running approved
+  // call is the activity line's to absorb (the head or its expand face),
+  // not a tail row.
+  const tailRows = liveTurn.rounds
     .flatMap((round) => round.rows)
-    .filter((row) => row.approval !== null && row.approval.response === null);
+    .filter(
+      (row) =>
+        row.approval !== null &&
+        !isSettledRow(row) &&
+        (row.approval.response === null || !row.running),
+    );
   // Segment the rounds at prose boundaries: a round with text opens a
   // segment; call-only rounds join the one before (leading call-only
   // rounds form a prose-less head segment). The last prose-bearing
   // segment is the activity line's domain; every segment BEFORE it is
   // sealed -- it lands as ONE aggregate fold line under its own prose
   // (the device ruling: one line per sealed stretch, never a block per
-  // round).
-  const segments: { proseRound: number; roundIdxs: number[] }[] = [];
+  // round). The segments carry their rounds pre-sliced.
+  const segments: { proseRound: number; rounds: LiveRound[] }[] = [];
   liveTurn.rounds.forEach((round, i) => {
-    if (round.text !== undefined || segments.length === 0) {
-      segments.push({ proseRound: round.text !== undefined ? i : -1, roundIdxs: [i] });
+    const last = segments[segments.length - 1];
+    if (round.text !== undefined || last === undefined) {
+      segments.push({ proseRound: round.text !== undefined ? i : -1, rounds: [round] });
     } else {
-      segments[segments.length - 1]!.roundIdxs.push(i);
+      last.rounds.push(round);
     }
   });
   const lastProseSegment = segments.reduce(
@@ -184,8 +199,7 @@ export function LiveTurnExchange({
             )}
             {k < lastProseSegment && (
               <RoundSegmentFold
-                rounds={liveTurn.rounds}
-                roundIdxs={segment.roundIdxs}
+                rounds={segment.rounds}
                 onRespond={onRespondApproval}
                 onLoadAttachments={onLoadApprovalAttachments}
               />
@@ -196,7 +210,8 @@ export function LiveTurnExchange({
       {/* ONE activity line for the whole turn, pinned after the rounds (a
           fresh turn with no rounds yet still mounts it -- the thinking
           face is the turn's first activity): the thinking phase, the
-          running call and the streaming tail rotate its face; its fold
+          running call rotate its face, the streaming tail steps it aside;
+          its fold
           holds the rounds after the last prose section (the count, the
           expand face) and its expand posture seeds the settled turn-level
           process fold across the settle swap (issue #1606). */}
@@ -206,9 +221,9 @@ export function LiveTurnExchange({
         onLoadAttachments={onLoadApprovalAttachments}
         onExpandedChange={onActivityExpandedChange}
       />
-      {pendingRows.length > 0 && (
+      {tailRows.length > 0 && (
         <TraceList>
-          {pendingRows.map((row) => (
+          {tailRows.map((row) => (
             <LiveRow
               key={row.key}
               row={row}

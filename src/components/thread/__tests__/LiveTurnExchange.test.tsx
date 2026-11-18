@@ -519,7 +519,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     }
   });
 
-  it("holds the tool face through the streaming window's grace, then reads the streaming face", () => {
+  it("holds the tool face through the streaming window's grace, then steps aside for the streaming tail", () => {
     vi.useFakeTimers();
     try {
       const view = renderExchange(midCallTurn());
@@ -618,7 +618,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     expect(screen.getByText("等待审批")).toBeInTheDocument();
   });
 
-  it("seals each prose-bounded segment into ONE aggregate fold line; the line keeps the suffix", () => {
+  it("seals each prose-bounded segment into ONE aggregate fold line; the count stays in the activity line", () => {
     const onActivityExpandedChange = vi.fn();
     const turn = liveTurnWith(undefined);
     turn.step = 4;
@@ -665,7 +665,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     const head = container.querySelector("button.process-toggle");
     expect(head?.textContent).toBe("正在写入 · 已完成 2 次调用");
     // Open the sealed segment: every round's thinking fold + call rows in
-    // settle order; the suffix stays in the activity line.
+    // settle order; the count stays in the activity line.
     fireEvent.click(roundToggles[0]!);
     expect(screen.getByText("思考 · 1.2s")).toBeInTheDocument();
     expect(screen.getByText("SELECT 1")).toBeInTheDocument();
@@ -692,5 +692,114 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     fireEvent.click(container.querySelector("button.process-toggle")!);
     expect(screen.getByText("SELECT 1")).toBeInTheDocument();
     expect(screen.getByText("SELECT 3")).toBeInTheDocument();
+  });
+
+  it("keeps a resolved-deny row visible at the tail until its completion lands", () => {
+    // The deny's optimistic resolve and the gateway's completion event
+    // (success false) are two commits; between them the row is neither
+    // pending nor settled, and the settled-only fold faces admit neither
+    // -- the tail is the one surface keeping the answer marker visible
+    // for that window (the marker used to vanish entirely).
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [
+      {
+        rows: [
+          {
+            key: "req-1",
+            name: "fetch",
+            server: "acme",
+            operationKind: "network",
+            summary: "GET /x",
+            approval: { requestId: "req-1", response: "deny" },
+            running: false,
+            success: null,
+            resultExcerpt: "",
+          },
+        ],
+      },
+    ];
+    const { container } = renderExchange(turn);
+    // The deny badge rides the row at the tail immediately -- no buttons
+    // remain (the card phase is over) and nothing doubles the row.
+    expect(screen.getByText("已拒绝")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "允许一次" })).not.toBeInTheDocument();
+    expect(container.querySelectorAll(".trace-row")).toHaveLength(1);
+    // The line holds the tool face under the un-completed approval row
+    // (the gate-hold extension: the deny's completion is a network window
+    // away), and the head counts only settled rows -- the deny row waits
+    // for its completion event. With nothing expandable behind the fold
+    // the line is the plain status face.
+    const line = container.querySelector(".process-toggle");
+    expect(line?.tagName).toBe("DIV");
+    expect(line?.textContent).toBe("正在联网 · 已完成 0 次调用");
+  });
+
+  it("keeps an abandoned call's row visible at the tail forever (#1267)", () => {
+    // The dropped call never completes -- no settled face will ever admit
+    // it -- so the tail keeps the abandoned marker for the rest of the
+    // turn (the marker used to have no surface at all).
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [
+      {
+        rows: [
+          settledRow({ key: "call-0", summary: "SELECT 1" }),
+          {
+            key: "req-1",
+            name: "fetch",
+            server: "acme",
+            operationKind: "network",
+            summary: "GET /x",
+            approval: { requestId: "req-1", response: "abandoned" },
+            running: false,
+            success: null,
+            resultExcerpt: "",
+          },
+        ],
+      },
+    ];
+    const { container } = renderExchange(turn);
+    expect(screen.getByText("已放弃")).toBeInTheDocument();
+    // The line holds the tool face under the abandoned row and keeps the
+    // settled call in its fold; the abandoned row rides the tail beside
+    // it, never inside the fold.
+    const head = container.querySelector("button.process-toggle");
+    expect(head?.textContent).toBe("正在联网 · 已完成 1 次调用");
+    fireEvent.click(head!);
+    expect(screen.getByText("SELECT 1")).toBeInTheDocument();
+    expect(container.querySelectorAll(".trace-row")).toHaveLength(2);
+  });
+
+  it("seals a leading call-only head segment under no prose (issue #1236)", () => {
+    // Rows may lead the slot arrays -- a turn can open with calls before
+    // any prose lands. The head segment is prose-less; a later prose
+    // section seals it into the same aggregate fold line, landing at its
+    // own top position.
+    const turn = liveTurnWith(undefined);
+    turn.step = 3;
+    turn.rounds = [
+      { rows: [settledRow({ key: "call-0", summary: "SELECT 1" })] },
+      { text: "先看一眼。", rows: [] },
+      { rows: [settledRow({ key: "call-1", summary: "SELECT 2" })] },
+    ];
+    const { container } = renderExchange(turn);
+    const roundToggles = container.querySelectorAll("button.round-toggle");
+    expect(roundToggles).toHaveLength(1);
+    expect(roundToggles[0]?.textContent).toBe("执行完成 · 1 次调用");
+    // The fold sits ABOVE the prose section (its own segment's position).
+    const prose = screen.getByText("先看一眼。");
+    expect(
+      roundToggles[0]!.compareDocumentPosition(prose) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // Open it: the head segment's call row lands on the shared left-rail
+    // list (the settled face's chrome); the line keeps the rounds after
+    // the prose (the count reads the one call there).
+    fireEvent.click(roundToggles[0]!);
+    expect(screen.getByText("SELECT 1")).toBeInTheDocument();
+    expect(container.querySelector(".round-toggle + ul.trace-list")).not.toBeNull();
+    fireEvent.click(container.querySelector("button.process-toggle")!);
+    expect(screen.getByText("SELECT 2")).toBeInTheDocument();
+    expect(screen.getByText("SELECT 2").closest("ul")).toHaveClass("trace-list");
   });
 });

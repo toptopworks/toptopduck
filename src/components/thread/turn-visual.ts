@@ -529,6 +529,10 @@ export function runtimeMarkerName(runtime: TurnRuntime | undefined): RuntimeMark
 // after the last prose section stay in the activity line's fold (its
 // count and its expand face); a turn with no prose section at all reveals
 // nothing -- the whole history rides the line (the pre-prose posture).
+// "A prose section exists" reads text !== undefined, which is sound only
+// because every Rust producer normalizes empty prose away (tool_calling's
+// Some("") filter, the codex and claude stream adapters' empty-text
+// guards) -- a defined text is always non-empty on the wire.
 export function liveRoundRevealed(
   rounds: ReadonlyArray<{ text?: string }>,
   i: number,

@@ -203,8 +203,8 @@ export interface LiveTurn {
   runtime?: TurnRuntime;
 }
 
-/** Whether the live turn sits in an LLM round-trip wait -- the trailing
- *  status line's gate and the wait-elapsed stamp's arm (issue #1264): true
+/** Whether the live turn sits in an LLM round-trip wait -- the activity
+ *  line's face gate (ADR-0151): true
  *  while nothing else on the tail carries the CURRENT round's liveness.
  *  While a call dispatches (or waits at the gate) its row carries the
  *  motion, and while #1163 streams the current round's prose -- prose that
@@ -218,8 +218,8 @@ export interface LiveTurn {
  *  every LLM round-trip wait (ask start, the inter-round wait, the new
  *  round's pre-prose thinking, the sealed-tail wait beside settled rows),
  *  with the step surfaced past the first round-trip ("step N", ADR-0081).
- *  One predicate for the rail's status gate and the hook's stamp, so the
- *  two can never drift. */
+ *  One predicate for every wait-naming surface, so the faces reading it
+ *  can never drift. */
 export function isRoundTripWait(turn: Pick<LiveTurn, "rounds" | "step">): boolean {
   const rowInProgress = turn.rounds.some((round) =>
     round.rows.some((row) => row.running || row.success === null),
@@ -573,10 +573,11 @@ export interface UseTurnFlow {
    *  1-based step, or the last tool-call event. null when no turn is running.
    *  Client UI state only -- drives the QuestionBar's compact phase label. */
   phase: TurnPhase | null;
-  /** The in-flight turn's live trace (ADR-0078, issue #297; chat form #610):
-   *  the rail renders it as a chat exchange -- the user bubble at submit plus
-   *  the streaming assistant side (round prose / thinking folds / rows +
-   *  approval cards). null when no turn is running. Built from the
+  /** The in-flight turn's live trace (ADR-0078, issue #297; chat form #610;
+   *  process face ADR-0151): the rail renders it as a chat exchange -- the
+   *  user bubble at submit plus the streaming assistant side (connective
+   *  prose segments + ONE activity line + sealed fold lines). null when no
+   *  turn is running. Built from the
    *  turn-progress tool-call events merged with the session's approval
    *  entries; folds into the optimistic TurnRecord.trace when the turn
    *  settles. */
@@ -974,9 +975,9 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
     liveRef.current = next;
     roundsRef.current = next === null ? NO_ROUNDS : buildLiveRounds(next, approvalsRef.current);
     // The rail's wait-elapsed suffix retired with the #1606 posture
-    // recalibration (the trailing status line reads bare "Thinking…" now),
-    // so the wait-stamp window that fed it is gone; the QuestionBar's wait
-    // feedback reads its own turn clock.
+    // recalibration (the thinking face now rides the activity line's
+    // folded head), so the wait-stamp window that fed it is gone; the
+    // QuestionBar's wait feedback reads its own turn clock.
     setLive(next);
   }, []);
 
@@ -1288,8 +1289,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
   // the ask stamp rides the live state, and the pause origin is the first
   // PENDING approval in arrival order (the rail renders cards in the order
   // the gateway raised them, so the first pending is the earliest hold).
-  // The QuestionBar displays the elapsed-with-user-pauses figure; the rail's
-  // wait-window stamp above stays the per-window figure.
+  // The QuestionBar displays the elapsed-with-user-pauses figure.
   const turnStartedAt = live?.askedAt ?? null;
   const turnPausedSince =
     approvals.find((a) => a.status.kind === "pending")?.receivedAt ?? null;
