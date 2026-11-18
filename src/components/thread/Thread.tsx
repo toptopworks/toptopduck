@@ -26,7 +26,7 @@ import { isLatestTurnFailed } from "../../session/useTurnFailureSids";
 import type { ApprovalResponse, FileAttachment } from "../../types/approval";
 import type { StaleAnchor } from "../../types/dataset";
 import type { SkillEntry } from "../../types/skills";
-import type { ThinkingTrace, ThreadEntry } from "../../types/thread";
+import type { ThreadEntry } from "../../types/thread";
 
 export type { DatasetLabel } from "./turn-visual";
 
@@ -90,10 +90,6 @@ interface ThreadProps {
    * for call sites / tests that do not exercise live rendering; defaults to
    * null (no live exchange). */
   liveTurn?: LiveTurn | null;
-  /** The LLM round-trip wait stamp (issue #1264): threaded to the live
-   *  exchange so the trailing status line renders the elapsed-seconds
-   *  suffix. Optional; defaults to null (no suffix). */
-  waitStartedAt?: number | null;
   /** The in-flight ingest's progress block (issue #1485): rendered as a
    *  transient status line ABOVE the live exchange while a dataset import
    *  materializes (the long IPC has no other surface). Optional; defaults to
@@ -148,7 +144,6 @@ interface ThreadProps {
 const NOOP_RESPOND: (requestId: string, response: ApprovalResponse) => void = () => {};
 // The empty fold-posture set, module-level for the same identity-stability
 // reason (the live swap's collector starts and resets to it).
-const NO_EXPANDED_FOLDS: ReadonlySet<ThinkingTrace> = new Set();
 // The empty lifecycle-fold posture set (issue #737), same convention.
 const NO_EXPANDED_LIFECYCLE_FOLDS: ReadonlySet<number> = new Set();
 
@@ -164,7 +159,6 @@ export function Thread({
   datasetLabels = [],
   skillIndex,
   liveTurn = null,
-  waitStartedAt = null,
   ingestProgress = null,
   replaceProgress = null,
   onRespondApproval = NOOP_RESPOND,
@@ -191,48 +185,31 @@ export function Thread({
       return next;
     });
   }, []);
-  // The live turn's open thinking folds (issue #620 settle continuity),
-  // keyed by the round's thinking block REFERENCE: the settle projection
-  // (liveRoundsToTrace) carries the same reference onto the optimistic
-  // record's round, so the key survives the projection's round drop (an
-  // entirely empty round vanishes from the trace, shifting array indices --
-  // a reference key cannot shift) and the seed maps the same fold on both
-  // sides. The exchange reports each toggle; the settle swap's mounting
-  // frame (liveTurn nulls while the optimistic entry appends, in one
-  // commit) seeds the appended entry's thinking folds with this set -- a
-  // fold the user opened while the turn ran mounts already open on the
-  // settled side, instead of snapping shut when the exchange's local fold
-  // state dies with it.
-  const [liveThinkingExpanded, setLiveThinkingExpanded] =
-    useState<ReadonlySet<ThinkingTrace>>(NO_EXPANDED_FOLDS);
-  const handleLiveThinkingExpanded = useCallback((thinking: ThinkingTrace, expanded: boolean) => {
-    setLiveThinkingExpanded((prev) => {
-      // Idempotent no-op: the fold reports on every posture/identity change
-      // (mount included), so a report matching the current state must return
-      // the SAME set (Object.is bailout) instead of churning a fresh one.
-      if (prev.has(thinking) === expanded) return prev;
-      const next = new Set(prev);
-      if (expanded) next.add(thinking);
-      else next.delete(thinking);
-      return next;
-    });
+  // The live activity line's expand posture (issue #1606, the #620
+  // pattern's boolean form): an expanded line seeds the swapped-in card's
+  // turn-level process fold, so the process face the user was reading lands
+  // open at the same spot. Reset when a FRESH turn starts (liveTurn
+  // transitions to non-null) -- the edge is keyed by the submit stamp, NOT
+  // the liveTurn object identity: the memoized liveTurn takes a new
+  // identity on EVERY progress event, so an identity edge would wipe the
+  // posture mid-turn and the settle seed would arrive empty. askedAt is
+  // read once at submit and constant within the turn, so it IS the turn
+  // identity. Adjusted during render -- the React-blessed "state on prop
+  // change" pattern, no effect (an effect would land a frame too late for
+  // the seed below, which must ride the swap's mounting frame).
+  const [liveActivityExpanded, setLiveActivityExpanded] = useState(false);
+  const handleLiveActivityExpanded = useCallback((expanded: boolean) => {
+    setLiveActivityExpanded(expanded);
   }, []);
-  // Reset the posture set when a FRESH turn starts (liveTurn transitions to
-  // non-null), so a new turn never inherits the previous one's folds. The
-  // edge is keyed by the submit stamp, NOT the liveTurn object identity:
-  // the memoized liveTurn takes a new identity on EVERY progress event, so
-  // an identity edge would wipe the collector mid-turn and the settle seed
-  // below would arrive empty. askedAt is read once at submit and constant
-  // within the turn, so it IS the turn identity (issue #620). Adjusted
-  // during render -- the React-blessed "state on prop change" pattern, no
-  // effect (an effect would land a frame too late for the seed below,
-  // which must ride the swap's mounting frame).
   const [prevAskedAt, setPrevAskedAt] = useState<number | null>(null);
   const askedAt = liveTurn?.askedAt ?? null;
   if (prevAskedAt !== askedAt) {
     setPrevAskedAt(askedAt);
-    if (askedAt !== null) setLiveThinkingExpanded(NO_EXPANDED_FOLDS);
+    if (askedAt !== null) {
+      setLiveActivityExpanded(false);
+    }
   }
+  const activitySeed = liveTurn === null && liveActivityExpanded ? true : undefined;
   // The index of the last recorded turn -- on the swap frame this is the
   // optimistic append the settle just landed (the timeline's tail turn).
   let lastTurnIdx = -1;
@@ -439,9 +416,9 @@ export function Thread({
                   // re-passing the set on later frames is a no-op and no
                   // swap-frame detection is needed -- only the last turn
                   // entry is a fresh mount while no turn runs.
-                  thinkingInitiallyExpanded={
-                    liveTurn === null && i === lastTurnIdx && liveThinkingExpanded.size > 0
-                      ? liveThinkingExpanded
+                  processInitiallyExpanded={
+                    liveTurn === null && i === lastTurnIdx && activitySeed !== undefined
+                      ? true
                       : undefined
                   }
                   skillIndex={skillIndex}
@@ -553,11 +530,10 @@ export function Thread({
       {liveTurn !== null && (
         <LiveTurnExchange
           liveTurn={liveTurn}
-          waitStartedAt={waitStartedAt}
           mentionedDataset={findMentionedDataset(liveTurn.question, datasetLabels)}
           onRespondApproval={onRespondApproval}
           onLoadApprovalAttachments={onLoadApprovalAttachments}
-          onThinkingExpandedChange={handleLiveThinkingExpanded}
+          onActivityExpandedChange={handleLiveActivityExpanded}
         />
       )}
     </section>

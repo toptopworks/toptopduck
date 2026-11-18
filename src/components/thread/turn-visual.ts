@@ -522,3 +522,16 @@ export function runtimeMarkerName(runtime: TurnRuntime | undefined): RuntimeMark
   if (adapterId === null) return null;
   return { adapterId, persistedName: displayName };
 }
+
+// ADR-0151's live reveal line: a round is revealed in place once a later
+// prose section exists -- the next prose seals every round before it, so
+// its thinking fold + call rows land at their settle position. The rounds
+// after the last prose section stay in the activity line's fold (its
+// count and its expand face); a turn with no prose section at all reveals
+// nothing -- the whole history rides the line (the pre-prose posture).
+export function liveRoundRevealed(
+  rounds: ReadonlyArray<{ text?: string }>,
+  i: number,
+): boolean {
+  return rounds.slice(i + 1).some((round) => round.text !== undefined);
+}

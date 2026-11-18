@@ -38,7 +38,12 @@ const queryClient = new QueryClient({
 // (layer-4 content, untranslated) so the assertions hold under any locale.
 // Split element / render so the default-open pins (#1005) can rerender the
 // same tree.
-function cardEl(record: TurnRecord, defaultOpenDetail?: boolean, locale: EffectiveLocale = "zh-CN") {
+function cardEl(
+  record: TurnRecord,
+  defaultOpenDetail?: boolean,
+  locale: EffectiveLocale = "zh-CN",
+  processInitiallyExpanded?: boolean,
+) {
   return (
     <IntlProvider locale={locale} messages={catalogFor(locale)}>
       <TooltipProvider>
@@ -55,6 +60,7 @@ function cardEl(record: TurnRecord, defaultOpenDetail?: boolean, locale: Effecti
             onRetryTurn={undefined}
             busy={false}
             defaultOpenDetail={defaultOpenDetail}
+            processInitiallyExpanded={processInitiallyExpanded}
           />
         </QueryClientProvider>
       </TooltipProvider>
@@ -62,8 +68,13 @@ function cardEl(record: TurnRecord, defaultOpenDetail?: boolean, locale: Effecti
   );
 }
 
-function renderCard(record: TurnRecord, defaultOpenDetail?: boolean, locale: EffectiveLocale = "zh-CN") {
-  return render(cardEl(record, defaultOpenDetail, locale));
+function renderCard(
+  record: TurnRecord,
+  defaultOpenDetail?: boolean,
+  locale: EffectiveLocale = "zh-CN",
+  processInitiallyExpanded?: boolean,
+) {
+  return render(cardEl(record, defaultOpenDetail, locale, processInitiallyExpanded));
 }
 
 function recordWith(runtime: TurnRecord["provenance"]["runtime"]): TurnRecord {
@@ -645,6 +656,17 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     // The migrated empty-round shape (every member missing) guards the same.
     const emptyRound = renderCard({ ...recordWith(undefined), trace: [{ calls: [] }] });
     expect(emptyRound.container.querySelector("button.process-toggle")).toBeNull();
+  });
+
+  it("mounts the process fold already open when the live posture seeds it (issue #1606)", () => {
+    // The live activity line's expand posture lands as the turn-level
+    // process fold mounted open -- the process face the user was reading
+    // stays at the same spot across the settle swap.
+    renderCard(tracedRecord(), undefined, "zh-CN", true);
+    const head = screen.getByRole("button", { name: /已回答/ });
+    expect(head).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("先看表")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "思考 · 3.2s" })).toBeInTheDocument();
   });
 
   it("mounts the head for the pre-v5 migrated single round of bare calls", () => {

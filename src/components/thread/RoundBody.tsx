@@ -21,8 +21,6 @@ export function RoundBody({
   thinking,
   text,
   proseMode,
-  initialThinkingExpanded = false,
-  onThinkingExpandedChange,
   onSelectViz,
   selectedVizSpec,
   children,
@@ -34,14 +32,6 @@ export function RoundBody({
    *  placeholder until the round closes or the turn settles (ADR-0120
    *  Decision 4); absent for the settled rounds, where a fence decodes. */
   proseMode?: RoundProseMode;
-  /** Issue #620: seeds the thinking fold mounted already open -- the settled
-   *  adapter reads the live posture out of the thread's seed set. */
-  initialThinkingExpanded?: boolean;
-  /** Issue #620: reports the fold's posture whenever it or the block's
-   *  identity changes -- the live adapter snapshots it for the settle seed.
-   *  Pass a stable callback (the adapter's useCallback): the fold's report
-   *  effect re-fires on identity churn otherwise. */
-  onThinkingExpandedChange?: (expanded: boolean) => void;
   /** Issue #1093 viz passthrough: only the settled stream wires it; the live
    *  prose holds fences at the placeholder. */
   onSelectViz?: (spec: string) => void;
@@ -51,13 +41,7 @@ export function RoundBody({
   if (thinking === undefined && text === undefined && !children) return null;
   return (
     <div className="trace-round max-w-full">
-      {thinking !== undefined && (
-        <ThinkingFold
-          thinking={thinking}
-          initialExpanded={initialThinkingExpanded}
-          onExpandedChange={onThinkingExpandedChange}
-        />
-      )}
+      {thinking !== undefined && <ThinkingFold thinking={thinking} />}
       {text !== undefined && (
         // #1573: the caller-side selection-source mark -- this prose (the
         // settled trace round AND, through the live adapter, the streaming

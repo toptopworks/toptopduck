@@ -95,10 +95,6 @@ export interface UseSessionState {
    *  cards). null when no turn is running. Client UI state only; folds into
    *  the optimistic TurnRecord.trace when the turn settles. */
   liveTurn: LiveTurn | null;
-  /** The LLM round-trip wait window's start stamp (issue #1264): feeds the
-   *  rail status line's elapsed-seconds suffix. null outside a wait
-   *  window. */
-  waitStartedAt: number | null;
   /** The turn clock (issue #1264 turn-clock ruling): the bar's phase label
    *  derives its continuous elapsed-seconds figure from it, freezing while
    *  an approval holds the turn. null when no turn is in flight. */
@@ -376,7 +372,6 @@ export function useSessionState(
   const {
     phase,
     liveTurn,
-    waitStartedAt,
     turnStartedAt,
     turnPausedSince,
     handleAsk,
@@ -519,7 +514,6 @@ export function useSessionState(
     turnLoading,
     phase,
     liveTurn,
-    waitStartedAt,
     turnStartedAt,
     turnPausedSince,
     error,

@@ -28,6 +28,7 @@ export function TurnProcessFold({
   label,
   askedAt,
   settledAt,
+  initialExpanded = false,
   children,
 }: {
   trace: TraceRound[];
@@ -37,9 +38,14 @@ export function TurnProcessFold({
   label: string;
   askedAt?: number;
   settledAt?: number;
+  /** Issue #1606: mounts the fold already open -- the live activity line's
+   *  expand posture seeds it across the settle swap, so the process face
+   *  the user was reading lands at the same spot. Default collapsed
+   *  (ADR-0078's long-rail posture). */
+  initialExpanded?: boolean;
   children: ReactNode;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(initialExpanded);
   // The content predicate mirrors the members the round blocks render
   // (thinking, prose, calls) -- extend it alongside them when a round
   // grows a new renderable member.

@@ -38,7 +38,6 @@ import type { StaleAnchor } from "../../types/dataset";
 import type { SkillEntry } from "../../types/skills";
 import type {
   SubagentUsage,
-  ThinkingTrace,
   TraceEntry,
   TraceRound,
   TurnRecord,
@@ -74,14 +73,11 @@ interface TurnCardProps {
    * when hasJumpTarget is false (the chip is disabled, so no handler is wired). */
   onStaleChipJump: (() => void) | undefined;
   mentionedDataset: DatasetLabel | null;
-  /** The thinking blocks whose fold mounts already expanded -- the live ->
-   *  settled continuity (issue #620): the thread injects the live turn's
-   *  open folds (keyed by the thinking block reference, which the settle
-   *  projection carries onto the trace's own round) into the entry appended
-   *  at the settle swap, so a fold the user opened while the turn ran stays
-   *  open across the swap. Undefined (or an empty set) is the default
-   *  collapsed posture. */
-  thinkingInitiallyExpanded?: ReadonlySet<ThinkingTrace>;
+  /** Issue #1606: the live activity line's expand posture rides the settle
+   *  swap -- an expanded line lands as the turn-level process fold mounted
+   *  already open (the process face the user was reading stays at the same
+   *  spot). Undefined is the default collapsed posture. */
+  processInitiallyExpanded?: boolean;
   /** The registry index for skill drift detection (issue #381). undefined when
    *  the caller does not wire the registry: drift detection is skipped (honest
    *  degrade -- the timeline stays readable). */
@@ -130,7 +126,7 @@ export function TurnCard({
   hasJumpTarget,
   onStaleChipJump,
   mentionedDataset,
-  thinkingInitiallyExpanded,
+  processInitiallyExpanded,
   skillIndex,
   onRetryTurn,
   busy,
@@ -203,6 +199,7 @@ export function TurnCard({
     >
       <TurnProcessFold
         trace={record.trace}
+        initialExpanded={processInitiallyExpanded ?? false}
         label={outcome.label}
         askedAt={record.asked_at}
         settledAt={record.settled_at}
@@ -213,7 +210,6 @@ export function TurnCard({
           <TraceRoundBlock
             key={i}
             round={round}
-            thinkingInitiallyExpanded={thinkingInitiallyExpanded}
             onSelectViz={onSelectViz}
             selectedVizSpec={selectedVizSpec}
             subtotalByEntry={subtotalByEntry}
@@ -310,21 +306,17 @@ function OutcomeGlyph({ visual }: { visual: ReturnType<typeof outcomeVisual> }) 
 
 // One round of the round-grouped trace (ADR-0103, calibrating ADR-0078): the
 // skeleton (thinking fold + connective prose) rides RoundBody -- the module
-// the live round block mounts too, so the settle swap does not move them;
-// `thinkingInitiallyExpanded` seeds the fold with the live turn's open
-// posture at the settle swap (issue #620). The round's step fold rides the
-// shared TraceStepFold (default collapsed, ADR-0078 long-rail posture).
-// Fold state is session-ephemeral UI state; the trace data persists on the
-// TurnRecord / recipe.
+// the live exchange mounts too, so the settle swap does not move them; the
+// round's step fold rides the shared TraceStepFold (default collapsed,
+// ADR-0078 long-rail posture). Fold state is session-ephemeral UI state;
+// the trace data persists on the TurnRecord / recipe.
 function TraceRoundBlock({
   round,
-  thinkingInitiallyExpanded,
   onSelectViz,
   selectedVizSpec,
   subtotalByEntry,
 }: {
   round: TraceRound;
-  thinkingInitiallyExpanded: ReadonlySet<ThinkingTrace> | undefined;
   onSelectViz?: (spec: string) => void;
   selectedVizSpec?: string | null;
   /** ADR-0129 Decision 6 (issue #1270): the turn-scoped entry-to-subtotal
@@ -338,9 +330,6 @@ function TraceRoundBlock({
     <RoundBody
       thinking={thinking}
       text={text}
-      initialThinkingExpanded={
-        thinking !== undefined && (thinkingInitiallyExpanded?.has(thinking) ?? false)
-      }
       onSelectViz={onSelectViz}
       selectedVizSpec={selectedVizSpec}
     >

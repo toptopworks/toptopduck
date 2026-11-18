@@ -688,7 +688,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   // trace card (tool-call rows + approval cards) trails the
                   // recorded thread while a turn runs.
                   liveTurn={s.liveTurn}
-                  waitStartedAt={s.waitStartedAt}
                   ingestProgress={s.ingestProgress}
                   replaceProgress={replaceProgress}
                   onRespondApproval={handleRespondApproval}
