@@ -40,6 +40,7 @@ export function TraceSummaryFold({
   summary,
   summaryClassName,
   head = null,
+  resultExcerpt,
 }: {
   summary: string;
   /** The hook class for the truncated summary span -- the visual
@@ -48,6 +49,12 @@ export function TraceSummaryFold({
   /** The site-specific line head (spinner / shield, tool name, badges)
    *  rendered inside the line before the summary. */
   head?: ReactNode;
+  /** The call's result excerpt, folded into the expand block beside the
+   *  argument summary as a second column (issue #1604). Absent keeps the
+   *  single-column block -- the trace row passes it only for the one
+   *  success whose excerpt survives the projection (the capped
+   *  delegation's truncation notice, issue #1047). */
+  resultExcerpt?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const intl = useIntl();
@@ -95,7 +102,19 @@ export function TraceSummaryFold({
             defaultMessage: "Full summary",
           })}
         >
-          {summary}
+          {resultExcerpt === undefined ? (
+            summary
+          ) : (
+            // Both faces of the call in one capped block (issue #1604):
+            // the argument summary left, the result excerpt right of the
+            // divider -- each column free to wrap, the cap bounds the pair.
+            <span className="flex gap-2">
+              <span className="min-w-0 flex-1">{summary}</span>
+              <span className="min-w-0 flex-1 border-l border-border pl-2">
+                {resultExcerpt}
+              </span>
+            </span>
+          )}
         </p>
       )}
     </>

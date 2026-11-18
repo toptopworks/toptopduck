@@ -525,7 +525,7 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     // Issue #1282: the per-round folds live inside the turn-level process
     // fold -- the head opens first.
     fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
-    screen.getAllByText("轨迹 · 1 次调用").forEach((t) => fireEvent.click(t));
+    screen.getAllByText("analyst ×1").forEach((t) => fireEvent.click(t));
     fireEvent.click(screen.getAllByText("子智能体轨迹")[roundIndex]);
   };
 
@@ -553,7 +553,7 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     renderCard(record);
     // Issue #1282: the head opens first; the per-round fold lives inside it.
     fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
-    fireEvent.click(screen.getByText("轨迹 · 2 次调用"));
+    fireEvent.click(screen.getByText("analyst ×2"));
     // The refusal renders no sub-trace fold (the row's own gate) --
     // exactly one openable expansion remains.
     const buttons = screen.getAllByText("子智能体轨迹");
@@ -610,7 +610,7 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     expect(head).not.toBeNull();
     expect(head).toHaveAttribute("aria-expanded", "false");
     // The per-round face mounts inside the fold on expand -- none of it at rest.
-    expect(screen.queryByText("轨迹 · 1 次调用")).not.toBeInTheDocument();
+    expect(container.querySelector(".trace-toggle")).toBeNull();
     expect(screen.queryByText("先看表")).not.toBeInTheDocument();
     // The answer is the reading mainstay -- outside the fold.
     expect(container.querySelector(".turn-outcome.textual")).not.toBeNull();
@@ -627,11 +627,16 @@ describe("TurnCard turn process fold (issue #1282)", () => {
   });
 
   it("expands to the incumbent per-round face (thinking, prose, steps)", () => {
-    renderCard(tracedRecord());
+    const { container } = renderCard(tracedRecord());
     fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
     expect(screen.getByText("先看表")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "思考 · 3.2s" })).toBeInTheDocument();
-    expect(screen.getAllByText("轨迹 · 1 次调用")).toHaveLength(2);
+    // One count fold per round, labeled by the fixture's tool names
+    // (round 1 explore, round 2 materialize).
+    const folds = container.querySelectorAll(".trace-toggle");
+    expect(folds).toHaveLength(2);
+    expect(folds[0]).toHaveTextContent("explore ×1");
+    expect(folds[1]).toHaveTextContent("materialize ×1");
   });
 
   it("renders no head when the trace carries no content at all", () => {
