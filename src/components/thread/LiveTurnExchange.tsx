@@ -3,107 +3,115 @@
 // the moment the user submits (asked_at is the client's submit stamp; the
 // question is final at submit, so the copy affordance is honest), over a
 // streaming assistant side: the runtime attribution marker (issue #818),
-// then the header's dataset chip (issue #620), then per-round thinking
-// folds + connective prose + tool rows (approval cards in
-// flow, ADR-0083 -- the card chrome lives in LiveRow, semantics unchanged
-// from the retired progressive card).
+// then the header's dataset chip (issue #620), then the live process face
+// (ADR-0151, the device-calibrated posture): the connective prose blocks +
+// ONE activity line whose face rotates with the phase (thinking / running
+// call; the streaming tail steps it aside). Rounds segment at prose boundaries; every
+// segment sealed by a later prose lands as ONE aggregate fold line under
+// its own prose ("Completed · N calls", clickable to the segment's
+// thinking folds + call rows) -- one line per sealed stretch, never a
+// block per round. The last prose-bearing segment is the line's domain:
+// its calls ride the head's count, its thinking and calls sit in the
+// line's expand face, the running call is absorbed by the head. A turn
+// with no prose section keeps everything in the line (the pre-prose
+// posture).
 //
 // The rounds arrive pre-grouped from the state layer's single derivation
 // (issue #620) -- this component renders them directly and never regroups.
-// The head and the round skeleton ride the swap-stable TurnExchangeFrame /
+// The head and the prose skeleton ride the swap-stable TurnExchangeFrame /
 // RoundBody -- the modules the settled TurnCard mounts too, so the settle
 // swap cannot move a member. Settle swaps this block for the settled
-// TurnCard: liveRoundsToTrace folds the same rounds into the optimistic
-// TurnRecord.trace; the running status row yields to the outcome body +
-// closing meta row, and the streamed rows fold behind the per-round step fold
-// (the settled default posture, ADR-0078). A thinking fold the user opened
-// while live mounts already open on the settled side via the
-// onThinkingExpandedChange report (issue #620).
+// TurnCard: the activity line yields to the outcome body + closing meta row,
+// the prose blocks keep, and the expand posture seeds the settled turn-level
+// process fold (the landing spot matches -- issue #1606). The single
+// rotating line is ADR-0151's narrowing of ADR-0078's live-unfolded.
 
-import { FormattedMessage } from "react-intl";
-import { useCallback } from "react";
-import { Loader2 } from "lucide-react";
+import { Fragment, useState } from "react";
+import { useIntl } from "react-intl";
+import { FoldToggle } from "./FoldToggle";
+import { ThinkingFold } from "./ThinkingFold";
 import { LiveRow } from "./TraceView";
+import { LiveActivityLine } from "./LiveActivityLine";
 import { TraceList } from "./TraceList";
 import { RoundBody } from "./RoundBody";
-import type { RoundProseMode } from "./RoundProse";
+import { isSettledRow } from "../../session/useTurnFlow";
 import { TurnExchangeFrame } from "./TurnExchangeFrame";
-import { isRoundTripWait } from "../../session/useTurnFlow";
 import type { LiveRound, LiveTurn } from "../../session/useTurnFlow";
-import { WaitElapsedSuffix } from "./WaitElapsedSuffix";
 import type { ApprovalResponse, FileAttachment } from "../../types/approval";
-import type { ThinkingTrace } from "../../types/thread";
-import type { DatasetLabel } from "./turn-visual";
+import { type DatasetLabel } from "./turn-visual";
 
-// One live round: the skeleton rides RoundBody (see its header for the swap
-// contract); this adapter owns the round's tool rows -- streaming UNFOLDED,
-// where the settled posture folds them (ADR-0078): streaming calls must be
-// visible as they land.
-function LiveRoundBlock({
-  round,
-  proseMode,
-  onRespondApproval,
-  onLoadApprovalAttachments,
-  onThinkingExpandedChange,
+// The sealed segment's fold line (ADR-0151): everything between two prose
+// sections lands as ONE line -- "Completed · N calls" -- clickable to the
+// segment's thinking folds + call rows in settle order (the rows on the
+// shared left-rail list, the settled face's chrome). One line per sealed
+// segment is the progressive feel (a long call-only stretch between two
+// prose sections never dumps a block per round); the fold keeps its own
+// session-ephemeral state and does not seed the settled process fold.
+function RoundSegmentFold({
+  rounds,
+  onRespond,
+  onLoadAttachments,
 }: {
-  round: LiveRound;
-  /** The caret is the round-is-alive signal (RoundProse's streaming
-   *  contract), and the only alive prose is the tail's while it has no
-   *  rows: the rounds array is append-only, so every earlier round's text
-   *  is final, and a row-bearing tail is sealed too (prose after a call
-   *  opens the next round, issue #1236) -- all of them render static
-   *  (caret off, cascade off, their fences decode) while the trailing
-   *  status names the wait. */
-  proseMode: RoundProseMode;
-  onRespondApproval: (requestId: string, response: ApprovalResponse) => void;
-  onLoadApprovalAttachments?: (requestId: string) => Promise<FileAttachment[]>;
-  onThinkingExpandedChange: (thinking: ThinkingTrace, expanded: boolean) => void;
+  /** The segment's rounds, pre-sliced by the caller -- the fold never
+   *  indexes back into the turn's array, so no cross-prop invariant
+   *  exists to keep. */
+  rounds: LiveRound[];
+  onRespond: (requestId: string, response: ApprovalResponse) => void;
+  /** Pulls the full (uncapped) file values for a pending approval card
+   * (issue #1009); optional -- absent loaders keep the capped broadcast
+   * snapshot. */
+  onLoadAttachments?: (requestId: string) => Promise<FileAttachment[]>;
 }) {
-  const { thinking, text, rows } = round;
-  // useCallback so the fold's report effect does not re-fire on an unrelated
-  // parent re-render (the identity must only change with the thinking block);
-  // the report passes the reference (the settle seed's key).
-  const reportThinkingExpanded = useCallback(
-    (expanded: boolean) => thinking !== undefined && onThinkingExpandedChange(thinking, expanded),
-    [thinking, onThinkingExpandedChange],
+  const [expanded, setExpanded] = useState(false);
+  const intl = useIntl();
+  const callCount = rounds.reduce(
+    (n, round) => n + round.rows.filter(isSettledRow).length,
+    0,
   );
   return (
-    <RoundBody
-      thinking={thinking}
-      text={text}
-      proseMode={proseMode}
-      onThinkingExpandedChange={reportThinkingExpanded}
-    >
-      {rows.length > 0 && (
-        <TraceList>
-          {rows.map((row) => (
-            <LiveRow
-              key={row.key}
-              row={row}
-              onRespond={onRespondApproval}
-              onLoadAttachments={onLoadApprovalAttachments}
-            />
-          ))}
-        </TraceList>
-      )}
-    </RoundBody>
+    <div className="trace-round max-w-full">
+      <FoldToggle hookClass="round-toggle" expanded={expanded} onToggle={() => setExpanded((v) => !v)}>
+        {intl.formatMessage(
+          {
+            id: "thread.trace.roundCompleted",
+            defaultMessage: "Completed · {count, plural, one {# call} other {# calls}}",
+          },
+          { count: callCount },
+        )}
+      </FoldToggle>
+      {expanded &&
+        rounds.map((round, i) => {
+          const rows = round.rows.filter(isSettledRow);
+          return (
+            <Fragment key={i + 1}>
+              {round.thinking !== undefined && <ThinkingFold thinking={round.thinking} />}
+              {rows.length > 0 && (
+                <TraceList>
+                  {rows.map((row) => (
+                    <LiveRow
+                      key={row.key}
+                      row={row}
+                      onRespond={onRespond}
+                      onLoadAttachments={onLoadAttachments}
+                    />
+                  ))}
+                </TraceList>
+              )}
+            </Fragment>
+          );
+        })}
+    </div>
   );
 }
 
 export function LiveTurnExchange({
   liveTurn,
-  waitStartedAt = null,
   mentionedDataset,
   onRespondApproval,
   onLoadApprovalAttachments,
-  onThinkingExpandedChange,
+  onActivityExpandedChange,
 }: {
   liveTurn: LiveTurn;
-  /** The LLM round-trip wait stamp (issue #1264): while non-null the
-   *  trailing status line carries the elapsed-seconds suffix -- the same
-   *  stamp the QuestionBar phase label reads. Optional so call sites /
-   *  tests that do not exercise the wait window omit it (no suffix). */
-  waitStartedAt?: number | null;
   /** The dataset the question explicitly names (the same findMentionedDataset
    *  read the settled header performs, computed by the thread) -- rendered
    *  here so the settle swap does not insert the chip (issue #620). null
@@ -112,20 +120,55 @@ export function LiveTurnExchange({
   onRespondApproval: (requestId: string, response: ApprovalResponse) => void;
   /** Pulls the full (uncapped) file values for a pending approval card
    * (issue #1009); optional -- absent loaders keep the capped broadcast
-   * snapshot. Threaded to each round's LiveRow. */
+   * snapshot. Threaded to each row's LiveRow. */
   onLoadApprovalAttachments?: (requestId: string) => Promise<FileAttachment[]>;
-  /** Reports each thinking-fold toggle with the block's reference (the key
-   *  the settle seed matches on -- the projection carries the same
-   *  reference onto the settled round). */
-  onThinkingExpandedChange: (thinking: ThinkingTrace, expanded: boolean) => void;
+  /** Reports the activity line's toggle posture (issue #1606): an expanded
+   *  line seeds the settled turn-level process fold across the settle swap
+   *  -- the process face the user was reading lands open at the same spot. */
+  onActivityExpandedChange: (expanded: boolean) => void;
 }) {
-  // The trailing status names the LLM round-trip wait and carries the
-  // elapsed-seconds suffix (issue #1264). Its gate is the shared predicate
-  // -- one round-trip-wait definition feeds the status line here and the
-  // wait stamp the QuestionBar label reads (see isRoundTripWait for the
-  // honest-liveness reasoning: which arms carry the motion, and why the
-  // prose arm requires the tail to BE the current round).
+  // The activity line's faces are gated by the shared wait predicate (see
+  // isRoundTripWait for the honest-liveness reasoning: which arms carry the
+  // motion, and why the prose arm requires the tail to BE the current
+  // round) -- the thinking phase rides the line's folded face, so the
+  // retired trailing status line's duty merged into it.
   const tailIndex = liveTurn.rounds.length - 1;
+  // The turn-tail rows that stay OUTSIDE every fold (ADR-0083's flow face):
+  // the gate-pending approval cards, plus the terminal-approved rows whose
+  // calls never completed -- a gate-denied call between its optimistic
+  // resolve and the gateway's completion event, an abandoned call forever
+  // (#1267). The fold faces admit only settled rows, so this tail is the
+  // one surface keeping those answer markers visible; a running approved
+  // call is the activity line's to absorb (the head or its expand face),
+  // not a tail row.
+  const tailRows = liveTurn.rounds
+    .flatMap((round) => round.rows)
+    .filter(
+      (row) =>
+        row.approval !== null &&
+        !isSettledRow(row) &&
+        (row.approval.response === null || !row.running),
+    );
+  // Segment the rounds at prose boundaries: a round with text opens a
+  // segment; call-only rounds join the one before (leading call-only
+  // rounds form a prose-less head segment). The last prose-bearing
+  // segment is the activity line's domain; every segment BEFORE it is
+  // sealed -- it lands as ONE aggregate fold line under its own prose
+  // (the device ruling: one line per sealed stretch, never a block per
+  // round). The segments carry their rounds pre-sliced.
+  const segments: { proseRound: number; rounds: LiveRound[] }[] = [];
+  liveTurn.rounds.forEach((round, i) => {
+    const last = segments[segments.length - 1];
+    if (round.text !== undefined || last === undefined) {
+      segments.push({ proseRound: round.text !== undefined ? i : -1, rounds: [round] });
+    } else {
+      last.rounds.push(round);
+    }
+  });
+  const lastProseSegment = segments.reduce(
+    (last, segment, k) => (segment.proseRound >= 0 ? k : last),
+    -1,
+  );
   return (
     <TurnExchangeFrame
       question={liveTurn.question}
@@ -135,38 +178,60 @@ export function LiveTurnExchange({
       mentionedDataset={mentionedDataset}
       live
     >
-      {liveTurn.rounds.map((round, i) => (
-        // The rounds array is append-only within a turn (round i is round
-        // i+1), so the index is a stable key. The mode judgment is the same
-        // seal discriminant the round-trip-wait predicate reads: a
-        // row-bearing tail is sealed prose -- static, the status names the
-        // wait (issue #1236).
-        <LiveRoundBlock
-          key={i + 1}
-          round={round}
-          proseMode={i === tailIndex && round.rows.length === 0 ? "streaming" : "static"}
-          onRespondApproval={onRespondApproval}
-          onLoadApprovalAttachments={onLoadApprovalAttachments}
-          onThinkingExpandedChange={onThinkingExpandedChange}
-        />
-      ))}
-      {isRoundTripWait(liveTurn) && (
-        <p
-          className="live-thinking m-0 mt-0.5 flex items-center gap-1 text-xs text-muted-foreground"
-          role="status"
-        >
-          <Loader2 aria-hidden="true" className="w-3.5 h-3.5 shrink-0 animate-spin" />
-          {liveTurn.step !== null && liveTurn.step > 1 ? (
-            <FormattedMessage
-              id="thread.live.thinkingStep"
-              defaultMessage="Thinking (step {step})…"
-              values={{ step: liveTurn.step }}
+      {segments.map((segment, k) => {
+        const proseRound =
+          segment.proseRound >= 0 ? liveTurn.rounds[segment.proseRound] : undefined;
+        return (
+          <Fragment key={k + 1}>
+            {proseRound !== undefined && (
+              // The caret rule rides the prose round: streaming only while
+              // it is the tail with no rows (the same seal discriminant
+              // the round-trip-wait predicate reads, issue #1236);
+              // everything else is static.
+              <RoundBody
+                text={proseRound.text}
+                proseMode={
+                  segment.proseRound === tailIndex && proseRound.rows.length === 0
+                    ? "streaming"
+                    : "static"
+                }
+              />
+            )}
+            {k < lastProseSegment && (
+              <RoundSegmentFold
+                rounds={segment.rounds}
+                onRespond={onRespondApproval}
+                onLoadAttachments={onLoadApprovalAttachments}
+              />
+            )}
+          </Fragment>
+        );
+      })}
+      {/* ONE activity line for the whole turn, pinned after the rounds (a
+          fresh turn with no rounds yet still mounts it -- the thinking
+          face is the turn's first activity): the thinking phase, the
+          running call rotate its face, the streaming tail steps it aside;
+          its fold
+          holds the rounds after the last prose section (the count, the
+          expand face) and its expand posture seeds the settled turn-level
+          process fold across the settle swap (issue #1606). */}
+      <LiveActivityLine
+        liveTurn={liveTurn}
+        onRespond={onRespondApproval}
+        onLoadAttachments={onLoadApprovalAttachments}
+        onExpandedChange={onActivityExpandedChange}
+      />
+      {tailRows.length > 0 && (
+        <TraceList>
+          {tailRows.map((row) => (
+            <LiveRow
+              key={row.key}
+              row={row}
+              onRespond={onRespondApproval}
+              onLoadAttachments={onLoadApprovalAttachments}
             />
-          ) : (
-            <FormattedMessage id="common.thinking" defaultMessage="Thinking…" />
-          )}
-          <WaitElapsedSuffix startedAt={waitStartedAt} />
-        </p>
+          ))}
+        </TraceList>
       )}
     </TurnExchangeFrame>
   );

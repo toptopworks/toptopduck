@@ -684,11 +684,11 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   staleByReference={s.staleByReference}
                   datasetLabels={datasetLabels}
                   skillIndex={skillIndex}
-                  // ADR-0078/0083 (issue #297): the in-flight turn's progressive
-                  // trace card (tool-call rows + approval cards) trails the
-                  // recorded thread while a turn runs.
+                  // ADR-0078/0083 (issue #297; process face ADR-0151): the
+                  // in-flight turn's live exchange (prose segments + the
+                  // activity line + sealed folds) trails the recorded thread
+                  // while a turn runs.
                   liveTurn={s.liveTurn}
-                  waitStartedAt={s.waitStartedAt}
                   ingestProgress={s.ingestProgress}
                   replaceProgress={replaceProgress}
                   onRespondApproval={handleRespondApproval}

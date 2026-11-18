@@ -12,7 +12,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
@@ -34,22 +34,34 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false, staleTime: Infinity } },
 });
 
-function renderExchange(liveTurn: LiveTurn, waitStartedAt: number | null = null) {
-  return render(
+// Split element / render so the posture pins can rerender the same tree
+// (the cardEl convention in TurnCard.test.tsx) -- the anti-flicker pin
+// rerenders with a grown streaming summary.
+function exchangeEl(
+  liveTurn: LiveTurn,
+  onActivityExpandedChange: (expanded: boolean) => void = () => {},
+) {
+  return (
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
       <TooltipProvider>
         <QueryClientProvider client={queryClient}>
           <LiveTurnExchange
             liveTurn={liveTurn}
-            waitStartedAt={waitStartedAt}
             mentionedDataset={null}
             onRespondApproval={() => {}}
-            onThinkingExpandedChange={() => {}}
+            onActivityExpandedChange={onActivityExpandedChange}
           />
         </QueryClientProvider>
       </TooltipProvider>
-    </IntlProvider>,
+    </IntlProvider>
   );
+}
+
+function renderExchange(
+  liveTurn: LiveTurn,
+  onActivityExpandedChange?: (expanded: boolean) => void,
+) {
+  return render(exchangeEl(liveTurn, onActivityExpandedChange));
 }
 
 const liveTurnWith = (runtime: LiveTurn["runtime"]): LiveTurn => ({
@@ -324,9 +336,12 @@ describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
   });
 });
 
-describe("LiveTurnExchange wait-elapsed suffix (issue #1264)", () => {
+describe("LiveTurnExchange trailing wait status (the #1606 bare face)", () => {
   // The sealed-tail wait: a settled row + sealed prose beside it -- the
-  // status names the round-trip wait, and the suffix rides inside it.
+  // status names the round-trip wait. The elapsed suffix stays retired
+  // (the #1264 suffix retirement, ADR-0151): the folded head names the
+  // phase without a clock -- the thinking duration lives on the expanded
+  // face's folds, not here.
   const sealedTailWait: LiveTurn = {
     question: "问",
     askedAt: 0,
@@ -335,17 +350,456 @@ describe("LiveTurnExchange wait-elapsed suffix (issue #1264)", () => {
     rounds: [{ text: "第一轮已收口。", rows: [settledRow()] }],
   };
 
-  it("renders the elapsed suffix inside the wait status when the stamp is open", () => {
-    // The stamp rides the real clock (a fresh window opens at Date.now),
-    // so the 12s-old stamp reads as 12 elapsed seconds.
-    renderExchange(sealedTailWait, Date.now() - 12_000);
-    expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
-    expect(screen.getByText("· 12秒")).toBeInTheDocument();
-  });
-
-  it("renders no suffix outside a wait window (stamp null)", () => {
+  it("reads the bare step-named status; no elapsed suffix ever rides it", () => {
     renderExchange(sealedTailWait);
     expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
     expect(screen.queryByText(/· \d/)).toBeNull();
+  });
+});
+
+// The live activity line (issue #1606, ADR-0151): the turn's ONE rotating
+// activity face -- the thinking phase and the running call rotate its
+// folded head (the tool face answers a call at once, the verb repaints
+// at most once per window, the face holds one window past the last
+// call), the streaming tail steps it aside (the prose + caret carry the
+// liveness), and expanding shows the rounds after the last prose
+// section (their thinking folds + flat call rows). With nothing behind
+// the fold the line is a plain status line (no hover, no click). The
+// head reads the rows' kind and count ONLY -- never the streaming
+// summary (the anti-flicker contract); the pending approval card stays
+// out at the turn tail, always visible (ADR-0083).
+describe("LiveTurnExchange live activity line (issue #1606)", () => {
+  // One round mid-flight: the first call completed, the second running.
+  const midCallTurn = (): LiveTurn => ({
+    ...liveTurnWith(undefined),
+    step: 1,
+    rounds: [
+      {
+        rows: [
+          settledRow({ key: "call-0", name: "explore", summary: "SELECT 1" }),
+          settledRow({
+            key: "call-1",
+            name: "describe",
+            summary: "SELECT 2",
+            running: true,
+            success: null,
+          }),
+        ],
+      },
+    ],
+  });
+
+  it("rotates into the running face at entry: verb + count with the spinner", () => {
+    const { container } = renderExchange(midCallTurn());
+    const head = container.querySelector("button.process-toggle");
+    expect(head).not.toBeNull();
+    expect(head).toHaveAttribute("aria-expanded", "false");
+    expect(head?.textContent).toBe("正在读取 · 已完成 1 次调用");
+    expect(head?.querySelector(".animate-spin")).not.toBeNull();
+    // Nothing renders unfurled: the process face is behind the line's fold.
+    expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
+    expect(screen.queryByText("SELECT 2")).not.toBeInTheDocument();
+  });
+
+  it("holds the verb through a sub-window kind switch: only the count moves", () => {
+    vi.useFakeTimers();
+    try {
+      const view = renderExchange(midCallTurn());
+      expect(view.container.querySelector("button.process-toggle")?.textContent).toBe(
+        "正在读取 · 已完成 1 次调用",
+      );
+      // The read settles; a fast network call starts running (its kind
+      // differs from the verb face on the head).
+      const switched = midCallTurn();
+      switched.rounds = [
+        {
+          rows: [
+            settledRow({ key: "call-0", name: "explore", summary: "SELECT 1" }),
+            settledRow({ key: "call-1", name: "describe", summary: "SELECT 2" }),
+            settledRow({
+              key: "call-2",
+              name: "fetch",
+              server: "acme",
+              operationKind: "network",
+              summary: "GET /x",
+              running: true,
+              success: null,
+            }),
+          ],
+        },
+      ];
+      view.rerender(exchangeEl(switched));
+      // Sub-dwell: the face holds the previous verb while the count ticks --
+      // a call that flashes by never repaints the head (the user ruling).
+      expect(view.container.querySelector("button.process-toggle")?.textContent).toBe(
+        "正在读取 · 已完成 2 次调用",
+      );
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+      expect(view.container.querySelector("button.process-toggle")?.textContent).toBe(
+        "正在联网 · 已完成 2 次调用",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rotates into the thinking face while no call runs (the wait)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.step = 2;
+    turn.rounds = [{ text: "第一轮已收口。", rows: [settledRow()] }];
+    const { container } = renderExchange(turn);
+    const head = container.querySelector("button.process-toggle");
+    expect(head?.textContent).toBe("思考中（第 2 步）…");
+    expect(head?.querySelector(".animate-spin")).not.toBeNull();
+  });
+
+  it("steps aside while the tail prose streams (the prose + caret carry the liveness)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [{ text: "正文正在流出。", rows: [] }];
+    const { container } = renderExchange(turn);
+    // The streaming face retired: an output face beside visibly streaming
+    // text doubled the signal and flipped against the thinking face as
+    // the stream paused (the device ruling). The prose + caret carry the
+    // liveness; the line steps aside entirely.
+    expect(container.querySelector(".process-toggle")).toBeNull();
+  });
+
+  it("keeps the head unchanged while the running call's args stream (anti-flicker)", () => {
+    const before = renderExchange(midCallTurn());
+    const headText = before.container.querySelector("button.process-toggle")?.textContent;
+    expect(headText).toBe("正在读取 · 已完成 1 次调用");
+    // An args delta lands: the running row's summary grows mid-stream. The
+    // head reads kind + count only.
+    const streamed = midCallTurn();
+    streamed.rounds[0]!.rows[1] = {
+      ...streamed.rounds[0]!.rows[1]!,
+      summary: "SELECT 2 with a far longer streaming args summary riding the delta",
+    };
+    before.rerender(exchangeEl(streamed));
+    expect(before.container.querySelector("button.process-toggle")?.textContent).toBe(headText);
+  });
+
+  it("holds the tool face one window past the last call, then reads the wait", () => {
+    vi.useFakeTimers();
+    try {
+      const view = renderExchange(midCallTurn());
+      expect(view.container.querySelector("button.process-toggle")?.textContent).toBe(
+        "正在读取 · 已完成 1 次调用",
+      );
+      const done = midCallTurn();
+      done.rounds = [
+        {
+          rows: [
+            settledRow({ key: "call-0", name: "explore", summary: "SELECT 1" }),
+            settledRow({ key: "call-1", name: "describe", summary: "SELECT 2" }),
+          ],
+        },
+      ];
+      view.rerender(exchangeEl(done));
+      // Grace: the face holds one window past the last call -- a call that
+      // just finished must not blink the line back to thinking (the user
+      // ruling: a line stuck on the thinking face reads as dead).
+      expect(view.container.querySelector("button.process-toggle")?.textContent).toBe(
+        "正在读取 · 已完成 2 次调用",
+      );
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+      // The round-trip wait IS the thinking phase: the face rotates back
+      // once the grace is spent, and the completed count waits behind the
+      // fold (expand to see it).
+      const head = view.container.querySelector("button.process-toggle");
+      expect(head?.textContent).toBe("思考中…");
+      expect(head?.querySelector(".animate-spin")).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds the tool face through the streaming window's grace, then steps aside for the streaming tail", () => {
+    vi.useFakeTimers();
+    try {
+      const view = renderExchange(midCallTurn());
+      expect(view.container.querySelector("button.process-toggle")?.textContent).toBe(
+        "正在读取 · 已完成 1 次调用",
+      );
+      // The call drains into a streaming tail (the wait predicate's prose
+      // arm -- the prose carries the liveness): the face holds one window
+      // first.
+      const prose = midCallTurn();
+      prose.step = 2;
+      prose.rounds = [
+        { rows: [settledRow({ key: "call-0", name: "explore", summary: "SELECT 1" })] },
+        { text: "正文正在流出。", rows: [] },
+      ];
+      view.rerender(exchangeEl(prose));
+      // The count reads the line's rounds only: the settled call now
+      // sits in a revealed round, so the line reports zero -- and with
+      // nothing left behind the fold, the line is the plain status face.
+      expect(view.container.querySelector(".process-toggle")?.textContent).toBe(
+        "正在读取 · 已完成 0 次调用",
+      );
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+      // Past the grace the line steps aside entirely: the prose + caret
+      // carry the liveness.
+      expect(view.container.querySelector(".process-toggle")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the tool face through the gate hold; the card renders beside it", () => {
+    const turn = liveTurnWith(undefined);
+    turn.rounds = [
+      {
+        rows: [
+          settledRow({ key: "call-0", name: "explore", summary: "SELECT 1" }),
+          {
+            key: "req-1",
+            name: "fetch",
+            server: "acme",
+            operationKind: "network",
+            summary: "GET /x",
+            approval: { requestId: "req-1", response: null },
+            running: false,
+            success: null,
+            resultExcerpt: "",
+          },
+        ],
+      },
+    ];
+    const { container } = renderExchange(turn);
+    // The gate hold KEEPS the tool face (the call is about to run -- the
+    // line vanishing entirely read as the process dying on the device);
+    // the card renders beside it (ADR-0083's flow face).
+    const head = container.querySelector("button.process-toggle");
+    expect(head?.textContent).toBe("正在联网 · 已完成 1 次调用");
+    expect(head?.querySelector(".animate-spin")).not.toBeNull();
+    expect(container.querySelector(".approval-card")).not.toBeNull();
+    expect(screen.getByText("等待审批")).toBeInTheDocument();
+  });
+
+  it("is a plain status line while nothing sits behind the fold (no hover, no click)", () => {
+    // A first-call gate hold: the card pends, but no thinking and no
+    // settled/running row exist yet -- expanding would show nothing.
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [
+      {
+        rows: [
+          {
+            key: "req-0",
+            name: "fetch",
+            server: "acme",
+            operationKind: "network",
+            summary: "GET /x",
+            approval: { requestId: "req-0", response: null },
+            running: false,
+            success: null,
+            resultExcerpt: "",
+          },
+        ],
+      },
+    ];
+    const { container } = renderExchange(turn);
+    // Not a button: no fold semantics, no hover, no click (the user ruling).
+    expect(container.querySelector("button.process-toggle")).toBeNull();
+    const line = container.querySelector(".process-toggle");
+    expect(line?.tagName).toBe("DIV");
+    expect(line?.textContent).toBe("正在联网 · 已完成 0 次调用");
+    expect(line?.querySelector(".animate-spin")).not.toBeNull();
+    // The card still renders beside the line (ADR-0083's flow face).
+    expect(container.querySelector(".approval-card")).not.toBeNull();
+    expect(screen.getByText("等待审批")).toBeInTheDocument();
+  });
+
+  it("seals each prose-bounded segment into ONE aggregate fold line; the count stays in the activity line", () => {
+    const onActivityExpandedChange = vi.fn();
+    const turn = liveTurnWith(undefined);
+    turn.step = 4;
+    turn.rounds = [
+      {
+        thinking: { duration_ms: 1200, text: "推理一" },
+        text: "先看一眼。",
+        rows: [settledRow({ key: "call-0", name: "explorer", summary: "SELECT 1" })],
+      },
+      {
+        rows: [settledRow({ key: "call-1", name: "fetch", server: "acme", operationKind: "network", summary: "GET /x" })],
+      },
+      {
+        thinking: { duration_ms: 300, text: "推理二" },
+        text: "数据已就绪。",
+        rows: [settledRow({ key: "call-2", name: "python", server: "acme", operationKind: "execute", summary: "SELECT 3" })],
+      },
+      {
+        rows: [
+          settledRow({ key: "call-3", name: "materialize", operationKind: "write", summary: "SELECT 4" }),
+          settledRow({ key: "call-4", name: "materialize", operationKind: "write", summary: "SELECT 5", running: true, success: null }),
+        ],
+      },
+    ];
+    const { container } = renderExchange(turn, onActivityExpandedChange);
+    // The stretch between the two prose sections (r0 + the call-only r1)
+    // lands as ONE aggregate fold line between them -- never a block per
+    // round.
+    const roundToggles = container.querySelectorAll("button.round-toggle");
+    expect(roundToggles).toHaveLength(1);
+    expect(roundToggles[0]?.textContent).toBe("执行完成 · 2 次调用");
+    // The prose renders above and below the fold; the folded thinking +
+    // rows stay hidden until it opens.
+    expect(screen.getByText("先看一眼。")).toBeInTheDocument();
+    expect(screen.getByText("数据已就绪。")).toBeInTheDocument();
+    expect(screen.queryByText("思考 · 1.2s")).not.toBeInTheDocument();
+    expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
+    expect(screen.queryByText("GET /x")).not.toBeInTheDocument();
+    // The last prose's segment (r2 + the tail) is NOT sealed: its rows
+    // stay in the activity line's fold.
+    expect(screen.queryByText("SELECT 3")).not.toBeInTheDocument();
+    expect(screen.queryByText("SELECT 4")).not.toBeInTheDocument();
+    // The head's count reads the line's rounds ONLY.
+    const head = container.querySelector("button.process-toggle");
+    expect(head?.textContent).toBe("正在写入 · 已完成 2 次调用");
+    // Open the sealed segment: every round's thinking fold + call rows in
+    // settle order; the count stays in the activity line.
+    fireEvent.click(roundToggles[0]!);
+    expect(screen.getByText("思考 · 1.2s")).toBeInTheDocument();
+    expect(screen.getByText("SELECT 1")).toBeInTheDocument();
+    expect(screen.getByText("GET /x")).toBeInTheDocument();
+    expect(screen.queryByText("SELECT 3")).not.toBeInTheDocument();
+    expect(onActivityExpandedChange).not.toHaveBeenCalledWith(true);
+  });
+
+  it("keeps everything in the line without any prose section (the pre-prose posture)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.rounds = [
+      { rows: [settledRow({ key: "call-0", summary: "SELECT 1" })] },
+      { rows: [settledRow({ key: "call-1", summary: "SELECT 2" })] },
+      { rows: [settledRow({ key: "call-2", summary: "SELECT 3", running: true, success: null })] },
+    ];
+    const { container } = renderExchange(turn);
+    // No prose section anywhere: nothing reveals -- the whole history
+    // rides the line (the pre-prose posture), the count reads the line's
+    // two settled calls.
+    expect(container.querySelector("button.process-toggle")?.textContent).toBe(
+      "正在读取 · 已完成 2 次调用",
+    );
+    expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
+    fireEvent.click(container.querySelector("button.process-toggle")!);
+    expect(screen.getByText("SELECT 1")).toBeInTheDocument();
+    expect(screen.getByText("SELECT 3")).toBeInTheDocument();
+  });
+
+  it("keeps a resolved-deny row visible at the tail until its completion lands", () => {
+    // The deny's optimistic resolve and the gateway's completion event
+    // (success false) are two commits; between them the row is neither
+    // pending nor settled, and the settled-only fold faces admit neither
+    // -- the tail is the one surface keeping the answer marker visible
+    // for that window (the marker used to vanish entirely).
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [
+      {
+        rows: [
+          {
+            key: "req-1",
+            name: "fetch",
+            server: "acme",
+            operationKind: "network",
+            summary: "GET /x",
+            approval: { requestId: "req-1", response: "deny" },
+            running: false,
+            success: null,
+            resultExcerpt: "",
+          },
+        ],
+      },
+    ];
+    const { container } = renderExchange(turn);
+    // The deny badge rides the row at the tail immediately -- no buttons
+    // remain (the card phase is over) and nothing doubles the row.
+    expect(screen.getByText("已拒绝")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "允许一次" })).not.toBeInTheDocument();
+    expect(container.querySelectorAll(".trace-row")).toHaveLength(1);
+    // The line holds the tool face under the un-completed approval row
+    // (the gate-hold extension: the deny's completion is a network window
+    // away), and the head counts only settled rows -- the deny row waits
+    // for its completion event. With nothing expandable behind the fold
+    // the line is the plain status face.
+    const line = container.querySelector(".process-toggle");
+    expect(line?.tagName).toBe("DIV");
+    expect(line?.textContent).toBe("正在联网 · 已完成 0 次调用");
+  });
+
+  it("keeps an abandoned call's row visible at the tail forever (#1267)", () => {
+    // The dropped call never completes -- no settled face will ever admit
+    // it -- so the tail keeps the abandoned marker for the rest of the
+    // turn (the marker used to have no surface at all).
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [
+      {
+        rows: [
+          settledRow({ key: "call-0", summary: "SELECT 1" }),
+          {
+            key: "req-1",
+            name: "fetch",
+            server: "acme",
+            operationKind: "network",
+            summary: "GET /x",
+            approval: { requestId: "req-1", response: "abandoned" },
+            running: false,
+            success: null,
+            resultExcerpt: "",
+          },
+        ],
+      },
+    ];
+    const { container } = renderExchange(turn);
+    expect(screen.getByText("已放弃")).toBeInTheDocument();
+    // The line holds the tool face under the abandoned row and keeps the
+    // settled call in its fold; the abandoned row rides the tail beside
+    // it, never inside the fold.
+    const head = container.querySelector("button.process-toggle");
+    expect(head?.textContent).toBe("正在联网 · 已完成 1 次调用");
+    fireEvent.click(head!);
+    expect(screen.getByText("SELECT 1")).toBeInTheDocument();
+    expect(container.querySelectorAll(".trace-row")).toHaveLength(2);
+  });
+
+  it("seals a leading call-only head segment under no prose (issue #1236)", () => {
+    // Rows may lead the slot arrays -- a turn can open with calls before
+    // any prose lands. The head segment is prose-less; a later prose
+    // section seals it into the same aggregate fold line, landing at its
+    // own top position.
+    const turn = liveTurnWith(undefined);
+    turn.step = 3;
+    turn.rounds = [
+      { rows: [settledRow({ key: "call-0", summary: "SELECT 1" })] },
+      { text: "先看一眼。", rows: [] },
+      { rows: [settledRow({ key: "call-1", summary: "SELECT 2" })] },
+    ];
+    const { container } = renderExchange(turn);
+    const roundToggles = container.querySelectorAll("button.round-toggle");
+    expect(roundToggles).toHaveLength(1);
+    expect(roundToggles[0]?.textContent).toBe("执行完成 · 1 次调用");
+    // The fold sits ABOVE the prose section (its own segment's position).
+    const prose = screen.getByText("先看一眼。");
+    expect(
+      roundToggles[0]!.compareDocumentPosition(prose) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // Open it: the head segment's call row lands on the shared left-rail
+    // list (the settled face's chrome); the line keeps the rounds after
+    // the prose (the count reads the one call there).
+    fireEvent.click(roundToggles[0]!);
+    expect(screen.getByText("SELECT 1")).toBeInTheDocument();
+    expect(container.querySelector(".round-toggle + ul.trace-list")).not.toBeNull();
+    fireEvent.click(container.querySelector("button.process-toggle")!);
+    expect(screen.getByText("SELECT 2")).toBeInTheDocument();
+    expect(screen.getByText("SELECT 2").closest("ul")).toHaveClass("trace-list");
   });
 });
