@@ -229,6 +229,34 @@ describe("LiveRow excerpt gate (issue #1047, #1604)", () => {
     expect(foldBlock(failed.container)).not.toHaveTextContent("boom");
   });
 
+  it("renders the full model-visible failure text over the excerpt head (issue #1610)", () => {
+    // The failure anchor upgraded to the audit record (#1610): a row whose
+    // completion carried a failure detail renders the full text in the
+    // anchor instead of the bounded head, keeping the #1604 cap face and
+    // the #1363 keyboard-reachable region posture. The no-detail fallback
+    // (pre-#1610 records, no-text arms) is the excerpt face the un-folded
+    // anchor test above pins.
+    const withDetail = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: false,
+          success: false,
+          resultExcerpt: "boom…",
+          failureDetail: "boom: relation not found (full text)",
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    const anchor = withDetail.container.querySelector(".trace-excerpt");
+    expect(anchor).toHaveTextContent("relation not found (full text)");
+    expect(anchor).not.toHaveTextContent("boom…");
+    expect(anchor).toHaveClass("max-h-48", "overflow-y-auto", "text-destructive");
+    expect(anchor).toHaveAttribute("tabindex", "0");
+    expect(anchor).toHaveAttribute("role", "region");
+    expect(anchor).toHaveAttribute("aria-label", "Error excerpt");
+  });
+
   it("renders neither excerpt face for a clean success row", () => {
     const clean = renderWithProviders(
       <LiveRow

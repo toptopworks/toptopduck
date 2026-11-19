@@ -66,6 +66,10 @@ export interface LiveCall {
   /** null until the completion event lands (a running dispatch). */
   success: boolean | null;
   resultExcerpt: string;
+  /** The completion's model-visible failure text (issue #1610), mirrored from
+   *  the wire entry; undefined until the completion lands, for a success
+   *  call, and for a no-text arm (the anchor falls back to the excerpt). */
+  failureDetail?: string;
   /** The delegation entry's nested sub-rounds (issue #934), delivered by the
    *  completion event; undefined for an ordinary call. */
   subRounds?: TraceRound[];
@@ -107,6 +111,10 @@ export interface LiveTraceRow {
   running: boolean;
   success: boolean | null;
   resultExcerpt: string;
+  /** The completion's model-visible failure text (issue #1610), carried
+   *  through the merge; undefined for the same arms the wire entry omits
+   *  it on. */
+  failureDetail?: string;
   /** The delegation entry's nested sub-rounds (issue #934), carried through
    *  the merge so the settled row renders the view affordance. */
   subRounds?: TraceRound[];
@@ -272,6 +280,7 @@ export function mergeLiveTrace(
         running: call.running,
         success: call.success,
         resultExcerpt: call.resultExcerpt,
+        failureDetail: call.failureDetail,
         subRounds: call.subRounds,
         callId: call.callId,
       });
@@ -287,6 +296,7 @@ export function mergeLiveTrace(
         running: call.running,
         success: call.success,
         resultExcerpt: call.resultExcerpt,
+        failureDetail: call.failureDetail,
         subRounds: call.subRounds,
         callId: call.callId,
       });
@@ -397,6 +407,7 @@ export function buildLiveRounds(
         running: r.running,
         success: r.success,
         resultExcerpt: r.resultExcerpt,
+        failureDetail: r.failureDetail,
         subRounds: r.subRounds,
         callId: r.callId,
         delegation: r.callId !== undefined ? views.get(r.callId) : undefined,
@@ -429,6 +440,7 @@ function foldRounds(fold: RoundFold): LiveRound[] {
         running: c.running,
         success: c.success,
         resultExcerpt: c.resultExcerpt,
+        failureDetail: c.failureDetail,
         subRounds: c.subRounds,
       })),
   }));
@@ -457,6 +469,7 @@ export function traceEntryFromRow(row: SettledLiveRow): TraceEntry {
     summary: row.summary,
     success: row.success,
     result_excerpt: row.resultExcerpt,
+    failure_detail: row.failureDetail,
     sub_rounds: row.subRounds,
   };
 }
@@ -677,6 +690,7 @@ function callRow(
   resultExcerpt: string,
   subRounds?: TraceRound[],
   callId?: string,
+  failureDetail?: string,
 ): LiveCall {
   return {
     key: `call-${seq}`,
@@ -689,6 +703,7 @@ function callRow(
     subRounds,
     success,
     resultExcerpt,
+    failureDetail,
   };
 }
 
@@ -727,6 +742,9 @@ function completeCallAt(calls: LiveCall[], idx: number, entry: TraceEntry): Live
           running: false,
           success: entry.success,
           resultExcerpt: entry.result_excerpt,
+          // The model-visible failure text rides the completion beside its
+          // bounded head (issue #1610); undefined for a success / no-text arm.
+          failureDetail: entry.failure_detail,
           // The delegation entry's nested sub-trace rides the completion
           // event (issue #934); undefined for an ordinary call.
           subRounds: entry.sub_rounds,
@@ -817,6 +835,8 @@ function applyRoundFold(fold: RoundFold, phase: TurnPhase): RoundFold {
         entry.success,
         entry.result_excerpt,
         entry.sub_rounds,
+        undefined,
+        entry.failure_detail,
       ),
     ],
   };

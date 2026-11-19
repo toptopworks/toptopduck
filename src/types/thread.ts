@@ -159,6 +159,13 @@ export interface TraceEntry {
   // -- the capped delegation report's truncation notice excepted
   // (issue #1047).
   result_excerpt: string;
+  // The model-visible error text of a FAILED call (issue #1610), capped at
+  // the failure-detail budget: the full text the error branch handed the
+  // model, rendered by the failure anchor in place of the excerpt head.
+  // Absent on every success entry and on every arm that produced no real
+  // text (a denial constant, a synthesized marker); absent on pre-#1610
+  // records -- the anchor falls back to result_excerpt.
+  failure_detail?: string;
   // The delegation report's FULL text (ADR-0135 Decision 3), present only
   // on a live delegation's completion -- a display-face fact the slim
   // projection does not persist (after resume only the excerpt exists, so

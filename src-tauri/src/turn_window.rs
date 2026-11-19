@@ -755,6 +755,7 @@ mod tests {
     #[test]
     fn window_history_carries_no_trace_data_adr_0078() {
         let trace_failure_excerpt = "SENTINEL_TRACE_FAILURE";
+        let trace_failure_detail = "SENTINEL_TRACE_FAILURE_DETAIL";
         let trace_summary = "SENTINEL_TRACE_SUMMARY";
         // The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
         // #934) rides the same exclusion: the sub-agent's rounds live under
@@ -764,6 +765,7 @@ mod tests {
         let sub_prose = "SENTINEL_SUB_PROSE";
         let sub_summary = "SENTINEL_SUB_SUMMARY";
         let sub_failure = "SENTINEL_SUB_FAILURE";
+        let sub_failure_detail = "SENTINEL_SUB_FAILURE_DETAIL";
         let poisoned_trace = vec![TraceRound {
             thinking: None,
             text: None,
@@ -775,6 +777,7 @@ mod tests {
                     summary: trace_summary.into(),
                     success: false,
                     result_excerpt: trace_failure_excerpt.into(),
+                    failure_detail: Some(trace_failure_detail.into()),
                     report: None,
                     sub_rounds: None,
                 },
@@ -785,6 +788,7 @@ mod tests {
                     summary: trace_summary.into(),
                     success: true,
                     result_excerpt: String::new(),
+                    failure_detail: None,
                     report: None,
                     sub_rounds: None,
                 },
@@ -795,6 +799,7 @@ mod tests {
                     summary: trace_summary.into(),
                     success: true,
                     result_excerpt: String::new(),
+                    failure_detail: None,
                     report: None,
                     sub_rounds: Some(vec![TraceRound {
                         thinking: None,
@@ -806,6 +811,7 @@ mod tests {
                             summary: sub_summary.into(),
                             success: false,
                             result_excerpt: sub_failure.into(),
+                            failure_detail: Some(sub_failure_detail.into()),
                             report: None,
                             sub_rounds: None,
                         }],
@@ -845,15 +851,18 @@ mod tests {
         let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS, &[]);
         let full = format!("{:?}", payload.history);
         assert!(
-            !full.contains(trace_failure_excerpt),
-            "ADR-0078: a failure trace excerpt leaked into an in-window Full TurnPayload:\n{full}"
+            !full.contains(trace_failure_excerpt) && !full.contains(trace_failure_detail),
+            "ADR-0078: a failure trace text (excerpt or #1610 detail) leaked into an in-window Full TurnPayload:\n{full}"
         );
         assert!(
             !full.contains(trace_summary),
             "ADR-0078: a trace summary leaked into an in-window Full TurnPayload:\n{full}"
         );
         assert!(
-            !full.contains(sub_prose) && !full.contains(sub_summary) && !full.contains(sub_failure),
+            !full.contains(sub_prose)
+                && !full.contains(sub_summary)
+                && !full.contains(sub_failure)
+                && !full.contains(sub_failure_detail),
             "ADR-0117: sub-trace detail leaked into an in-window Full TurnPayload:\n{full}"
         );
 
@@ -864,8 +873,8 @@ mod tests {
         let payload2 = assemble("probe", &[], &ws2, &history2, WINDOW_TURNS, &[]);
         let summary = format!("{:?}", payload2.history);
         assert!(
-            !summary.contains(trace_failure_excerpt),
-            "ADR-0078: a failure trace excerpt leaked into a far-window Summary TurnPayload:\n{summary}"
+            !summary.contains(trace_failure_excerpt) && !summary.contains(trace_failure_detail),
+            "ADR-0078: a failure trace text (excerpt or #1610 detail) leaked into a far-window Summary TurnPayload:\n{summary}"
         );
         assert!(
             !summary.contains(trace_summary),
@@ -874,7 +883,8 @@ mod tests {
         assert!(
             !summary.contains(sub_prose)
                 && !summary.contains(sub_summary)
-                && !summary.contains(sub_failure),
+                && !summary.contains(sub_failure)
+                && !summary.contains(sub_failure_detail),
             "ADR-0117: sub-trace detail leaked into a far-window Summary TurnPayload:\n{summary}"
         );
     }

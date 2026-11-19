@@ -1647,6 +1647,7 @@ fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
                 summary: "SELECT 1 AS n".into(),
                 success: true,
                 result_excerpt: String::new(),
+                failure_detail: None,
                 report: None,
                 sub_rounds: None,
             }),

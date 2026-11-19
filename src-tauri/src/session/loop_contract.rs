@@ -72,6 +72,16 @@ pub(crate) fn derived_step_ceiling(cap: u32) -> u32 {
 /// 512 -- an arm asymmetry, recorded rather than converged.
 pub(crate) const TRACE_EXCERPT_MAX: usize = 240;
 
+/// Maximum length of a failed call's persisted failure detail (issue #1610):
+/// the model-visible error text (`ToolResult.content` at the error branch,
+/// past whatever output cap already bounded it) kept as a durable record so
+/// the audit surface can show what the model actually self-corrected from --
+/// the excerpt anchor stays at [`TRACE_EXCERPT_MAX`] as the compact head.
+/// The same 4KB scale as the approval surface's attachment cap
+/// (`FILE_ATTACHMENT_MAX_CHARS`), so the two bounded-text budgets of one
+/// payload family agree. Shared across runtimes like the excerpt cap above.
+pub(crate) const TRACE_FAILURE_DETAIL_MAX: usize = 4 * 1024;
+
 /// The no-progress kill's measured detail (#886): the armed cap plus the
 /// trip-side observables -- the silence actually observed at expiry and the
 /// turn's whole runtime since arm. The cap alone is a production constant
@@ -177,6 +187,16 @@ pub struct TraceEntry {
     /// in-memory form keeps the success payload for the loop's own
     /// next-turn context.
     pub result_excerpt: String,
+    /// The model-visible error text of a FAILED call (issue #1610), bounded
+    /// at [`TRACE_FAILURE_DETAIL_MAX`]: the full `ToolResult.content` the
+    /// error branch handed the model (past its own output cap), kept as the
+    /// durable audit record the ADR-0078 anchor upgrades from head-only to
+    /// full-text. `None` on every arm that produced no real text (a denial
+    /// constant, a synthesized marker, a wire that carries no result text)
+    /// -- honest absence, never a copy of the excerpt. `None` on every
+    /// success entry; absent on pre-#1610 records (serde degrade, the
+    /// render falls back to `result_excerpt`).
+    pub failure_detail: Option<String>,
     /// The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
     /// #934): the sub-agent's round-grouped trajectory -- its thinking, its
     /// tool string, its calls' bounded excerpts (the terminal report itself
@@ -225,6 +245,7 @@ impl TraceEntry {
             success: true,
             output_truncated: false,
             result_excerpt: result_excerpt.into(),
+            failure_detail: None,
             sub_trace: None,
         }
     }
@@ -253,8 +274,23 @@ impl TraceEntry {
             } else {
                 message
             },
+            failure_detail: None,
             sub_trace: None,
         }
+    }
+
+    /// Attach a failed call's model-visible error text (issue #1610): the
+    /// full text the error branch routed back to the model, bounded here at
+    /// [`TRACE_FAILURE_DETAIL_MAX`] so every arm lands the same cap. An empty
+    /// text leaves the field absent -- arms without real text (constants,
+    /// synthesized markers) degrade honestly rather than duplicating the
+    /// excerpt. Builder form on the [`TraceEntry::failed`] pair; a success
+    /// entry never carries the field (the projections clear it regardless).
+    pub fn with_failure_detail(mut self, detail: &str) -> Self {
+        if !detail.is_empty() {
+            self.failure_detail = Some(truncate_trace_excerpt(detail, TRACE_FAILURE_DETAIL_MAX));
+        }
+        self
     }
 
     /// The approval-gateway denial row: the failed entry whose bounded anchor
@@ -309,6 +345,15 @@ fn reduced_trace(entry: &TraceEntry) -> TraceEntryView {
         } else {
             entry.result_excerpt.clone()
         },
+        // The failure detail is failure-only (issue #1610): the projections
+        // clear it on a success entry just as they empty the success excerpt,
+        // so the persisted + wire shapes never carry a success-arm detail
+        // even if a construction site handed one in.
+        failure_detail: if entry.success {
+            None
+        } else {
+            entry.failure_detail.clone()
+        },
         report: None,
         // The nested sub-trace (ADR-0117 Decision 6): the sub-rounds ride the
         // round-level display mapping, so a sub-round's entries take the same
@@ -361,6 +406,7 @@ impl RecipeTraceEntry {
             summary: v.summary,
             success: v.success,
             result_excerpt: v.result_excerpt,
+            failure_detail: v.failure_detail,
             // The nested sub-trace persists under the same slim projection
             // the main rounds take (ADR-0117 Decision 6): each sub-round maps
             // through `RecipeTraceRound::from_live_round`, so a successful
@@ -624,6 +670,7 @@ mod tests {
             success,
             output_truncated: false,
             result_excerpt: excerpt.into(),
+            failure_detail: None,
             sub_trace: None,
         };
         let ok = RecipeTraceEntry::from_live_trace(&base(true, "42 rows"));
@@ -650,6 +697,7 @@ mod tests {
             success,
             output_truncated: false,
             result_excerpt: excerpt.into(),
+            failure_detail: None,
             sub_trace: None,
         };
         let ok = TraceEntryView::from(&base(true, "42 rows"));
@@ -734,6 +782,7 @@ mod tests {
             success: false,
             output_truncated: false,
             result_excerpt: String::new(),
+            failure_detail: None,
             sub_trace: None,
         };
         let _ = RecipeTraceEntry::from_live_trace(&entry);
@@ -746,6 +795,111 @@ mod tests {
         let cut = truncate_trace_excerpt(&long, 10);
         assert_eq!(cut.chars().count(), 10);
         assert!(cut.ends_with('…'), "ends with ellipsis: {cut}");
+    }
+
+    /// The failure detail's own budget (issue #1610): a short text rides
+    /// verbatim, an over-cap text cuts at the detail cap with the shared
+    /// ellipsis marker, and an empty text leaves the field absent -- arms
+    /// without real text degrade honestly instead of duplicating the excerpt.
+    #[test]
+    fn with_failure_detail_bounds_at_the_cap_and_degrades_on_empty() {
+        let base = |detail: &str| {
+            TraceEntry::failed(
+                "tu_1",
+                "explore",
+                OperationKind::Read,
+                "SELECT 1",
+                "no such table",
+            )
+            .with_failure_detail(detail)
+        };
+        assert_eq!(
+            base("boom: relation not found").failure_detail.as_deref(),
+            Some("boom: relation not found"),
+            "a short text rides verbatim"
+        );
+        assert_eq!(base("").failure_detail, None, "empty degrades to absent");
+        let cut = base(&"x".repeat(TRACE_FAILURE_DETAIL_MAX + 100)).failure_detail;
+        let cut = cut.expect("an over-cap text still lands");
+        assert_eq!(
+            cut.chars().count(),
+            TRACE_FAILURE_DETAIL_MAX,
+            "capped at the detail budget"
+        );
+        assert!(cut.ends_with('…'), "cut carries the shared marker");
+    }
+
+    /// The detail is failure-only through BOTH reduced projections (issue
+    /// #1610): a failed entry's detail rides the persisted recipe + the wire
+    /// view verbatim, while a success entry -- even one a construction site
+    /// mistakenly stamped -- projects the field away, same as the success
+    /// excerpt empties.
+    #[test]
+    fn failure_detail_rides_both_reduced_projections_failure_only() {
+        let failed = TraceEntry::failed(
+            "tu_1",
+            "explore",
+            OperationKind::Read,
+            "SELECT 1",
+            "no such table",
+        )
+        .with_failure_detail("boom: relation not found");
+        let persisted = RecipeTraceEntry::from_live_trace(&failed);
+        assert_eq!(
+            persisted.failure_detail.as_deref(),
+            Some("boom: relation not found"),
+            "the persisted form carries the full text"
+        );
+        let view = TraceEntryView::from(&failed);
+        assert_eq!(
+            view.failure_detail.as_deref(),
+            Some("boom: relation not found"),
+            "the wire form carries the full text"
+        );
+        // The success-side clearing: a detail stamped on a success entry (a
+        // construction-site mistake the projections must survive) never
+        // reaches the persisted or wire shape.
+        let mut ok = TraceEntry::succeeded(
+            "tu_2",
+            "explore",
+            OperationKind::Read,
+            "SELECT 2",
+            "42 rows",
+        );
+        ok.failure_detail = Some("leaky".into());
+        assert_eq!(
+            RecipeTraceEntry::from_live_trace(&ok).failure_detail,
+            None,
+            "success persists no detail"
+        );
+        assert_eq!(
+            TraceEntryView::from(&ok).failure_detail,
+            None,
+            "success wires no detail"
+        );
+    }
+
+    /// Pre-#1610 records carry no `failure_detail` key (issue #1610): the
+    /// field degrades to absent on deserialize -- zero migration -- and the
+    /// key is absent on the wire when unset, so old recipe.json files stay
+    /// byte-compatible.
+    #[test]
+    fn failure_detail_degrades_absent_on_pre_1610_records() {
+        let legacy = serde_json::json!({
+            "name": "explore",
+            "operation_kind": "read",
+            "summary": "SELECT 1",
+            "success": false,
+            "result_excerpt": "no such table"
+        });
+        let entry: RecipeTraceEntry =
+            serde_json::from_value(legacy).expect("a pre-#1610 record deserializes");
+        assert_eq!(entry.failure_detail, None, "absent key degrades to None");
+        let wire = serde_json::to_value(&entry).expect("re-serializes");
+        assert!(
+            wire.get("failure_detail").is_none(),
+            "the unset field stays off the wire"
+        );
     }
 
     /// The windowed ceiling is the derived product every windowed runtime
@@ -797,6 +951,7 @@ mod tests {
             success: true,
             output_truncated: false,
             result_excerpt: "done".into(),
+            failure_detail: None,
             sub_trace: Some(vec![sub_round]),
         };
 

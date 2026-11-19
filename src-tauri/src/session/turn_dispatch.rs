@@ -530,7 +530,8 @@ fn dispatch_gated_call_inner(
                                         OperationKind::Write,
                                         summary,
                                         truncate_trace_excerpt(&message, TRACE_EXCERPT_MAX),
-                                    );
+                                    )
+                                    .with_failure_detail(&message);
                                     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(
                                         &entry,
                                     )));
@@ -735,6 +736,7 @@ fn dispatch_gated_call_inner(
             summary,
             excerpt,
         )
+        .with_failure_detail(&result.content)
     };
     // ADR-0078: complete the live row with the persisted-shape view (success
     // excerpt emptied -- see TraceEntryView's mapping below), paired with the
@@ -2115,6 +2117,13 @@ mod tests {
             !entry.result_excerpt.is_empty(),
             "the failure message rides the trace entry"
         );
+        // The model-visible error text rides the failure detail (issue
+        // #1610): exactly the ToolResult.content the model saw.
+        assert_eq!(
+            entry.failure_detail.as_deref(),
+            Some(result.content.as_str()),
+            "the dispatched failure persists its full model-visible text"
+        );
         let phases = phases.into_inner().unwrap();
         assert_eq!(phases.len(), 2, "one dispatch -> Started + Completed");
         assert_eq!(
@@ -2855,6 +2864,13 @@ mod tests {
         let entry = entry.expect("a raced failure records an entry");
         assert!(!entry.success);
         assert_eq!(entry.operation_kind, OperationKind::Write);
+        // The typed error rides the failure detail too (issue #1610): the
+        // message the model self-corrected from persists beside the head.
+        assert_eq!(
+            entry.failure_detail.as_deref(),
+            Some(result.content.as_str()),
+            "the raced create persists its model-visible error text"
+        );
         let phases = phases.into_inner().unwrap();
         assert_eq!(phases.len(), 2, "started + completed survive the failure");
         assert!(
