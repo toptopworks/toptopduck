@@ -266,11 +266,12 @@ export function QuestionBar({ onSubmit, onCancel, loading, queued = false, draft
           {trailing}
           {queued && !loading && (
             // The queued posture's feedback slot (issue #1500), seated where
-            // the wait-feedback slot sits: the held question waits behind
-            // the queue window -- an ingest batch or a source replace
-            // flight (#1512) -- and the copy describes the wait so the
-            // disabled bar reads as intent, not a freeze. role="status" +
-            // aria-live like the phase slot.
+            // the retired wait-feedback slot sat (the turn wait feedback
+            // moved to the rail's activity line, #1612): the held question
+            // waits behind the queue window -- an ingest batch or a source
+            // replace flight (#1512) -- and the copy describes the wait so
+            // the disabled bar reads as intent, not a freeze. role="status"
+            // + aria-live, carried over from the retired phase slot.
             //
             // One neutral tier for every window kind is the #1516 ruling,
             // not an oversight: the slot's exit contract is kind-agnostic

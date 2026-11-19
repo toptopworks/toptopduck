@@ -338,7 +338,7 @@ export function useSessionState(
 
   // --- Actions -------------------------------------------------------------
 
-  // Turn orchestration (handleAsk + handleCancel + phase) lives in useTurnFlow
+  // Turn orchestration (handleAsk + handleCancel + hasLiveTurn) lives in useTurnFlow
   // (issue #230) -- the turn domain's "thread stays un-invalidated" rule is
   // distinct from the generic refreshServerState used by the ingest mutations.
   // Driven through injected deps; this hook never reaches for

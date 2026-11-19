@@ -37,8 +37,9 @@ function useElapsedSeconds(startedAt: number | null, pausedSince: number | null)
 /** The elapsed-seconds suffix leaf ("· 12s" / "· 12秒"): ticks once a second off a
  *  turn-flow-owned stamp, mounted at the live activity line's face tail --
  *  the turn clock's one host since the composer wait slot retired (#1612's
- *  re-host of the #1264 ruling) -- and inside the rail's ingest / replace
- *  progress strips. aria-hidden: the per-second change is decoration riding
+ *  re-host of the #1264 ruling) -- inside the rail's ingest / replace
+ *  progress strips and the datasets dialog's per-dataset running badge.
+ *  aria-hidden: the per-second change is decoration riding
  *  its host's own face, never a stream of announcements of its own. Renders
  *  null when no clock is running (stamp null). The display face is the
  *  shared tiered ElapsedFace (issue #1280; the settled process head's frozen
