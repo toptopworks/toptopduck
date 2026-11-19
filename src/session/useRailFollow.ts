@@ -37,6 +37,12 @@ const RESUME_BAND_PX = 40;
  *    transition; the callback rides the same rAF, and the follow tracks the
  *    eased bound instead of holding a stale maxScroll until the next
  *    streaming delta.
+ *    A shrink while PAUSED also re-evaluates the band right there: a
+ *    collapse (the activity line's fold, a details fold) that leaves the
+ *    paused viewport inside the shrunken extent fires no scroll event
+ *    (scrollTop unchanged, no clamp), so the pill's exit condition would
+ *    otherwise never run -- the callback resumes in place, and the align it
+ *    schedules lands the tail, at most a band's worth away.
  *  - Pause: a scroll event landing beyond RESUME_BAND_PX from the bottom.
  *    Programmatic aligns land AT the bottom, and their scroll events are
  *    recognized as echoes (they land exactly on the written offset while
@@ -63,10 +69,10 @@ const RESUME_BAND_PX = 40;
  *  reflow resizing the rail's box. A fold that shrinks past the current
  *  position makes the browser clamp scrollTop, which fires one scroll event
  *  at distance 0 -- re-entering the follow, which the clamped bottom
- *  already is. (In-content folds -- a thread card's <details> -- resize no
- *  box; they ride the next signal of any kind -- an append, submit,
- *  activation, or range change -- and on an idle session the drift lasts
- *  until one arrives.)
+ *  already is. (In-content folds -- a thread card's <details> -- do not
+ *  resize the rail's own box, but the reading column is an observer
+ *  target too, so a fold is itself a range change: the callback sees it
+ *  directly, with no wait for the next append, submit, or activation.)
  *
  *  Session switch PRESERVES posture (the keep-alive contract, ADR-0051):
  *  open panes stay MOUNTED but display:none when not active, so a switch is
@@ -171,8 +177,9 @@ export function useRailFollow({
       // A landed write is the machine re-entering the follow, so the
       // published mirror rides the same callback (a bail-out no-op when
       // already true). The published boolean is ONLY ever touched from event
-      // callbacks (here and the scroll handler) -- never from an effect
-      // body; followingRef is the half the submit effect sets directly.
+      // callbacks (here, the scroll handler, and the range callback) --
+      // never from an effect body; followingRef is the half the submit
+      // effect sets directly.
       setIsFollowing(true);
     });
   }, []);
@@ -254,7 +261,25 @@ export function useRailFollow({
     const el = railRef.current;
     if (el === null) return;
     if (typeof ResizeObserver === "undefined") return; // jsdom (test-setup stubs it)
-    const observer = new ResizeObserver(() => scheduleAlign());
+    const observer = new ResizeObserver(() => {
+      // A paused shrink re-enters the follow here, not through the scroll
+      // handler -- the why is the doc block's Range entry above. The same
+      // arithmetic the scroll handler runs, gated on the hidden pane for
+      // the same reason scrollToBottom is (display:none reports a 0x0
+      // box, which the band math would read as "at the bottom").
+      const el = railRef.current;
+      if (
+        !followingRef.current &&
+        activeRef.current &&
+        el !== null &&
+        el.clientHeight > 0 &&
+        el.scrollHeight - el.clientHeight - el.scrollTop <= RESUME_BAND_PX
+      ) {
+        followingRef.current = true;
+        setIsFollowing(true);
+      }
+      scheduleAlign();
+    });
     observer.observe(el);
     // Streamed prose grows the CONTENT, not the rail's own box, and its
     // append signal (liveTurn identity) can miss markdown enrichment that

@@ -624,6 +624,130 @@ describe("useRailFollow", () => {
     expect(followingText()).toBe("false");
   });
 
+  it("resumes a paused rail when a collapse brings the viewport back within the band (no scroll event fires)", () => {
+    // The activity-line fold's round trip (expand -> read -> collapse): the
+    // collapse shrinks the extent toward the paused viewport WITHOUT
+    // clamping past it, so the browser fires no scroll event and the scroll
+    // handler's band evaluation never runs -- the pill's exit is the range
+    // callback's to compute, or it outlives a viewport already back at the
+    // tail.
+    const { getByTestId } = render(
+      <Host active={true} entryCount={3} liveTurn={makeLiveTurn()} />,
+    );
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame(); // mount land: maxScroll 700, scrollTop 700
+
+    // Expand: the fold's rows grow the extent -> the range align lands the
+    // new bottom (maxScroll 1300).
+    rig.geo.scrollHeight = 1600;
+    fireRange();
+    flushFrame();
+    expect(rig.scrollTop()).toBe(1300);
+
+    // The reader scrolls up to the fold's rows: distance 350 > 40 -> pause.
+    rig.userScrollTo(950);
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("false");
+
+    // Collapse: the extent shrinks back to maxScroll 970. scrollTop 950
+    // still sits INSIDE the shrunken extent, so no clamp fires and no
+    // scroll event exists -- the range signal sees distance 20, inside
+    // the band.
+    rig.geo.scrollHeight = 1270;
+    fireRange();
+    expect(followingText()).toBe("true"); // the band re-evaluated: resumed
+
+    // The resume's scheduled align lands the tail: 970, the 20px hop the
+    // doc block promises ("at most a band's worth away").
+    flushFrame();
+    expect(rig.scrollTop()).toBe(970);
+    expect(followingText()).toBe("true");
+  });
+
+  it("resumes at the band edge on the range path (distance exactly the band resumes)", () => {
+    // The band is inclusive here exactly as in the scroll handler (whose
+    // twin case holds following at distance 40): a collapse landing the
+    // viewport exactly one band from the tail re-enters the follow.
+    const { getByTestId } = render(
+      <Host active={true} entryCount={3} liveTurn={makeLiveTurn()} />,
+    );
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame();
+
+    rig.geo.scrollHeight = 1600; // expand -> maxScroll 1300
+    fireRange();
+    flushFrame();
+    rig.userScrollTo(950); // distance 350 -> pause
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("false");
+
+    // maxScroll 990: distance exactly 40 -- inside the inclusive band.
+    rig.geo.scrollHeight = 1290;
+    fireRange();
+    expect(followingText()).toBe("true"); // the boundary itself resumes
+    flushFrame();
+    expect(rig.scrollTop()).toBe(990);
+  });
+
+  it("stays paused when the collapse still leaves the viewport beyond the band", () => {
+    const { getByTestId } = render(
+      <Host active={true} entryCount={3} liveTurn={makeLiveTurn()} />,
+    );
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame();
+
+    rig.geo.scrollHeight = 1600; // expand -> maxScroll 1300
+    fireRange();
+    flushFrame();
+    rig.userScrollTo(950); // distance 350 -> pause
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("false");
+
+    // A shallower collapse: maxScroll 1100, distance 150 -- still beyond
+    // the band. The re-evaluation must not resume, and the reading
+    // position stays.
+    rig.geo.scrollHeight = 1400;
+    fireRange();
+    flushFrame();
+    expect(followingText()).toBe("false");
+    expect(rig.scrollTop()).toBe(950);
+  });
+
+  it("does not resume a hidden paused pane on its collapsed-box range change", () => {
+    // display:none collapses the box to 0x0, which the band math would read
+    // as "at the bottom" -- the resume must gate on activation exactly as
+    // scrollToBottom does, or a stray hidden-pane resize flips the posture
+    // and the switch-back discards the preserved reading position.
+    const { getByTestId, rerender } = render(
+      <Host active={true} entryCount={3} liveTurn={null} />,
+    );
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame();
+    rig.userScrollTo(400); // pause while visible
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("false");
+
+    rerender(<Host active={false} entryCount={3} liveTurn={null} />);
+    rig.geo.scrollHeight = 0; // display:none reports a 0x0 box
+    rig.geo.clientHeight = 0;
+    fireRange();
+    flushFrame();
+    expect(followingText()).toBe("false"); // posture preserved, pill intact
+    expect(rig.hookWrites()).toBe(1); // the mount land -- no geometry write
+  });
+
   it("keeps the range observer armed across the StrictMode remount cycle", () => {
     const { getByTestId } = render(
       <StrictMode>
