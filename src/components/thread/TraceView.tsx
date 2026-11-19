@@ -128,7 +128,7 @@ function RunningRow({
               prose, ADR-0135 filters the deltas -- with live rows (spinner
               / completed) in place of settled entries. */}
           {view.rounds.map((round, i) => (
-            <div key={i} className="trace-round">
+            <div key={i} className="trace-round max-w-full">
               {round.thinking !== undefined && <ThinkingFold thinking={round.thinking} />}
               {round.rows.length > 0 && (
                 <TraceList>

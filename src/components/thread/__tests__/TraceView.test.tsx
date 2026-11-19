@@ -717,12 +717,17 @@ describe("LiveRow delegation live affordances (ADR-0135)", () => {
     const taskHead = document.querySelector(".subtrace-task");
     expect(taskHead?.textContent).toBe("Clean the whole sheet, report back");
     expect(taskHead).toHaveClass("whitespace-pre-wrap", "max-h-48");
-    expect(screen.getByText("SELECT 1")).toBeInTheDocument();
+    const subCall = screen.getByText("SELECT 1");
+    expect(subCall).toBeInTheDocument();
     // The sub-round's thinking rides the same honest fold the settled panel
     // uses, collapsed by default.
     const thinking = container.querySelectorAll(".thinking-toggle");
     expect(thinking).toHaveLength(1);
     expect(screen.queryByText("child reasoning")).not.toBeInTheDocument();
+    // The live panel's round blocks carry the trace family's max-w-full cap
+    // (jsdom cannot measure; the structure is the pin, rationale at the
+    // mount in TraceView).
+    expect(subCall.closest(".trace-round")).toHaveClass("max-w-full");
   });
 
   it("does not fold the summary line when the sub-trace toggle is clicked", () => {
