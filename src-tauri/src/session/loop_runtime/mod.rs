@@ -368,13 +368,16 @@ impl LoopRuntime {
                         .completed
                         .lock()
                         .expect("completed lock poisoned")
-                        .push_back(TraceEntry::failed(
-                            call.id.clone(),
-                            call.name.clone(),
-                            operation_kind,
-                            summary,
-                            truncate_trace_excerpt(&refusal, TRACE_EXCERPT_MAX),
-                        ));
+                        .push_back(
+                            TraceEntry::failed(
+                                call.id.clone(),
+                                call.name.clone(),
+                                operation_kind,
+                                summary,
+                                truncate_trace_excerpt(&refusal, TRACE_EXCERPT_MAX),
+                            )
+                            .with_failure_detail(&refusal),
+                        );
                     channel.recorded_calls.fetch_add(1, Ordering::SeqCst);
                     let result = crate::provider::tool_calling::ToolResult {
                         tool_use_id: call.id.clone(),

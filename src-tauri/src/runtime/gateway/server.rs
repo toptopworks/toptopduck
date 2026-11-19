@@ -1083,7 +1083,8 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 operation_kind,
                 summary,
                 excerpt,
-            );
+            )
+            .with_failure_detail(&detail);
             ctx.events
                 .emit(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
             outcome.trace.push(entry);

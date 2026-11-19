@@ -354,6 +354,7 @@ mod tests {
             success,
             output_truncated: false,
             result_excerpt: format!("{name} excerpt"),
+            failure_detail: None,
             sub_trace: None,
         }
     }

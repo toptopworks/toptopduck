@@ -1288,6 +1288,37 @@ describe("useTurnFlow", () => {
       ]);
     });
 
+    it("threads the failure detail through merge + grouping + the settle projection (issue #1610)", () => {
+      // The wire's failure_detail rides the whole live chain -- the fold's
+      // call, the merge, the round grouping, and the settled projection back
+      // onto the trace shape -- so the live anchor and the optimistic record
+      // both render the full model-visible text. A row without one (a
+      // pre-#1610 record, a no-text arm) keeps an absent key: the anchor
+      // falls back to the excerpt.
+      const failed = call({
+        success: false,
+        resultExcerpt: "boom…",
+        failureDetail: "boom: relation not found (full text)",
+      });
+      const trace = liveRoundsToTrace(
+        buildLiveRounds(
+          { step: 1, calls: [failed], roundTexts: [], roundThinkings: [], delegations: {} },
+          [],
+        ),
+      );
+      expect(trace[0]?.calls[0]?.failure_detail).toBe(
+        "boom: relation not found (full text)",
+      );
+      const plain = call({ success: false, resultExcerpt: "boom" });
+      const plainTrace = liveRoundsToTrace(
+        buildLiveRounds(
+          { step: 1, calls: [plain], roundTexts: [], roundThinkings: [], delegations: {} },
+          [],
+        ),
+      );
+      expect(plainTrace[0]?.calls[0]?.failure_detail).toBeUndefined();
+    });
+
     it("buildLiveRounds turns padded null slots into absent members (a round that emitted none)", () => {
       // withRoundSlot pads skipped rounds with null (round 1 emitted nothing
       // when round 2's event lands first); the derivation converts the

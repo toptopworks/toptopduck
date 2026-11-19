@@ -689,6 +689,9 @@ fn land_delegation_entry(
             truncation::marked_reply_excerpt(report, TRACE_EXCERPT_MAX),
         )
     } else {
+        // A failed run's report IS the model-visible failure text (issue
+        // #1610): the bounded excerpt stays the anchor head, the detail
+        // keeps the capped report whole.
         TraceEntry::failed(
             id.to_string(),
             name.to_string(),
@@ -696,6 +699,7 @@ fn land_delegation_entry(
             delegation_summary(task),
             truncation::marked_reply_excerpt(report, TRACE_EXCERPT_MAX),
         )
+        .with_failure_detail(report)
     };
     // The cap-cut stamp (issue #1047): keys the projections' exception --
     // the capped report's marker-bearing notice survives where every
@@ -791,6 +795,7 @@ mod tests {
                 summary: "clean the sheet".to_string(),
                 success: true,
                 result_excerpt: String::new(),
+                failure_detail: None,
                 id: None,
                 report: None,
                 sub_rounds: None,

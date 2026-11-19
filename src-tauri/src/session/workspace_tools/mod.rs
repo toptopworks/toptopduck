@@ -375,6 +375,7 @@ pub(crate) fn dispatch_workspace_tool(
                     plan.summary,
                     excerpt,
                 )
+                .with_failure_detail(&result.content)
             } else {
                 TraceEntry::succeeded(
                     call.id.clone(),

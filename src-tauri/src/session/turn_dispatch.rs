@@ -530,7 +530,8 @@ fn dispatch_gated_call_inner(
                                         OperationKind::Write,
                                         summary,
                                         truncate_trace_excerpt(&message, TRACE_EXCERPT_MAX),
-                                    );
+                                    )
+                                    .with_failure_detail(&message);
                                     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(
                                         &entry,
                                     )));
@@ -735,6 +736,7 @@ fn dispatch_gated_call_inner(
             summary,
             excerpt,
         )
+        .with_failure_detail(&result.content)
     };
     // ADR-0078: complete the live row with the persisted-shape view (success
     // excerpt emptied -- see TraceEntryView's mapping below), paired with the

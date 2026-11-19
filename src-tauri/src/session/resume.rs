@@ -660,6 +660,7 @@ impl From<&RecipeTraceEntry> for TraceEntryView {
             summary: entry.summary.clone(),
             success: entry.success,
             result_excerpt: entry.result_excerpt.clone(),
+            failure_detail: entry.failure_detail.clone(),
             report: None,
             // The nested sub-trace (ADR-0117 Decision 6, issue #934) resumes
             // verbatim: the sub-rounds map through the round-level mapping
@@ -1712,6 +1713,7 @@ mod tests {
             summary: "clean the sheet".into(),
             success: false,
             result_excerpt: "no such table".into(),
+            failure_detail: Some("the full model-visible failure text".into()),
             sub_rounds: Some(vec![RecipeTraceRound {
                 thinking: None,
                 text: Some("child prose".into()),
@@ -1721,6 +1723,7 @@ mod tests {
                     summary: "SELECT 1".into(),
                     success: true,
                     result_excerpt: String::new(),
+                    failure_detail: None,
                     sub_rounds: None,
                 }],
             }]),

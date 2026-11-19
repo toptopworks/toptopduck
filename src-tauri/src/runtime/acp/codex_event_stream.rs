@@ -982,17 +982,18 @@ impl JsonPump {
                     // An empty message degrades to the constructor's
                     // failure-anchor fallback — the anchor is never empty;
                     // a longer one truncates under the trace-excerpt
-                    // discipline (the bounded-anchor caller contract).
+                    // discipline (the bounded-anchor caller contract). The
+                    // message itself rides the failure detail whole (issue
+                    // #1610): the wire's error text is what the model saw.
+                    let message = error_message.as_deref().unwrap_or("");
                     TraceEntry::failed(
                         call_id,
                         name.clone(),
                         operation_kind,
                         summary.clone(),
-                        truncate_trace_excerpt(
-                            &error_message.unwrap_or_default(),
-                            TRACE_EXCERPT_MAX,
-                        ),
+                        truncate_trace_excerpt(message, TRACE_EXCERPT_MAX),
                     )
+                    .with_failure_detail(message)
                 } else {
                     TraceEntry::succeeded(
                         call_id,
@@ -1063,6 +1064,7 @@ fn outcome(
 mod tests {
     use super::*;
     use crate::runtime::acp::wire::McpServer;
+    use crate::session::loop_contract::TRACE_FAILURE_DETAIL_MAX;
     use serde_json::json;
     use std::collections::BTreeMap;
 
@@ -1983,6 +1985,42 @@ mod tests {
             excerpt.ends_with('…'),
             "the cut renders the ellipsis marker"
         );
+        // The same message rides the failure detail whole (issue #1610): this
+        // text is under the detail budget, so the wire's error text lands
+        // verbatim beside its bounded head.
+        let message = "x".repeat(TRACE_EXCERPT_MAX + 100);
+        assert_eq!(
+            rounds[0].calls[0].failure_detail.as_deref(),
+            Some(message.as_str()),
+            "a sub-budget message rides the detail verbatim"
+        );
+    }
+
+    /// An over-budget wire error message caps at the detail budget (issue
+    /// #1610): the excerpt stays its bounded head while the detail keeps the
+    /// model-visible text up to the 4KB scale.
+    #[test]
+    fn failed_mcp_tool_call_detail_caps_at_the_failure_detail_budget() {
+        let mut pump = JsonPump::new(24, None, None);
+        pump.fold(
+            CodexEvent::McpToolCall {
+                call_id: "item_1".into(),
+                name: "convert".into(),
+                arguments: String::new(),
+                failed: true,
+                error_message: Some("y".repeat(TRACE_FAILURE_DETAIL_MAX + 100)),
+            },
+            &mut |_| {},
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text(String::new()));
+        let detail = rounds[0].calls[0]
+            .failure_detail
+            .as_deref()
+            .expect("an over-budget message still lands a detail");
+        assert_eq!(detail.chars().count(), TRACE_FAILURE_DETAIL_MAX);
+        assert!(detail.ends_with('…'), "the cut renders the marker");
     }
 
     /// Prose stays in the round it was emitted in: cross-round fragments do

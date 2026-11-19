@@ -4,7 +4,7 @@
 
 1. **live 子事件由 tagged 通路转发既有非 delta phase。** 两个汇入点共用同一包裹形态：`run_subagent` 的 noop sink 替换为 tagged sink，转发子智能体事件 fold 产出的 `Thinking` / `ThinkingCompleted`；子面 dispatch 请求携带委派 id，dispatch 环路按 id 选 tagged 包裹转发工具调用对（`ToolCallStarted` / `ToolCallCompleted`）。每条贴所属委派的 call id；`TextDelta` 滤除——轮文本的 live 面不流式，随 settle 的 `sub_rounds` 全量可见。审批卡既有通道不变（子面 dispatch 的 `origin` 标注，ADR-0117）。
 2. **事件身份由起点铸造单一 id。** 委派 execute 入口铸 call id，贯穿 started/completed phase、每条子事件与落地条目；持久 `TraceEntry` 不携带——id 是纯 live 路由事实（LiveTurn 不入 thread cache 的既有边界），同名并行委派由此可路由。
-3. **全文为 live-only。** 任务全文随 started phase、报告全文随 completed phase 到达前端，仅渲染于展开区；持久投影维持瘦身摘录（`TRACE_EXCERPT_MAX`），resume 后全文不可见——与成功摘录持久后清空（ADR-0036）同姿态。
+3. **全文为 live-only。** 任务全文随 started phase、报告全文随 completed phase 到达前端，仅渲染于展开区；持久投影维持瘦身摘录（`TRACE_EXCERPT_MAX`），resume 后全文不可见——与成功摘录持久后清空（ADR-0036）同姿态。失败审计臂除外：失败调用的模型可见错误文本（失败委派的报告在内）另入有界持久字段（4KB 预算），resume 后失败全文可见；任务与成功报告全文仍为 live-only。
 
 ## Context
 
@@ -15,7 +15,7 @@
 1. **行内展开面是唯一子轨迹面**（ADR-0117 Decision 6）：live 尾窗与 settled `sub_rounds` 同构复用同一渲染，live→settle 只是数据续播，无第二呈现面；live 面承载 thinking 两族与工具调用对（后者由 dispatch 请求携带的委派 id 路由），轮文本仍随 settle 全量可见——换帧无行蒸发与凭空显形。
 2. **转发即达**：thinking 两族事件已在产生，转发零 Rust 逻辑增量；「在干什么」由轮推进与 thinking 全文（折叠）覆盖，工具调用对经 dispatch 通路携带委派身份并入，过程性 prose 价值密度低。
 3. **同名并行需要真身份**：`DELEGATION_BATCH_CAP`（8）下按名称与顺序的前端配对存在同名歧义，起点铸造是唯一干净解。
-4. **全文与摘录是两个面**：240 字符摘录服务模型输入与持久审计，读者需要的任务书与终局报告是显示面事实——截断常数分设，持久契约不动。
+4. **全文与摘录是两个面**：240 字符摘录服务模型输入与持久审计，读者需要的任务书与终局报告是显示面事实——截断常数分设；失败文本的持久审计另由 4KB 有界字段承载，成功面持久契约不动。
 
 ## Considered options
 
@@ -28,7 +28,7 @@
 
 - 行面状态芯片（单委托「step n」、批次聚合「N-of-M done, 1 running」）为纯前端派生，零协议增量。
 - settle 换帧时展开态不存续（已知限制：展开收起、位置不变、重击展开即可）。
-- resume 后展开区只渲染摘要 + `sub_rounds`，全文不可见且不报错。
+- resume 后展开区只渲染摘要 + `sub_rounds`，任务与成功报告全文不可见且不报错；失败报告的有界全文渲染于失败锚区（Decision 3）。
 - `TurnPhase::ToolCallStarted` / `ToolCallCompleted` 增字段为加性 wire 变更，`ipc_contract` 同步。
 - `TextDelta` 滤除点收敛在 tagged sink 一处；轮文本落点事件留实施期可选。
 - 拒绝臂（batch cap / 空任务）行为不变：失败行、无 phase 对、无子事件。

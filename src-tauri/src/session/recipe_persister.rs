@@ -874,6 +874,7 @@ mod tests {
                 summary: "SELECT 1".into(),
                 success: true,
                 result_excerpt: String::new(),
+                failure_detail: None,
                 sub_rounds: None,
             }],
         }];

@@ -287,6 +287,7 @@ pub(crate) fn dispatch_readonly(
             summary,
             truncate_trace_excerpt(&content, TRACE_EXCERPT_MAX),
         )
+        .with_failure_detail(&content)
     } else {
         TraceEntry::succeeded(
             call.id.clone(),
@@ -1399,6 +1400,15 @@ mod tests {
         );
         assert!(failing.is_error);
         assert!(failing.content.contains("does not exist"));
-        assert!(!entry.expect("a failed read records an entry").success);
+        let entry = entry.expect("a failed read records an entry");
+        assert!(!entry.success);
+        // The model-visible error text rides the failure detail whole (issue
+        // #1610): the model self-corrected from exactly this string, so the
+        // audit record keeps it beside the bounded excerpt anchor.
+        assert_eq!(
+            entry.failure_detail.as_deref(),
+            Some(failing.content.as_str()),
+            "the failed read persists its full model-visible text"
+        );
     }
 }

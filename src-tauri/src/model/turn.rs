@@ -560,6 +560,14 @@ pub struct TraceEntryView {
     /// empty for a successful call -- the capped delegation report's
     /// truncation notice excepted (issue #1047).
     pub result_excerpt: String,
+    /// The model-visible error text of a FAILED call (issue #1610), bounded
+    /// at the failure-detail cap: the durable audit record the failure
+    /// anchor renders in full, where `result_excerpt` keeps only the bounded
+    /// head. Absent on every success entry and on every arm that produced no
+    /// real text (a denial constant, a synthesized marker); absent on
+    /// pre-#1610 records -- the render falls back to `result_excerpt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_detail: Option<String>,
     /// The delegation report's FULL text (ADR-0135 Decision 3), present only
     /// on a live delegation's completion -- a display-face fact the slim
     /// projection does not persist (the recorded entry keeps its bounded

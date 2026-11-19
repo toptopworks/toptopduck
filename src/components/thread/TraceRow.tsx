@@ -166,6 +166,10 @@ export function TraceRow({
 }) {
   const [subOpen, setSubOpen] = useState(false);
   const intl = useIntl();
+  // The failure anchor's text (issue #1610): the full model-visible error
+  // text when the entry carries one, the bounded excerpt when it does not
+  // (pre-#1610 records, no-text arms) -- one anchor face, two depths.
+  const failureText = entry.failure_detail ?? entry.result_excerpt;
   // The gate lives here, once: a row whose entry carries no sub-rounds (or
   // whose caller supplied no body) renders neither the toggle nor the panel,
   // so the callers inject the body unconditionally over their row lists.
@@ -217,16 +221,18 @@ export function TraceRow({
             </>
           )}
         />
-        {/* The failure excerpt is the cross-turn retrospection anchor
-         * (ADR-0078): visible without a click, destructive-styled, and
-         * height-capped since #1604 so a multi-KB error cannot push the
-         * whole screen out of view (the thinking fold's cap face and its
-         * #1363 keyboard-reachable region posture). A success never
-         * renders here anymore (#1604) -- the one success excerpt the
-         * projections keep, the capped delegation report's truncation
-         * notice (issue #1047), folds into the summary expand block
-         * above. */}
-        {!entry.success && entry.result_excerpt !== "" && (
+        {/* The failure anchor is the cross-turn retrospection surface
+         * (ADR-0078, full text since #1610): visible without a click,
+         * destructive-styled, and height-capped since #1604 so a multi-KB
+         * error cannot push the whole screen out of view (the thinking
+         * fold's cap face and its #1363 keyboard-reachable region posture).
+         * It renders the model-visible failure text whole when the entry
+         * carries one (#1610) and falls back to the bounded excerpt for
+         * pre-#1610 records and no-text arms. A success never renders here
+         * anymore (#1604) -- the one success excerpt the projections keep,
+         * the capped delegation report's truncation notice (issue #1047),
+         * folds into the summary expand block above. */}
+        {!entry.success && failureText !== "" && (
           <span
             className="trace-excerpt block whitespace-pre-wrap break-words text-xs max-h-48 overflow-y-auto text-destructive"
             tabIndex={0}
@@ -236,7 +242,7 @@ export function TraceRow({
               defaultMessage: "Error excerpt",
             })}
           >
-            {entry.result_excerpt}
+            {failureText}
           </span>
         )}
         {/* The expanded panel mounts full width beneath the row; unmounting

@@ -287,6 +287,16 @@ pub struct RecipeTraceEntry {
     /// success payload is rebuilt on resume anyway), so persisting it would
     /// add noise without value.
     pub result_excerpt: String,
+    /// The model-visible error text of a FAILED call (issue #1610), bounded
+    /// at the failure-detail cap (same 4KB scale as the approval surface's
+    /// attachment budget): the durable audit record that upgrades the
+    /// ADR-0078 failure anchor from its bounded head to the full text the
+    /// model self-corrected from. Absent on every success entry and on every
+    /// arm that produced no real text; absent on pre-#1610 sessions (serde
+    /// degrade, zero migration) -- the resumed render falls back to
+    /// `result_excerpt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_detail: Option<String>,
     /// The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
     /// #934): the sub-agent's rounds persisted under the SAME slim projection
     /// the main rounds take (a successful sub-call's excerpt empties, a
@@ -445,6 +455,7 @@ pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
         summary: truncate_trace_summary(sql),
         success: true,
         result_excerpt: String::new(),
+        failure_detail: None,
         sub_rounds: None,
     };
     // Failure-message guard (issue #316): shared with the live trace mapping

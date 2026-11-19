@@ -59,7 +59,7 @@ use crate::runtime::acp::wire::{
 use crate::session::loop_contract::{
     derived_step_ceiling, truncate_trace_excerpt, DiscoveredRuntime, LoopOutcome, LoopRound,
     Termination, TraceEntry, DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, MAX_WINDOW_RESUMES,
-    TRACE_EXCERPT_MAX, WINDOW_CONVERGENCE_NUDGE,
+    TRACE_EXCERPT_MAX, TRACE_FAILURE_DETAIL_MAX, WINDOW_CONVERGENCE_NUDGE,
 };
 use crate::session::progress::ProgressClock;
 use crate::util::{push_capped, push_capped_emit};
@@ -1437,26 +1437,16 @@ impl Pump {
         gateway: bool,
         on_phase: &mut impl FnMut(TurnPhase),
     ) {
-        let (success, result_excerpt) = match end {
-            RowEnd::Completed => (true, String::new()),
+        let (success, result_excerpt, failure_detail) = match end {
+            RowEnd::Completed => (true, String::new(), String::new()),
             RowEnd::Failed => {
-                // Failure: keep the bounded text as the cross-turn failure
-                // anchor (ADR-0078). An empty failure excerpt would lose the
-                // anchor, so fall back to an honest "failed" marker.
-                let text = ToolCallContent::collect_text(content, TRACE_EXCERPT_MAX);
-                (
-                    false,
-                    if text.is_empty() {
-                        "failed".to_string()
-                    } else {
-                        text
-                    },
-                )
+                let (anchor, detail) = failed_row_faces(content);
+                (false, anchor, detail)
             }
             // Unobserved: the turn ended before the agent reported a final
             // status (issue #630). Not a success row -- the fixed marker
             // keeps it distinguishable from a real completion in the trace.
-            RowEnd::Unobserved => (false, UNOBSERVED_EXCERPT.to_string()),
+            RowEnd::Unobserved => (false, UNOBSERVED_EXCERPT.to_string(), String::new()),
         };
         let entry = if success {
             TraceEntry::succeeded(
@@ -1474,6 +1464,7 @@ impl Pump {
                 summary.to_string(),
                 result_excerpt,
             )
+            .with_failure_detail(&failure_detail)
         };
         // The gateway echo's completion is silent too (issue #1242): the
         // gateway serve emits the row's authoritative completed phase.
@@ -1490,6 +1481,22 @@ impl Pump {
 fn bounded_name_summary(title: &str) -> (String, String) {
     let bounded = truncate_trace_excerpt(title, TRACE_EXCERPT_MAX);
     (bounded.clone(), bounded)
+}
+
+/// A failed row's (anchor, detail) text pair (ADR-0078 + issue #1610): the
+/// content collects at the DETAIL budget -- the whole model-visible failure
+/// text -- and the anchor is its bounded head, so the 240-char excerpt the
+/// live row + persisted recipe always carried is unchanged while the detail
+/// rides beside it. An empty collect (no text content on the wire) degrades
+/// to the honest "failed" marker with NO detail: the marker is synthesized,
+/// not text the model saw.
+fn failed_row_faces(content: &[ToolCallContent]) -> (String, String) {
+    let text = ToolCallContent::collect_text(content, TRACE_FAILURE_DETAIL_MAX);
+    if text.is_empty() {
+        ("failed".to_string(), String::new())
+    } else {
+        (truncate_trace_excerpt(&text, TRACE_EXCERPT_MAX), text)
+    }
 }
 
 /// Derive a (name, summary) pair from a tool call's title + id. The title is
@@ -1848,6 +1855,42 @@ mod tests {
                 "the gateway classification wins over the CLI kind"
             );
         }
+    }
+
+    /// The failed row's two faces (issue #1610): the detail is the whole
+    /// model-visible text capped at the detail budget, the anchor its bounded
+    /// head -- byte-identical to the pre-#1610 excerpt (the collect-then-
+    /// truncate equivalence), so a live row and an old trace render the same
+    /// anchor. No text content degrades to the honest marker with no detail.
+    #[test]
+    fn failed_row_faces_detail_capped_anchor_head_unchanged() {
+        let text_items = |s: String| {
+            vec![ToolCallContent::Content {
+                content: crate::runtime::acp::wire::ContentBlock::text(s),
+            }]
+        };
+        // Short text: both faces ride verbatim.
+        let (anchor, detail) = failed_row_faces(&text_items("boom".into()));
+        assert_eq!(anchor, "boom");
+        assert_eq!(detail, "boom");
+        // Over both budgets: the detail caps at its own budget, the anchor at
+        // the excerpt cap -- the anchor equals the head-truncation of the
+        // detail, exactly what a pre-#1610 collect at 240 produced.
+        let long = "x".repeat(TRACE_FAILURE_DETAIL_MAX + 50);
+        let (anchor, detail) = failed_row_faces(&text_items(long));
+        assert_eq!(detail.chars().count(), TRACE_FAILURE_DETAIL_MAX);
+        assert!(detail.ends_with('…'), "the detail cut renders the marker");
+        assert_eq!(anchor.chars().count(), TRACE_EXCERPT_MAX);
+        assert!(anchor.ends_with('…'), "the anchor cut renders the marker");
+        assert_eq!(
+            anchor,
+            truncate_trace_excerpt(&detail, TRACE_EXCERPT_MAX),
+            "the anchor is the detail's head"
+        );
+        // No text content: the honest marker, no detail.
+        let (anchor, detail) = failed_row_faces(&[]);
+        assert_eq!(anchor, "failed");
+        assert!(detail.is_empty(), "a synthesized marker carries no detail");
     }
 
     /// A namespaced external handle under the rename keeps its namespaced
