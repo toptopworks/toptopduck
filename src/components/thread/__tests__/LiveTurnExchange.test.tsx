@@ -592,6 +592,13 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     expect(head).toHaveTextContent("正在联网 · 已完成 1 次调用");
     expect(head?.querySelector(".animate-spin")).not.toBeNull();
     expect(container.querySelector(".approval-card")).not.toBeNull();
+    // The tail mount's width pin: w-full, NOT the family's max-w-full cap
+    // (jsdom cannot measure; toHaveClass pins the token exactly, rationale
+    // at the mount in LiveTurnExchange).
+    const tailMount = container
+      .querySelector(".approval-card")
+      ?.closest(".trace-round");
+    expect(tailMount).toHaveClass("w-full");
     expect(screen.getByText("等待审批")).toBeInTheDocument();
   });
 

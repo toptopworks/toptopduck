@@ -224,16 +224,25 @@ export function LiveTurnExchange({
         onExpandedChange={onActivityExpandedChange}
       />
       {tailRows.length > 0 && (
-        <TraceList>
-          {tailRows.map((row) => (
-            <LiveRow
-              key={row.key}
-              row={row}
-              onRespond={onRespondApproval}
-              onLoadAttachments={onLoadApprovalAttachments}
-            />
-          ))}
-        </TraceList>
+        // w-full (not the trace family's max-w-full cap): the stream's
+        // items-start makes a bare fit-content item size by its widest
+        // row's max-content -- a short pending card shrinks narrower than
+        // the rows above it, and a long summary / expanded file value
+        // overruns the rail into the overflow-x crop. The card is a
+        // bordered decision surface: pinned full width restores the row
+        // family's truncate posture (issues #826/#872) for both ends.
+        <div className="trace-round w-full">
+          <TraceList>
+            {tailRows.map((row) => (
+              <LiveRow
+                key={row.key}
+                row={row}
+                onRespond={onRespondApproval}
+                onLoadAttachments={onLoadApprovalAttachments}
+              />
+            ))}
+          </TraceList>
+        </div>
       )}
     </TurnExchangeFrame>
   );
