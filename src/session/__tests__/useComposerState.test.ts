@@ -11,9 +11,6 @@ import {
 const SESSION_FIELDS: ComposerSessionFields = {
   loading: true,
   queued: false,
-  phase: null,
-  turnStartedAt: null,
-  turnPausedSince: null,
   handleAsk: vi.fn(),
   handleCancel: vi.fn(),
   handleIngestFiles: vi.fn(),
@@ -35,7 +32,6 @@ describe("useComposerState (ADR-0092 per-session drafts)", () => {
   it("returns idle defaults when sessionId is null", () => {
     const { result } = renderHook(() => useComposerState(null));
     expect(result.current.loading).toBe(false);
-    expect(result.current.phase).toBeNull();
     expect(result.current.draft).toBe("");
     expect(result.current.handleAsk).toBeInstanceOf(Function);
     expect(result.current.handleCancel).toBeInstanceOf(Function);
@@ -47,7 +43,6 @@ describe("useComposerState (ADR-0092 per-session drafts)", () => {
       useComposerState("sess-1", SESSION_FIELDS),
     );
     expect(result.current.loading).toBe(true);
-    expect(result.current.phase).toBeNull();
     expect(result.current.handleAsk).toBe(SESSION_FIELDS.handleAsk);
     expect(result.current.handleCancel).toBe(SESSION_FIELDS.handleCancel);
     expect(result.current.handleIngestFiles).toBe(SESSION_FIELDS.handleIngestFiles);

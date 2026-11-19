@@ -12,9 +12,6 @@ function makeFields(
   return {
     loading: true,
     queued: false,
-    phase: null,
-    turnStartedAt: null,
-    turnPausedSince: null,
     handleAsk: vi.fn(),
     handleCancel: vi.fn(),
     handleIngestFiles: vi.fn(),

@@ -1,37 +1,17 @@
 import { useRef, useState, type ReactNode } from "react";
-import { useIntl, type IntlShape } from "react-intl";
+import { useIntl } from "react-intl";
 import { ArrowUp, Square } from "lucide-react";
-import type { TurnPhase } from "../../types/session";
 import { materializeQuotes } from "../../lib/quoteText";
 import { Button } from "../ui/button";
 import { SkillPickerPanel } from "./SkillPickerPanel";
 import { skillPickerOptionId } from "./skillPickerLogic";
 import { useSkillPicker } from "./useSkillPicker";
-import { WaitElapsedSuffix } from "./WaitElapsedSuffix";
 
 type QuestionBarProps = {
   onSubmit: (question: string) => void;
   /** Fire while a turn is in flight (ADR-0021 cancel). Hidden when not loading. */
   onCancel: () => void;
   loading: boolean;
-  /** The in-flight turn's latest progress event (ADR-0059, calibrated by
-   *  ADR-0078): when non-null and loading, the bar shows a compact wait label
-   *  ("Thinking (attempt N)" / "Running") so the user sees the turn moving
-   *  instead of a blank spinner -- the per-call detail rides the rail's live
-   *  trace card (issue #297), not the bar. null/absent when no turn is running
-   *  (the listener clears it on outcome, incl. Cancelled). Optional so call
-   *  sites / tests that don't exercise phase feedback omit it. */
-  phase?: TurnPhase | null;
-  /** The turn clock (issue #1264 turn-clock ruling): while non-null and the
-   *  bar is loading, the wait-feedback slot carries the elapsed-seconds
-   *  figure -- continuous across every phase of the in-flight turn, so a
-   *  slow gap (round-trip wait, tool dispatch, the pre-approval stretch)
-   *  can't read as a frozen UI. Before the first phase event the figure
-   *  hosts the slot alone (issue #1266); `turnPausedSince` freezes it while
-   *  an approval holds the turn on the gate. Optional so call sites / tests
-   *  that don't exercise a running turn omit it (no figure). */
-  turnStartedAt?: number | null;
-  turnPausedSince?: number | null;
   /** The composer question's queued posture (issue #1500): a submit that
    *  landed while an ingest batch is in flight sits in the session's pending
    *  slot -- the input is disabled and the status slot carries the queued
@@ -46,7 +26,7 @@ type QuestionBarProps = {
   /** Left-side toolbar controls rendered inside the unified container (the
    *  composer "+" / auth-mode slots threaded from the shell, ADR-0092). */
   children?: ReactNode;
-  /** Right-side toolbar controls, seated before the phase + submit/stop
+  /** Right-side toolbar controls, seated before the submit/stop
    *  button (the runtime / model picker threaded from the shell, ADR-0092). */
   trailing?: ReactNode;
   /** Skill picker channel (ADR-0112, issue #716): "/" opens the global panel
@@ -101,17 +81,15 @@ type QuestionBarProps = {
 // submit is ignored client-side; the orchestrator runs one turn at a time
 // (ADR-0021 single in-flight). While a turn runs the input is disabled and a
 // stop button replaces the submit so the user can cancel the in-flight query.
-// The discrete phase feedback (ADR-0059, calibrated to the tool-call event
-// stream by ADR-0078) renders alongside the stop button -- "Thinking
-// (attempt N)" for the LLM wait, "Running" while tool calls dispatch -- an
-// honest discrete label, not a fabricated percentage. The whole bar's chrome
-// (placeholder, aria-label, button labels, phase feedback) ships through the
-// react-intl catalog (ADR-0052); see the questionBar.* keys.
+// The in-flight turn's wait feedback lives on the rail's activity line (#1612
+// re-host: the phase face + the turn clock) -- the bar carries no phase
+// mirror. The whole bar's chrome (placeholder, aria-label, button labels)
+// ships through the react-intl catalog (ADR-0052); see the questionBar.* keys.
 //
 // Unified composer container: a rounded border + shadow box. The input area
 // flows the pre-activation chips inline with the textarea (the caret seats
 // right after the last chip); a toolbar row at the bottom carries the
-// composer slot controls (passed as children) on the left and the phase +
+// composer slot controls (passed as children) on the left and the
 // submit/stop button on the right. Enter submits (Shift+Enter inserts a
 // newline).
 
@@ -123,7 +101,7 @@ const SKILL_PICKER_PANEL_ID = "question-bar-skill-picker";
 /** The textarea's DOM id -- the shell's one anchor for seating focus on the
  *  composer (the create exit's focus hand-off, issue #1040). */
 export const COMPOSER_INPUT_ID = "question-bar-input";
-export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnStartedAt = null, turnPausedSince = null, queued = false, draft, setDraft, children, trailing, skillPicker, quoteChips }: QuestionBarProps) {
+export function QuestionBar({ onSubmit, onCancel, loading, queued = false, draft, setDraft, children, trailing, skillPicker, quoteChips }: QuestionBarProps) {
   const intl = useIntl();
   const [localDraft, setLocalDraft] = useState("");
   const value = draft ?? localDraft;
@@ -273,8 +251,8 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
             )}
         />
       )}
-      {/* Toolbar row: composer controls (children) on the left, phase
-          feedback + submit/stop on the right. */}
+      {/* Toolbar row: composer controls (children) on the left, the
+          submit/stop button on the right. */}
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
         <div className="flex items-center gap-1.5">
           {children}
@@ -286,42 +264,6 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
             right border on narrow bars. */}
         <div className="flex min-w-0 items-center gap-2">
           {trailing}
-          {loading && (phase !== null || turnStartedAt !== null) && (
-            // The wait-feedback slot: the phase label when a phase event has
-            // arrived (ADR-0059 -- the attempt number surfaces only on a
-            // blind retry (>1); the first attempt shows the bare verb,
-            // ADR-0017 -- honest, not fabricated, and the first attempt needs
-            // no attempt-number noise), plus the turn clock's elapsed figure
-            // whenever a clock runs. Before the first phase event the label
-            // has nothing to name, so the figure hosts the slot alone
-            // (issue #1266) -- the slow first round trip can't read as a
-            // frozen bar, and no phase text is invented for it.
-            // ADR-0067 (issue #185): the .phase-indicator visual rule (font-size +
-            // color + white-space) retired onto utility here; the class hook had no
-            // selector / test dependent (Shell.test.tsx queries role="status", not
-            // the class) and is dropped. role="status" + aria-live stay.
-            <span
-              className="flex min-w-0 items-baseline text-[0.82rem] text-muted-foreground @max-[340px]:hidden"
-              role="status"
-              aria-live="polite"
-            >
-              {/* Narrow-bar contract: the phase label may ellipsize; the
-                  elapsed figure never shrinks (the turn-clock ruling makes it
-                  the anti-frozen signal) and the stop button stays inside the
-                  card. A single nowrap span could not shrink -- its min-content
-                  locked to the full label+figure width and pushed the stop
-                  button past the bar's right border. Below a 340px bar the
-                  whole slot hides (@container on the form): the fixed toolbar
-                  controls alone need ~240px, and a minute-tier figure adds
-                  ~80px more than the row can carry -- the rail tail's own live
-                  phase line carries the same signal, so the mirror goes before
-                  the controls do. */}
-              {phase !== null && <span className="truncate">{phaseLabel(phase, intl)}</span>}
-              <span className="shrink-0">
-                <WaitElapsedSuffix startedAt={turnStartedAt} pausedSince={turnPausedSince} />
-              </span>
-            </span>
-          )}
           {queued && !loading && (
             // The queued posture's feedback slot (issue #1500), seated where
             // the wait-feedback slot sits: the held question waits behind
@@ -391,30 +333,4 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
       </div>
     </form>
   );
-}
-
-// Discrete phase label (ADR-0059 + 0017 honesty, calibrated by ADR-0078,
-// issue #297): Thinking with the 1-based STEP shown only past the first
-// round-trip (> 1 -- the bare verb reads cleaner than an "attempt 1" suffix
-// that implies a retry count), and a bare "Running…" for the other phases
-// (the rail carries their detail -- the call rows, the streamed tail prose;
-// the bar's label only signals which wait the turn is in). i18n'd via
-// react-intl
-// (ADR-0052); each formatMessage id is a static literal at the call site so
-// @formatjs/cli extract resolves them.
-function phaseLabel(phase: TurnPhase, intl: IntlShape): string {
-  if ("Thinking" in phase) {
-    const { attempt } = phase.Thinking;
-    return attempt > 1
-      ? intl.formatMessage(
-          { id: "questionBar.phase.thinkingRetry", defaultMessage: "Thinking (attempt {attempt})…" },
-          { attempt },
-        )
-      : intl.formatMessage({ id: "common.thinking", defaultMessage: "Thinking…" });
-  }
-  // ToolCallStarted / ToolCallCompleted / TextDelta / ThinkingCompleted: the
-  // rail renders the call rows, and streamed prose shows in the tail round
-  // with its caret (issue #1163) -- the bar's compact label just names the
-  // running wait.
-  return intl.formatMessage({ id: "questionBar.phase.running", defaultMessage: "Running…" });
 }

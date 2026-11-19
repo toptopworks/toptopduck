@@ -47,8 +47,8 @@ const state = vi.hoisted(() => ({
 
 // ADR-0059 turn-progress capture: the SessionPane mounts a long-lived listener
 // on mount. Capturing the callback here lets a test emit a turn-progress event
-// (Thinking / the tool-call stream, ADR-0078) and assert the QuestionBar
-// renders the discrete feedback, then assert it clears when the ask resolves.
+// (Thinking / the tool-call stream, ADR-0078) and assert the rail's activity
+// line rotates its face, then assert it folds away when the ask resolves.
 const turnProgressCb = vi.hoisted(() => ({
   current: null as null | ((ev: TurnProgress) => void),
 }));
@@ -73,7 +73,7 @@ vi.mock("../api", async (importOriginal) => {
   };
 });
 
-describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
+describe("App turn-progress feedback (issue #82 / ADR-0059)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     state.workingSet = [src("people")];
@@ -82,7 +82,7 @@ describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
 
-  it("renders Thinking / tool-call phase labels during an in-flight ask", async () => {
+  it("routes turn-progress events into the rail's activity line, filtered by session (ADR-0056)", async () => {
     vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
     const { resolve } = pendingAsk();
     render(<App />);
@@ -93,67 +93,48 @@ describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
     );
-    // Phase-label assertions scope to the QuestionBar: the rail's live turn
-    // card (issue #297) shows its own 思考中 hint from ask start, so a global
-    // text query would match two surfaces.
-    const bar = () => document.querySelector(".question-bar") as HTMLElement;
+    // The in-flight ask mounts the activity line with the ask-start thinking
+    // face -- the ONE wait surface since #1612 retired the bar's phase
+    // mirror (the composer carries no wait feedback of its own).
+    const line = () => document.querySelector(".process-toggle") as HTMLElement;
+    await waitFor(() => expect(within(line()).getByText("思考中…")).toBeInTheDocument());
 
-    // Thinking{attempt: 1} -> bare verb "思考中…" (no "第 1 次" noise).
+    // A tool-call event for a DIFFERENT session is filtered out (ADR-0056):
+    // the face stays on the wait -- no verb face, no row folds.
     turnProgressCb.current!({
-      session_id: "sess-1",
-      phase: { Thinking: { attempt: 1 } },
-    });
-    await waitFor(() => expect(within(bar()).getByText("思考中…")).toBeInTheDocument());
-
-    // A tool-call event (ADR-0078 stream) -> the bar's compact "执行中…"; the
-    // per-call detail rides the rail's live trace card, not the bar.
-    turnProgressCb.current!({
-      session_id: "sess-1",
+      session_id: "other-session",
       phase: {
         ToolCallStarted: {
-          name: "materialize",
-          operation_kind: "write",
+          name: "explore",
+          operation_kind: "read",
           summary: "SELECT 1",
         },
       },
     });
-    await waitFor(() => expect(within(bar()).getByText("执行中…")).toBeInTheDocument());
+    expect(within(line()).getByText("思考中…")).toBeInTheDocument();
 
-    // Outcome lands -> phase clears (ADR-0059 handleAsk finally).
-    resolve({ kind: "Cancelled", data: null });
-    await waitFor(() =>
-      expect(within(bar()).queryByText(/执行中/)).not.toBeInTheDocument(),
-    );
-  });
-
-  it("ignores turn-progress events addressed to a different session (ADR-0056 filter)", async () => {
-    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
-    const { resolve } = pendingAsk();
-    render(<App />);
-    await openSession();
-    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
-    fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
-    );
-    const bar = () => document.querySelector(".question-bar") as HTMLElement;
-    // A phase for a DIFFERENT session is filtered out -- the bar carries no
-    // indicator (the rail's live card shows its own ask-start 思考中 hint, so
-    // the filter contract is asserted on the bar surface).
-    turnProgressCb.current!({
-      session_id: "other-session",
-      phase: { Thinking: { attempt: 1 } },
-    });
-    await waitFor(() =>
-      expect(within(bar()).queryByText(/思考中/)).not.toBeInTheDocument(),
-    );
-    // The same phase for THIS session lights up.
+    // The same event for THIS session folds a running row: the face
+    // rotates onto the tool verb (entry is immediate, the anti-dead-line
+    // ruling).
     turnProgressCb.current!({
       session_id: "sess-1",
-      phase: { Thinking: { attempt: 1 } },
+      phase: {
+        ToolCallStarted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+        },
+      },
     });
-    await waitFor(() => expect(within(bar()).getByText("思考中…")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(within(line()).getByText(/正在读取/)).toBeInTheDocument(),
+    );
+
+    // The settle folds the live turn away: the line leaves with it.
     resolve({ kind: "Cancelled", data: null });
+    await waitFor(() =>
+      expect(document.querySelector(".process-toggle")).toBeNull(),
+    );
   });
 });
 

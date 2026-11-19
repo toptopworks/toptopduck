@@ -4,9 +4,10 @@
 // question is final at submit, so the copy affordance is honest), over a
 // streaming assistant side: the runtime attribution marker (issue #818),
 // then the header's dataset chip (issue #620), then the live process face
-// (ADR-0151, the device-calibrated posture): the connective prose blocks +
+// (ADR-0151, the device-calibrated posture; streaming face #1612): the
+// connective prose blocks +
 // ONE activity line whose face rotates with the phase (thinking / running
-// call; the streaming tail steps it aside). Rounds segment at prose boundaries; every
+// call / the streaming window's running face). Rounds segment at prose boundaries; every
 // segment sealed by a later prose lands as ONE aggregate fold line under
 // its own prose ("Completed · N calls", clickable to the segment's
 // thinking folds + call rows) -- one line per sealed stretch, never a
@@ -210,8 +211,9 @@ export function LiveTurnExchange({
       {/* ONE activity line for the whole turn, pinned after the rounds (a
           fresh turn with no rounds yet still mounts it -- the thinking
           face is the turn's first activity): the thinking phase, the
-          running call rotate its face, the streaming tail steps it aside;
-          its fold
+          running call and the streaming window rotate its face; the line
+          never leaves the exchange (the turn clock rides it, #1612); its
+          fold
           holds the rounds after the last prose section (the count, the
           expand face) and its expand posture seeds the settled turn-level
           process fold across the settle swap (issue #1606). */}

@@ -22,7 +22,7 @@ import {
 } from "./workspace";
 import type { AppError, SessionFlowKind } from "../types/error";
 import type { DatasetDescriptor, GuidanceRequest, SheetGuidance, StaleAnchor } from "../types/dataset";
-import type { SaveError, SourceNotice, TurnPhase } from "../types/session";
+import type { SaveError, SourceNotice } from "../types/session";
 import type { ThreadEntry } from "../types/thread";
 
 // Per-session state + actions (ADR-0051). The shell (<App>) creates the
@@ -84,23 +84,13 @@ export interface UseSessionState {
    *  mutations never flip it, so their in-flight window leaves the bar
    *  untouched. */
   turnLoading: boolean;
-  /** The in-flight turn's latest progress event (ADR-0059): Thinking with the
-   *  1-based step or the last tool-call event. null when no turn is running.
-   *  Client UI state only -- never enters TanStack Query / the thread cache
-   *  (ADR-0051 single truth: the thread holds completed TurnRecords; phase is
-   *  a transient hint). Drives the QuestionBar's compact label. */
-  phase: TurnPhase | null;
   /** The in-flight turn's live trace (ADR-0078, issue #297; process face
    *  ADR-0151): the rail renders it as a live chat exchange (question +
    *  prose segments + the activity line + sealed folds). null when no turn
    *  is running. Client UI state only; folds into
-   *  the optimistic TurnRecord.trace when the turn settles. */
+   *  the optimistic TurnRecord.trace when the turn settles. The turn clock
+   *  rides it (`askedAt` / `pausedSince`, #1612). */
   liveTurn: LiveTurn | null;
-  /** The turn clock (issue #1264 turn-clock ruling): the bar's phase label
-   *  derives its continuous elapsed-seconds figure from it, freezing while
-   *  an approval holds the turn. null when no turn is in flight. */
-  turnStartedAt: number | null;
-  turnPausedSince: number | null;
   error: AppError | null;
   /** The most recent per-turn save failure as a typed SaveError (issue #120),
    *  rendered via the locale catalog in the session pane's persist-warning
@@ -371,10 +361,7 @@ export function useSessionState(
     [markProduced, notePromotion],
   );
   const {
-    phase,
     liveTurn,
-    turnStartedAt,
-    turnPausedSince,
     handleAsk,
     handleCancel,
     hasLiveTurn,
@@ -513,10 +500,7 @@ export function useSessionState(
     rightSidebarCollapsed,
     loading,
     turnLoading,
-    phase,
     liveTurn,
-    turnStartedAt,
-    turnPausedSince,
     error,
     persistError,
     sourceNotices,

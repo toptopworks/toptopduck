@@ -706,9 +706,8 @@ describe("App session soft-cap hint (ADR-0046/0050, issue #108)", () => {
     // ADR-0046: too many open sessions risk memory pressure. The hint migrated
     // from a bespoke .topbar-softcap span to a warning Alert (ADR-0050);
     // role="status" is polite. Opening >= SOFT_CAP_OPEN_SESSIONS (8) sessions
-    // lights it. within(topbar) scopes the role query: each open SessionPane's
-    // QuestionBar also carries a role="status" phase-indicator, so a global
-    // getByRole would match many; the soft-cap Alert is the only status inside
+    // lights it. within(topbar) scopes the role query -- a global getByRole
+    // would sweep the panes; the soft-cap Alert is the only status inside
     // the topbar.
     let n = 0;
     vi.mocked(createSession).mockImplementation(async () => ({ session_id: `sess-${++n}`, recipe_path: `/sessions/sess-${n}/recipe.json` }));

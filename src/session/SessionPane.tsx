@@ -48,7 +48,7 @@ import { useSkillsRegistry } from "../skills/registry";
 //
 // ADR-0092: QuestionBar moved to the shell level. SessionPane no longer owns
 // the bar or its composer controls. It reports its bar-relevant fields
-// (loading / queued / phase / handleAsk / handleCancel / handleIngestFiles)
+// (loading / queued / handleAsk / handleCancel / handleIngestFiles)
 // upward via onComposerFields so the shell-level bar can read them for the
 // active session.
 // Pending payloads from a cold-start submit (#500) are consumed on mount by
@@ -104,7 +104,7 @@ interface SessionPaneProps {
    *  precedent -- identity-stable, sid-addressed. */
   onStageQuote: (sessionId: string, text: string) => void;
   /** ADR-0092: lifts this session's bar-relevant fields (loading / queued /
-   *  phase / handleAsk / handleCancel / handleIngestFiles) to the
+   *  handleAsk / handleCancel / handleIngestFiles) to the
    *  shell-level bar. Called via useEffect whenever the fields change. */
   onComposerFields: (sessionId: string, fields: ComposerSessionFields) => void;
   /** ADR-0092: drop this session's bar-fields entry on unmount (close / delete
@@ -270,8 +270,8 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // (the composer registry owns the registry and its identity contract --
   // see composerRegistry.ts; the reported handlers must stay
   // useCallback-stable).
-  // The payload is the pane-side selection: the TURN-domain turnLoading /
-  // phase, NOT the union `loading` (turn OR mutation, ADR-0040) -- a dataset
+  // The payload is the pane-side selection: the TURN-domain turnLoading,
+  // NOT the union `loading` (turn OR mutation, ADR-0040) -- a dataset
   // mutation's in-flight window must not flip the bar's Ask/Stop button (the
   // reported flicker). rightSidebarCollapsed (bar-shaping, ADR-0083 fold)
   // changes on the fold toggle + the one-shot first-Materialized expansion;
@@ -281,9 +281,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     onComposerFields(sessionId, {
       loading: s.turnLoading,
       queued,
-      phase: s.phase,
-      turnStartedAt: s.turnStartedAt,
-      turnPausedSince: s.turnPausedSince,
       handleAsk: queuedHandleAsk,
       handleCancel: s.handleCancel,
       handleIngestFiles: ingestMany,
@@ -293,9 +290,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     sessionId,
     s.turnLoading,
     queued,
-    s.phase,
-    s.turnStartedAt,
-    s.turnPausedSince,
     queuedHandleAsk,
     s.handleCancel,
     ingestMany,

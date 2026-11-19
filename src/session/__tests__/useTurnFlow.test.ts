@@ -121,53 +121,68 @@ describe("useTurnFlow", () => {
     turnProgressCb.current = null;
   });
 
-  describe("turn-progress listener + phase lifecycle (ADR-0059)", () => {
+  describe("turn-progress listener + live folding (ADR-0059)", () => {
     it("mounts a LONG-LIVED listener once (reused across turns, ADR-0059 C-4)", () => {
       const { deps } = setup();
       renderHook(() => useTurnFlow(SID, deps));
       expect(turnProgressCb.current).not.toBeNull();
     });
 
-    it("sets phase from a Thinking / tool-call event addressed to this session", async () => {
+    it("folds a Thinking / tool-call event addressed to this session into the live turn", async () => {
       const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
       emitProgress(SID, { Thinking: { attempt: 1 } });
-      expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
-      // ADR-0078: the tool-call event stream replaces the retired Querying
-      // marker; the latest event rides `phase` for the QuestionBar label.
+      expect(result.current.liveTurn?.step).toBe(1);
+      // ADR-0078: the tool-call event stream folds a running row.
       emitProgress(SID, {
         ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
       });
-      expect(result.current.phase).toEqual({
-        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
-      });
+      const rows = result.current.liveTurn?.rounds[0]?.rows ?? [];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ name: "explore", running: true });
     });
 
     it("filters out events addressed to ANOTHER session (ADR-0056 multi-session filter)", async () => {
       const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
       emitProgress(SID, { Thinking: { attempt: 1 } });
-      expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
-      // A sibling pane's event must never leak in.
+      expect(result.current.liveTurn?.step).toBe(1);
+      // A sibling pane's event must never leak in: no row folds.
       emitProgress(STRANGER, {
         ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
       });
-      expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
+      expect(result.current.liveTurn?.rounds[0]?.rows ?? []).toHaveLength(0);
     });
 
-    it("clears phase to null on every ask end (finally, incl. a Cancelled outcome)", async () => {
+    it("folds the live turn away on every ask end (finally, incl. a Cancelled outcome)", async () => {
       const { deps } = setup();
       vi.mocked(askQuestion).mockResolvedValue({ kind: "Cancelled", data: null });
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
-      emitProgress(SID, { Thinking: { attempt: 1 } });
-      expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
-      await act(async () => {
-        await result.current.handleAsk("q");
+      let ask!: Promise<void>;
+      act(() => {
+        ask = result.current.handleAsk("q");
       });
-      expect(result.current.phase).toBeNull();
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      expect(result.current.liveTurn).not.toBeNull();
+      await act(async () => {
+        await ask;
+      });
+      expect(result.current.liveTurn).toBeNull();
     });
 
     it("hasLiveTurn probes the live truth: false before, true mid-turn, false after the settle (#1503)", async () => {
@@ -204,17 +219,9 @@ describe("useTurnFlow", () => {
       vi.mocked(askQuestion).mockRejectedValue(new Error("ipc down"));
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
-      emitProgress(SID, {
-        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
-      });
-      expect(result.current.phase).toEqual({
-        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
-      });
       await act(async () => {
         await result.current.handleAsk("q");
       });
-      // The reject's finally clears the phase the mid-turn event set.
-      expect(result.current.phase).toBeNull();
       // Error + loading teardown on the failure path: setError(null) clears the
       // prior error at the ask start, then the reject sets a fresh AppError.
       expect(setError).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "ask" }));
@@ -567,10 +574,6 @@ describe("useTurnFlow", () => {
       });
       emitProgress(SID, { Thinking: { attempt: 1 } });
       emitProgress(SID, {
-        ThinkingCompleted: { duration_ms: 900, text: "reasoning" },
-      });
-      // Observable as the latest phase; the round carries the block, no row.
-      expect(result.current.phase).toEqual({
         ThinkingCompleted: { duration_ms: 900, text: "reasoning" },
       });
       // The thinking block rides the rounds (#610): the live fold renders
@@ -1769,10 +1772,11 @@ describe("useTurnFlow", () => {
     });
   });
 
-  describe("turn clock (issue #1264 turn-clock ruling)", () => {
-    // The bar's continuous figure: the ask stamp while the turn is in
-    // flight, frozen at the earliest PENDING approval's arrival while the
-    // gate holds the user's turn. Derived, never stored.
+  describe("turn clock (issue #1264 turn-clock ruling, #1612 re-host)", () => {
+    // The figure's stamps ride liveTurn (`askedAt` / `pausedSince`): the
+    // ask stamp while the turn is in flight, frozen at the earliest PENDING
+    // approval's arrival while the gate holds the user's turn. Derived,
+    // never stored.
     it("starts at the ask stamp and dies with the turn", async () => {
       const { deps } = setup();
       const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
@@ -1784,19 +1788,19 @@ describe("useTurnFlow", () => {
           }),
       );
       const { result } = renderHook(() => useTurnFlow(SID, deps));
-      expect(result.current.turnStartedAt).toBeNull();
+      expect(result.current.liveTurn).toBeNull();
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
       let askPromise!: Promise<void>;
       act(() => {
         askPromise = result.current.handleAsk("问");
       });
-      expect(result.current.turnStartedAt).toBe(1_000);
-      expect(result.current.turnPausedSince).toBeNull();
+      expect(result.current.liveTurn?.askedAt).toBe(1_000);
+      expect(result.current.liveTurn?.pausedSince).toBeNull();
       await act(async () => {
         resolveAsk(textualOutcome("答案"));
         await askPromise;
       });
-      expect(result.current.turnStartedAt).toBeNull();
+      expect(result.current.liveTurn).toBeNull();
       nowSpy.mockRestore();
     });
 
@@ -1828,14 +1832,14 @@ describe("useTurnFlow", () => {
       });
       // Arrival order is gateway order -- the FIRST pending is the earliest
       // hold, and the figure freezes there.
-      expect(result.current.turnPausedSince).toBe(5_000);
+      expect(result.current.liveTurn?.pausedSince).toBe(5_000);
       // The first approval resolves: the clock resumes (null) only when no
       // pending remains -- the later hold re-freezes the figure at ITS
       // arrival.
       rerender({ approvals: [entry(5_000, "resolved"), entry(9_000, "pending")] });
-      expect(result.current.turnPausedSince).toBe(9_000);
+      expect(result.current.liveTurn?.pausedSince).toBe(9_000);
       rerender({ approvals: [entry(5_000, "resolved"), entry(9_000, "resolved")] });
-      expect(result.current.turnPausedSince).toBeNull();
+      expect(result.current.liveTurn?.pausedSince).toBeNull();
     });
   });
 });
