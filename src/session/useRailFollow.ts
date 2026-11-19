@@ -69,10 +69,10 @@ const RESUME_BAND_PX = 40;
  *  reflow resizing the rail's box. A fold that shrinks past the current
  *  position makes the browser clamp scrollTop, which fires one scroll event
  *  at distance 0 -- re-entering the follow, which the clamped bottom
- *  already is. (In-content folds -- a thread card's <details> -- resize no
- *  box; they ride the next signal of any kind -- an append, submit,
- *  activation, or range change -- and on an idle session the drift lasts
- *  until one arrives.)
+ *  already is. (In-content folds -- a thread card's <details> -- do not
+ *  resize the rail's own box, but the reading column is an observer
+ *  target too, so a fold is itself a range change: the callback sees it
+ *  directly, with no wait for the next append, submit, or activation.)
  *
  *  Session switch PRESERVES posture (the keep-alive contract, ADR-0051):
  *  open panes stay MOUNTED but display:none when not active, so a switch is
@@ -262,13 +262,10 @@ export function useRailFollow({
     if (el === null) return;
     if (typeof ResizeObserver === "undefined") return; // jsdom (test-setup stubs it)
     const observer = new ResizeObserver(() => {
-      // A shrink while paused is the one extent change the scroll handler
-      // never sees: unless the collapse clamps past the position, scrollTop
-      // is unchanged and no scroll event fires, so the band -- and the
-      // follow pill's exit -- would never re-evaluate (the pill outlives a
-      // viewport the collapse has already brought back to the tail). The
-      // same arithmetic the scroll handler runs, gated on the hidden pane
-      // for the same reason scrollToBottom is (display:none reports a 0x0
+      // A paused shrink re-enters the follow here, not through the scroll
+      // handler -- the why is the doc block's Range entry above. The same
+      // arithmetic the scroll handler runs, gated on the hidden pane for
+      // the same reason scrollToBottom is (display:none reports a 0x0
       // box, which the band math would read as "at the bottom").
       const el = railRef.current;
       if (

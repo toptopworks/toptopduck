@@ -652,18 +652,47 @@ describe("useRailFollow", () => {
     });
     expect(followingText()).toBe("false");
 
-    // Collapse: the extent shrinks back to maxScroll 950. scrollTop 950
-    // sits INSIDE the shrunken extent, so no clamp fires and no scroll
-    // event exists -- only the range signal sees the viewport is at the
-    // tail again.
-    rig.geo.scrollHeight = 1250;
+    // Collapse: the extent shrinks back to maxScroll 970. scrollTop 950
+    // still sits INSIDE the shrunken extent, so no clamp fires and no
+    // scroll event exists -- the range signal sees distance 20, inside
+    // the band.
+    rig.geo.scrollHeight = 1270;
     fireRange();
     expect(followingText()).toBe("true"); // the band re-evaluated: resumed
 
-    // The resume's scheduled align lands the tail (distance 0 here).
+    // The resume's scheduled align lands the tail: 970, the 20px hop the
+    // doc block promises ("at most a band's worth away").
     flushFrame();
-    expect(rig.scrollTop()).toBe(950);
+    expect(rig.scrollTop()).toBe(970);
     expect(followingText()).toBe("true");
+  });
+
+  it("resumes at the band edge on the range path (distance exactly the band resumes)", () => {
+    // The band is inclusive here exactly as in the scroll handler (whose
+    // twin case holds following at distance 40): a collapse landing the
+    // viewport exactly one band from the tail re-enters the follow.
+    const { getByTestId } = render(
+      <Host active={true} entryCount={3} liveTurn={makeLiveTurn()} />,
+    );
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame();
+
+    rig.geo.scrollHeight = 1600; // expand -> maxScroll 1300
+    fireRange();
+    flushFrame();
+    rig.userScrollTo(950); // distance 350 -> pause
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("false");
+
+    // maxScroll 990: distance exactly 40 -- inside the inclusive band.
+    rig.geo.scrollHeight = 1290;
+    fireRange();
+    expect(followingText()).toBe("true"); // the boundary itself resumes
+    flushFrame();
+    expect(rig.scrollTop()).toBe(990);
   });
 
   it("stays paused when the collapse still leaves the viewport beyond the band", () => {
