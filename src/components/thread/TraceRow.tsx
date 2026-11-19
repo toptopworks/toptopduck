@@ -81,12 +81,15 @@ function SuccessGlyph({ success }: { success: boolean }) {
 }
 
 // The step fold's head label (issue #1604, recalibrated on the device):
-// per-tool call counts -- "explore ×3 · describe ×1". The tool name is
-// the call's identity; the operation category alone collapsed to noise
-// on a single-category round (a data-exploration turn of all reads read
-// as an undifferentiated 读 ×N). Order is first appearance -- the trace
-// is append-only within a round, so re-renders never reshuffle it, and
-// tool names are untranslated data, so locale switches cannot either.
+// a completion prefix over per-tool call counts -- "Completed · explore ×3
+// · describe ×1". The prefix word matches the live face's sealed-segment
+// head (thread.trace.roundCompleted) so the settled face scans with the
+// same vocabulary; the counts stay bare of it -- the tool name is still
+// the call's identity, and the operation category alone collapsed to
+// noise on a single-category round (a data-exploration turn of all reads
+// read as an undifferentiated 读 ×N). Order is first appearance -- the
+// trace is append-only within a round, so re-renders never reshuffle it,
+// and tool names are untranslated data, so locale switches cannot either.
 // The category stays on the row's OperationBadge.
 function foldLabel(intl: IntlShape, calls: ReadonlyArray<TraceEntry>): string {
   // A Map keeps its insertion order, which over an append-only trace is
@@ -95,12 +98,18 @@ function foldLabel(intl: IntlShape, calls: ReadonlyArray<TraceEntry>): string {
   for (const call of calls) {
     counts.set(call.name, (counts.get(call.name) ?? 0) + 1);
   }
-  return Array.from(counts, ([tool, count]) =>
-    intl.formatMessage(
-      { id: "thread.trace.toolCount", defaultMessage: "{tool} ×{count}" },
-      { tool, count },
+  return [
+    intl.formatMessage({
+      id: "thread.trace.stepCompleted",
+      defaultMessage: "Completed",
+    }),
+    ...Array.from(counts, ([tool, count]) =>
+      intl.formatMessage(
+        { id: "thread.trace.toolCount", defaultMessage: "{tool} ×{count}" },
+        { tool, count },
+      ),
     ),
-  ).join(" · ");
+  ].join(" · ");
 }
 
 // One round's step fold (ADR-0078's folding discipline): the fold head

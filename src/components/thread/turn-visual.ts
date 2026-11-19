@@ -96,10 +96,7 @@ export function outcomeVisual(
     case "Materialized":
       return {
         Icon: Table2,
-        label: intl.formatMessage({
-          id: "thread.outcome.materialized",
-          defaultMessage: "Result ready",
-        }),
+        label: intl.formatMessage({ id: "thread.outcome.completed", defaultMessage: "Completed" }),
         // A materialized round = teal --primary (ADR-0047 A hue).
         tone: "text-primary",
       };
@@ -111,7 +108,7 @@ export function outcomeVisual(
       let label: string;
       switch (outcome.data.text_kind) {
         case "Agent":
-          label = intl.formatMessage({ id: "thread.outcome.agent", defaultMessage: "Answered" });
+          label = intl.formatMessage({ id: "thread.outcome.completed", defaultMessage: "Completed" });
           break;
         case "Clarify":
           label = intl.formatMessage({
@@ -137,8 +134,8 @@ export function outcomeVisual(
         // (question-mark semantics preserved). Follow-up: restore
         // MessageSquareQuestion once lucide ships it, OR amend ADR-0050 to make
         // MessageCircleQuestion the canonical glyph. The label still names
-        // the sub-kind (Agent vs Clarify vs Refuse) so the split is legible
-        // without it.
+        // Clarify and Refuse; Agent reads the shared completed word (same
+        // as Materialized), so the glyph carries that arm's split.
         Icon: MessageCircleQuestion,
         // B is intentionally neutral (ADR-0047 B!=C; an honest answer /
         // refuse / clarify must NOT read as failure, so no warm tint).
