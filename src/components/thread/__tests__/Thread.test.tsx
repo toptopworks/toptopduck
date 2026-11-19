@@ -307,7 +307,7 @@ describe("Thread", () => {
     // since issue #827), labeled by its verbatim question.
     expect(screen.getByText("总共有多少客户")).toBeInTheDocument();
     expect(screen.getByText("共 128 位客户。")).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "已回答" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "已完成" })).toBeInTheDocument();
     // The reply body rides the conversation tier (text-sm, matching the user
     // bubble's question and RoundProse) -- the answer is discourse, not
     // chrome. Since issue #827 the body renders through RoundProse, so the
@@ -420,10 +420,10 @@ describe("Thread", () => {
     const turnCard = container.querySelector(".turn-card");
     expect(turnCard?.classList.contains("stale-ghost")).toBe(true);
     expect(turnCard?.getAttribute("data-stale")).toBe("true");
-    // CircleOff is the stale glyph (aria-label "结果已失效"), not the fresh
-    // Materialized's Table2 ("已出结果").
+    // CircleOff is the stale glyph (aria-label "结果已失效"), not the
+    // completed outcomes' shared glyph word ("已完成").
     expect(screen.getByRole("img", { name: "结果已失效" })).toBeInTheDocument();
-    expect(screen.queryByRole("img", { name: "已出结果" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "已完成" })).not.toBeInTheDocument();
     // Causal chip wording for a Replaced source.
     expect(screen.getByRole("button", { name: /源已更新/ })).toBeInTheDocument();
   });
@@ -507,8 +507,9 @@ describe("Thread", () => {
     const outs = container.querySelectorAll(".turn-entry");
     expect(outs).toHaveLength(4);
     expect(Array.from(outs).map((li) => li.getAttribute("data-outcome"))).toEqual(kinds);
-    // Each outcome's glyph is announced via its icon aria-label.
-    expect(screen.getByRole("img", { name: "已出结果" })).toBeInTheDocument();
+    // Each outcome's glyph is announced via its icon aria-label; the
+    // completed word is shared by the completed outcome kinds.
+    expect(screen.getByRole("img", { name: "已完成" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "需要澄清" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "失败" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "已取消" })).toBeInTheDocument();
@@ -1075,8 +1076,8 @@ describe("Thread", () => {
       );
       // Issue #1282: the head opens first; the per-round folds live inside it.
       fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
-      fireEvent.click(screen.getByRole("button", { name: "explore ×1 · materialize ×1" }));
-      const toggle = screen.getByRole("button", { name: "explore ×1 · materialize ×1" });
+      fireEvent.click(screen.getByRole("button", { name: "执行完成 · explore ×1 · materialize ×1" }));
+      const toggle = screen.getByRole("button", { name: "执行完成 · explore ×1 · materialize ×1" });
       expect(toggle).toHaveAttribute("aria-expanded", "true");
       // Both calls render with their summaries + operation badges.
       expect(screen.getByText("explore")).toBeInTheDocument();
@@ -1303,14 +1304,14 @@ describe("Thread", () => {
       // per-round face -- connective prose, thinking folds, step folds --
       // mounts inside it on expand.
       expect(screen.queryByText("我先查一下数据")).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
+      fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
       expect(screen.getByText("我先查一下数据")).toBeInTheDocument();
       expect(screen.getByText("再聚合一次")).toBeInTheDocument();
       // Thinking + steps folds are per round, both default collapsed.
       const thinking = screen.getByRole("button", { name: "思考 · 1.5s" });
       expect(thinking).toHaveAttribute("aria-expanded", "false");
-      const round1 = screen.getByRole("button", { name: "explore ×1 · materialize ×1" });
-      const round2 = screen.getByRole("button", { name: "explore ×1" });
+      const round1 = screen.getByRole("button", { name: "执行完成 · explore ×1 · materialize ×1" });
+      const round2 = screen.getByRole("button", { name: "执行完成 · explore ×1" });
       expect(round1).toHaveAttribute("aria-expanded", "false");
       expect(round2).toHaveAttribute("aria-expanded", "false");
       expect(screen.queryByText("先推理一下")).not.toBeInTheDocument();
@@ -1320,15 +1321,15 @@ describe("Thread", () => {
     it("expands each round's thinking + steps folds independently", () => {
       renderChat(chatRecord());
       // Issue #1282: the head opens first; the per-round folds live inside it.
-      fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
+      fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
       fireEvent.click(screen.getByRole("button", { name: "思考 · 1.5s" }));
       expect(screen.getByText("先推理一下")).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "explore ×1 · materialize ×1" }));
+      fireEvent.click(screen.getByRole("button", { name: "执行完成 · explore ×1 · materialize ×1" }));
       expect(screen.getByText("SELECT 1")).toBeInTheDocument();
       expect(screen.getByText("SELECT 2")).toBeInTheDocument();
       // Round 2's fold stays collapsed -- its call is still hidden.
       expect(screen.queryByText("SELECT 3")).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "explore ×1" }));
+      fireEvent.click(screen.getByRole("button", { name: "执行完成 · explore ×1" }));
       expect(screen.getByText("SELECT 3")).toBeInTheDocument();
     });
 
@@ -1342,7 +1343,7 @@ describe("Thread", () => {
       );
       // The prose is process discourse: it rides inside the turn-level fold
       // (issue #1282) and carries no per-round fold chrome of its own.
-      fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
+      fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
       expect(screen.getByText("直接答复")).toBeInTheDocument();
       expect(container.querySelector(".trace-toggle")).toBeNull();
       expect(screen.queryByRole("button", { name: /思考/ })).not.toBeInTheDocument();
@@ -1360,7 +1361,7 @@ describe("Thread", () => {
       const stream = container.querySelector(".assistant-stream");
       expect(stream).not.toBeNull();
       const glyph = stream!.querySelector(".turn-meta .outcome-icon");
-      expect(glyph?.getAttribute("aria-label")).toBe("已回答");
+      expect(glyph?.getAttribute("aria-label")).toBe("已完成");
       expect(stream!.querySelector(".turn-meta time")).not.toBeNull();
     });
 

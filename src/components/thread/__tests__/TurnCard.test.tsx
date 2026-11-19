@@ -535,8 +535,8 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     renderCard(dualRunRecord());
     // Issue #1282: the per-round folds live inside the turn-level process
     // fold -- the head opens first.
-    fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
-    screen.getAllByText("analyst ×1").forEach((t) => fireEvent.click(t));
+    fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
+    screen.getAllByText("执行完成 · analyst ×1").forEach((t) => fireEvent.click(t));
     fireEvent.click(screen.getAllByText("子智能体轨迹")[roundIndex]);
   };
 
@@ -563,8 +563,8 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     };
     renderCard(record);
     // Issue #1282: the head opens first; the per-round fold lives inside it.
-    fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
-    fireEvent.click(screen.getByText("analyst ×2"));
+    fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
+    fireEvent.click(screen.getByText("执行完成 · analyst ×2"));
     // The refusal renders no sub-trace fold (the row's own gate) --
     // exactly one openable expansion remains.
     const buttons = screen.getAllByText("子智能体轨迹");
@@ -634,20 +634,20 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     // own text: the Textual Agent outcome word, seconds tier, fed by
     // settled_at - asked_at.
     const head = document.querySelector("button.process-toggle");
-    expect(head?.textContent).toBe("已回答 · 40秒");
+    expect(head?.textContent).toBe("已完成 · 40秒");
   });
 
   it("expands to the incumbent per-round face (thinking, prose, steps)", () => {
     const { container } = renderCard(tracedRecord());
-    fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
+    fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
     expect(screen.getByText("先看表")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "思考 · 3.2s" })).toBeInTheDocument();
     // One count fold per round, labeled by the fixture's tool names
     // (round 1 explore, round 2 materialize).
     const folds = container.querySelectorAll(".trace-toggle");
     expect(folds).toHaveLength(2);
-    expect(folds[0]).toHaveTextContent("explore ×1");
-    expect(folds[1]).toHaveTextContent("materialize ×1");
+    expect(folds[0]).toHaveTextContent("执行完成 · explore ×1");
+    expect(folds[1]).toHaveTextContent("执行完成 · materialize ×1");
   });
 
   it("renders no head when the trace carries no content at all", () => {
@@ -663,7 +663,7 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     // process fold mounted open -- the process face the user was reading
     // stays at the same spot across the settle swap.
     renderCard(tracedRecord(), undefined, "zh-CN", true);
-    const head = screen.getByRole("button", { name: /已回答/ });
+    const head = screen.getByRole("button", { name: /已完成/ });
     expect(head).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("先看表")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "思考 · 3.2s" })).toBeInTheDocument();
@@ -690,7 +690,7 @@ describe("TurnCard turn process fold (issue #1282)", () => {
 
   it("renders the en face with the latin tier suffix", () => {
     renderCard(tracedRecord(), undefined, "en-US");
-    expect(document.querySelector("button.process-toggle")?.textContent).toBe("Answered · 40s");
+    expect(document.querySelector("button.process-toggle")?.textContent).toBe("Completed · 40s");
   });
 
   it("keeps the collapsed head on a Failed turn with the failure card outside", () => {
@@ -710,14 +710,14 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     delete record.asked_at;
     delete record.settled_at;
     renderCard(record);
-    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已回答");
+    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已完成");
   });
 
   it("degrades honestly with one stamp missing: the head still carries no duration", () => {
     const record = tracedRecord();
     delete record.settled_at;
     renderCard(record);
-    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已回答");
+    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已完成");
   });
 
   it("degrades honestly on inverted stamps: no floor-seconds face", () => {
@@ -725,6 +725,6 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     record.asked_at = 1e12;
     record.settled_at = 1e12 - 1500;
     renderCard(record);
-    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已回答");
+    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已完成");
   });
 });

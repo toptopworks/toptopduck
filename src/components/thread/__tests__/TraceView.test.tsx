@@ -277,7 +277,7 @@ describe("TraceStepFold fold label (issue #1604)", () => {
       "false",
     );
     expect(
-      screen.getByRole("button", { name: "explore ×2 · describe ×1" }),
+      screen.getByRole("button", { name: "Completed · explore ×2 · describe ×1" }),
     ).toBeInTheDocument();
   });
 
@@ -288,7 +288,7 @@ describe("TraceStepFold fold label (issue #1604)", () => {
       />,
     );
     expect(
-      screen.getByRole("button", { name: "web_search ×2 · explore ×1" }),
+      screen.getByRole("button", { name: "Completed · web_search ×2 · explore ×1" }),
     ).toBeInTheDocument();
   });
 
@@ -296,7 +296,9 @@ describe("TraceStepFold fold label (issue #1604)", () => {
     renderWithProviders(
       <TraceStepFold calls={[call(), call(), call()]} />,
     );
-    expect(screen.getByRole("button", { name: "explore ×3" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Completed · explore ×3" }),
+    ).toBeInTheDocument();
   });
 
   it("renders no fold for a zero-call round", () => {
