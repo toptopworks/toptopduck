@@ -1742,6 +1742,13 @@ mod tests {
         assert_eq!(rounds[0].text.as_deref(), Some("child prose"));
         assert_eq!(rounds[0].calls[0].name, "explore");
         assert!(rounds[0].calls[0].success);
+        // The failure detail survives the resume projection (issue #1610):
+        // the reopened session's anchor renders the full text, not the
+        // excerpt head.
+        assert_eq!(
+            view.failure_detail.as_deref(),
+            Some("the full model-visible failure text")
+        );
 
         // A pre-#934 entry (no sub_rounds key on the wire) resumes without
         // one -- the serde default degrades honestly.

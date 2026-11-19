@@ -722,6 +722,73 @@ describe("useTurnFlow", () => {
       });
     });
 
+    // The wire's failure_detail enters the live chain at the merge
+    // ingestion site (issue #1610): a started+completed pair folds the
+    // completion into the open row (completeCallAt), and the merged row
+    // carries the field the anchor renders -- the ingestion hop the
+    // factory-based chain test bypasses.
+    it("a merged completion carries the wire failure_detail onto the row", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: false,
+          result_excerpt: "boom…",
+          failure_detail: "boom: relation not found (full text)",
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        running: false,
+        success: false,
+        failureDetail: "boom: relation not found (full text)",
+      });
+    });
+
+    // The append ingestion site (issue #1610): a completion with no started
+    // event rides applyRoundFold's positional callRow pass -- the trailing
+    // hole the factory-based tests never cross -- and the appended row
+    // keeps the field.
+    it("an appended completion (no started event) carries the failure_detail", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: false,
+          result_excerpt: "boom…",
+          failure_detail: "boom: relation not found (full text)",
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows).toHaveLength(1);
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        running: false,
+        success: false,
+        failureDetail: "boom: relation not found (full text)",
+      });
+    });
+
     it("merges approval entries into the matching call row (one row per call)", async () => {
       const approval: ApprovalEntry = {
         requestId: "req-1",

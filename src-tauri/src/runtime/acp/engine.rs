@@ -1893,6 +1893,38 @@ mod tests {
         assert!(detail.is_empty(), "a synthesized marker carries no detail");
     }
 
+    /// The finalize_row wiring (issue #1610): a failed native row's settled
+    /// entry carries both faces through the construction the trace records
+    /// -- the bounded excerpt anchor and the detail at its own budget. The
+    /// helper's math is unit-tested beside this; this pins the call site.
+    #[test]
+    fn finalize_row_lands_the_failure_detail_beside_the_anchor() {
+        let mut pump = fold_pump();
+        pump.fold_update(
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_9".into(),
+                title: Some("bash boom".into()),
+                status: wire::ToolCallStatus::Failed,
+                kind: Some(wire::ToolKind::Execute),
+                content: vec![ToolCallContent::Content {
+                    content: crate::runtime::acp::wire::ContentBlock::text(
+                        "boom: the command failed hard".to_string(),
+                    ),
+                }],
+            },
+            &mut |_| {},
+        );
+        let rounds = pump.tracker.settle_rounds(&Termination::Cancelled);
+        let entry = &rounds[0].calls[0];
+        assert!(!entry.success);
+        assert!(entry.result_excerpt.contains("boom"));
+        assert_eq!(
+            entry.failure_detail.as_deref(),
+            Some("boom: the command failed hard"),
+            "the settle-recorded entry carries the model-visible text"
+        );
+    }
+
     /// A namespaced external handle under the rename keeps its namespaced
     /// remainder (the gateway records those rows under the same handle) and
     /// takes the Network badge; a title that is only the server name, or the

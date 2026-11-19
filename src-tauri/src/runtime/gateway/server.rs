@@ -4292,6 +4292,15 @@ mod tests {
             !outcome.trace[0].success,
             "the trace row records the failure"
         );
+        // The model-visible panic text persists as the failure detail
+        // (issue #1610): the same string the error result handed the model.
+        assert!(
+            outcome.trace[0]
+                .failure_detail
+                .as_deref()
+                .is_some_and(|d| d.contains("panicked in tool dispatch")),
+            "the panicked call keeps its model-visible text"
+        );
         assert!(
             !ctx.deps.working_set.is_result("result_1"),
             "ghost result_1 unregistered from the working set"

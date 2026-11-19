@@ -1051,7 +1051,15 @@ mod tests {
             !outside.path().join("pkg/script.py").exists(),
             "nothing landed outside the workspace"
         );
-        assert!(!entry.expect("a failed execute records an entry").success);
+        let entry = entry.expect("a failed execute records an entry");
+        assert!(!entry.success);
+        // The model-visible error text rides the failure detail (issue
+        // #1610): exactly the ToolResult.content the model saw.
+        assert_eq!(
+            entry.failure_detail.as_deref(),
+            Some(result.content.as_str()),
+            "the failed execute persists its full model-visible text"
+        );
     }
 
     /// (Windows) A verbatim `\\?\` spelling of an in-workspace path -- the

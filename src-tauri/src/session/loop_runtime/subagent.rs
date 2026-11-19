@@ -691,7 +691,7 @@ fn land_delegation_entry(
     } else {
         // A failed run's report IS the model-visible failure text (issue
         // #1610): the bounded excerpt stays the anchor head, the detail
-        // keeps the capped report whole.
+        // keeps the report capped at the detail budget.
         TraceEntry::failed(
             id.to_string(),
             name.to_string(),

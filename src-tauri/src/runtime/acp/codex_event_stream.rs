@@ -983,8 +983,9 @@ impl JsonPump {
                     // failure-anchor fallback — the anchor is never empty;
                     // a longer one truncates under the trace-excerpt
                     // discipline (the bounded-anchor caller contract). The
-                    // message itself rides the failure detail whole (issue
-                    // #1610): the wire's error text is what the model saw.
+                    // message itself rides the failure detail under the
+                    // detail cap (issue #1610): the wire's error text is
+                    // what the model saw.
                     let message = error_message.as_deref().unwrap_or("");
                     TraceEntry::failed(
                         call_id,

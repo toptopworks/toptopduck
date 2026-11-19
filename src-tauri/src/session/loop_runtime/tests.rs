@@ -1289,6 +1289,14 @@ fn a_stamped_subagent_run_reattributes_the_accumulator_eof_fault() {
         "the failure vocabulary stays: {}",
         row.result_excerpt
     );
+    // The model-visible failure text persists as the detail (issue #1610):
+    // the report the model saw, beside its bounded head.
+    assert!(
+        row.failure_detail
+            .as_deref()
+            .is_some_and(|d| d.contains("sub-agent failed")),
+        "the failed delegation persists its model-visible report"
+    );
 
     // Stamp-less (the bridged production shape): the same fault keeps its
     // verbatim passthrough -- #669's contract holds on the delegation
@@ -1314,6 +1322,12 @@ fn a_stamped_subagent_run_reattributes_the_accumulator_eof_fault() {
             .contains(&format!("sub-agent failed: {ACCUMULATOR_EOF_DETAIL}")),
         "without the stamp the detail passes through verbatim: {}",
         row.result_excerpt
+    );
+    assert!(
+        row.failure_detail
+            .as_deref()
+            .is_some_and(|d| d.contains("sub-agent failed")),
+        "the verbatim fault rides the failure detail too (issue #1610)"
     );
 }
 
@@ -1693,6 +1707,12 @@ fn loop_detection_refuses_identical_arguments_then_aborts() {
     assert!(refused
         .iter()
         .all(|c| c.result_excerpt.contains("identical arguments")));
+    // The refusal text IS model-visible (issue #1610): the refused rows
+    // keep it as the failure detail beside the excerpt head.
+    assert!(refused.iter().all(|c| c
+        .failure_detail
+        .as_deref()
+        .is_some_and(|d| d.contains("identical arguments"))));
 }
 
 /// The detector counts arrivals per (tool name, argument signature)
