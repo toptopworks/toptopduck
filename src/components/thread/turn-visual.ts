@@ -134,8 +134,8 @@ export function outcomeVisual(
         // (question-mark semantics preserved). Follow-up: restore
         // MessageSquareQuestion once lucide ships it, OR amend ADR-0050 to make
         // MessageCircleQuestion the canonical glyph. The label still names
-        // the sub-kind (Agent vs Clarify vs Refuse) so the split is legible
-        // without it.
+        // Clarify and Refuse; Agent reads the shared completed word (same
+        // as Materialized), so the glyph carries that arm's split.
         Icon: MessageCircleQuestion,
         // B is intentionally neutral (ADR-0047 B!=C; an honest answer /
         // refuse / clarify must NOT read as failure, so no warm tint).

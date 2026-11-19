@@ -688,9 +688,17 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     expect(container.querySelector("button.process-toggle")).not.toBeNull();
   });
 
-  it("renders the en face with the latin tier suffix", () => {
-    renderCard(tracedRecord(), undefined, "en-US");
+  it("renders the en face: latin tier suffix and the real-catalog fold words", () => {
+    const { container } = renderCard(tracedRecord(), undefined, "en-US");
     expect(document.querySelector("button.process-toggle")?.textContent).toBe("Completed · 40s");
+    // The step prefix rides the real en-US catalog here -- its en word is
+    // otherwise asserted only through the defaultMessage face (TraceView,
+    // delegation), which the parity script's key-only check cannot cover.
+    fireEvent.click(screen.getByRole("button", { name: /Completed/ }));
+    const folds = container.querySelectorAll(".trace-toggle");
+    expect(folds).toHaveLength(2);
+    expect(folds[0]).toHaveTextContent("Completed · explore ×1");
+    expect(folds[1]).toHaveTextContent("Completed · materialize ×1");
   });
 
   it("keeps the collapsed head on a Failed turn with the failure card outside", () => {
