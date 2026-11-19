@@ -35,13 +35,14 @@ function useElapsedSeconds(startedAt: number | null, pausedSince: number | null)
 }
 
 /** The elapsed-seconds suffix leaf ("· 12s" / "· 12秒"): ticks once a second off a
- *  turn-flow-owned stamp, rendered inside the rail's trailing wait status
- *  line and the QuestionBar wait-feedback slot -- both role="status" live
- *  regions, so the ticking number is aria-hidden: the per-second change is
- *  decoration, never a live-region re-announcement. Renders null when no
- *  clock is running (stamp null). The display face is the shared tiered
- *  ElapsedFace (issue #1280; the settled process head's frozen duration
- *  mounts the same face, issue #1282). */
+ *  turn-flow-owned stamp, mounted at the live activity line's face tail --
+ *  the turn clock's one host since the composer wait slot retired (#1612's
+ *  re-host of the #1264 ruling) -- and inside the rail's ingest / replace
+ *  progress strips. aria-hidden: the per-second change is decoration riding
+ *  its host's own face, never a stream of announcements of its own. Renders
+ *  null when no clock is running (stamp null). The display face is the
+ *  shared tiered ElapsedFace (issue #1280; the settled process head's frozen
+ *  duration mounts the same face, issue #1282). */
 export function WaitElapsedSuffix({
   startedAt,
   pausedSince = null,

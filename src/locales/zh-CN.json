@@ -229,7 +229,7 @@
   "privacy.typeOnlyAria": "仅类型 {name}",
   "privacy.typeOnlyHeader": "仅类型（不发值、不发列名）",
   "questionBar.ariaLabel": "提问",
-      "questionBar.placeholder": "用自然语言提问…",
+  "questionBar.placeholder": "用自然语言提问…",
   "questionBar.queued": "已排队，当前任务完成后自动发送…",
   "result.action.confirmLarge.body": "该结果共 {rowCount, number} 行。全量导出/复制可能耗时较长，期间该会话的其他操作会排队等待。仍要继续吗？",
   "result.action.confirmLarge.title": "结果很大",
