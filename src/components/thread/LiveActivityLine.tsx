@@ -1,11 +1,15 @@
-// The live activity line (issue #1606, ADR-0151): the turn's ONE rotating
-// activity face. Folded, it reads the current phase -- the thinking
-// period ("Thinking (step n)…", the retired trailing status line's duty
-// merged in) or the running call ("{verb} · N completed", the spinner
-// riding the head); while the tail round's prose streams the line steps
-// aside (the prose + caret ARE the activity evidence -- the output face
-// doubled the signal and flipped against the thinking face, the device
-// ruling). The tool face answers a call at once; its verb switches at
+// The live activity line (issue #1606, ADR-0151; clock re-host #1612): the
+// turn's ONE rotating activity face. Folded, it reads the current phase --
+// the thinking period ("Thinking (step n)…", the retired trailing status
+// line's duty merged in), the running call ("{verb} · N completed", the
+// spinner riding the head), or the prose-streaming window ("Running…" --
+// the #1612 narrowing of ADR-0151's step-aside ruling: what let the line
+// yield was the THINKING face doubling the prose signal; the running face
+// beside the caret does not reproduce it, and the turn clock must never
+// leave the exchange). The elapsed figure ("· 12s") rides the face tail in
+// every posture -- the turn clock's only host since the composer wait slot
+// retired (#1264's ruling re-hosted). The tool face answers a call at
+// once; its verb switches at
 // most once per window (calls flashing a fresh verb each read as flicker
 // -- the user ruling) and the face holds one window past the last call,
 // so short calls stay readable and the line never blinks inside a burst.
@@ -27,6 +31,7 @@ import { FoldToggle } from "./FoldToggle";
 import { ThinkingFold } from "./ThinkingFold";
 import { LiveRow } from "./TraceView";
 import { TraceList } from "./TraceList";
+import { WaitElapsedSuffix } from "./WaitElapsedSuffix";
 import { isRoundTripWait, isSettledRow } from "../../session/useTurnFlow";
 import type { ApprovalResponse, FileAttachment, OperationKind } from "../../types/approval";
 import type { LiveTurn } from "../../session/useTurnFlow";
@@ -160,10 +165,14 @@ export function LiveActivityLine({
   }, [toolKind, faceKind, gateHold, waiting]);
   // The prose-streaming window: no call running, no gate hold, no held
   // face, not the wait -- the tail round's prose + caret carry the
-  // liveness themselves, so the line steps aside (an output face beside
-  // visibly streaming text doubled the signal and flipped against the
-  // thinking face as the stream paused -- the device ruling).
-  if (!waiting && toolKind === undefined && faceKind === undefined) return null;
+  // streaming's own liveness, so the face does NOT claim thinking over
+  // visibly growing text (an output face beside streaming prose doubled
+  // the signal and flipped against the thinking face as the stream paused
+  // -- the device ruling). The line itself no longer steps aside (#1612's
+  // narrowing of ADR-0151): what let it yield was the thinking face's
+  // duplicate signal; the running face + the turn clock do not reproduce
+  // it, and the clock must stay continuous across the whole turn.
+  const streaming = !waiting && toolKind === undefined && faceKind === undefined;
   // Expandable only when something sits behind the fold (the user ruling:
   // a line with nothing to show on expand is a plain status line -- no
   // hover, no click): any round's thinking, or any settled/running row.
@@ -173,9 +182,13 @@ export function LiveActivityLine({
       round.rows.some((row) => isSettledRow(row) || row.running),
   );
   // The head's face content, shared by both postures (the fold toggle and
-  // the plain status line): the spinner + the phase face. The verb reads
+  // the plain status line): the spinner + the phase face + the turn clock's
+  // elapsed figure. The verb reads
   // the damped faceKind; the count reads the live rows -- a brief call
-  // ticks the count without repainting the verb.
+  // ticks the count without repainting the verb. The figure sits at ONE
+  // tail position in every posture and phase: the ask stamp derives the
+  // elapsed seconds, so the clock never resets across a face rotation or
+  // a posture flip (the #1612 re-host of the #1264 turn clock).
   const face = (
     <>
       <Loader2 aria-hidden="true" className="w-3.5 h-3.5 shrink-0 animate-spin" />
@@ -192,6 +205,8 @@ export function LiveActivityLine({
             { count: completedCount },
           )}
         </>
+      ) : streaming ? (
+        <FormattedMessage id="thread.live.running" defaultMessage="Running…" />
       ) : liveTurn.step !== null && liveTurn.step > 1 ? (
         <FormattedMessage
           id="thread.live.thinkingStep"
@@ -201,6 +216,7 @@ export function LiveActivityLine({
       ) : (
         <FormattedMessage id="common.thinking" defaultMessage="Thinking…" />
       )}
+      <WaitElapsedSuffix startedAt={liveTurn.askedAt} pausedSince={liveTurn.pausedSince} />
     </>
   );
   return (

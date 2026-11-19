@@ -1499,6 +1499,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "统计一下",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: null,
         rounds: [],
@@ -1523,6 +1524,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 2,
         rounds: [],
@@ -1537,6 +1539,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 2,
         rounds: [
@@ -1567,7 +1570,7 @@ describe("Thread", () => {
       // real clock.
       const head = await waitFor(() => {
         const el = container.querySelector("button.process-toggle");
-        expect(el?.textContent).toBe("正在写入 · 已完成 1 次调用");
+        expect(el).toHaveTextContent("正在写入 · 已完成 1 次调用");
         return el;
       });
       // The prose renders always-expanded; the thinking is NOT a rail line
@@ -1594,6 +1597,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 3,
         rounds: [
@@ -1623,7 +1627,7 @@ describe("Thread", () => {
       // it out on the real clock.
       const head = await waitFor(() => {
         const el = container.querySelector("button.process-toggle");
-        expect(el?.textContent).toBe("正在写入 · 已完成 0 次调用");
+        expect(el).toHaveTextContent("正在写入 · 已完成 0 次调用");
         return el;
       });
       expect(head?.querySelector(".animate-spin")).not.toBeNull();
@@ -1639,6 +1643,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 2,
         rounds: [liveRound({ rows: [liveRow({ key: "call-0", running: false, success: true })] })],
@@ -1653,6 +1658,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
         rounds: [
@@ -1704,6 +1710,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
         rounds: [
@@ -1752,6 +1759,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
         rounds: [
@@ -1779,7 +1787,7 @@ describe("Thread", () => {
       // running the face has already rotated back to the thinking phase
       // (the count waits behind the fold).
       const head = container.querySelector("button.process-toggle");
-      expect(head?.textContent).toBe("思考中…");
+      expect(head).toHaveTextContent("思考中…");
       expect(screen.queryByText("已拒绝")).not.toBeInTheDocument();
       // Expand: the badge names the answer on the flat row, the denial
       // excerpt rides beneath it -- no buttons remain.
@@ -1793,6 +1801,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "第一问",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: null,
         rounds: [],
@@ -1815,6 +1824,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "在员工表上统计总销售额",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: null,
         rounds: [],
@@ -1856,6 +1866,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "随便看看",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: null,
         rounds: [],
@@ -1881,6 +1892,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
         rounds: [
@@ -1930,6 +1942,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
         rounds: [
@@ -1997,6 +2010,7 @@ describe("Thread", () => {
       const turnOne: LiveTurn = {
         question: "q1",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
         rounds: [liveRound({ rows: [liveRow({ key: "call-0", running: false, success: true })] })],
@@ -2025,6 +2039,7 @@ describe("Thread", () => {
       const turnTwo: LiveTurn = {
         question: "q2",
         askedAt: ASKED_AT + 1000,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
         rounds: [liveRound({ rows: [liveRow({ key: "call-1", running: false, success: true })] })],

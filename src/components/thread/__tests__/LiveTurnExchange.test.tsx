@@ -67,6 +67,7 @@ function renderExchange(
 const liveTurnWith = (runtime: LiveTurn["runtime"]): LiveTurn => ({
   question: "问",
   askedAt: 0,
+  pausedSince: null,
   invocationNames: [],
   step: null,
   rounds: [],
@@ -304,16 +305,19 @@ describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
     expect(screen.getByText("思考中…")).toBeInTheDocument();
   });
 
-  it("yields nothing while the call-less tail's prose streams (the caret carries liveness)", () => {
-    // The suppression arm's own pin: a still-growing tail keeps the status
-    // away, so a regression to "always show" -- the spinner leaking over
-    // visibly streaming text -- cannot pass the suite silently (the keep
-    // tests above own the "never show" direction).
+  it("names the streaming window with the running face, never the thinking face", () => {
+    // The recalibrated arm (#1612): the line no longer vanishes while the
+    // tail prose streams -- the face claims the run (never 思考 over
+    // visibly streaming text, the device ruling), and the turn clock keeps
+    // its host.
     renderExchange({
       ...liveTurnWith(undefined),
+      askedAt: Date.now() - 46_000,
       step: 1,
       rounds: [{ text: "正文正在流出。", rows: [] }],
     });
+    expect(screen.getByText("执行中…")).toBeInTheDocument();
+    expect(screen.getByText("· 46秒")).toBeInTheDocument();
     expect(screen.queryByText(/思考中/)).not.toBeInTheDocument();
   });
 
@@ -338,22 +342,22 @@ describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
 
 describe("LiveTurnExchange trailing wait status (the #1606 bare face)", () => {
   // The sealed-tail wait: a settled row + sealed prose beside it -- the
-  // status names the round-trip wait. The elapsed suffix stays retired
-  // (the #1264 suffix retirement, ADR-0151): the folded head names the
-  // phase without a clock -- the thinking duration lives on the expanded
-  // face's folds, not here.
-  const sealedTailWait: LiveTurn = {
+  // status names the round-trip wait. The thinking duration still lives on
+  // the expanded face's folds, but the TURN clock rides the head since
+  // #1612 re-hosted it here -- the figure is the line's constant tail.
+  const sealedTailWait = (): LiveTurn => ({
     question: "问",
-    askedAt: 0,
+    askedAt: Date.now() - 46_000,
+    pausedSince: null,
     invocationNames: [],
     step: 2,
     rounds: [{ text: "第一轮已收口。", rows: [settledRow()] }],
-  };
+  });
 
-  it("reads the bare step-named status; no elapsed suffix ever rides it", () => {
-    renderExchange(sealedTailWait);
+  it("reads the step-named status with the turn clock riding the head", () => {
+    renderExchange(sealedTailWait());
     expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
-    expect(screen.queryByText(/· \d/)).toBeNull();
+    expect(screen.getByText("· 46秒")).toBeInTheDocument();
   });
 });
 
@@ -394,7 +398,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     const head = container.querySelector("button.process-toggle");
     expect(head).not.toBeNull();
     expect(head).toHaveAttribute("aria-expanded", "false");
-    expect(head?.textContent).toBe("正在读取 · 已完成 1 次调用");
+    expect(head).toHaveTextContent("正在读取 · 已完成 1 次调用");
     expect(head?.querySelector(".animate-spin")).not.toBeNull();
     // Nothing renders unfurled: the process face is behind the line's fold.
     expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
@@ -405,7 +409,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     vi.useFakeTimers();
     try {
       const view = renderExchange(midCallTurn());
-      expect(view.container.querySelector("button.process-toggle")?.textContent).toBe(
+      expect(view.container.querySelector("button.process-toggle")).toHaveTextContent(
         "正在读取 · 已完成 1 次调用",
       );
       // The read settles; a fast network call starts running (its kind
@@ -431,13 +435,13 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       view.rerender(exchangeEl(switched));
       // Sub-dwell: the face holds the previous verb while the count ticks --
       // a call that flashes by never repaints the head (the user ruling).
-      expect(view.container.querySelector("button.process-toggle")?.textContent).toBe(
+      expect(view.container.querySelector("button.process-toggle")).toHaveTextContent(
         "正在读取 · 已完成 2 次调用",
       );
       act(() => {
         vi.advanceTimersByTime(600);
       });
-      expect(view.container.querySelector("button.process-toggle")?.textContent).toBe(
+      expect(view.container.querySelector("button.process-toggle")).toHaveTextContent(
         "正在联网 · 已完成 2 次调用",
       );
     } finally {
@@ -451,26 +455,31 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     turn.rounds = [{ text: "第一轮已收口。", rows: [settledRow()] }];
     const { container } = renderExchange(turn);
     const head = container.querySelector("button.process-toggle");
-    expect(head?.textContent).toBe("思考中（第 2 步）…");
+    expect(head).toHaveTextContent("思考中（第 2 步）…");
     expect(head?.querySelector(".animate-spin")).not.toBeNull();
   });
 
-  it("steps aside while the tail prose streams (the prose + caret carry the liveness)", () => {
+  it("keeps the line on the streaming tail with the running face and the clock", () => {
     const turn = liveTurnWith(undefined);
+    turn.askedAt = Date.now() - 46_000;
     turn.step = 1;
     turn.rounds = [{ text: "正文正在流出。", rows: [] }];
     const { container } = renderExchange(turn);
-    // The streaming face retired: an output face beside visibly streaming
-    // text doubled the signal and flipped against the thinking face as
-    // the stream paused (the device ruling). The prose + caret carry the
-    // liveness; the line steps aside entirely.
-    expect(container.querySelector(".process-toggle")).toBeNull();
+    // #1612's narrowing of the step-aside ruling: what let the line yield
+    // was the thinking face doubling the prose signal -- the running face
+    // beside the caret does not reproduce it, and the turn clock keeps its
+    // host. The face names the run, never 思考 over growing text.
+    const line = container.querySelector(".process-toggle");
+    expect(line?.textContent).toContain("执行中…");
+    expect(line?.textContent).toContain("· 46秒");
+    expect(line?.querySelector(".animate-spin")).not.toBeNull();
+    expect(line?.textContent).not.toContain("思考中");
   });
 
   it("keeps the head unchanged while the running call's args stream (anti-flicker)", () => {
     const before = renderExchange(midCallTurn());
     const headText = before.container.querySelector("button.process-toggle")?.textContent;
-    expect(headText).toBe("正在读取 · 已完成 1 次调用");
+    expect(headText).toContain("正在读取 · 已完成 1 次调用");
     // An args delta lands: the running row's summary grows mid-stream. The
     // head reads kind + count only.
     const streamed = midCallTurn();
@@ -486,7 +495,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     vi.useFakeTimers();
     try {
       const view = renderExchange(midCallTurn());
-      expect(view.container.querySelector("button.process-toggle")?.textContent).toBe(
+      expect(view.container.querySelector("button.process-toggle")).toHaveTextContent(
         "正在读取 · 已完成 1 次调用",
       );
       const done = midCallTurn();
@@ -502,7 +511,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       // Grace: the face holds one window past the last call -- a call that
       // just finished must not blink the line back to thinking (the user
       // ruling: a line stuck on the thinking face reads as dead).
-      expect(view.container.querySelector("button.process-toggle")?.textContent).toBe(
+      expect(view.container.querySelector("button.process-toggle")).toHaveTextContent(
         "正在读取 · 已完成 2 次调用",
       );
       act(() => {
@@ -512,18 +521,18 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       // once the grace is spent, and the completed count waits behind the
       // fold (expand to see it).
       const head = view.container.querySelector("button.process-toggle");
-      expect(head?.textContent).toBe("思考中…");
+      expect(head).toHaveTextContent("思考中…");
       expect(head?.querySelector(".animate-spin")).not.toBeNull();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("holds the tool face through the streaming window's grace, then steps aside for the streaming tail", () => {
+  it("holds the tool face through the streaming window's grace, then reads the streaming running face", () => {
     vi.useFakeTimers();
     try {
       const view = renderExchange(midCallTurn());
-      expect(view.container.querySelector("button.process-toggle")?.textContent).toBe(
+      expect(view.container.querySelector("button.process-toggle")).toHaveTextContent(
         "正在读取 · 已完成 1 次调用",
       );
       // The call drains into a streaming tail (the wait predicate's prose
@@ -539,15 +548,17 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       // The count reads the line's rounds only: the settled call now
       // sits in a revealed round, so the line reports zero -- and with
       // nothing left behind the fold, the line is the plain status face.
-      expect(view.container.querySelector(".process-toggle")?.textContent).toBe(
+      expect(view.container.querySelector(".process-toggle")).toHaveTextContent(
         "正在读取 · 已完成 0 次调用",
       );
       act(() => {
         vi.advanceTimersByTime(600);
       });
-      // Past the grace the line steps aside entirely: the prose + caret
-      // carry the liveness.
-      expect(view.container.querySelector(".process-toggle")).toBeNull();
+      // Past the grace the streaming face owns the line (#1612's narrowing):
+      // the running face + the clock keep the line alive beside the prose.
+      expect(view.container.querySelector(".process-toggle")?.textContent).toContain(
+        "执行中…",
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -578,7 +589,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     // line vanishing entirely read as the process dying on the device);
     // the card renders beside it (ADR-0083's flow face).
     const head = container.querySelector("button.process-toggle");
-    expect(head?.textContent).toBe("正在联网 · 已完成 1 次调用");
+    expect(head).toHaveTextContent("正在联网 · 已完成 1 次调用");
     expect(head?.querySelector(".animate-spin")).not.toBeNull();
     expect(container.querySelector(".approval-card")).not.toBeNull();
     expect(screen.getByText("等待审批")).toBeInTheDocument();
@@ -611,7 +622,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     expect(container.querySelector("button.process-toggle")).toBeNull();
     const line = container.querySelector(".process-toggle");
     expect(line?.tagName).toBe("DIV");
-    expect(line?.textContent).toBe("正在联网 · 已完成 0 次调用");
+    expect(line).toHaveTextContent("正在联网 · 已完成 0 次调用");
     expect(line?.querySelector(".animate-spin")).not.toBeNull();
     // The card still renders beside the line (ADR-0083's flow face).
     expect(container.querySelector(".approval-card")).not.toBeNull();
@@ -663,7 +674,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     expect(screen.queryByText("SELECT 4")).not.toBeInTheDocument();
     // The head's count reads the line's rounds ONLY.
     const head = container.querySelector("button.process-toggle");
-    expect(head?.textContent).toBe("正在写入 · 已完成 2 次调用");
+    expect(head).toHaveTextContent("正在写入 · 已完成 2 次调用");
     // Open the sealed segment: every round's thinking fold + call rows in
     // settle order; the count stays in the activity line.
     fireEvent.click(roundToggles[0]!);
@@ -685,7 +696,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     // No prose section anywhere: nothing reveals -- the whole history
     // rides the line (the pre-prose posture), the count reads the line's
     // two settled calls.
-    expect(container.querySelector("button.process-toggle")?.textContent).toBe(
+    expect(container.querySelector("button.process-toggle")).toHaveTextContent(
       "正在读取 · 已完成 2 次调用",
     );
     expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
@@ -732,7 +743,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     // the line is the plain status face.
     const line = container.querySelector(".process-toggle");
     expect(line?.tagName).toBe("DIV");
-    expect(line?.textContent).toBe("正在联网 · 已完成 0 次调用");
+    expect(line).toHaveTextContent("正在联网 · 已完成 0 次调用");
   });
 
   it("keeps an abandoned call's row visible at the tail forever (#1267)", () => {
@@ -765,7 +776,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     // settled call in its fold; the abandoned row rides the tail beside
     // it, never inside the fold.
     const head = container.querySelector("button.process-toggle");
-    expect(head?.textContent).toBe("正在联网 · 已完成 1 次调用");
+    expect(head).toHaveTextContent("正在联网 · 已完成 1 次调用");
     fireEvent.click(head!);
     expect(screen.getByText("SELECT 1")).toBeInTheDocument();
     expect(container.querySelectorAll(".trace-row")).toHaveLength(2);
@@ -801,5 +812,87 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     fireEvent.click(container.querySelector("button.process-toggle")!);
     expect(screen.getByText("SELECT 2")).toBeInTheDocument();
     expect(screen.getByText("SELECT 2").closest("ul")).toHaveClass("trace-list");
+  });
+});
+
+// The turn clock's host (issue #1264's ruling re-hosted by #1612): the
+// elapsed figure rides the line's face tail in EVERY phase and posture --
+// pausedSince freezes it while the gate holds, and a face rotation never
+// resets it (the stamp-derived seconds heal any remount).
+describe("LiveTurnExchange the turn clock on the line (#1612)", () => {
+  const gateHoldTurn = (askedAt: number, pausedSince: number | null): LiveTurn => ({
+    ...liveTurnWith(undefined),
+    askedAt,
+    pausedSince,
+    step: 1,
+    rounds: [
+      {
+        rows: [
+          {
+            key: "req-0",
+            name: "fetch",
+            server: "acme",
+            operationKind: "network",
+            summary: "GET /x",
+            approval: { requestId: "req-0", response: null },
+            running: false,
+            success: null,
+            resultExcerpt: "",
+          },
+        ],
+      },
+    ],
+  });
+
+  it("freezes the figure at the pause origin while the gate holds the turn", () => {
+    // One now for both stamps: the 60s span stays exact (a per-call
+    // Date.now() pair could straddle a millisecond and floor to 59s).
+    const now = Date.now();
+    renderExchange(gateHoldTurn(now - 100_000, now - 40_000));
+    // 100s since the ask, the last 40s on the user: the figure reads the
+    // pause origin -- user think-time stays out (60s lands on the minutes
+    // tier, zero-padded).
+    expect(screen.getByText("· 1分00秒")).toBeInTheDocument();
+  });
+
+  it("keeps the same figure across face rotations (streaming -> tool -> thinking)", () => {
+    // Fake timers: the tool face's 600ms grace must be spent before the
+    // streaming face takes over (the grace ruling is unchanged by #1612).
+    vi.useFakeTimers();
+    try {
+      const askedAt = Date.now() - 46_000;
+      const view = renderExchange(
+        gateHoldTurn(askedAt, null),
+      );
+      // Gate hold renders the tool face; the figure runs from the ask stamp.
+      expect(view.container.querySelector(".process-toggle")).toHaveTextContent(
+        "正在联网",
+      );
+      expect(screen.getByText("· 46秒")).toBeInTheDocument();
+      // A streaming tail arrives: after the grace the face rotates to the
+      // running face -- the figure does not reset (one host, one stamp).
+      const streaming: LiveTurn = {
+        ...gateHoldTurn(askedAt, null),
+        rounds: [{ text: "正文正在流出。", rows: [] }],
+      };
+      view.rerender(exchangeEl(streaming));
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+      expect(screen.getByText("· 46秒")).toBeInTheDocument();
+      expect(view.container.querySelector(".process-toggle")?.textContent).toContain("执行中…");
+      // The call settles into the round-trip wait: the thinking face, the
+      // same figure still.
+      const settled: LiveTurn = {
+        ...gateHoldTurn(askedAt, null),
+        step: 2,
+        rounds: [{ rows: [settledRow({ key: "call-0" })] }],
+      };
+      view.rerender(exchangeEl(settled));
+      expect(screen.getByText("· 46秒")).toBeInTheDocument();
+      expect(view.container.querySelector(".process-toggle")).toHaveTextContent("思考中");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
