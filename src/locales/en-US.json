@@ -676,7 +676,7 @@
   "sidebar.workspace.removeConfirm.title": "Remove {name}?",
   "sidebar.workspace.renameTitle": "Rename workspace",
   "thread.activeChip.title": "Question names \"{name}\"",
-  "thread.antecedents": "Derived from {names}",
+  "thread.antecedents": "Derived from {count, plural, one {# intermediate} other {# intermediates}}",
   "thread.approval.allowOnce": "Allow once",
   "thread.approval.alwaysAllow": "Always allow",
   "thread.approval.alwaysAllowScope": "After Always allow, calls to this tool no longer ask for the rest of the session.",

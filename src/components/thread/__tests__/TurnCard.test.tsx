@@ -411,12 +411,14 @@ describe("TurnCard result-name display axis (issue #1623)", () => {
     expect(getByRole("button", { name: "结果：销量汇总" })).toBeInTheDocument();
   });
 
-  it("labels the antecedents line with display names", () => {
-    const { getByRole, getByText } = renderCard(
+  it("summarizes the antecedents line as a count trigger", () => {
+    const { getByRole, container } = renderCard(
       labeledRecord([labeledDataset("result_1", "筛选后明细"), labeledDataset("result_2", "销量汇总")]),
     );
     expect(getByRole("button", { name: "结果：销量汇总" })).toBeInTheDocument();
-    expect(getByText("由 筛选后明细 派生")).toBeInTheDocument();
+    // The names moved into the popover (the usage-pill pattern); the line
+    // itself reads the count sentence, the display names ride the list rows.
+    expect(container.querySelector(".antecedents")).toHaveTextContent("由 1 个中间结果派生");
   });
 
   it("carries the display name into the preview card's accessible name", () => {
@@ -613,7 +615,7 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     // Issue #1282: the per-round folds live inside the turn-level process
     // fold -- the head opens first.
     fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
-    screen.getAllByText("执行完成 · analyst ×1").forEach((t) => fireEvent.click(t));
+    screen.getAllByText("轨迹 · analyst ×1").forEach((t) => fireEvent.click(t));
     fireEvent.click(screen.getAllByText("子智能体轨迹")[roundIndex]);
   };
 
@@ -641,7 +643,7 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     renderCard(record);
     // Issue #1282: the head opens first; the per-round fold lives inside it.
     fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
-    fireEvent.click(screen.getByText("执行完成 · analyst ×2"));
+    fireEvent.click(screen.getByText("轨迹 · analyst ×2"));
     // The refusal renders no sub-trace fold (the row's own gate) --
     // exactly one openable expansion remains.
     const buttons = screen.getAllByText("子智能体轨迹");
@@ -723,8 +725,8 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     // (round 1 explore, round 2 materialize).
     const folds = container.querySelectorAll(".trace-toggle");
     expect(folds).toHaveLength(2);
-    expect(folds[0]).toHaveTextContent("执行完成 · explore ×1");
-    expect(folds[1]).toHaveTextContent("执行完成 · materialize ×1");
+    expect(folds[0]).toHaveTextContent("轨迹 · explore ×1");
+    expect(folds[1]).toHaveTextContent("轨迹 · materialize ×1");
   });
 
   it("renders no head when the trace carries no content at all", () => {

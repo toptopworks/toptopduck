@@ -483,7 +483,7 @@ export function Thread({
       {ingestProgress !== null && (
         <p
           role="status"
-          className="m-0 mb-2 flex items-center gap-1 text-xs text-muted-foreground"
+          className="m-0 mb-2 flex items-center gap-1 text-sm text-muted-foreground"
         >
           <Loader2 aria-hidden="true" className="w-3.5 h-3.5 shrink-0 animate-spin" />
           <span className="min-w-0 truncate">
@@ -508,7 +508,7 @@ export function Thread({
       {replaceProgress !== null && (
         <p
           role="status"
-          className="m-0 mb-2 flex items-center gap-1 text-xs text-muted-foreground"
+          className="m-0 mb-2 flex items-center gap-1 text-sm text-muted-foreground"
         >
           <Loader2 aria-hidden="true" className="w-3.5 h-3.5 shrink-0 animate-spin" />
           <span className="min-w-0 truncate">

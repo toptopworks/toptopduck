@@ -43,7 +43,7 @@ export function ArtifactCard({
       // The card hugs its content like ResultPreviewCard (the stream is
       // items-start); max-w-full caps the hug at the stream width.
       className={cn(
-        "artifacts-card mt-4 block max-w-full rounded-md border bg-background text-left text-xs",
+        "artifacts-card mt-4 block max-w-full rounded-md border bg-background text-left text-sm",
         stale && "stale border-dashed",
       )}
       data-stale={stale ? "true" : undefined}
