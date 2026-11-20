@@ -43,6 +43,12 @@ function cardEl(
   defaultOpenDetail?: boolean,
   locale: EffectiveLocale = "zh-CN",
   processInitiallyExpanded?: boolean,
+  // Selection-prop overrides for the divergent-name guard (#1623): the
+  // defaults pin the null selection posture every other describe rides.
+  overrides?: {
+    selectedResult?: string | null;
+    onSelectResult?: (referenceName: string) => void;
+  },
 ) {
   return (
     <IntlProvider locale={locale} messages={catalogFor(locale)}>
@@ -61,6 +67,7 @@ function cardEl(
             busy={false}
             defaultOpenDetail={defaultOpenDetail}
             processInitiallyExpanded={processInitiallyExpanded}
+            {...overrides}
           />
         </QueryClientProvider>
       </TooltipProvider>
@@ -371,6 +378,76 @@ describe("TurnCard materialized link-row narrow-column caps (issue #872)", () =>
     // inline-block joins the pin because the pair is what a rogue
     // all-unset-style arbitrary property would clobber first.
     expect(container.querySelector(".result-link")).toHaveClass("inline-block", "max-w-full");
+  });
+});
+
+describe("TurnCard result-name display axis (issue #1623)", () => {
+  // ADR-0037 dual-name: the thread surface shows the display name (the label
+  // the model supplied or the user chose); the reference name stays the SQL
+  // identity (ADR-0022) -- the selection guard below pins that the selection
+  // keys keep riding it while the rendered label diverges (the rail flows'
+  // equal-name fixtures cannot discriminate the two fields).
+  function labeledDataset(reference_name: string, display_name: string): DatasetDescriptor {
+    return { ...previewDataset, reference_name, display_name };
+  }
+
+  function labeledRecord(promotions: DatasetDescriptor[]): TurnRecord {
+    return {
+      ...recordWith(undefined),
+      outcome: {
+        kind: "Materialized",
+        data: {
+          promotions: promotions.map((dataset) => ({ dataset, sql: "SELECT 1" })),
+          viz: null,
+          body: null,
+          assumption: null,
+        },
+      },
+    };
+  }
+
+  it("labels the result link with the display name", () => {
+    const { getByRole } = renderCard(labeledRecord([labeledDataset("result_1", "销量汇总")]));
+    expect(getByRole("button", { name: "结果：销量汇总" })).toBeInTheDocument();
+  });
+
+  it("labels the antecedents line with display names", () => {
+    const { getByRole, getByText } = renderCard(
+      labeledRecord([labeledDataset("result_1", "筛选后明细"), labeledDataset("result_2", "销量汇总")]),
+    );
+    expect(getByRole("button", { name: "结果：销量汇总" })).toBeInTheDocument();
+    expect(getByText("由 筛选后明细 派生")).toBeInTheDocument();
+  });
+
+  it("carries the display name into the preview card's accessible name", () => {
+    const { getByRole } = renderCard(labeledRecord([labeledDataset("result_1", "销量汇总")]));
+    expect(getByRole("button", { name: /销量汇总 的预览/ })).toBeInTheDocument();
+  });
+
+  it("renders the equal-name posture of an unlabelled result", () => {
+    const { getByRole } = renderCard(labeledRecord([labeledDataset("result_1", "result_1")]));
+    expect(getByRole("button", { name: "结果：result_1" })).toBeInTheDocument();
+  });
+
+  it("keeps the selection keys on the reference name while the label diverges", () => {
+    const onSelectResult = vi.fn();
+    const { getByRole } = render(
+      cardEl(
+        labeledRecord([labeledDataset("result_1", "销量汇总")]),
+        undefined,
+        "zh-CN",
+        undefined,
+        { selectedResult: "result_1", onSelectResult },
+      ),
+    );
+    // The active ring lands via the reference name while the link reads as
+    // its label, and both selection surfaces report the reference name.
+    const link = getByRole("button", { name: "结果：销量汇总" });
+    expect(link).toHaveAttribute("aria-current", "true");
+    fireEvent.click(link);
+    expect(onSelectResult).toHaveBeenLastCalledWith("result_1");
+    fireEvent.click(getByRole("button", { name: /销量汇总 的预览/ }));
+    expect(onSelectResult).toHaveBeenLastCalledWith("result_1");
   });
 });
 

@@ -467,7 +467,7 @@ function TurnBody({
                   defaultMessage="Derived from {names}"
                   values={{
                     names: intl.formatList(
-                      antecedents.map((p) => p.dataset.reference_name),
+                      antecedents.map((p) => p.dataset.display_name),
                       { type: "conjunction" },
                     ),
                   }}
@@ -504,7 +504,7 @@ function TurnBody({
               <FormattedMessage
                 id="result.title"
                 defaultMessage="Result: {name}"
-                values={{ name: primary.dataset.reference_name }}
+                values={{ name: primary.dataset.display_name }}
               />
             </button>
             {staleAnchor && (

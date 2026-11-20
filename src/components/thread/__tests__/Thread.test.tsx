@@ -31,7 +31,8 @@ vi.mock("../../../api", async (importOriginal) => ({
   listAdapters: vi.fn().mockResolvedValue([]),
 }));
 
-// A materialized-record fixture (reference_name overridden per test) -- the
+// A materialized-record fixture (reference_name and display_name overridden
+// per test) -- the
 // only outcome that needs a full dataset payload. File-local per the suite
 // convention: TurnCard.test.tsx carries its own descriptor (preview-card
 // pins, issue #860) rather than reaching into this suite's fixture.
@@ -123,7 +124,16 @@ describe("Thread", () => {
         kind: "Materialized",
         data: {
           promotions: [
-            { dataset: { ...mockDataset, reference_name: referenceName }, sql: "SELECT 1" },
+            {
+              dataset: {
+                ...mockDataset,
+                reference_name: referenceName,
+                // The unlabelled fallback posture (ADR-0037): display starts
+                // equal to the reference name; divergence is a later label/rename.
+                display_name: referenceName,
+              },
+              sql: "SELECT 1",
+            },
           ],
           viz: null,
           body,
@@ -151,8 +161,14 @@ describe("Thread", () => {
         kind: "Materialized",
         data: {
           promotions: [
-            { dataset: { ...mockDataset, reference_name: "result_1" }, sql: "SELECT 1" },
-            { dataset: { ...mockDataset, reference_name: "result_2" }, sql: "SELECT 2" },
+            {
+              dataset: { ...mockDataset, reference_name: "result_1", display_name: "result_1" },
+              sql: "SELECT 1",
+            },
+            {
+              dataset: { ...mockDataset, reference_name: "result_2", display_name: "result_2" },
+              sql: "SELECT 2",
+            },
           ],
           viz: null,
           body: null,
@@ -2092,12 +2108,16 @@ describe("Thread", () => {
                 dataset: {
                   ...mockDataset,
                   reference_name: "result_1",
+                  display_name: "result_1",
                   sample: [["x"]],
                   columns: [{ name: "mid", canonical_type: "VARCHAR" }],
                 },
                 sql: "SELECT 1",
               },
-              { dataset: { ...mockDataset, reference_name: "result_2" }, sql: "SELECT 2" },
+              {
+                dataset: { ...mockDataset, reference_name: "result_2", display_name: "result_2" },
+                sql: "SELECT 2",
+              },
             ],
             viz: null,
             body: null,
@@ -2150,7 +2170,13 @@ describe("Thread", () => {
           data: {
             promotions: [
               {
-                dataset: { ...mockDataset, reference_name: "result_1", row_count: 0, sample: [] },
+                dataset: {
+                  ...mockDataset,
+                  reference_name: "result_1",
+                  display_name: "result_1",
+                  row_count: 0,
+                  sample: [],
+                },
                 sql: "SELECT 1 WHERE false",
               },
             ],
@@ -2224,6 +2250,7 @@ describe("Thread", () => {
                 dataset: {
                   ...mockDataset,
                   reference_name: "result_1",
+                  display_name: "result_1",
                   columns: [
                     { name: "a", canonical_type: "VARCHAR" },
                     { name: "b", canonical_type: "VARCHAR" },
