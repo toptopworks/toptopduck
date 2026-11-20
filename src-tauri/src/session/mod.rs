@@ -3269,14 +3269,19 @@ mod tests {
             |_| {},
             &inputs,
         );
+        // Issue #1625: the unknown external tool no longer fails the turn --
+        // the Skip hook feeds the invalid call back as a synthetic error
+        // result, and the scripted second turn answers in text (the
+        // self-corrected shape; the synthetic row's honest name is pinned
+        // in loop_runtime's self-correction suite).
         match outcome {
-            TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
-                assert!(
-                    detail.contains("unknown tool") && detail.contains("mcp__weather__lookup"),
-                    "the unknown-tool terminal carries the honest name: {detail:?}"
+            TurnOutcome::Textual { body, .. } => {
+                assert_eq!(
+                    body, "没有可用的天气服务。",
+                    "the turn self-corrects past the unknown external tool"
                 );
             }
-            other => panic!("expected the unknown-tool Execute failure, got {other:?}"),
+            other => panic!("expected the self-corrected Textual turn, got {other:?}"),
         }
         assert!(
             !session.admin_engine.is_materialized(),

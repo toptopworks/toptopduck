@@ -795,6 +795,25 @@ fn provider_owned_400_body_is_transient_even_when_prefix_shaped() {
     );
 }
 
+/// The Fail fallback's termination mapping (issue #1625): the Skip hook
+/// retires the in-app path to this arm, but rig's post-assembly
+/// validation still raises `UnknownToolCall` without consulting the
+/// invalid-call hook -- so the mapping stays total and honest: a
+/// transient carrying the name, never a silent success.
+#[test]
+fn unknown_tool_call_prompt_error_maps_to_the_honest_transient() {
+    let err = rig_agent::completion::PromptError::UnknownToolCall {
+        tool_name: "explode".into(),
+        available_tools: vec!["explore".into()],
+        allowed_tools: vec!["explore".into()],
+        chat_history: Box::default(),
+    };
+    assert_eq!(
+        super::termination_for_prompt(&err, 8, None),
+        Termination::Transient("model attempted to call unknown tool `explode`".into())
+    );
+}
+
 /// The bridged face's request-translation guards (issue #926): the loop
 /// runtime feeds rig the system prompt through the preamble slot, and the
 /// bridge must lift it back onto the app request's own `system` field;
@@ -2332,31 +2351,125 @@ fn an_approval_gate_interleaves_with_a_window_resume() {
     );
 }
 
-/// The unknown-tool-call fallback (ADR-0116 Decision 5): the model reaching
-/// for a tool outside the advertised table lands an honest transient
-/// carrying the name -- never a silent success, never a bare cancel.
+/// The invalid-tool-call self-correction (issue #1625): a model reaching
+/// for a tool outside the advertised table no longer fails the run -- the
+/// Skip hook feeds back a synthetic error `tool_result` (the reason names
+/// the hallucination and lists the advertised table), the next turn
+/// self-corrects, and the trace renders the invalid call as an error row
+/// on the hallucinating turn's own round. The `Fail` arm this retires
+/// stays the honest default for a hook stack that chooses it (the
+/// termination mapping's `UnknownToolCall` arm, unchanged).
 #[test]
-fn unknown_tool_call_lands_honest_transient() {
+fn unknown_tool_call_feeds_back_and_self_corrects() {
     let mut h = Harness::new();
-    let model = MockCompletionModel::from_stream_turns([batch_turn(
-        "",
-        None,
-        &[("tu_1", "not_a_registered_tool", json!({}))],
-    )]);
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn("", None, &[("tu_1", "not_a_registered_tool", json!({}))]),
+        text_turn("recovered without it."),
+    ]);
     let outcome = h.run(
         &h.request("call something unknown"),
+        mock_runtime(model.clone()),
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("recovered without it.".into()),
+        "the run self-corrects past the invalid call"
+    );
+    // The invalid turn's round survives on the synthetic row alone (the
+    // turn streamed no thinking and no prose), wearing the hallucinated
+    // name and the reason text in the ordinary failed-row shape.
+    assert_eq!(outcome.trace.len(), 1, "{:?}", outcome.trace);
+    let row = &outcome.trace[0].calls[0];
+    assert_eq!(row.name, "not_a_registered_tool");
+    assert!(!row.success, "the synthetic row is an error row");
+    assert!(
+        row.result_excerpt.contains("not_a_registered_tool"),
+        "the anchor names the hallucination: {}",
+        row.result_excerpt
+    );
+    assert!(
+        row.result_excerpt.contains("available tools: ["),
+        "the anchor lists the advertised table: {}",
+        row.result_excerpt
+    );
+    assert!(
+        row.failure_detail.is_some(),
+        "the reason rides as the model-visible failure text too"
+    );
+    // The wire the self-correction rode (issue #1625's orphan-free pin):
+    // the second request's history carries the rolled-back pair -- the
+    // assistant turn with the invalid call, answered by the synthetic
+    // error result -- so the invalid call id never stands orphaned.
+    let wire =
+        serde_json::to_string(&model.requests()[1].chat_history).expect("messages serialize");
+    assert!(
+        wire.contains("not_a_registered_tool"),
+        "the hallucinated name rides both the call and its answer: {wire}"
+    );
+    assert!(
+        wire.contains("does not exist"),
+        "the synthetic error text answers the invalid call: {wire}"
+    );
+    assert!(
+        wire.matches("tu_1").count() >= 2,
+        "the call id is answered (assistant call + user result), never orphaned: {wire}"
+    );
+}
+
+/// A sub-agent's hallucinated tool name self-corrects inside the
+/// delegation (issue #1625): the same Skip resolver registers on the
+/// sub-agent's run, so the invalid call feeds back within the sub-agent's
+/// own loop -- the delegation never fails on it, the sub-agent's report
+/// lands, and the hallucination surfaces as the error row on the nested
+/// sub-trace's round.
+#[test]
+fn subagent_unknown_tool_call_self_corrects_inside_the_delegation() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "delegate",
+            None,
+            &[("tu_d1", "analyst", json!({"prompt": "count the rows"}))],
+        ),
+        // The sub-agent's first turn hallucinates a name outside its
+        // sub-face; its second turn delivers the report.
+        batch_turn("", None, &[("tu_s1", "not_on_any_face", json!({}))]),
+        text_turn("sub report"),
+        text_turn("main done"),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "count"),
         mock_runtime(model),
         Arc::new(CancelToken::new()),
     );
-    match &outcome.termination {
-        Termination::Transient(detail) => {
-            assert!(
-                detail.contains("not_a_registered_tool"),
-                "the detail names the tool: {detail}"
-            );
-        }
-        other => panic!("expected Transient, got {other:?}"),
-    }
+
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("main done".into()),
+        "the delegation survived the sub-agent's hallucination"
+    );
+    // The delegation entry lands succeeded with the report; its nested
+    // sub-trace carries the hallucinating round's synthetic error row.
+    let entry = &outcome.trace[0].calls[0];
+    assert_eq!(entry.name, "analyst");
+    assert!(entry.success, "the delegation itself succeeds");
+    let sub = entry
+        .sub_trace
+        .as_ref()
+        .expect("the sub-agent's rounds ride the delegation entry");
+    assert_eq!(sub.len(), 1, "{sub:?}");
+    let row = &sub[0].calls[0];
+    assert_eq!(row.name, "not_on_any_face");
+    assert!(!row.success);
+    assert!(
+        row.result_excerpt.contains("available tools: ["),
+        "the sub-agent's reason lists its own sub-face: {}",
+        row.result_excerpt
+    );
 }
 
 /// The layer's own history conversion -- the ADR-0116 diagnostic-probe

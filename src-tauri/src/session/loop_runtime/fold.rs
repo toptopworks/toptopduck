@@ -35,11 +35,12 @@
 //! whichever way the run ended.
 
 use rig_agent::agent::MultiTurnStreamItem;
-use rig_core::message::ReasoningContent;
-use rig_core::streaming::StreamedAssistantContent;
+use rig_core::message::{ReasoningContent, ToolResult, ToolResultContent};
+use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent};
 
+use crate::approval::OperationKind;
 use crate::model::{Protocol, ThinkingTrace, TokenUsage, TurnPhase};
-use crate::session::loop_contract::{push_call, LoopRound};
+use crate::session::loop_contract::{push_call, LoopRound, TraceEntry};
 use crate::util::{is_latched, push_capped, push_capped_emit};
 
 use super::adapter::{emit_phase, CompletionChannel, PhaseSink};
@@ -139,6 +140,23 @@ pub(crate) struct EventFold {
     /// dropped there too -- the batch seal rebuilds the round's text off
     /// `text_deltas`).
     trailing_round: Option<LoopRound>,
+    /// Count of `ToolExecutionCommitted` items whose paired result event
+    /// has not arrived yet -- the reconciliation key between a result
+    /// event and the dispatch-recorded entry queue (issue #1625). An
+    /// executed call's result is always preceded by its execution
+    /// confirmation; a framework-side synthetic result (an
+    /// invalid-tool-call Skip's feedback) never is. The app's trace
+    /// entries carry no rig call id to pair on (the gateway adapter mints
+    /// its own ids -- rig's callback surface hands over no call id), so
+    /// the confirmation count is the one discriminator the stream itself
+    /// carries.
+    ///
+    /// A commit-less result has a second producer in rig's contract -- an
+    /// `on_tool_call` hook that skips a VALID call lands its result with
+    /// no confirmation (and would take the synthetic-row arm here). No
+    /// hook of ours skips valid calls today; registering one must re-read
+    /// this reconciliation.
+    pending_results: usize,
 }
 
 impl EventFold {
@@ -160,6 +178,7 @@ impl EventFold {
             thinking_trace: None,
             batch_open: false,
             trailing_round: None,
+            pending_results: 0,
         }
     }
 
@@ -196,20 +215,35 @@ impl EventFold {
             MultiTurnStreamItem::ToolExecutionCommitted { .. } => {
                 // Execution confirmation, surfaced only after the batch
                 // settles; the trace entry rides the result event below.
+                // Counting the confirmation keys the result-event
+                // reconciliation below (issue #1625): only a confirmed
+                // execution's result may consume a queued dispatch entry.
+                self.pending_results += 1;
             }
-            MultiTurnStreamItem::StreamUserItem(_) => {
-                // One executed (or framework-skipped) call's result, in call
-                // order: land its dispatch-recorded entry on the open round.
-                // A result with no queued entry is a framework-side result
-                // (a skipped call -- none of ours) and lands nothing.
-                if let Some(entry) = channel
-                    .completed
-                    .lock()
-                    .expect("completed lock poisoned")
-                    .pop_front()
-                {
-                    push_call(&mut self.rounds, entry);
-                    self.landed_calls += 1;
+            MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+                tool_result,
+                ..
+            }) => {
+                // One call's result, in call order. A confirmed execution
+                // (its `ToolExecutionCommitted` counted above) lands its
+                // dispatch-recorded entry on the open round; a result with
+                // NO confirmed execution is framework-side -- an
+                // invalid-tool-call Skip's synthetic feedback (issue #1625)
+                // -- and lands its own error row instead of stealing a
+                // queued entry it never paired with.
+                if self.pending_results > 0 {
+                    self.pending_results -= 1;
+                    if let Some(entry) = channel
+                        .completed
+                        .lock()
+                        .expect("completed lock poisoned")
+                        .pop_front()
+                    {
+                        push_call(&mut self.rounds, entry);
+                        self.landed_calls += 1;
+                    }
+                } else {
+                    self.land_synthetic_call(tool_result);
                 }
             }
             MultiTurnStreamItem::CompletionCall(call) => {
@@ -276,7 +310,10 @@ impl EventFold {
                         debug_assert_eq!(round.text.as_deref(), Some(response.output.as_str()));
                     }
                     round.text = None;
-                    if round.thinking.is_some() {
+                    // A round that landed calls (an invalid-call Skip's
+                    // synthetic row, issue #1625) survives the prose strip:
+                    // the calls are honesty the trace keeps.
+                    if round.thinking.is_some() || !round.calls.is_empty() {
                         self.rounds.push(round);
                     }
                 }
@@ -498,6 +535,44 @@ impl EventFold {
         });
     }
 
+    /// Land a framework-side synthetic result (issue #1625): the error
+    /// `tool_result` an invalid-tool-call Skip fed back to the model. The
+    /// row reuses the ordinary failed-call shape (the hallucinated name,
+    /// the reason text as both the bounded anchor and the model-visible
+    /// detail) so the trace needs no new frontend vocabulary. It rides
+    /// the invalid turn's parked trailing round -- the batch never
+    /// confirmed (the turn was abandoned at the invalid call), so the
+    /// turn's round is the parked one; a parkless turn (nothing streamed
+    /// but the invalid call) parks a fresh round to carry the row.
+    fn land_synthetic_call(&mut self, result: &ToolResult) {
+        let reason = result
+            .content
+            .iter()
+            .filter_map(ToolResultContent::as_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let entry = TraceEntry::failed(
+            result.call.as_str(),
+            result.name.clone(),
+            // No dispatch ever classified the call -- the neutral default
+            // is the honest kind for a name that resolved to nothing.
+            OperationKind::Read,
+            String::new(),
+            reason.clone(),
+        )
+        .with_failure_detail(&reason);
+        match &mut self.trailing_round {
+            Some(round) => round.calls.push(entry),
+            None => {
+                self.trailing_round = Some(LoopRound {
+                    thinking: None,
+                    text: None,
+                    calls: vec![entry],
+                });
+            }
+        }
+    }
+
     /// Land the waiting trailing round, if one waits.
     fn flush_trailing(&mut self) {
         if let Some(round) = self.trailing_round.take() {
@@ -522,6 +597,7 @@ mod tests {
     use super::*;
     use crate::util::{ACCUM_MAX_BYTES, TRUNCATION_MARKER};
     use rig_core::completion::Usage;
+    use rig_core::message::{ToolCall, ToolCallId, ToolFunction};
     use std::sync::Mutex;
 
     fn text_item(t: &str) -> MultiTurnStreamItem {
@@ -583,6 +659,44 @@ mod tests {
 
     fn noop_sink() -> PhaseSink {
         Arc::new(Mutex::new(|_p: TurnPhase| {}))
+    }
+
+    /// A framework-side synthetic result event (issue #1625): the error
+    /// `tool_result` an invalid-tool-call Skip surfaces -- identical in
+    /// shape to an executed call's result; the reconciliation keys on the
+    /// execution confirmation, not the payload.
+    fn synthetic_result_item(name: &str, text: &str) -> MultiTurnStreamItem {
+        MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+            tool_result: ToolResult {
+                call: ToolCallId::new_or_mint("tc_invalid"),
+                provider: None,
+                name: name.into(),
+                content: vec![ToolResultContent::text(text)],
+            },
+            internal_call_id: "ic_invalid".into(),
+        })
+    }
+
+    /// The confirmation half of an executed call's stream pair (issue
+    /// #1625's reconciliation input): a committed `ToolCall` (the batch
+    /// seal) followed by its execution confirmation.
+    fn executed_call_items() -> Vec<MultiTurnStreamItem> {
+        vec![
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
+                tool_call: ToolCall::new(
+                    ToolCallId::new_or_mint("tc_ok"),
+                    ToolFunction::new("explore".into(), serde_json::json!({})),
+                ),
+                internal_call_id: "ic_ok".into(),
+            }),
+            MultiTurnStreamItem::ToolExecutionCommitted {
+                tool_call: ToolCall::new(
+                    ToolCallId::new_or_mint("tc_ok"),
+                    ToolFunction::new("explore".into(), serde_json::json!({})),
+                ),
+                internal_call_id: "ic_ok".into(),
+            },
+        ]
     }
 
     fn recording_sink() -> (Arc<Mutex<Vec<TurnPhase>>>, PhaseSink) {
@@ -1130,5 +1244,184 @@ mod tests {
                 limit: None,
             })
         );
+    }
+
+    // --- framework-side synthetic results (issue #1625) -------------------------
+
+    /// Issue #1625: an invalid-tool-call Skip's synthetic result lands its
+    /// own error row on the invalid turn's parked round -- the batch never
+    /// confirmed (the turn was abandoned at the invalid call), so the row
+    /// joins the turn's parked thinking/prose, wearing the hallucinated
+    /// name and the reason text in the ordinary failed-row shape.
+    #[test]
+    fn synthetic_result_lands_an_error_row_on_the_invalid_turns_round() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new(None);
+        // The invalid turn: reasoning streams, the invalid call's arguments
+        // stream as deltas (nothing commits), the turn closes and parks.
+        fold.event(&reasoning_delta_item("reach for a tool"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        // The Skip's synthetic result: after the close, no execution
+        // confirmation ever seen.
+        fold.event(
+            &synthetic_result_item(
+                "explode",
+                "tool `explode` does not exist; available tools: [explore]",
+            ),
+            &channel,
+            &sink,
+        );
+        // The next (self-corrected) turn opens, flushing the parked round.
+        fold.event(&text_item("recovered"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.finish();
+        assert_eq!(fold.rounds.len(), 2, "{:?}", fold.rounds);
+        let invalid = &fold.rounds[0];
+        assert_eq!(
+            invalid
+                .thinking
+                .as_ref()
+                .expect("the invalid turn's thinking parks")
+                .text,
+            "reach for a tool"
+        );
+        assert_eq!(invalid.calls.len(), 1, "exactly the synthetic row");
+        let row = &invalid.calls[0];
+        assert_eq!(row.name, "explode", "the row wears the hallucinated name");
+        assert!(!row.success);
+        assert_eq!(
+            row.result_excerpt,
+            "tool `explode` does not exist; available tools: [explore]"
+        );
+        assert_eq!(
+            row.failure_detail.as_deref(),
+            Some("tool `explode` does not exist; available tools: [explore]"),
+            "the reason is the model-visible failure text"
+        );
+        assert_eq!(fold.rounds[1].text.as_deref(), Some("recovered"));
+        assert_eq!(
+            fold.landed_calls, 0,
+            "a synthetic row is not a dispatched call's landing"
+        );
+    }
+
+    /// Issue #1625's regression pin: a synthetic result arriving while the
+    /// completion queue still holds a dispatched entry (the misordering
+    /// hazard the blind order-pairing posed) must NOT consume it -- the
+    /// entry stays queued for the executed result (or the finish-time
+    /// drain) that owns it, and the synthetic row still lands.
+    #[test]
+    fn synthetic_result_never_steals_a_queued_dispatch_entry() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        // A dispatched call's recorded entry sits queued -- a shape the
+        // strict event order never produces with a synthetic result behind
+        // it; the reconciliation must hold anyway (it keys on the
+        // confirmation count, not the queue's emptiness).
+        channel
+            .completed
+            .lock()
+            .unwrap()
+            .push_back(TraceEntry::succeeded(
+                "gateway-1",
+                "explore",
+                OperationKind::Read,
+                "",
+                "rows",
+            ));
+        let mut fold = EventFold::new(None);
+        fold.event(&text_item("plan"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.event(
+            &synthetic_result_item("explode", "reason text"),
+            &channel,
+            &sink,
+        );
+        fold.finish();
+        assert_eq!(
+            channel.completed.lock().unwrap().len(),
+            1,
+            "the dispatched entry stays queued for its owner"
+        );
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        let round = &fold.rounds[0];
+        assert_eq!(round.text.as_deref(), Some("plan"));
+        assert_eq!(
+            round.calls.len(),
+            1,
+            "the synthetic row landed without touching the queue"
+        );
+        assert_eq!(round.calls[0].name, "explode");
+    }
+
+    /// The executed path is unchanged by the reconciliation (#1625's
+    /// no-regression arm): an execution confirmation counts, its paired
+    /// result event consumes the count and pops the queued entry exactly
+    /// as the blind order-pairing did.
+    #[test]
+    fn executed_results_pair_through_the_committed_count() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new(None);
+        fold.event(&text_item("plan"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        for item in executed_call_items() {
+            fold.event(&item, &channel, &sink);
+        }
+        channel
+            .completed
+            .lock()
+            .unwrap()
+            .push_back(TraceEntry::succeeded(
+                "gateway-1",
+                "explore",
+                OperationKind::Read,
+                "",
+                "rows",
+            ));
+        fold.event(&synthetic_result_item("explore", "rows"), &channel, &sink);
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        let batch = &fold.rounds[0];
+        assert_eq!(
+            batch.text.as_deref(),
+            Some("plan"),
+            "the batch seal rebuilt the round with the turn's prose"
+        );
+        assert_eq!(batch.calls.len(), 1);
+        assert_eq!(batch.calls[0].name, "explore");
+        assert_eq!(batch.calls[0].tool_use_id, "gateway-1");
+        assert_eq!(fold.landed_calls, 1);
+    }
+
+    /// The FinalResponse prose strip keeps a parked round that landed
+    /// calls (issue #1625's strip-survival arm): the strict event order
+    /// never lands a synthetic row on the final text turn's own park (the
+    /// next turn's open flushes the invalid turn's park first) -- the
+    /// strip must hold anyway; it keys on the round's calls, not on the
+    /// order that produces them.
+    #[test]
+    fn final_response_keeps_a_parked_round_that_landed_a_synthetic_call() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new(None);
+        // The final text turn parks its prose, and the synthetic row joins
+        // the park after the close -- a shape the strict order never
+        // produces, held here for the strip's own sake.
+        fold.event(&text_item("done"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.event(
+            &synthetic_result_item("explode", "reason text"),
+            &channel,
+            &sink,
+        );
+        fold.event(&final_response_item("done"), &channel, &sink);
+        fold.finish();
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        let round = &fold.rounds[0];
+        assert_eq!(round.text, None, "the prose rode the final output");
+        assert_eq!(round.calls.len(), 1, "the synthetic row survived the strip");
+        assert_eq!(round.calls[0].name, "explode");
+        assert_eq!(fold.final_output.as_deref(), Some("done"));
     }
 }
