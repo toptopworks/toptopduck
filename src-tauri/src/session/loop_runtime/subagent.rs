@@ -84,6 +84,7 @@ use crate::util::is_latched;
 
 use super::adapter::{emit_phase, next_call_id, DispatchRequest, PhaseSink, SharedTurnState};
 use super::cancel::CancelWatcher;
+use super::invalid_tool::InvalidToolSkipper;
 use super::truncation;
 use super::EventFold;
 
@@ -565,6 +566,11 @@ async fn run_subagent(
         // last turn stopped is read off the same hook seam the main loop's
         // watcher rides.
         .add_hook(finish_watcher)
+        // The invalid-tool-call self-correction (issue #1625): the same
+        // Skip resolver the host loop registers -- a sub-agent's
+        // hallucinated name feeds back as a synthetic error result it
+        // corrects from, instead of failing the whole delegation.
+        .add_hook(InvalidToolSkipper)
         .into_future()
         .await;
     // The tagged sink (ADR-0135 Decision 1): replaces the noop -- every
