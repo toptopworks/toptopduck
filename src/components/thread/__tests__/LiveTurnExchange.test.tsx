@@ -393,13 +393,20 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     ],
   });
 
-  it("rotates into the running face at entry: verb + count with the spinner", () => {
+  it("rotates into the running face at entry: verb + count with the breathing dot", () => {
     const { container } = renderExchange(midCallTurn());
     const head = container.querySelector("button.process-toggle");
     expect(head).not.toBeNull();
     expect(head).toHaveAttribute("aria-expanded", "false");
     expect(head).toHaveTextContent("正在读取 · 已完成 1 次调用");
-    expect(head?.querySelector(".animate-spin")).not.toBeNull();
+    expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
+    // The sweep half of the pair is pinned too: flattening the face back to
+    // bare text must red here, not silently retire the liveness (DESIGN.md's
+    // Indicators entry carries the sweep as the liveness carrier).
+    expect(head?.querySelector(".activity-shimmer")).not.toBeNull();
+    // The widened gap rides the head in both postures; the class pin keeps
+    // the spacing from normalizing back to the family default.
+    expect(head).toHaveClass("mt-2");
     // Nothing renders unfurled: the process face is behind the line's fold.
     expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
     expect(screen.queryByText("SELECT 2")).not.toBeInTheDocument();
@@ -456,7 +463,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     const { container } = renderExchange(turn);
     const head = container.querySelector("button.process-toggle");
     expect(head).toHaveTextContent("思考中（第 2 步）…");
-    expect(head?.querySelector(".animate-spin")).not.toBeNull();
+    expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
   });
 
   it("keeps the line on the streaming tail with the running face and the clock", () => {
@@ -472,7 +479,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     const line = container.querySelector(".process-toggle");
     expect(line?.textContent).toContain("执行中…");
     expect(line?.textContent).toContain("· 46秒");
-    expect(line?.querySelector(".animate-spin")).not.toBeNull();
+    expect(line?.querySelector(".activity-live-dot")).not.toBeNull();
     expect(line?.textContent).not.toContain("思考中");
   });
 
@@ -522,7 +529,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       // fold (expand to see it).
       const head = view.container.querySelector("button.process-toggle");
       expect(head).toHaveTextContent("思考中…");
-      expect(head?.querySelector(".animate-spin")).not.toBeNull();
+      expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
     } finally {
       vi.useRealTimers();
     }
@@ -590,7 +597,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     // the card renders beside it (ADR-0083's flow face).
     const head = container.querySelector("button.process-toggle");
     expect(head).toHaveTextContent("正在联网 · 已完成 1 次调用");
-    expect(head?.querySelector(".animate-spin")).not.toBeNull();
+    expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
     expect(container.querySelector(".approval-card")).not.toBeNull();
     // The tail mount's width pin: w-full, NOT the family's max-w-full cap
     // (jsdom cannot measure; toHaveClass pins the token exactly, rationale
@@ -630,7 +637,10 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     const line = container.querySelector(".process-toggle");
     expect(line?.tagName).toBe("DIV");
     expect(line).toHaveTextContent("正在联网 · 已完成 0 次调用");
-    expect(line?.querySelector(".animate-spin")).not.toBeNull();
+    expect(line?.querySelector(".activity-live-dot")).not.toBeNull();
+    // The plain posture carries the same widened gap (the fold posture's is
+    // pinned on the head above).
+    expect(line).toHaveClass("mt-2");
     // The card still renders beside the line (ADR-0083's flow face).
     expect(container.querySelector(".approval-card")).not.toBeNull();
     expect(screen.getByText("等待审批")).toBeInTheDocument();

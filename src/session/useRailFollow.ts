@@ -167,8 +167,10 @@ export function useRailFollow({
       // Record the offset the write LANDED on, read back -- not the computed
       // value. The computed difference is an integer (scrollHeight/clientHeight
       // round), but the true maxScroll is a double, so the write clamps to a
-      // fractional offset whenever content heights are fractional (prose at
-      // leading-[1.75] -- 24.5px lines). Comparing against the read-back keeps
+      // fractional offset whenever content heights are fractional (fractional
+      // zoom scales, translated glyph metrics; the prose line height is
+      // integer -- 24px -- by design, exactly to keep line boxes off the
+      // half-pixel ladder). Comparing against the read-back keeps
       // the echo check an exact same-source match in either geometry. A
       // boxless write (the trailing-active race frame above) is a no-op whose
       // read-back is 0 -- recording it would arm the echo check against the

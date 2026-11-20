@@ -442,11 +442,13 @@ describe("useRailFollow", () => {
   });
 
   it("still suppresses the echo when the write clamps to a fractional true max (fractional prose heights)", () => {
-    // leading-[1.75] prose (24.5px lines) makes the true maxScroll a double:
-    // the integer computed write clamps to a fractional offset, so a naive
-    // "record the computed value" fingerprint never matches the echo and the
-    // self-pause survives the guard. The hook records the READ-BACK offset,
-    // which matches whatever the clamp landed on.
+    // Fractional content heights (fractional zoom scales, translated glyph
+    // metrics -- the prose line height itself is a whole 24px by design)
+    // make the true maxScroll a double: the integer computed write clamps
+    // to a fractional offset, so a naive "record the computed value"
+    // fingerprint never matches the echo and the self-pause survives the
+    // guard. The hook records the READ-BACK offset, which matches whatever
+    // the clamp landed on.
     const { getByTestId, rerender } = render(
       <Host active={true} entryCount={3} liveTurn={makeLiveTurn()} />,
     );
