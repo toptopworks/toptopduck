@@ -661,6 +661,12 @@ impl From<&RecipeTraceEntry> for TraceEntryView {
             success: entry.success,
             result_excerpt: entry.result_excerpt.clone(),
             failure_detail: entry.failure_detail.clone(),
+            // The write/edit landed stats (issue #1621) resume verbatim --
+            // a pre-#1621 recipe degrades to absent and the row renders
+            // no badge, the same honest absence as the wire.
+            lines_added: entry.lines_added,
+            lines_removed: entry.lines_removed,
+            replacements: entry.replacements,
             report: None,
             // The nested sub-trace (ADR-0117 Decision 6, issue #934) resumes
             // verbatim: the sub-rounds map through the round-level mapping
@@ -1714,6 +1720,9 @@ mod tests {
             success: false,
             result_excerpt: "no such table".into(),
             failure_detail: Some("the full model-visible failure text".into()),
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             sub_rounds: Some(vec![RecipeTraceRound {
                 thinking: None,
                 text: Some("child prose".into()),
@@ -1724,6 +1733,9 @@ mod tests {
                     success: true,
                     result_excerpt: String::new(),
                     failure_detail: None,
+                    lines_added: None,
+                    lines_removed: None,
+                    replacements: None,
                     sub_rounds: None,
                 }],
             }]),

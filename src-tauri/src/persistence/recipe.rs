@@ -297,6 +297,25 @@ pub struct RecipeTraceEntry {
     /// `result_excerpt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_detail: Option<String>,
+    /// The landed line counts of a successful built-in write/edit (issue
+    /// #1621): added = the lines the call wrote (`write`: the whole
+    /// `content`; `edit`: `new_string`), removed = the displaced
+    /// `old_string` lines (`None` on a `write` -- an overwrite's `+N`
+    /// names the lines landed, not a diff). Absent on every failed /
+    /// denied entry, every non-write call, and pre-#1621 sessions (serde
+    /// degrade, zero migration) -- the resumed row renders no badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_added: Option<u64>,
+    /// The removed-line half of the landed counts -- see
+    /// [`Self::lines_added`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_removed: Option<u64>,
+    /// The edit's replacement count (issue #1621): how many sites
+    /// `old_string` replaced (a count beyond 1 implies `replace_all`).
+    /// Absent on a `write` and every non-write arm; the expanded-block
+    /// line renders from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacements: Option<u64>,
     /// The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
     /// #934): the sub-agent's rounds persisted under the SAME slim projection
     /// the main rounds take (a successful sub-call's excerpt empties, a
@@ -456,6 +475,9 @@ pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
         success: true,
         result_excerpt: String::new(),
         failure_detail: None,
+        lines_added: None,
+        lines_removed: None,
+        replacements: None,
         sub_rounds: None,
     };
     // Failure-message guard (issue #316): shared with the live trace mapping
@@ -1157,6 +1179,47 @@ mod tests {
         );
         let back: RecipeTraceRound = serde_json::from_value(value).expect("deserialize");
         assert_eq!(back, round);
+    }
+
+    #[test]
+    fn trace_entry_landed_stats_round_trip_with_pre_1621_degrade() {
+        // Issue #1621: a write/edit entry's landed stats ride the wire as
+        // flat optional keys and survive a serialize -> deserialize cycle;
+        // a pre-#1621 entry (none of the three keys) degrades to absent --
+        // zero migration, the resumed row simply renders no badge.
+        let entry = RecipeTraceEntry {
+            name: "edit".into(),
+            operation_kind: OperationKind::Write,
+            summary: "s.py".into(),
+            success: true,
+            result_excerpt: String::new(),
+            failure_detail: None,
+            lines_added: Some(3),
+            lines_removed: Some(1),
+            replacements: Some(2),
+            sub_rounds: None,
+        };
+        let value = serde_json::to_value(&entry).expect("serialize");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "name": "edit", "operation_kind": "write", "summary": "s.py",
+                "success": true, "result_excerpt": "",
+                "lines_added": 3, "lines_removed": 1, "replacements": 2,
+            }),
+        );
+        let back: RecipeTraceEntry = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back, entry);
+        let old: RecipeTraceEntry = serde_json::from_value(serde_json::json!({
+            "name": "edit", "operation_kind": "write", "summary": "s.py",
+            "success": true, "result_excerpt": "",
+        }))
+        .expect("deserialize pre-#1621 form");
+        assert_eq!(
+            (old.lines_added, old.lines_removed, old.replacements),
+            (None, None, None),
+            "a pre-#1621 entry degrades to absent stats"
+        );
     }
 
     #[test]

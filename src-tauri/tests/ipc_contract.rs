@@ -798,6 +798,9 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
             success: false,
             result_excerpt: "no such table".into(),
             failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             report: None,
             sub_rounds: None,
         },
@@ -818,6 +821,9 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
             success: true,
             result_excerpt: String::new(),
             failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             report: None,
             sub_rounds: Some(vec![TraceRound {
                 thinking: None,
@@ -830,12 +836,36 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
                     success: true,
                     result_excerpt: String::new(),
                     failure_detail: None,
+                    lines_added: None,
+                    lines_removed: None,
+                    replacements: None,
                     report: None,
                     sub_rounds: None,
                 }],
             }]),
         },
         r#"{"name":"analyst","operation_kind":"execute","summary":"clean the sheet","success":true,"result_excerpt":"","sub_rounds":[{"text":"child prose","calls":[{"name":"explore","operation_kind":"read","summary":"SELECT 1","success":true,"result_excerpt":""}]}]}"#,
+    );
+    // The landed write/edit stats' PRESENT wire form (issue #1621): the
+    // exact keys the TS mirror's badge reads; `lines_removed` stays absent
+    // on a write (an overwrite is not a diff) -- the same skip-if-none
+    // absence every field above pins.
+    assert_wire(
+        &TraceEntryView {
+            id: None,
+            name: "edit".into(),
+            operation_kind: OperationKind::Write,
+            summary: "notes.md".into(),
+            success: true,
+            result_excerpt: String::new(),
+            failure_detail: None,
+            lines_added: Some(3),
+            lines_removed: None,
+            replacements: Some(2),
+            report: None,
+            sub_rounds: None,
+        },
+        r#"{"name":"edit","operation_kind":"write","summary":"notes.md","success":true,"result_excerpt":"","lines_added":3,"replacements":2}"#,
     );
 }
 
@@ -1214,6 +1244,9 @@ fn turn_phase_serializes_externally_tagged() {
             success: true,
             result_excerpt: String::new(),
             failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             report: None,
             sub_rounds: None,
         }),
@@ -1269,6 +1302,9 @@ fn delegation_live_phases_carry_identity_and_full_text() {
             success: true,
             result_excerpt: String::new(),
             failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             report: Some("Done; 3 rows cleaned.".into()),
             sub_rounds: None,
         }),
@@ -1307,6 +1343,9 @@ fn turn_record_carries_round_grouped_trace_and_timestamps() {
             success: true,
             result_excerpt: String::new(),
             failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             report: None,
             sub_rounds: None,
         }],

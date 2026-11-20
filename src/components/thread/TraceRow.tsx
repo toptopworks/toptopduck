@@ -8,6 +8,43 @@ import { TraceSummaryFold } from "./TraceSummaryFold";
 import type { OperationKind } from "../../types/approval";
 import type { TraceEntry } from "../../types/thread";
 
+// The landed-stats badge (issue #1621): a successful write/edit row's
+// `+N −M` -- monospace at the muted tier, diff-colored, each part
+// aria-labeled so the counts read without color. A write carries no
+// removed count (an overwrite is not a diff -- `+N` names the lines
+// landed), so `−M` renders only when the entry has one; every other row
+// type and a failed call carry no stats on the wire and render none.
+function WriteStatsBadge({ entry }: { entry: TraceEntry }) {
+  const intl = useIntl();
+  if (entry.lines_added === undefined) return null;
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1 font-mono text-xs">
+      <span
+        className="text-green-600 dark:text-green-400"
+        role="img"
+        aria-label={intl.formatMessage({
+          id: "thread.trace.linesAddedAria",
+          defaultMessage: "Added {count, plural, one {# line} other {# lines}}",
+        }, { count: entry.lines_added })}
+      >
+        +{entry.lines_added}
+      </span>
+      {entry.lines_removed !== undefined && (
+        <span
+          className="text-destructive"
+          role="img"
+          aria-label={intl.formatMessage({
+            id: "thread.trace.linesRemovedAria",
+            defaultMessage: "Removed {count, plural, one {# line} other {# lines}}",
+          }, { count: entry.lines_removed })}
+        >
+          −{entry.lines_removed}
+        </span>
+      )}
+    </span>
+  );
+}
+
 // The trace-row rendering family (ADR-0078, issue #297), extracted from
 // TraceView so the delegation sub-trace panel can reuse the rows without a
 // circular import: the panel composes rows, and the panel body is injected
@@ -189,6 +226,7 @@ export function TraceRow({
           resultExcerpt={
             entry.success && entry.result_excerpt !== "" ? entry.result_excerpt : undefined
           }
+          replacements={entry.replacements}
           head={(
             <>
               {/* Tool name truncates with the row's summary family
@@ -198,6 +236,7 @@ export function TraceRow({
                   (issue #874). */}
               <span className="trace-name font-medium min-w-0 truncate">{entry.name}</span>
               <OperationBadge kind={entry.operation_kind} />
+              <WriteStatsBadge entry={entry} />
               {afterName}
               {hasSubTrace && (
                 // stopPropagation: the toggle sits inside the row head's

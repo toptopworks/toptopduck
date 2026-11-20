@@ -70,6 +70,15 @@ export interface LiveCall {
    *  the wire entry; undefined until the completion lands, for a success
    *  call, and for a no-text arm (the anchor falls back to the excerpt). */
   failureDetail?: string;
+  /** The landed line counts of a successful built-in write/edit (issue
+   *  #1621), mirrored from the wire entry; undefined until the completion
+   *  lands and on every arm the wire omits them on. */
+  linesAdded?: number;
+  /** The removed-line half of the landed counts -- see linesAdded. */
+  linesRemoved?: number;
+  /** The edit's replacement count (issue #1621), mirrored from the wire
+   *  entry; undefined on a write and every non-edit arm. */
+  replacements?: number;
   /** The delegation entry's nested sub-rounds (issue #934), delivered by the
    *  completion event; undefined for an ordinary call. */
   subRounds?: TraceRound[];
@@ -115,6 +124,15 @@ export interface LiveTraceRow {
    *  through the merge; undefined for the same arms the wire entry omits
    *  it on. */
   failureDetail?: string;
+  /** The landed line counts of a successful built-in write/edit (issue
+   *  #1621), carried through the merge for the row's `+N −M` badge;
+   *  undefined for the same arms the wire entry omits them on. */
+  linesAdded?: number;
+  /** The removed-line half of the landed counts -- see linesAdded. */
+  linesRemoved?: number;
+  /** The edit's replacement count (issue #1621) for the expand block's
+   *  replacements line; undefined on a write and every non-edit arm. */
+  replacements?: number;
   /** The delegation entry's nested sub-rounds (issue #934), carried through
    *  the merge so the settled row renders the view affordance. */
   subRounds?: TraceRound[];
@@ -289,6 +307,9 @@ export function mergeLiveTrace(
         success: call.success,
         resultExcerpt: call.resultExcerpt,
         failureDetail: call.failureDetail,
+        linesAdded: call.linesAdded,
+        linesRemoved: call.linesRemoved,
+        replacements: call.replacements,
         subRounds: call.subRounds,
         callId: call.callId,
       });
@@ -305,6 +326,9 @@ export function mergeLiveTrace(
         success: call.success,
         resultExcerpt: call.resultExcerpt,
         failureDetail: call.failureDetail,
+        linesAdded: call.linesAdded,
+        linesRemoved: call.linesRemoved,
+        replacements: call.replacements,
         subRounds: call.subRounds,
         callId: call.callId,
       });
@@ -416,6 +440,9 @@ export function buildLiveRounds(
         success: r.success,
         resultExcerpt: r.resultExcerpt,
         failureDetail: r.failureDetail,
+        linesAdded: r.linesAdded,
+        linesRemoved: r.linesRemoved,
+        replacements: r.replacements,
         subRounds: r.subRounds,
         callId: r.callId,
         delegation: r.callId !== undefined ? views.get(r.callId) : undefined,
@@ -478,6 +505,9 @@ export function traceEntryFromRow(row: SettledLiveRow): TraceEntry {
     success: row.success,
     result_excerpt: row.resultExcerpt,
     failure_detail: row.failureDetail,
+    lines_added: row.linesAdded,
+    lines_removed: row.linesRemoved,
+    replacements: row.replacements,
     sub_rounds: row.subRounds,
   };
 }
@@ -741,6 +771,14 @@ function completeCallAt(calls: LiveCall[], idx: number, entry: TraceEntry): Live
           // The model-visible failure text rides the completion beside its
           // bounded head (issue #1610); undefined for a success / no-text arm.
           failureDetail: entry.failure_detail,
+          // The landed write/edit stats ride the completion (issue #1621);
+          // undefined on every arm the wire omits them on (a failure, a
+          // denial, a non-write call). The unpaired append below never
+          // carries them: its sole producer is the gate-denied arm, whose
+          // wire entry has none.
+          linesAdded: entry.lines_added,
+          linesRemoved: entry.lines_removed,
+          replacements: entry.replacements,
           // The delegation entry's nested sub-trace rides the completion
           // event (issue #934); undefined for an ordinary call.
           subRounds: entry.sub_rounds,

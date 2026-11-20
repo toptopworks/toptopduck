@@ -568,6 +568,25 @@ pub struct TraceEntryView {
     /// pre-#1610 records -- the render falls back to `result_excerpt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_detail: Option<String>,
+    /// The landed line counts of a successful built-in write/edit (issue
+    /// #1621): added = the lines the call wrote (`write`: the whole
+    /// `content`; `edit`: `new_string`), removed = the displaced
+    /// `old_string` lines (`None` on a `write` -- an overwrite's `+N`
+    /// names the lines landed, not a diff). Absent on every failed /
+    /// denied entry, every non-write call, and pre-#1621 records (serde
+    /// degrade, zero migration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_added: Option<u64>,
+    /// The removed-line half of the landed counts -- see
+    /// [`Self::lines_added`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_removed: Option<u64>,
+    /// The edit's replacement count (issue #1621): how many sites
+    /// `old_string` replaced (a count beyond 1 implies `replace_all`).
+    /// Absent on a `write` and every non-write arm; same absent-on-wire
+    /// posture as the counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacements: Option<u64>,
     /// The delegation report's FULL text (ADR-0135 Decision 3), present only
     /// on a live delegation's completion -- a display-face fact the slim
     /// projection does not persist (the recorded entry keeps its bounded

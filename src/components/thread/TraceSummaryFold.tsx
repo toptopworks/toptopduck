@@ -41,6 +41,7 @@ export function TraceSummaryFold({
   summaryClassName,
   head = null,
   resultExcerpt,
+  replacements,
 }: {
   summary: string;
   /** The hook class for the truncated summary span -- the visual
@@ -55,6 +56,11 @@ export function TraceSummaryFold({
    *  success whose excerpt survives the projection (the capped
    *  delegation's truncation notice, issue #1047). */
   resultExcerpt?: string;
+  /** The edit's replacement count (issue #1621), rendered as one lead
+   *  line of the expand block (a count beyond 1 implies replace_all).
+   *  Absent keeps the block without the line -- only a successful edit
+   *  entry carries one; a write has no replacements to name. */
+  replacements?: number;
 }) {
   const [expanded, setExpanded] = useState(false);
   const intl = useIntl();
@@ -102,6 +108,21 @@ export function TraceSummaryFold({
             defaultMessage: "Full summary",
           })}
         >
+          {replacements !== undefined && (
+            // The edit's replacement count as the block's lead line (issue
+            // #1621): readable next to the strings it names, without
+            // competing with the row-head badge.
+            <span className="mb-1 block border-b border-border pb-1">
+              {intl.formatMessage(
+                {
+                  id: "thread.trace.replacementsCount",
+                  defaultMessage:
+                    "Replaced {count, plural, one {# occurrence} other {# occurrences}}",
+                },
+                { count: replacements },
+              )}
+            </span>
+          )}
           {resultExcerpt === undefined ? (
             summary
           ) : (
