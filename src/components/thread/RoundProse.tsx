@@ -446,7 +446,7 @@ export const RoundProse = memo(function RoundProse({
           trace-round cap's prose twin (issue #860); the other consumers sit
           inside already-capped containers (.trace-round, .turn-outcome.textual). */}
       <Streamdown
-        className="round-text m-0 mt-0.5 max-w-full space-y-4 text-sm leading-[1.75] text-foreground break-words"
+        className="round-text m-0 mt-0.5 max-w-full space-y-4 text-sm leading-[24px] text-foreground break-words"
         remarkPlugins={REMARK_PLUGINS}
         rehypePlugins={REHYPE_PLUGINS}
         components={mode === "streaming" ? LIVE_MARKDOWN_COMPONENTS : SETTLED_MARKDOWN_COMPONENTS}
