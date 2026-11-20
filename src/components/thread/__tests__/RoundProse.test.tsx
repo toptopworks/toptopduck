@@ -76,12 +76,13 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     expect(classes).toContain("text-sm");
     // Body line-height is a 24px ABSOLUTE -- the deliberate step above the
     // body-md token's 1.5 that CJK discourse reads as cramped once answers
-    // run long (issue #828's 1.75 ratio, re-expressed exactly), pinned
-    // whole so every line box lands on the integer pixel grid: a fractional
-    // 24.5px ladder puts each wrapped line half a pixel off its neighbor,
-    // and the streaming follow's per-line growth then reads as jitter (the
-    // half-pixel ladder was a measured contributor). The negative guard
-    // keeps the old compact leading from sneaking back onto the prose root.
+    // run long (issue #828's intent, re-expressed on the whole-pixel
+    // grid: 24/14 is a hair under the 1.75 ratio, imperceptible next to
+    // what the whole-pixel pin buys -- a fractional 24.5px ladder puts
+    // each wrapped line half a pixel off its neighbor, and the streaming
+    // follow's per-line growth then reads as jitter, #1619). The negative
+    // guard keeps the old compact leading from sneaking back onto the
+    // prose root.
     expect(classes).toContain("leading-[24px]");
     expect(classes).not.toContain("leading-snug");
     // The root hangs off the stream (flex-col items-start) as a

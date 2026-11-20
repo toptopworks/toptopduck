@@ -1579,7 +1579,6 @@ describe("Thread", () => {
       expect(screen.getByText("先看一眼数据。")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "思考" })).not.toBeInTheDocument();
       expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
-      expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
       // Nothing unfurled: the completed row hides behind the head and the
       // running call is absorbed too (the runner's motion keeps the wait
       // status off).

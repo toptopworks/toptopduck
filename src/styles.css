@@ -1052,11 +1052,11 @@
   margin-left: auto;
 }
 
-/* The live activity line's running face: the label itself carries the
-   liveness -- a highlight band sweeping the glyphs, both ends on the theme's
-   own text tokens -- with a small dot breathing in the SAME 2.4s period so
-   the pair reads as one organism (the dsh-desktop running-status posture,
-   replacing the generic spinner beside static gray text). The band is
+/* The live activity line's running face (#1619): the label itself carries
+   the liveness -- a highlight band sweeping the glyphs, both ends on the
+   theme's own text tokens -- with a small dot breathing in the SAME 2.4s
+   period so the pair reads as one organism, replacing the generic spinner
+   beside static gray text. The band is
    twice the label's width and the keyframe percentages place it fully
    outside the box at both ends of the sweep, so the loop reseams with the
    box at pure base color. The sweep and the breath are decoration (the
