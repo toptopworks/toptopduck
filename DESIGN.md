@@ -609,7 +609,7 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 **`warning-indicator` / `warning-indicator-dark`** — Small status dot. Background `{colors.warning}` / `{colors.warning-dark}`, rounded `{rounded.pill}`, size 8px. Marks stale results, degraded visualizations, and cautionary disclosures.
 
-**`activity-shimmer` + `activity-live-dot`** — The live activity line's running face. The phase label is swept by a highlight band (gradient `{colors.muted-foreground}` → `{colors.foreground}` → `{colors.muted-foreground}`, `background-clip: text`), led by a 6px breathing dot (`currentColor`); both share one 2.4s period so the pair reads as one organism. The liveness is carried by the sweep itself — no generic spinner. Both animations collapse to the static muted face under `prefers-reduced-motion`.
+**`activity-shimmer` + `activity-live-dot`** — The live activity line's running face. The phase label and elapsed figure are swept together by a highlight band (gradient `{colors.muted-foreground}` → `{colors.foreground}` → `{colors.muted-foreground}`, `background-clip: text`), led by a 6px breathing dot (`currentColor`); both share one 2.4s period so the pair reads as one organism. The liveness is carried by the sweep itself — no generic spinner. Both animations collapse to the static muted face under `prefers-reduced-motion`.
 
 ### Dividers
 

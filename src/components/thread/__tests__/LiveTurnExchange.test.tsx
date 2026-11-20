@@ -393,13 +393,20 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     ],
   });
 
-  it("rotates into the running face at entry: verb + count with the spinner", () => {
+  it("rotates into the running face at entry: verb + count with the breathing dot", () => {
     const { container } = renderExchange(midCallTurn());
     const head = container.querySelector("button.process-toggle");
     expect(head).not.toBeNull();
     expect(head).toHaveAttribute("aria-expanded", "false");
     expect(head).toHaveTextContent("正在读取 · 已完成 1 次调用");
     expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
+    // The sweep half of the pair is pinned too: flattening the face back to
+    // bare text must red here, not silently retire the liveness (DESIGN.md's
+    // Indicators entry carries the sweep as the liveness carrier).
+    expect(head?.querySelector(".activity-shimmer")).not.toBeNull();
+    // The widened gap rides the head in both postures; the class pin keeps
+    // the spacing from normalizing back to the family default.
+    expect(head).toHaveClass("mt-2");
     // Nothing renders unfurled: the process face is behind the line's fold.
     expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
     expect(screen.queryByText("SELECT 2")).not.toBeInTheDocument();
@@ -631,6 +638,9 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     expect(line?.tagName).toBe("DIV");
     expect(line).toHaveTextContent("正在联网 · 已完成 0 次调用");
     expect(line?.querySelector(".activity-live-dot")).not.toBeNull();
+    // The plain posture carries the same widened gap (the fold posture's is
+    // pinned on the head above).
+    expect(line).toHaveClass("mt-2");
     // The card still renders beside the line (ADR-0083's flow face).
     expect(container.querySelector(".approval-card")).not.toBeNull();
     expect(screen.getByText("等待审批")).toBeInTheDocument();

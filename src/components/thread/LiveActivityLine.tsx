@@ -181,10 +181,10 @@ export function LiveActivityLine({
       round.rows.some((row) => isSettledRow(row) || row.running),
   );
   // The head's face content, shared by both postures (the fold toggle and
-  // the plain status line): the breathing dot + the shimmer-swept phase
-  // face + the turn clock's elapsed figure (the running visual lives in
-  // styles.css's .activity-live-dot / .activity-shimmer, one shared 2.4s
-  // period). The verb reads
+  // the plain status line): the breathing dot + the shimmer sweeping the
+  // phase face and the elapsed figure together (the running visual lives
+  // in styles.css's .activity-live-dot / .activity-shimmer, one shared
+  // 2.4s period). The verb reads
   // the damped faceKind; the count reads the live rows -- a brief call
   // ticks the count without repainting the verb. The figure sits at ONE
   // tail position in every posture and phase: the ask stamp derives the
