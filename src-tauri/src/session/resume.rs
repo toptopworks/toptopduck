@@ -1777,6 +1777,34 @@ mod tests {
         assert!(TraceEntryView::from(&legacy).sub_rounds.is_none());
     }
 
+    /// The write/edit landed stats resume verbatim (issue #1621): the
+    /// mapping copies the persisted counts onto the display view, so a
+    /// reopened session renders the same badge the live turn landed -- a
+    /// dropped field here would silently strip badges from resumed rows
+    /// with nothing red (the mutation run caught this mapping unpinned).
+    #[test]
+    fn the_landed_write_stats_resume_onto_the_view() {
+        use crate::approval::OperationKind;
+        use crate::persistence::recipe::RecipeTraceEntry;
+
+        let persisted = RecipeTraceEntry {
+            name: "write".into(),
+            operation_kind: OperationKind::Write,
+            summary: "land the sheet".into(),
+            success: true,
+            result_excerpt: String::new(),
+            failure_detail: None,
+            lines_added: Some(12),
+            lines_removed: Some(3),
+            replacements: Some(2),
+            sub_rounds: None,
+        };
+        let view = TraceEntryView::from(&persisted);
+        assert_eq!(view.lines_added, Some(12));
+        assert_eq!(view.lines_removed, Some(3));
+        assert_eq!(view.replacements, Some(2));
+    }
+
     #[test]
     fn resolve_active_restores_when_recipe_active_still_registered() {
         // Happy path (ADR-0035/0037): recipe.active names a source still in the

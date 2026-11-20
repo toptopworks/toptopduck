@@ -476,6 +476,9 @@ function foldRounds(fold: RoundFold): LiveRound[] {
         success: c.success,
         resultExcerpt: c.resultExcerpt,
         failureDetail: c.failureDetail,
+        linesAdded: c.linesAdded,
+        linesRemoved: c.linesRemoved,
+        replacements: c.replacements,
         subRounds: c.subRounds,
       })),
   }));
