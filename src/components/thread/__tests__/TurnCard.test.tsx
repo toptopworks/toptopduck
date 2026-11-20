@@ -374,6 +374,55 @@ describe("TurnCard materialized link-row narrow-column caps (issue #872)", () =>
   });
 });
 
+describe("TurnCard result-name display axis (issue #1623)", () => {
+  // ADR-0037 dual-name: the thread surface shows the display name (the label
+  // the model supplied or the user chose); the reference name stays the SQL
+  // identity (ADR-0022) -- selection keys and onSelectResult keep riding it,
+  // pinned by the rail flows whose fixtures keep both names equal (the
+  // fallback posture).
+  function labeledDataset(reference_name: string, display_name: string): DatasetDescriptor {
+    return { ...previewDataset, reference_name, display_name };
+  }
+
+  function labeledRecord(promotions: DatasetDescriptor[]): TurnRecord {
+    return {
+      ...recordWith(undefined),
+      outcome: {
+        kind: "Materialized",
+        data: {
+          promotions: promotions.map((dataset) => ({ dataset, sql: "SELECT 1" })),
+          viz: null,
+          body: null,
+          assumption: null,
+        },
+      },
+    };
+  }
+
+  it("labels the result link with the display name", () => {
+    const { getByRole } = renderCard(labeledRecord([labeledDataset("result_1", "销量汇总")]));
+    expect(getByRole("button", { name: "结果：销量汇总" })).toBeInTheDocument();
+  });
+
+  it("labels the antecedents line with display names", () => {
+    const { getByRole, getByText } = renderCard(
+      labeledRecord([labeledDataset("result_1", "筛选后明细"), labeledDataset("result_2", "销量汇总")]),
+    );
+    expect(getByRole("button", { name: "结果：销量汇总" })).toBeInTheDocument();
+    expect(getByText("由 筛选后明细 派生")).toBeInTheDocument();
+  });
+
+  it("carries the display name into the preview card's accessible name", () => {
+    const { getByRole } = renderCard(labeledRecord([labeledDataset("result_1", "销量汇总")]));
+    expect(getByRole("button", { name: /销量汇总 的预览/ })).toBeInTheDocument();
+  });
+
+  it("falls back to the reference name when no label diverges", () => {
+    const { getByRole } = renderCard(labeledRecord([labeledDataset("result_1", "result_1")]));
+    expect(getByRole("button", { name: "结果：result_1" })).toBeInTheDocument();
+  });
+});
+
 describe("TurnCard textual outcome markdown (issue #827)", () => {
   function textualRecord(
     text_kind: TextKind,

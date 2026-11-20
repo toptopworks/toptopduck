@@ -62,7 +62,7 @@ export function ResultPreviewCard({
           id: "thread.preview.aria",
           defaultMessage: "Preview of {name} (first rows), open it in the right sidebar",
         },
-        { name: dataset.reference_name },
+        { name: dataset.display_name },
       )}
       aria-current={active ? "true" : undefined}
       onClick={onSelect}
