@@ -2673,6 +2673,9 @@ mod tests {
             success: true,
             result_excerpt: String::new(),
             failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             sub_rounds: None,
         }];
         let harvested_provenance = PersistedTurnProvenance {

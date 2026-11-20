@@ -825,3 +825,72 @@ describe("LiveRow delegation live affordances (ADR-0135)", () => {
     expect(container.querySelectorAll(".trace-toggle")).toHaveLength(1);
   });
 });
+
+// The landed-stats badge (issue #1621): a settled write/edit row's `+N −M`
+// rides the row head beside the operation badge, each part aria-labeled;
+// a row without stats (every non-write arm, a failed call) renders none.
+// The edit's replacement count folds into the expand block instead.
+describe("LiveRow landed-stats badge (issue #1621)", () => {
+  it("renders the added and removed counts with per-part aria labels", () => {
+    renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: false,
+          success: true,
+          operationKind: "write",
+          linesAdded: 12,
+          linesRemoved: 3,
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("+12")).toBeInTheDocument();
+    expect(screen.getByText("−3")).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Added 12 lines" })).not.toBeNull();
+    expect(screen.queryByRole("img", { name: "Removed 3 lines" })).not.toBeNull();
+  });
+
+  it("renders only the added count on a write (an overwrite is not a diff)", () => {
+    renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: false,
+          success: true,
+          operationKind: "write",
+          linesAdded: 7,
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("+7")).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /Removed/ })).toBeNull();
+  });
+
+  it("renders no badge on a row without stats", () => {
+    renderWithProviders(
+      <LiveRow row={rowWith({ approval: null, running: false, success: true })} onRespond={vi.fn()} />,
+    );
+    expect(screen.queryByText(/^\+\d+$/)).toBeNull();
+  });
+
+  it("folds the edit's replacement count into the expand block", () => {
+    const { container } = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: false,
+          success: true,
+          operationKind: "write",
+          linesAdded: 1,
+          linesRemoved: 2,
+          replacements: 2,
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    fireEvent.click(summaryFoldToggle(container));
+    expect(foldBlock(container)).toHaveTextContent("Replaced 2 occurrences");
+  });
+});

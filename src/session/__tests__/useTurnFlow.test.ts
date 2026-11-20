@@ -760,6 +760,44 @@ describe("useTurnFlow", () => {
       });
     });
 
+    // The wire's landed stats enter the live chain at the same merge hop
+    // (issue #1621): a started+completed pair folds the completion into
+    // the open row, and the merged row carries the fields the badge and
+    // the replacements line render.
+    it("a merged completion carries the wire landed stats onto the row (issue #1621)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "edit", operation_kind: "write", summary: "s.py" },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "edit",
+          operation_kind: "write",
+          summary: "s.py",
+          success: true,
+          result_excerpt: "",
+          lines_added: 1,
+          lines_removed: 2,
+          replacements: 2,
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        running: false,
+        success: true,
+        linesAdded: 1,
+        linesRemoved: 2,
+        replacements: 2,
+      });
+    });
+
     // The append ingestion site (issue #1610): a completion with no started
     // event rides applyRoundFold's positional callRow pass -- the trailing
     // hole the factory-based tests never cross -- and the appended row
@@ -1387,6 +1425,83 @@ describe("useTurnFlow", () => {
         ),
       );
       expect(plainTrace[0]?.calls[0]?.failure_detail).toBeUndefined();
+    });
+
+    it("threads the landed write stats through merge + grouping + the settle projection (issue #1621)", () => {
+      // The wire's lines_added / lines_removed / replacements ride the
+      // whole live chain like the failure detail above -- the settled row
+      // renders the same badge a resumed (recipe-played) row would, the
+      // zero-mapping projection parity. A row without them (every
+      // non-write arm, a failed call) keeps absent keys: no badge, no
+      // replacements line.
+      const wrote = call({
+        success: true,
+        resultExcerpt: "",
+        linesAdded: 12,
+        linesRemoved: 3,
+        replacements: 2,
+      });
+      const trace = liveRoundsToTrace(
+        buildLiveRounds(
+          { step: 1, calls: [wrote], roundTexts: [], roundThinkings: [], delegations: {} },
+          [],
+        ),
+      );
+      expect(trace[0]?.calls[0]).toMatchObject({
+        lines_added: 12,
+        lines_removed: 3,
+        replacements: 2,
+      });
+      const plain = call({ success: true, resultExcerpt: "" });
+      const plainTrace = liveRoundsToTrace(
+        buildLiveRounds(
+          { step: 1, calls: [plain], roundTexts: [], roundThinkings: [], delegations: {} },
+          [],
+        ),
+      );
+      expect(plainTrace[0]?.calls[0]?.lines_added).toBeUndefined();
+      expect(plainTrace[0]?.calls[0]?.lines_removed).toBeUndefined();
+      expect(plainTrace[0]?.calls[0]?.replacements).toBeUndefined();
+    });
+
+    it("carries the landed write stats through a delegation's running fold (issue #1621)", () => {
+      // A sub-agent's completed write rides the shared completion landing
+      // (completeCallAt) into the buffer's fold, and foldRounds projects
+      // that fold onto the running panel's rows -- the panel's settled rows
+      // render through the same traceEntryFromRow as the main rail, so the
+      // stats must survive this hand-synced table too, or the running
+      // panel's write/edit rows show no badge until the delegation
+      // completes and the wire's sub_rounds take over (the settle
+      // isomorphism torn for the delegation's whole run).
+      const agent = call({ name: "agent", callId: "d1", summary: "fix things" });
+      const wrote = call({
+        key: "sub-0",
+        step: 1,
+        name: "write",
+        operationKind: "write",
+        success: true,
+        resultExcerpt: "",
+        linesAdded: 12,
+        linesRemoved: 3,
+        replacements: 2,
+      });
+      const rounds = buildLiveRounds(
+        {
+          step: 1,
+          calls: [agent],
+          roundTexts: [],
+          roundThinkings: [],
+          delegations: {
+            d1: { task: "fix the widget", fold: { step: 1, calls: [wrote], roundThinkings: [] } },
+          },
+        },
+        [],
+      );
+      expect(rounds[0]?.rows[0]?.delegation?.rounds[0]?.rows[0]).toMatchObject({
+        linesAdded: 12,
+        linesRemoved: 3,
+        replacements: 2,
+      });
     });
 
     it("buildLiveRounds turns padded null slots into absent members (a round that emitted none)", () => {

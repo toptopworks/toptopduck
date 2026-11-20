@@ -197,6 +197,21 @@ pub struct TraceEntry {
     /// success entry; absent on pre-#1610 records (serde degrade, the
     /// render falls back to `result_excerpt`).
     pub failure_detail: Option<String>,
+    /// The landed line counts of a successful built-in write/edit (issue
+    /// #1621), counted off the same payloads the text cap already bounds:
+    /// added = the lines the call wrote (`write`: the whole `content`;
+    /// `edit`: `new_string`), removed = the lines it displaced (`edit`'s
+    /// `old_string`; `None` on a `write` -- an overwrite is not a diff,
+    /// `+N` names the lines landed). `None` on every failed / denied entry
+    /// and every non-write call.
+    pub lines_added: Option<u64>,
+    /// The removed-line half of the landed counts -- see
+    /// [`Self::lines_added`].
+    pub lines_removed: Option<u64>,
+    /// The edit's replacement count (issue #1621): how many sites
+    /// `old_string` replaced (a count beyond 1 implies `replace_all`).
+    /// `None` on a `write` and every non-write arm.
+    pub replacements: Option<u64>,
     /// The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
     /// #934): the sub-agent's round-grouped trajectory -- its thinking, its
     /// tool string, its calls' bounded excerpts (the terminal report itself
@@ -246,6 +261,9 @@ impl TraceEntry {
             output_truncated: false,
             result_excerpt: result_excerpt.into(),
             failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             sub_trace: None,
         }
     }
@@ -275,8 +293,29 @@ impl TraceEntry {
                 message
             },
             failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             sub_trace: None,
         }
+    }
+
+    /// Attach a successful write/edit's landed stats (issue #1621): the
+    /// line counts and replacement count the resolver computed off the
+    /// model-emitted payload (already bounded by the text cap, so the
+    /// counts are bounded with it). Builder form on the
+    /// [`TraceEntry::succeeded`] pair; the failure / denial arms never
+    /// carry the fields, and the projections clear them regardless.
+    pub fn with_write_stats(
+        mut self,
+        lines_added: Option<u64>,
+        lines_removed: Option<u64>,
+        replacements: Option<u64>,
+    ) -> Self {
+        self.lines_added = lines_added;
+        self.lines_removed = lines_removed;
+        self.replacements = replacements;
+        self
     }
 
     /// Attach a failed call's model-visible error text (issue #1610): the
@@ -354,6 +393,25 @@ fn reduced_trace(entry: &TraceEntry) -> TraceEntryView {
         } else {
             entry.failure_detail.clone()
         },
+        // The write/edit stats are success-only (issue #1621), the mirror
+        // of the failure detail's clearing above: the projections clear
+        // them on a failed entry, so the wire shape never carries a failed
+        // call's counts even if a construction site handed them in.
+        lines_added: if entry.success {
+            entry.lines_added
+        } else {
+            None
+        },
+        lines_removed: if entry.success {
+            entry.lines_removed
+        } else {
+            None
+        },
+        replacements: if entry.success {
+            entry.replacements
+        } else {
+            None
+        },
         report: None,
         // The nested sub-trace (ADR-0117 Decision 6): the sub-rounds ride the
         // round-level display mapping, so a sub-round's entries take the same
@@ -407,6 +465,9 @@ impl RecipeTraceEntry {
             success: v.success,
             result_excerpt: v.result_excerpt,
             failure_detail: v.failure_detail,
+            lines_added: v.lines_added,
+            lines_removed: v.lines_removed,
+            replacements: v.replacements,
             // The nested sub-trace persists under the same slim projection
             // the main rounds take (ADR-0117 Decision 6): each sub-round maps
             // through `RecipeTraceRound::from_live_round`, so a successful
@@ -671,6 +732,9 @@ mod tests {
             output_truncated: false,
             result_excerpt: excerpt.into(),
             failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             sub_trace: None,
         };
         let ok = RecipeTraceEntry::from_live_trace(&base(true, "42 rows"));
@@ -682,6 +746,44 @@ mod tests {
             failed.result_excerpt, "no such table",
             "the failure message rides verbatim"
         );
+    }
+
+    /// The write/edit landed stats (issue #1621) ride the projections on a
+    /// success and clear on a failure: the persisted recipe, the display
+    /// view, and the live event carry the same Some/None the resolver
+    /// computed, and a failed entry never carries counts (the projections'
+    /// defensive clearing, the failure-detail clearing's mirror).
+    #[test]
+    fn write_stats_ride_the_projections_success_only() {
+        let ok = TraceEntry::succeeded("tu_1", "write", OperationKind::Write, "notes.txt", "")
+            .with_write_stats(Some(3), None, None);
+        let persisted = RecipeTraceEntry::from_live_trace(&ok);
+        assert_eq!(persisted.lines_added, Some(3));
+        assert_eq!(persisted.lines_removed, None);
+        assert_eq!(persisted.replacements, None);
+        let view = TraceEntryView::from(&ok);
+        assert_eq!(view.lines_added, Some(3));
+        assert_eq!(view.lines_removed, None);
+        assert_eq!(view.replacements, None);
+
+        // A failed entry clears the stats even when a construction site
+        // handed them in.
+        let failed = TraceEntry::failed(
+            "tu_1",
+            "write",
+            OperationKind::Write,
+            "notes.txt",
+            "io error",
+        )
+        .with_write_stats(Some(3), Some(1), Some(1));
+        let persisted = RecipeTraceEntry::from_live_trace(&failed);
+        assert_eq!(persisted.lines_added, None);
+        assert_eq!(persisted.lines_removed, None);
+        assert_eq!(persisted.replacements, None);
+        let view = TraceEntryView::from(&failed);
+        assert_eq!(view.lines_added, None);
+        assert_eq!(view.lines_removed, None);
+        assert_eq!(view.replacements, None);
     }
 
     /// The display-trace mapping (issue #297) mirrors the persisted one: the
@@ -698,6 +800,9 @@ mod tests {
             output_truncated: false,
             result_excerpt: excerpt.into(),
             failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             sub_trace: None,
         };
         let ok = TraceEntryView::from(&base(true, "42 rows"));
@@ -783,6 +888,9 @@ mod tests {
             output_truncated: false,
             result_excerpt: String::new(),
             failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             sub_trace: None,
         };
         let _ = RecipeTraceEntry::from_live_trace(&entry);
@@ -952,6 +1060,9 @@ mod tests {
             output_truncated: false,
             result_excerpt: "done".into(),
             failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             sub_trace: Some(vec![sub_round]),
         };
 

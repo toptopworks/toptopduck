@@ -86,3 +86,38 @@ describe("TraceSummaryFold result excerpt column (issue #1604)", () => {
     expect(block?.querySelector(".border-l")).toBeNull();
   });
 });
+
+// Issue #1621: an edit entry's replacement count renders as the expand
+// block's lead line -- readable beside the strings it names, present only
+// when the entry carries one.
+describe("TraceSummaryFold replacements line (issue #1621)", () => {
+  it("renders the count as the block's lead line when given", () => {
+    const { container } = renderWithProviders(
+      <TraceSummaryFold
+        summary="s.py"
+        summaryClassName="trace-summary"
+        replacements={2}
+      />,
+    );
+    fireEvent.click(container.querySelector(".summary-fold-toggle") as Element);
+    const block = document.querySelector(".summary-fold-block");
+    expect(block).toHaveTextContent("Replaced 2 occurrences");
+    // The lead line rides its own rule-bearing row above the summary.
+    const lead = block?.querySelector(".border-b");
+    expect(lead).not.toBeNull();
+    expect(lead).toHaveTextContent("Replaced 2 occurrences");
+  });
+
+  it("keeps the block without the line when no count is given", () => {
+    const { container } = renderWithProviders(
+      <TraceSummaryFold
+        summary="SELECT * FROM result_1"
+        summaryClassName="trace-summary"
+      />,
+    );
+    fireEvent.click(container.querySelector(".summary-fold-toggle") as Element);
+    const block = document.querySelector(".summary-fold-block");
+    expect(block?.textContent).toBe("SELECT * FROM result_1");
+    expect(block?.querySelector(".border-b")).toBeNull();
+  });
+});
