@@ -795,6 +795,25 @@ fn provider_owned_400_body_is_transient_even_when_prefix_shaped() {
     );
 }
 
+/// The Fail fallback's termination mapping (issue #1625): the Skip hook
+/// retires the in-app path to this arm, but rig's post-assembly
+/// validation still raises `UnknownToolCall` without consulting the
+/// invalid-call hook -- so the mapping stays total and honest: a
+/// transient carrying the name, never a silent success.
+#[test]
+fn unknown_tool_call_prompt_error_maps_to_the_honest_transient() {
+    let err = rig_agent::completion::PromptError::UnknownToolCall {
+        tool_name: "explode".into(),
+        available_tools: vec!["explore".into()],
+        allowed_tools: vec!["explore".into()],
+        chat_history: Box::default(),
+    };
+    assert_eq!(
+        super::termination_for_prompt(&err, 8, None),
+        Termination::Transient("model attempted to call unknown tool `explode`".into())
+    );
+}
+
 /// The bridged face's request-translation guards (issue #926): the loop
 /// runtime feeds rig the system prompt through the preamble slot, and the
 /// bridge must lift it back onto the app request's own `system` field;

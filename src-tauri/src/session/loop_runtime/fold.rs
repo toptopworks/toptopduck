@@ -150,6 +150,12 @@ pub(crate) struct EventFold {
     /// its own ids -- rig's callback surface hands over no call id), so
     /// the confirmation count is the one discriminator the stream itself
     /// carries.
+    ///
+    /// A commit-less result has a second producer in rig's contract -- an
+    /// `on_tool_call` hook that skips a VALID call lands its result with
+    /// no confirmation (and would take the synthetic-row arm here). No
+    /// hook of ours skips valid calls today; registering one must re-read
+    /// this reconciliation.
     pending_results: usize,
 }
 
@@ -1386,5 +1392,36 @@ mod tests {
         assert_eq!(batch.calls[0].name, "explore");
         assert_eq!(batch.calls[0].tool_use_id, "gateway-1");
         assert_eq!(fold.landed_calls, 1);
+    }
+
+    /// The FinalResponse prose strip keeps a parked round that landed
+    /// calls (issue #1625's strip-survival arm): the strict event order
+    /// never lands a synthetic row on the final text turn's own park (the
+    /// next turn's open flushes the invalid turn's park first) -- the
+    /// strip must hold anyway; it keys on the round's calls, not on the
+    /// order that produces them.
+    #[test]
+    fn final_response_keeps_a_parked_round_that_landed_a_synthetic_call() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new(None);
+        // The final text turn parks its prose, and the synthetic row joins
+        // the park after the close -- a shape the strict order never
+        // produces, held here for the strip's own sake.
+        fold.event(&text_item("done"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.event(
+            &synthetic_result_item("explode", "reason text"),
+            &channel,
+            &sink,
+        );
+        fold.event(&final_response_item("done"), &channel, &sink);
+        fold.finish();
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        let round = &fold.rounds[0];
+        assert_eq!(round.text, None, "the prose rode the final output");
+        assert_eq!(round.calls.len(), 1, "the synthetic row survived the strip");
+        assert_eq!(round.calls[0].name, "explode");
+        assert_eq!(fold.final_output.as_deref(), Some("done"));
     }
 }
