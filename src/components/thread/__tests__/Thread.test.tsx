@@ -1578,8 +1578,8 @@ describe("Thread", () => {
       // single rotating line ruling, issue #1606).
       expect(screen.getByText("先看一眼数据。")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "思考" })).not.toBeInTheDocument();
-      expect(head?.querySelector(".animate-spin")).not.toBeNull();
-      expect(head?.querySelector(".animate-spin")).not.toBeNull();
+      expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
+      expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
       // Nothing unfurled: the completed row hides behind the head and the
       // running call is absorbed too (the runner's motion keeps the wait
       // status off).
@@ -1630,7 +1630,7 @@ describe("Thread", () => {
         expect(el).toHaveTextContent("正在写入 · 已完成 0 次调用");
         return el;
       });
-      expect(head?.querySelector(".animate-spin")).not.toBeNull();
+      expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
       expect(screen.queryByText("materialize")).not.toBeInTheDocument();
     });
 

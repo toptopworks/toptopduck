@@ -2,7 +2,7 @@
 // turn's ONE rotating activity face. Folded, it reads the current phase --
 // the thinking period ("Thinking (step n)…", the retired trailing status
 // line's duty merged in), the running call ("{verb} · N completed", the
-// spinner riding the head), or the prose-streaming window ("Running…" --
+// breathing dot riding the head), or the prose-streaming window ("Running…" --
 // the #1612 narrowing of ADR-0151's step-aside ruling: what let the line
 // yield was the THINKING face doubling the prose signal; the running face
 // beside the caret does not reproduce it, and the turn clock must never
@@ -25,7 +25,6 @@
 // the settled turn-level process fold across the swap.
 
 import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { FoldToggle } from "./FoldToggle";
 import { ThinkingFold } from "./ThinkingFold";
@@ -182,8 +181,10 @@ export function LiveActivityLine({
       round.rows.some((row) => isSettledRow(row) || row.running),
   );
   // The head's face content, shared by both postures (the fold toggle and
-  // the plain status line): the spinner + the phase face + the turn clock's
-  // elapsed figure. The verb reads
+  // the plain status line): the breathing dot + the shimmer-swept phase
+  // face + the turn clock's elapsed figure (the running visual lives in
+  // styles.css's .activity-live-dot / .activity-shimmer, one shared 2.4s
+  // period). The verb reads
   // the damped faceKind; the count reads the live rows -- a brief call
   // ticks the count without repainting the verb. The figure sits at ONE
   // tail position in every posture and phase: the ask stamp derives the
@@ -191,45 +192,52 @@ export function LiveActivityLine({
   // a posture flip (the #1612 re-host of the #1264 turn clock).
   const face = (
     <>
-      <Loader2 aria-hidden="true" className="w-3.5 h-3.5 shrink-0 animate-spin" />
-      {faceKind !== undefined ? (
-        <>
-          {liveVerbLabel(intl, faceKind)}
-          {" · "}
-          {intl.formatMessage(
-            {
-              id: "thread.trace.liveCount",
-              defaultMessage:
-                "{count, plural, one {# call completed} other {# calls completed}}",
-            },
-            { count: completedCount },
-          )}
-        </>
-      ) : streaming ? (
-        <FormattedMessage id="thread.live.running" defaultMessage="Running…" />
-      ) : liveTurn.step !== null && liveTurn.step > 1 ? (
-        <FormattedMessage
-          id="thread.live.thinkingStep"
-          defaultMessage="Thinking (step {step})…"
-          values={{ step: liveTurn.step }}
-        />
-      ) : (
-        <FormattedMessage id="common.thinking" defaultMessage="Thinking…" />
-      )}
-      <WaitElapsedSuffix startedAt={liveTurn.askedAt} pausedSince={liveTurn.pausedSince} />
+      <span aria-hidden="true" className="activity-live-dot shrink-0" />
+      <span className="activity-shimmer">
+        {faceKind !== undefined ? (
+          <>
+            {liveVerbLabel(intl, faceKind)}
+            {" · "}
+            {intl.formatMessage(
+              {
+                id: "thread.trace.liveCount",
+                defaultMessage:
+                  "{count, plural, one {# call completed} other {# calls completed}}",
+              },
+              { count: completedCount },
+            )}
+          </>
+        ) : streaming ? (
+          <FormattedMessage id="thread.live.running" defaultMessage="Running…" />
+        ) : liveTurn.step !== null && liveTurn.step > 1 ? (
+          <FormattedMessage
+            id="thread.live.thinkingStep"
+            defaultMessage="Thinking (step {step})…"
+            values={{ step: liveTurn.step }}
+          />
+        ) : (
+          <FormattedMessage id="common.thinking" defaultMessage="Thinking…" />
+        )}
+        <WaitElapsedSuffix startedAt={liveTurn.askedAt} pausedSince={liveTurn.pausedSince} />
+      </span>
     </>
   );
   return (
     <>
       {canExpand ? (
-        <FoldToggle hookClass="process-toggle" expanded={expanded} onToggle={() => setExpanded((v) => !v)}>
+        <FoldToggle
+          hookClass="process-toggle"
+          expanded={expanded}
+          onToggle={() => setExpanded((v) => !v)}
+          className="mt-2"
+        >
           {face}
         </FoldToggle>
       ) : (
         // The plain status face: the same layout minus the fold chrome --
         // no chevron, no hover, no click, nothing to expand (the user
         // ruling). The hook class stays as the test anchor.
-        <div className="process-toggle mt-0.5 flex items-center gap-1 text-xs text-muted-foreground">
+        <div className="process-toggle mt-2 flex items-center gap-1 text-xs text-muted-foreground">
           {face}
         </div>
       )}

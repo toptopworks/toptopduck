@@ -1052,6 +1052,56 @@
   margin-left: auto;
 }
 
+/* The live activity line's running face: the label itself carries the
+   liveness -- a highlight band sweeping the glyphs, both ends on the theme's
+   own text tokens -- with a small dot breathing in the SAME 2.4s period so
+   the pair reads as one organism (the dsh-desktop running-status posture,
+   replacing the generic spinner beside static gray text). The band is
+   twice the label's width and the keyframe percentages place it fully
+   outside the box at both ends of the sweep, so the loop reseams with the
+   box at pure base color. The sweep and the breath are decoration (the
+   text already carries the phase), so prefers-reduced-motion collapses
+   both to the plain static muted face. */
+@keyframes activity-shimmer {
+  from { background-position: 120% 0; }
+  to { background-position: -20% 0; }
+}
+.activity-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    var(--muted-foreground) 42%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 58%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: activity-shimmer 2.4s linear infinite;
+}
+@keyframes activity-live-dot {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+.activity-live-dot {
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: activity-live-dot 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .activity-shimmer {
+    animation: none;
+    background-image: none;
+    color: inherit;
+  }
+  .activity-live-dot {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
 /* Phase indicator (ADR-0059 discrete phase feedback). Sits between the input
    and the stop button while a turn is in flight; reads as a muted status line
    so it never competes with the primary input affordance. ADR-0067 (issue
