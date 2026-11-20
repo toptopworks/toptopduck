@@ -31,7 +31,8 @@ vi.mock("../../../api", async (importOriginal) => ({
   listAdapters: vi.fn().mockResolvedValue([]),
 }));
 
-// A materialized-record fixture (reference_name overridden per test) -- the
+// A materialized-record fixture (reference_name and display_name overridden
+// per test) -- the
 // only outcome that needs a full dataset payload. File-local per the suite
 // convention: TurnCard.test.tsx carries its own descriptor (preview-card
 // pins, issue #860) rather than reaching into this suite's fixture.
