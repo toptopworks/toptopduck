@@ -16,7 +16,7 @@ import {
   type ReactNode,
 } from "react";
 import { SessionSidebar } from "../SessionSidebar";
-import { DeleteSessionDialog } from "../SessionDialogs";
+import { CloseRunningSessionDialog, DeleteSessionDialog } from "../SessionDialogs";
 import type { OpenSession } from "../sidebarModel";
 import type { SessionMetadata } from "../../types/session";
 import type { ProviderConfig } from "../../types/provider";
@@ -837,6 +837,101 @@ describe("SessionSidebar turn-failed coloring (issue #1005)", () => {
   });
 });
 
+// The running-turn state (issue #1629): same row-state posture as the failure
+// set above, one priority slot lower than the approval tint.
+describe("SessionSidebar running-turn state (issue #1629)", () => {
+  function baseProps() {
+    return {
+      collapsed: false,
+      sessions: [] as SessionMetadata[],
+      sessionsLoaded: true,
+      openSessions: twoOpenSessions(),
+      activeSessionId: "sess-active",
+      disabled: false,
+      loadError: null,
+      onNew: () => {},
+      onNewInWorkspace: () => {},
+      onActivate: () => {},
+      onOpenPersisted: () => {},
+      archivedSessions: [],
+      showArchived: false,
+      onToggleArchived: () => {},
+      onSetPinned: () => {},
+      onArchive: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
+      onOpenSearch: () => {},
+      provider: null,
+      onOpenSettings: () => {},
+    };
+  }
+
+  it("marks the entry of a session with a turn in flight (breathing dot + sr-only + data hook)", () => {
+    const { container } = renderShell(
+      <SessionSidebar {...baseProps()} runningSids={new Set(["sess-bg"])} />,
+    );
+    const entry = container.querySelector(".session-entry[data-turn-running=\"true\"]");
+    expect(entry).not.toBeNull();
+    expect(entry?.className.split(/\s+/)).toContain("turn-running");
+    expect(entry?.querySelector(".session-name")?.textContent).toContain("Background");
+    const dot = entry?.querySelector(".sidebar-status-dot");
+    expect(dot?.className.split(/\s+/)).toContain("sidebar-running-dot");
+    expect(dot?.className.split(/\s+/)).toContain("bg-primary");
+    expect(entry?.querySelector(".sr-only")?.textContent).toContain("running");
+    expect(container.querySelector(".session-entry.active[data-turn-running]")).toBeNull();
+  });
+
+  it("gives the approval tint priority over running (dot + label take the highest)", () => {
+    const { container } = renderShell(
+      <SessionSidebar
+        {...baseProps()}
+        pendingApprovalSids={new Set(["sess-bg"])}
+        runningSids={new Set(["sess-bg"])}
+      />,
+    );
+    const entry = container.querySelector(".session-entry[data-turn-running=\"true\"]");
+    expect(entry).not.toBeNull();
+    const dot = entry?.querySelector(".sidebar-status-dot");
+    expect(dot?.className.split(/\s+/)).toContain("bg-warning");
+    expect(dot?.className.split(/\s+/)).not.toContain("sidebar-running-dot");
+    expect(entry?.querySelector(".sr-only")?.textContent).toContain("awaiting approval");
+  });
+
+  it("gives running priority over the failed terminal state when both hold", () => {
+    const { container } = renderShell(
+      <SessionSidebar
+        {...baseProps()}
+        turnFailedSids={new Set(["sess-bg"])}
+        runningSids={new Set(["sess-bg"])}
+      />,
+    );
+    const entry = container.querySelector(".session-entry[data-turn-running=\"true\"]");
+    expect(entry).not.toBeNull();
+    const dot = entry?.querySelector(".sidebar-status-dot");
+    expect(dot?.className.split(/\s+/)).toContain("sidebar-running-dot");
+    expect(dot?.className.split(/\s+/)).not.toContain("bg-destructive");
+    expect(entry?.querySelector(".sr-only")?.textContent).toContain("running");
+  });
+
+  it("extinguishes the running mark when the set drops the sid", () => {
+    const view = renderShell(
+      <SessionSidebar {...baseProps()} runningSids={new Set(["sess-bg"])} />,
+    );
+    expect(view.container.querySelector(".session-entry[data-turn-running]")).not.toBeNull();
+    view.rerender(shellTree(<SessionSidebar {...baseProps()} />));
+    expect(view.container.querySelector("[data-turn-running]")).toBeNull();
+    expect(view.container.querySelector(".turn-running")).toBeNull();
+    expect(view.container.querySelector(".sidebar-running-dot")).toBeNull();
+  });
+
+  it("leaves every row unmarked when no session is running (default)", () => {
+    const { container } = renderShell(<SessionSidebar {...baseProps()} />);
+    expect(container.querySelector("[data-turn-running]")).toBeNull();
+    expect(container.querySelector(".sidebar-running-dot")).toBeNull();
+  });
+});
+
 describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
   // Radix HoverCard opens on pointerEnter / focus after openDelay (300 ms). The
   // content renders inside a Radix Portal (document.body); React context
@@ -1123,6 +1218,36 @@ describe("DeleteSessionDialog ESC routing (issue #258)", () => {
     const dialog = screen.getByRole("alertdialog");
     fireEvent.keyDown(dialog, { key: "Escape" });
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The running-turn guard dialogs (issue #1629).
+describe("running-turn dialogs (issue #1629)", () => {
+  it("DeleteSessionDialog's running body names the stop cost beside the delete cost", () => {
+    renderShell(
+      <DeleteSessionDialog name="S" turnRunning onCancel={() => {}} onConfirm={() => {}} />,
+    );
+    expect(screen.getByRole("alertdialog").textContent).toContain("still working");
+  });
+
+  it("CloseRunningSessionDialog routes ESC to onCancel", () => {
+    const onCancel = vi.fn();
+    renderShell(<CloseRunningSessionDialog name="S" onCancel={onCancel} onConfirm={() => {}} />);
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog.textContent).toContain("still working");
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("CloseRunningSessionDialog routes the action to onConfirm", () => {
+    const onConfirm = vi.fn();
+    renderShell(<CloseRunningSessionDialog name="S" onCancel={() => {}} onConfirm={onConfirm} />);
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "Stop and close",
+      }),
+    );
+    expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 });
 // --- ADR-0127 (issue #1175): pin / archive organization surface --------------

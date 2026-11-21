@@ -5,6 +5,7 @@ import { FormattedMessage, IntlProvider } from "react-intl";
 import { SessionPane } from "./session/SessionPane";
 import { SessionSearchDialog } from "./session/SessionSearchDialog";
 import { SessionSidebar } from "./session/SessionSidebar";
+import { CloseRunningSessionDialog } from "./session/SessionDialogs";
 import { useApprovalEvents } from "./session/useApprovalEvents";
 import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
@@ -727,6 +728,35 @@ export default function App() {
     handleRemoveQuote,
   ]);
 
+  // The cross-session running-turn view (issue #1629): each pane reports its
+  // turn domain's in-flight flag through onTurnRunningChange; the shell folds
+  // the reports into one sid set that the sidebar's running dot + the
+  // close/delete guards read. Same shell-level cross-session posture as
+  // useApprovalEvents / useTurnFailureSids -- the pane owns the truth, the
+  // shell only aggregates. The handler is useCallback-stable (the panes'
+  // effects key on it) and identity-preserving on no-op reports.
+  const [runningSids, setRunningSids] = useState<ReadonlySet<string>>(() => new Set());
+  const handleTurnRunningChange = useCallback((sid: string, running: boolean) => {
+    setRunningSids((prev) => {
+      if (prev.has(sid) === running) return prev;
+      const next = new Set(prev);
+      if (running) next.add(sid);
+      else next.delete(sid);
+      return next;
+    });
+  }, []);
+
+  // The running-close guard (issue #1629): closing a session with a turn in
+  // flight silently discards the turn (the close is fire-and-forget), so the
+  // request first lands in a confirm dialog -- one gate covering both close
+  // entry points (the pane header menu + the sidebar row menu). A non-running
+  // sid closes immediately; the previous behavior is untouched. Declared
+  // after closeSessionWithCleanup (it routes into the teardown body).
+  const [closeRunningTarget, setCloseRunningTarget] = useState<{
+    sid: string;
+    name: string;
+  } | null>(null);
+
   // Shared teardown for "close this session": the pane header menu (ADR-0093)
   // and the sidebar row menu (ADR-0133, issue #1319) both fire cancel +
   // approval cleanup + draft drop -- one body keeps the two surfaces in
@@ -748,7 +778,7 @@ export default function App() {
     composer.clearQuotes(sid);
   };
 
-  // Symmetric teardown for "delete this session" (issue #1319): the pane
+  // Symmetric teardown for "delete a session" (issue #1319): the pane
   // header menu and the sidebar row menu share the deletePersisted mutation +
   // draft drop -- one body keeps the two surfaces in lockstep. `sid` is null
   // for a cold persisted / archived row (nothing open to unmount or drop).
@@ -759,6 +789,19 @@ export default function App() {
       dropSession(sid);
       composer.clearQuotes(sid);
     }
+  };
+
+  // The running-close guard's request router (issue #1629), declared after
+  // the teardown it routes into. A running sid parks in the confirm state;
+  // anything else closes immediately (the prior behavior, untouched). Plain
+  // identity: it rides only the menu onClose props, never an effect dep.
+  const requestCloseSession = (sid: string) => {
+    if (runningSids.has(sid)) {
+      const open = openSessions.find((s) => s.sid === sid);
+      setCloseRunningTarget({ sid, name: open?.name ?? "" });
+      return;
+    }
+    closeSessionWithCleanup(sid);
   };
 
   // ADR-0092 (#500): shell-level file ingest. When active, delegate to the
@@ -964,6 +1007,7 @@ export default function App() {
                   loadError={sessionsError}
                   pendingApprovalSids={approvalEvents.pendingApprovalSids}
                   turnFailedSids={turnFailureSids}
+                  runningSids={runningSids}
                   onNew={goToEmptyState}
                   onNewInWorkspace={(path, label) => {
                     // Issue #1392: the workspace section's ⊕ shortcut -- the
@@ -986,7 +1030,7 @@ export default function App() {
                   onDelete={deleteSessionWithCleanup}
                   onRename={(path, sid, newName) =>
                     void renameEntry(sid, path, newName)}
-                  onClose={closeSessionWithCleanup}
+                  onClose={requestCloseSession}
                   onOpenSearch={openSearch}
                   provider={appConfig?.provider ?? null}
                   onOpenSettings={() => openSettings()}
@@ -1141,8 +1185,9 @@ export default function App() {
                             recipePath={s.path}
                             onRename={renameEntry}
                             disabled={busy}
-                            onClose={closeSessionWithCleanup}
+                            onClose={requestCloseSession}
                             onDelete={deleteSessionWithCleanup}
+                            onTurnRunningChange={handleTurnRunningChange}
                           />
                         </ErrorBoundary>
                       </div>
@@ -1374,6 +1419,22 @@ export default function App() {
                   panel mount; in-panel banners keep the panel-present
                   failure face. */}
               <Toaster />
+              {/* The running-close confirm (issue #1629): parked by
+                  requestCloseSession when the close request targets a session
+                  with a turn in flight. Confirming routes into the shared
+                  teardown (the close itself fires cancel); cancelling only
+                  clears the parked state -- the turn keeps running. */}
+              {closeRunningTarget && (
+                <CloseRunningSessionDialog
+                  name={closeRunningTarget.name}
+                  onCancel={() => setCloseRunningTarget(null)}
+                  onConfirm={() => {
+                    const sid = closeRunningTarget.sid;
+                    setCloseRunningTarget(null);
+                    closeSessionWithCleanup(sid);
+                  }}
+                />
+              )}
             </NavigationHistoryProvider>
           </ErrorBoundary>
         </IntlProvider>

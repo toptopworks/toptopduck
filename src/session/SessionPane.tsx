@@ -139,6 +139,14 @@ interface SessionPaneProps {
   /** ADR-0093 (issue #512): shell callback to permanently delete this
    *  session. Receives the recipe.json path + runtime sid. */
   onDelete: (recipePath: string, sessionId: string) => void;
+  /** Issue #1629: report this session's turn-running state (the turn domain's
+   *  `turnLoading`) to the shell, whose sidebar runningSids set drives the
+   *  row's running dot + the close/delete running guards. The sid-taking
+   *  shape mirrors onFirstTurnSettled: the shell passes a useCallback-stable
+   *  handler, so this effect re-fires only on the flag's own flips. The
+   *  cleanup reports false, so a close / unmount mid-turn cannot strand the
+   *  row lit. */
+  onTurnRunningChange: (sessionId: string, running: boolean) => void;
   /** Shell-wide busy gate: disables the header menu trigger during
    *  persistence / resume operations (ADR-0093, matching the sidebar's
    *  disabled={busy} contract). */
@@ -172,7 +180,7 @@ const EDGE_DOCKED_SCROLL_CLASS = "-m-4 overflow-y-auto p-4";
  * padding, or the stage header's border-b sits flush on the tab strip's. */
 const FILE_STAGE_CLASS = "-mx-4 -mb-4 overflow-hidden";
 
-export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onStageQuote, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, recipePath, onRename, onClose, onDelete, disabled }: SessionPaneProps) {
+export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onStageQuote, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, recipePath, onRename, onClose, onDelete, onTurnRunningChange, disabled }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -206,6 +214,16 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     handleApprovalsSettled,
     onFirstTurnSettled,
   );
+  // Issue #1629: mirror the turn domain's loading flag to the shell (the
+  // sidebar's running dot + the close/delete running guards). The stable
+  // sid-taking handler keeps this effect on the flag's own flips; the
+  // cleanup reports false, so a close / unmount mid-turn cannot strand the
+  // row lit.
+  const turnRunning = s.turnLoading;
+  useEffect(() => {
+    onTurnRunningChange(sessionId, turnRunning);
+    return () => onTurnRunningChange(sessionId, false);
+  }, [onTurnRunningChange, sessionId, turnRunning]);
   // Issue #1500: the composer question's queue behind an in-flight ingest
   // batch. The tracked ingestMany is the ingest arming point -- one of two
   // (#1512): the manual "+" section (the shell-reported handleIngestFiles),
@@ -604,6 +622,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               onRename={onRename}
               onClose={onClose}
               onDelete={onDelete}
+              turnRunning={turnRunning}
               disabled={disabled}
             />
             <div className="flex-1" data-tauri-drag-region />

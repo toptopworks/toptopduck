@@ -611,6 +611,8 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 **`activity-shimmer` + `activity-live-dot`** — The live activity line's running face. The phase label and elapsed figure are swept together by a highlight band (gradient `{colors.muted-foreground}` → `{colors.foreground}` → `{colors.muted-foreground}`, `background-clip: text`), led by a 6px breathing dot (`currentColor`); both share one 2.4s period so the pair reads as one organism. The liveness is carried by the sweep itself — no generic spinner. Both animations collapse to the static muted face under `prefers-reduced-motion`.
 
+**`sidebar-running-dot`** — The session sidebar's running-turn indicator (issue #1629). The open row's `{colors.primary}` status dot plus a static halo ring — a 3px `outline` at 25% `{colors.primary}`, the focus-ring color-ring posture, not a shadow — so the state reads as a shape even under reduced motion; a 2.4s opacity breath underscores it, sharing the `activity-live-dot` period so the app's running faces read as one organism. The global reduced-motion cutoff parks the breath on its first frame; the halo carries the state there.
+
 ### Dividers
 
 **`hairline-divider` / `hairline-divider-dark`** — 1px horizontal or vertical separator. Background `{colors.border}` / `{colors.border-dark}`, height 1px. The universal separator — between cards, between rail sections, between table rows.

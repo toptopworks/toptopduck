@@ -165,6 +165,7 @@ const HEADER_MGMT_PROPS = {
   onRename: () => {},
   onClose: () => {},
   onDelete: () => {},
+  onTurnRunningChange: () => {},
 } as const;
 
 // Issue #81 cold start (ADR-0061): <App/> no longer auto-creates a session on

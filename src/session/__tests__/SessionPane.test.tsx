@@ -157,6 +157,7 @@ function renderPane(opts?: {
   onSeedDraft?: (sid: string, question: string) => void;
   onSeedInvocations?: (sid: string, names: string[]) => void;
   onStageQuote?: (sid: string, text: string) => void;
+  onTurnRunningChange?: (sid: string, running: boolean) => void;
 }) {
   if (opts?.thread) {
     vi.mocked(conversation).mockResolvedValue(opts.thread);
@@ -207,6 +208,7 @@ function renderPane(opts?: {
             onRename={noop}
             onClose={noop}
             onDelete={noop}
+            onTurnRunningChange={opts?.onTurnRunningChange ?? noop}
           />
         </IntlProvider>
       </TooltipProvider>
@@ -228,9 +230,29 @@ async function openArtifact(fileName: string) {
   fireEvent.click(await screen.findByRole("button", { name }));
 }
 
-describe("SessionPane approval wiring", () => {
+// The shell-facing running report (issue #1629): the ask flips the flag (the
+// hanging askQuestion keeps the turn in flight), and the unmount cleanup
+// reports false -- a close mid-turn cannot strand the sidebar row lit. The
+// settle-time false rides the same effect-deps flip, so this pins both AC
+// faces (settle drop + close cleanup) at the mechanism level.
+describe("SessionPane turn-running report (issue #1629)", () => {
   beforeEach(stubSessionApis);
 
+  it("reports (sid, true) when a turn goes in flight and (sid, false) on unmount", async () => {
+    const onTurnRunningChange = vi.fn();
+    const view = renderPane({ onTurnRunningChange });
+    await waitFor(() => expect(view.getComposerFields()).not.toBeNull());
+    view.ask();
+    await waitFor(() =>
+      expect(onTurnRunningChange).toHaveBeenCalledWith(SID, true),
+    );
+    view.unmount();
+    expect(onTurnRunningChange).toHaveBeenLastCalledWith(SID, false);
+  });
+});
+
+describe("SessionPane approval wiring", () => {
+  beforeEach(stubSessionApis);
   it("threads the full-view loader to the pending card with the pane's session id", async () => {
     vi.mocked(getApprovalAttachments).mockResolvedValue([
       { param: "code", content: "print(1); print(2)" },
