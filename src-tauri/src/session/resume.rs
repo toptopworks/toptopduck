@@ -1809,6 +1809,35 @@ mod tests {
         assert_eq!(view.replacements, Some(2));
     }
 
+    /// The cut argument's full text resumes onto the view (issue #1636):
+    /// the mapping copies the persisted `summary_detail` beside its bounded
+    /// head, so a reopened session's fold expands the model's original
+    /// argument -- a dropped field here would silently revert resumed rows
+    /// to the head with nothing red (the review's mutation run caught this
+    /// mapping unpinned).
+    #[test]
+    fn the_cut_summary_detail_resumes_onto_the_view() {
+        use crate::approval::OperationKind;
+        use crate::persistence::recipe::RecipeTraceEntry;
+
+        let full_text = "SELECT * FROM people WHERE name = 'ada' ORDER BY id";
+        let persisted = RecipeTraceEntry {
+            summary_detail: Some(full_text.into()),
+            name: "sandbox_sql".into(),
+            operation_kind: OperationKind::Execute,
+            summary: "SELECT * FROM people WHERE…".into(),
+            success: true,
+            result_excerpt: String::new(),
+            failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
+            sub_rounds: None,
+        };
+        let view = TraceEntryView::from(&persisted);
+        assert_eq!(view.summary_detail.as_deref(), Some(full_text));
+    }
+
     #[test]
     fn resolve_active_restores_when_recipe_active_still_registered() {
         // Happy path (ADR-0035/0037): recipe.active names a source still in the

@@ -872,8 +872,8 @@ mod tests {
             "ADR-0078: a failure trace text (excerpt or #1610 detail) leaked into an in-window Full TurnPayload:\n{full}"
         );
         assert!(
-            !full.contains(trace_summary),
-            "ADR-0078: a trace summary leaked into an in-window Full TurnPayload:\n{full}"
+            !full.contains(trace_summary) && !full.contains(trace_summary_detail),
+            "ADR-0078: a trace summary or its cut-argument full text (issue #1636) leaked into an in-window Full TurnPayload:\n{full}"
         );
         assert!(
             !full.contains(sub_prose)
@@ -894,8 +894,8 @@ mod tests {
             "ADR-0078: a failure trace text (excerpt or #1610 detail) leaked into a far-window Summary TurnPayload:\n{summary}"
         );
         assert!(
-            !summary.contains(trace_summary),
-            "ADR-0078: a trace summary leaked into a far-window Summary TurnPayload:\n{summary}"
+            !summary.contains(trace_summary) && !summary.contains(trace_summary_detail),
+            "ADR-0078: a trace summary or its cut-argument full text (issue #1636) leaked into a far-window Summary TurnPayload:\n{summary}"
         );
         assert!(
             !summary.contains(sub_prose)

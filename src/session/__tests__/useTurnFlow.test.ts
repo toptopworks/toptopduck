@@ -1548,6 +1548,71 @@ describe("useTurnFlow", () => {
       });
     });
 
+    it("threads the cut summary detail through merge + grouping + the settle projection (issue #1636)", () => {
+      // The wire's summary_detail rides the whole live chain like the
+      // failure detail above -- the settled row's fold expands the model's
+      // original argument while the line keeps the bounded head, and the
+      // optimistic record matches what a resumed (recipe-played) row would
+      // render. A row without one (an uncut argument, every arm the wire
+      // omits it on) keeps an absent key: the fold falls back to the head.
+      const fullText = "SELECT * FROM people WHERE name = 'ada' ORDER BY id";
+      const cut = call({
+        name: "sandbox_sql",
+        operationKind: "execute",
+        summary: "SELECT * FROM people WHERE…",
+        summaryDetail: fullText,
+      });
+      const trace = liveRoundsToTrace(
+        buildLiveRounds(
+          { step: 1, calls: [cut], roundTexts: [], roundThinkings: [], delegations: {} },
+          [],
+        ),
+      );
+      expect(trace[0]?.calls[0]?.summary_detail).toBe(fullText);
+      const plain = call({ summary: "SELECT 1" });
+      const plainTrace = liveRoundsToTrace(
+        buildLiveRounds(
+          { step: 1, calls: [plain], roundTexts: [], roundThinkings: [], delegations: {} },
+          [],
+        ),
+      );
+      expect(plainTrace[0]?.calls[0]?.summary_detail).toBeUndefined();
+    });
+
+    it("carries the cut summary detail through a delegation's running fold (issue #1636)", () => {
+      // Mirror of the landed-stats fold test above: a sub-agent's cut SQL
+      // rides the shared completion landing (completeCallAt) into the
+      // buffer's fold, and foldRounds projects it onto the running panel's
+      // rows -- the panel's rows expand through the same summaryDetail the
+      // main rail's rows carry, or the running panel degrades to the head
+      // for the delegation's whole run.
+      const fullText = "SELECT * FROM people WHERE name = 'ada' ORDER BY id";
+      const agent = call({ name: "agent", callId: "d1", summary: "fix things" });
+      const cut = call({
+        key: "sub-0",
+        step: 1,
+        name: "sandbox_sql",
+        operationKind: "execute",
+        summary: "SELECT * FROM people WHERE…",
+        summaryDetail: fullText,
+      });
+      const rounds = buildLiveRounds(
+        {
+          step: 1,
+          calls: [agent],
+          roundTexts: [],
+          roundThinkings: [],
+          delegations: {
+            d1: { task: "fix the widget", fold: { step: 1, calls: [cut], roundThinkings: [] } },
+          },
+        },
+        [],
+      );
+      expect(rounds[0]?.rows[0]?.delegation?.rounds[0]?.rows[0]).toMatchObject({
+        summaryDetail: fullText,
+      });
+    });
+
     it("buildLiveRounds turns padded null slots into absent members (a round that emitted none)", () => {
       // withRoundSlot pads skipped rounds with null (round 1 emitted nothing
       // when round 2's event lands first); the derivation converts the
