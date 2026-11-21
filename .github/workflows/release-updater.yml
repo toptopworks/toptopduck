@@ -47,6 +47,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      # R2's S3 API rejects the aws CLI's default-region resolution
+      # (e.g. us-west-2); `auto` is Cloudflare's supported value.
+      AWS_REGION: auto
       R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
       R2_BUCKET: s3://${{ secrets.R2_BUCKET_NAME }}
     steps:
