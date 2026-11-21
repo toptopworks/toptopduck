@@ -416,8 +416,9 @@ describe("TurnCard result-name display axis (issue #1623)", () => {
       labeledRecord([labeledDataset("result_1", "筛选后明细"), labeledDataset("result_2", "销量汇总")]),
     );
     expect(getByRole("button", { name: "结果：销量汇总" })).toBeInTheDocument();
-    // The names moved into the popover (the usage-pill pattern); the line
-    // itself reads the count sentence, the display names ride the list rows.
+    // The names moved behind the count-sentence fold head (the process
+    // fold's chrome, no popover); the line reads the count sentence, the
+    // display names ride the chips inside the expansion.
     expect(container.querySelector(".antecedents")).toHaveTextContent("由 1 个中间结果派生");
   });
 
@@ -776,8 +777,8 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     fireEvent.click(screen.getByRole("button", { name: /Completed/ }));
     const folds = container.querySelectorAll(".trace-toggle");
     expect(folds).toHaveLength(2);
-    expect(folds[0]).toHaveTextContent("Completed · explore ×1");
-    expect(folds[1]).toHaveTextContent("Completed · materialize ×1");
+    expect(folds[0]).toHaveTextContent("Trace · explore ×1");
+    expect(folds[1]).toHaveTextContent("Trace · materialize ×1");
   });
 
   it("keeps the collapsed head on a Failed turn with the failure card outside", () => {

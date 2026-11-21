@@ -488,7 +488,7 @@ function TurnBody({
             <button
               type="button"
               className={cn(
-                "result-link appearance-none bg-transparent inline-block max-w-full text-sm text-primary",
+                "result-link appearance-none bg-transparent inline-block max-w-full text-xs text-primary",
                 "px-1.5 py-1 rounded-md border border-transparent",
                 "hover:bg-transit",
                 active && "active font-semibold border-primary",
@@ -684,11 +684,13 @@ function TurnBody({
 
 // The antecedents lineage fold (the process fold's chrome, the user ruling):
 // the head reads the count sentence ("由 13 个中间结果派生"), the chips
-// (the muted badge surfaces, the DESIGN.md muted role) open in place below --
-// the long-chain names read as a wall once the intermediates pile up, so the
-// collapsed line stays short and the list is on demand. Session-ephemeral
-// fold state, the TraceStepFold convention; chevronSide right rides the
-// process fold's affordance posture.
+// (the badge-secondary face pair: muted light, white-alpha dark -- muted's
+// opaque value sits ~1.2:1 on the dark card and reads as no chip at all,
+// DESIGN.md's muted-dark law) open in place below -- the long-chain names
+// read as a wall once the intermediates pile up, so the collapsed line
+// stays short and the list is on demand. Session-ephemeral fold state, the
+// TraceStepFold convention; chevronSide right rides the process fold's
+// affordance posture.
 function AntecedentsFold({
   antecedents,
 }: {
@@ -715,7 +717,7 @@ function AntecedentsFold({
           {antecedents.map((p) => (
             <span
               key={p.dataset.reference_name}
-              className="min-w-0 rounded-md bg-muted px-1.5 py-px break-words"
+              className="min-w-0 rounded-md bg-muted px-1.5 py-px break-words dark:bg-white/[0.08]"
             >
               {p.dataset.display_name}
             </span>
