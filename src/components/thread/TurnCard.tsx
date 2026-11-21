@@ -12,10 +12,11 @@
 // TurnExchangeFrame / RoundBody -- the modules the live exchange mounts too,
 // so the settle swap cannot move a member.
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { cn } from "@/lib/utils";
 import { Button } from "../ui/button";
+import { FoldToggle } from "./FoldToggle";
 import { DelegationSubTraceBody } from "./DelegationSubTraceBody";
 import { TraceStepFold } from "./TraceRow";
 import { ArtifactCard } from "./ArtifactCard";
@@ -34,7 +35,7 @@ import {
   userInvocationNames,
   type DatasetLabel,
 } from "./turn-visual";
-import type { StaleAnchor } from "../../types/dataset";
+import type { DatasetDescriptor, StaleAnchor } from "../../types/dataset";
 import type { SkillEntry } from "../../types/skills";
 import type {
   SubagentUsage,
@@ -252,7 +253,7 @@ export function TurnCard({
         // A <div>: the row is a control cluster (the outcome glyph, the
         // usage pill's dialog trigger, copy), not prose -- the flex layout
         // owns it, so it never becomes a <p>.
-        <div className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+        <div className="turn-meta m-0 mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
           {/* The glyph rides the card-level mark (see above); Failed/Cancelled
                 never mount it here -- their glyph derives in TurnBody's card
                 head, and the process fold's head word carries the vocabulary. */}
@@ -454,26 +455,20 @@ function TurnBody({
         <>
           {/* max-w-full + break-words: the link row rides the stream as a
               non-stretched flex item (the #860 prose twin's branch-mate),
-              and a long unbroken dataset name in the antecedents line or
-              the result link stretches its min-content past the column --
-              the rail's overflow-x crop eats it (issue #872). break-words
-              sits here once and inherits into both riders; the button
-              below carries its own cap so the break can engage inside it. */}
-          <p className="turn-outcome mt-1 max-w-full break-words text-xs leading-snug">
-            {antecedents.length > 0 && (
-              <span className="antecedents block mb-0.5 text-muted-foreground">
-                <FormattedMessage
-                  id="thread.antecedents"
-                  defaultMessage="Derived from {names}"
-                  values={{
-                    names: intl.formatList(
-                      antecedents.map((p) => p.dataset.display_name),
-                      { type: "conjunction" },
-                    ),
-                  }}
-                />
-              </span>
-            )}
+              and a long unbroken dataset name in the result link stretches
+              its min-content past the column -- the rail's overflow-x crop
+              eats it (issue #872). break-words sits here once and inherits
+              into the result link, its one heir: the lineage fold above is
+              a sibling and carries its own caps. The button below carries
+              its own cap so the break can engage inside it. */}
+          {/* The lineage line is a fold head (the process fold's chrome --
+              the user ruling: same expand pattern, no popover): a long
+              chain's names read as a wall once the intermediates pile up --
+              the line stays one short count sentence, the chips open in
+              place below. Sits OUTSIDE the outcome <p>: the expanded chip
+              flow is a block the paragraph cannot host. */}
+          <AntecedentsFold antecedents={antecedents} />
+          <p className="turn-outcome mt-2 mb-2 max-w-full break-words text-xs leading-snug">
             {/* result-link is a real <button> (clickable, focusable) stripped
                 of native chrome by appearance-none + bg-transparent -- the
                 ADR-0067 bareButtonReset pair without border-0, since the
@@ -492,8 +487,8 @@ function TurnBody({
             <button
               type="button"
               className={cn(
-                "result-link appearance-none bg-transparent inline-block max-w-full text-primary",
-                "px-1.5 py-0.5 rounded-md border border-transparent",
+                "result-link appearance-none bg-transparent inline-block max-w-full text-xs text-primary",
+                "px-1.5 py-1 rounded-md border border-transparent",
                 "hover:bg-transit",
                 active && "active font-semibold border-primary",
                 staleAnchor && "stale text-muted-foreground border-dashed",
@@ -684,4 +679,51 @@ function TurnBody({
       throw new Error(`unhandled turn outcome: ${JSON.stringify(unhandled)}`);
     }
   }
+}
+
+// The antecedents lineage fold (the process fold's chrome, the user ruling):
+// the head reads the count sentence ("由 13 个中间结果派生"), the chips
+// (the badge-secondary face pair: muted light, white-alpha dark -- muted's
+// opaque value sits ~1.2:1 on the dark card and reads as no chip at all,
+// DESIGN.md's muted-dark law) open in place below -- the long-chain names
+// read as a wall once the intermediates pile up, so the collapsed line
+// stays short and the list is on demand. Session-ephemeral fold state, the
+// TraceStepFold convention; chevronSide right rides the process fold's
+// affordance posture.
+function AntecedentsFold({
+  antecedents,
+}: {
+  antecedents: ReadonlyArray<{ dataset: DatasetDescriptor }>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (antecedents.length === 0) return null;
+  return (
+    <>
+      <FoldToggle
+        hookClass="antecedents-toggle"
+        expanded={expanded}
+        onToggle={() => setExpanded((v) => !v)}
+        className="antecedents mt-1 mb-1"
+        chevronSide="right"
+      >
+        <FormattedMessage
+          id="thread.antecedents"
+          defaultMessage="Derived from {count, plural, one {# intermediate} other {# intermediates}}"
+          values={{ count: antecedents.length }}
+        />
+      </FoldToggle>
+      {expanded && (
+        <div className="mb-1 flex max-w-full flex-wrap items-center gap-1 text-sm text-muted-foreground">
+          {antecedents.map((p) => (
+            <span
+              key={p.dataset.reference_name}
+              className="min-w-0 rounded-md bg-muted px-1.5 py-px break-words dark:bg-white/[0.08]"
+            >
+              {p.dataset.display_name}
+            </span>
+          ))}
+        </div>
+      )}
+    </>
+  );
 }

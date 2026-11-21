@@ -60,6 +60,7 @@ export function TurnProcessFold({
         hookClass="process-toggle"
         expanded={expanded}
         onToggle={() => setExpanded((v) => !v)}
+        chevronSide="right"
       >
         {label}
         {askedAt !== undefined && settledAt !== undefined && settledAt >= askedAt && (

@@ -305,7 +305,7 @@ describe("TraceStepFold fold label (issue #1604)", () => {
       "false",
     );
     expect(
-      screen.getByRole("button", { name: "Completed · explore ×2 · describe ×1" }),
+      screen.getByRole("button", { name: "Trace · explore ×2 · describe ×1" }),
     ).toBeInTheDocument();
   });
 
@@ -316,7 +316,7 @@ describe("TraceStepFold fold label (issue #1604)", () => {
       />,
     );
     expect(
-      screen.getByRole("button", { name: "Completed · web_search ×2 · explore ×1" }),
+      screen.getByRole("button", { name: "Trace · web_search ×2 · explore ×1" }),
     ).toBeInTheDocument();
   });
 
@@ -325,7 +325,7 @@ describe("TraceStepFold fold label (issue #1604)", () => {
       <TraceStepFold calls={[call(), call(), call()]} />,
     );
     expect(
-      screen.getByRole("button", { name: "Completed · explore ×3" }),
+      screen.getByRole("button", { name: "Trace · explore ×3" }),
     ).toBeInTheDocument();
   });
 

@@ -230,6 +230,7 @@ export function LiveActivityLine({
           expanded={expanded}
           onToggle={() => setExpanded((v) => !v)}
           className="mt-2"
+          chevronSide="right"
         >
           {face}
         </FoldToggle>
@@ -237,7 +238,7 @@ export function LiveActivityLine({
         // The plain status face: the same layout minus the fold chrome --
         // no chevron, no hover, no click, nothing to expand (the user
         // ruling). The hook class stays as the test anchor.
-        <div className="process-toggle mt-2 flex items-center gap-1 text-xs text-muted-foreground">
+        <div className="process-toggle mt-2 flex items-center gap-1 text-sm text-muted-foreground">
           {face}
         </div>
       )}

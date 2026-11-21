@@ -185,7 +185,7 @@ describe("Thread", () => {
     expect(screen.getByRole("button", { name: /结果：result_2/ })).toBeInTheDocument();
     // The antecedent is NOT a result link -- it rides the muted disclosure.
     expect(screen.queryByRole("button", { name: /结果：result_1/ })).not.toBeInTheDocument();
-    expect(screen.getByText(/由 result_1 派生/)).toBeInTheDocument();
+    expect(document.querySelector(".antecedents")).toHaveTextContent(/由 1 个中间结果.*派生/);
   });
 
   it("renders a Materialized turn's terminal text as markdown prose, not a side note (#847)", () => {
@@ -1092,8 +1092,8 @@ describe("Thread", () => {
       );
       // Issue #1282: the head opens first; the per-round folds live inside it.
       fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
-      fireEvent.click(screen.getByRole("button", { name: "执行完成 · explore ×1 · materialize ×1" }));
-      const toggle = screen.getByRole("button", { name: "执行完成 · explore ×1 · materialize ×1" });
+      fireEvent.click(screen.getByRole("button", { name: "轨迹 · explore ×1 · materialize ×1" }));
+      const toggle = screen.getByRole("button", { name: "轨迹 · explore ×1 · materialize ×1" });
       expect(toggle).toHaveAttribute("aria-expanded", "true");
       // Both calls render with their summaries + operation badges.
       expect(screen.getByText("explore")).toBeInTheDocument();
@@ -1326,8 +1326,8 @@ describe("Thread", () => {
       // Thinking + steps folds are per round, both default collapsed.
       const thinking = screen.getByRole("button", { name: "思考 · 1.5s" });
       expect(thinking).toHaveAttribute("aria-expanded", "false");
-      const round1 = screen.getByRole("button", { name: "执行完成 · explore ×1 · materialize ×1" });
-      const round2 = screen.getByRole("button", { name: "执行完成 · explore ×1" });
+      const round1 = screen.getByRole("button", { name: "轨迹 · explore ×1 · materialize ×1" });
+      const round2 = screen.getByRole("button", { name: "轨迹 · explore ×1" });
       expect(round1).toHaveAttribute("aria-expanded", "false");
       expect(round2).toHaveAttribute("aria-expanded", "false");
       expect(screen.queryByText("先推理一下")).not.toBeInTheDocument();
@@ -1340,12 +1340,12 @@ describe("Thread", () => {
       fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
       fireEvent.click(screen.getByRole("button", { name: "思考 · 1.5s" }));
       expect(screen.getByText("先推理一下")).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "执行完成 · explore ×1 · materialize ×1" }));
+      fireEvent.click(screen.getByRole("button", { name: "轨迹 · explore ×1 · materialize ×1" }));
       expect(screen.getByText("SELECT 1")).toBeInTheDocument();
       expect(screen.getByText("SELECT 2")).toBeInTheDocument();
       // Round 2's fold stays collapsed -- its call is still hidden.
       expect(screen.queryByText("SELECT 3")).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "执行完成 · explore ×1" }));
+      fireEvent.click(screen.getByRole("button", { name: "轨迹 · explore ×1" }));
       expect(screen.getByText("SELECT 3")).toBeInTheDocument();
     });
 

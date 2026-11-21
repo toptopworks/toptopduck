@@ -118,10 +118,10 @@ function SuccessGlyph({ success }: { success: boolean }) {
 }
 
 // The step fold's head label (issue #1604, recalibrated on the device):
-// a completion prefix over per-tool call counts -- "Completed · explore ×3
-// · describe ×1". The prefix word matches the live face's sealed-segment
-// head (thread.trace.roundCompleted) so the settled face scans with the
-// same vocabulary; the counts stay bare of it -- the tool name is still
+// a trace prefix over per-tool call counts -- "Trace · explore ×3
+// · describe ×1". The prefix word is the settled face's own -- the live
+// face's sealed-segment head (thread.trace.roundCompleted) keeps the
+// completion word; the counts stay bare of it -- the tool name is still
 // the call's identity, and the operation category alone collapsed to
 // noise on a single-category round (a data-exploration turn of all reads
 // read as an undifferentiated 读 ×N). Order is first appearance -- the
@@ -138,7 +138,7 @@ function foldLabel(intl: IntlShape, calls: ReadonlyArray<TraceEntry>): string {
   return [
     intl.formatMessage({
       id: "thread.trace.stepCompleted",
-      defaultMessage: "Completed",
+      defaultMessage: "Trace",
     }),
     ...Array.from(counts, ([tool, count]) =>
       intl.formatMessage(
