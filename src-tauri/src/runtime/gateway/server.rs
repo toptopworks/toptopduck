@@ -1074,6 +1074,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             let ResolvedClassification {
                 operation_kind,
                 summary,
+                summary_detail,
                 ..
             } = classify_with_cli_tool(ctx.cli, &call, ctx.deps.temp_path);
             let excerpt = truncate_trace_excerpt(&detail, TRACE_EXCERPT_MAX);
@@ -1084,7 +1085,8 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 summary,
                 excerpt,
             )
-            .with_failure_detail(&detail);
+            .with_failure_detail(&detail)
+            .with_summary_detail(summary_detail);
             ctx.events
                 .emit(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
             outcome.trace.push(entry);
