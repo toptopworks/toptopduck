@@ -1,10 +1,12 @@
-// The memory panel's create form (issue #1538): three fields (title,
-// description, four-way type picker) over the store's `create_entry`. The
-// description is a textarea -- the store's body is multi-line-capable, a
-// single-line input would say otherwise. The click-to-prefill example sits
-// above the fields -- the blank-form kicker, so the first row never starts
-// from an empty canvas. Mounted by WorkspaceMemoryDialog in place of the
-// list face; the dialog owns the entry points and the saved confirmation.
+// The memory panel's create form (issue #1538, single-lined by #1591):
+// three fields (title, one-line description, four-way type picker) over
+// the store's `create_entry`. The description is a SINGLE-LINE input --
+// the field folds into the index hook anyway, and the file's body equals
+// the input verbatim; richer multi-line prose is the row's open
+// action's job (#1591). The click-to-prefill example sits above the
+// fields -- the blank-form kicker, so the first row never starts from an
+// empty canvas. Mounted by WorkspaceMemoryDialog in place of the list
+// face; the dialog owns the entry points and the saved confirmation.
 
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -13,7 +15,6 @@ import { FormattedMessage, useIntl } from "react-intl";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
-import { Textarea } from "../components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "../components/ui/radio-group";
 import { log } from "../lib/log";
 import { describeError } from "../lib/error-presentation";
@@ -121,7 +122,7 @@ export function MemoryCreateForm({
             defaultMessage="Description"
           />
         </Label>
-        <Textarea
+        <Input
           id="memory-new-description"
           value={description}
           onChange={(e) => setDescription(e.target.value)}

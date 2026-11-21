@@ -165,6 +165,7 @@ const HEADER_MGMT_PROPS = {
   onRename: () => {},
   onClose: () => {},
   onDelete: () => {},
+  onTurnRunningChange: () => {},
 } as const;
 
 // Issue #81 cold start (ADR-0061): <App/> no longer auto-creates a session on
@@ -288,7 +289,14 @@ function materializedOutcome(referenceName: string): TurnOutcome {
     data: {
       promotions: [
         {
-          dataset: { ...guidedDataset, reference_name: referenceName, row_count: 1 },
+          // The unlabelled fallback posture (#1623): display starts equal to
+          // the reference name; divergence is a later label/rename.
+          dataset: {
+            ...guidedDataset,
+            reference_name: referenceName,
+            display_name: referenceName,
+            row_count: 1,
+          },
           sql: "SELECT 1",
         },
       ],

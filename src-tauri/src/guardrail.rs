@@ -16,8 +16,11 @@
 //!    (not retried -- the same SQL hits the same wall, ADR-0028).
 //!
 //! The filesystem-function guard (read_*/COPY/ATTACH/INSTALL/LOAD) is enforced
-//! two ways. COPY/ATTACH/INSTALL/LOAD are statements, not query expressions, so
-//! the `CREATE TABLE ... AS <query>` wrapping rejects them as syntax errors.
+//! two ways. COPY/ATTACH are statements, not query expressions, so the
+//! `CREATE TABLE ... AS <query>` wrapping rejects them as syntax errors.
+//! INSTALL/LOAD are routed by ADR-0150 instead: the three blessed shapes are
+//! lifted into the tier-gated extension prelude (see sandbox_sql), and every
+//! other spelling stays body and dies at the same wrap.
 //! The remaining surface -- read_* table functions (read_csv_auto / read_parquet
 //! / read_json_auto) in a SELECT -- is constrained by the gateway FsAcl
 //! whitelist (ADR-0080 + ADR-0088): read_* literal paths are classified against
@@ -99,6 +102,19 @@ pub(crate) fn classify_duckdb_error(detail: &str) -> ExecErrorKind {
         || lower.contains("file system operations are disabled")
     {
         return ExecErrorKind::Resource;
+    }
+    // Extension-channel errors (ADR-0150): "extension not installed", a
+    // failed INSTALL (network/download), an unsupported extension function.
+    // These route Runtime -- the agent self-corrects by issuing INSTALL then
+    // LOAD. Anchored to channel-shaped wording, NOT the bare word
+    // "extension": a schema error naming a column/table that merely contains
+    // the word must keep its Schema classification.
+    if lower.contains("extension")
+        && (lower.contains("install")
+            || lower.contains("download")
+            || lower.contains("not supported"))
+    {
+        return ExecErrorKind::Runtime;
     }
     // Schema errors: a missing table or column. The provider can fix these.
     if lower.contains("does not exist")
@@ -195,6 +211,34 @@ pub(crate) fn apply_resource_caps(conn: &Connection, memory_limit: &str, threads
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// ADR-0150: extension-channel errors route Runtime (the agent
+    /// self-corrects: INSTALL then LOAD). The anchor is the channel-shaped
+    /// wording, so a schema error whose identifier merely contains the word
+    /// "extension" keeps its Schema classification.
+    #[test]
+    fn extension_channel_errors_route_runtime() {
+        assert_eq!(
+            classify_duckdb_error("Extension 'icu' not installed"),
+            ExecErrorKind::Runtime
+        );
+        assert_eq!(
+            classify_duckdb_error("IO Error: Failed to download extension 'icu'"),
+            ExecErrorKind::Runtime
+        );
+        assert_eq!(
+            classify_duckdb_error("Catalog Error: Extension Function 'st_read' is not supported"),
+            ExecErrorKind::Runtime
+        );
+    }
+
+    #[test]
+    fn a_schema_error_naming_an_extension_column_stays_schema() {
+        assert_eq!(
+            classify_duckdb_error("Binder Error: Column with name \"extension\" does not exist"),
+            ExecErrorKind::Schema
+        );
+    }
 
     /// Test-only: parse DuckDB's normalized `memory_limit` display value
     /// (e.g. `"244.1 MiB"`) back into bytes. DuckDB stores `'256MB'` as

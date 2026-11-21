@@ -2,12 +2,48 @@ import { useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { Check, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
 import { FoldToggle } from "./FoldToggle";
 import { TraceList } from "./TraceList";
 import { TraceSummaryFold } from "./TraceSummaryFold";
 import type { OperationKind } from "../../types/approval";
 import type { TraceEntry } from "../../types/thread";
+
+// The landed-stats badge (issue #1621): a successful write/edit row's
+// `+N −M` -- monospace at the muted tier, diff-colored, each part
+// aria-labeled so the counts read without color. A write carries no
+// removed count (an overwrite is not a diff -- `+N` names the lines
+// landed), so `−M` renders only when the entry has one; every other row
+// type and a failed call carry no stats on the wire and render none.
+function WriteStatsBadge({ entry }: { entry: TraceEntry }) {
+  const intl = useIntl();
+  if (entry.lines_added === undefined) return null;
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1 font-mono text-xs">
+      <span
+        className="text-green-600 dark:text-green-400"
+        role="img"
+        aria-label={intl.formatMessage({
+          id: "thread.trace.linesAddedAria",
+          defaultMessage: "Added {count, plural, one {# line} other {# lines}}",
+        }, { count: entry.lines_added })}
+      >
+        +{entry.lines_added}
+      </span>
+      {entry.lines_removed !== undefined && (
+        <span
+          className="text-destructive"
+          role="img"
+          aria-label={intl.formatMessage({
+            id: "thread.trace.linesRemovedAria",
+            defaultMessage: "Removed {count, plural, one {# line} other {# lines}}",
+          }, { count: entry.lines_removed })}
+        >
+          −{entry.lines_removed}
+        </span>
+      )}
+    </span>
+  );
+}
 
 // The trace-row rendering family (ADR-0078, issue #297), extracted from
 // TraceView so the delegation sub-trace panel can reuse the rows without a
@@ -81,13 +117,45 @@ function SuccessGlyph({ success }: { success: boolean }) {
   );
 }
 
-// One round's step fold (the "Trace · N calls" tier, ADR-0078's folding
-// discipline): the round's call count reads on the fold head so a rail scan
-// shows which rounds made multiple calls without expanding; the rows mount
-// only while expanded. Shared by the settled main trace's round adapter
-// (TurnCard) and the delegation sub-trace's rounds (issue #1355) so the two
-// faces cannot drift; `renderSubTrace` is the delegation panel injection
-// (issue #934) -- the sub-face passes none.
+// The step fold's head label (issue #1604, recalibrated on the device):
+// a trace prefix over per-tool call counts -- "Trace · explore ×3
+// · describe ×1". The prefix word is the settled face's own -- the live
+// face's sealed-segment head (thread.trace.roundCompleted) keeps the
+// completion word; the counts stay bare of it -- the tool name is still
+// the call's identity, and the operation category alone collapsed to
+// noise on a single-category round (a data-exploration turn of all reads
+// read as an undifferentiated 读 ×N). Order is first appearance -- the
+// trace is append-only within a round, so re-renders never reshuffle it,
+// and tool names are untranslated data, so locale switches cannot either.
+// The category stays on the row's OperationBadge.
+function foldLabel(intl: IntlShape, calls: ReadonlyArray<TraceEntry>): string {
+  // A Map keeps its insertion order, which over an append-only trace is
+  // the first-appearance order above.
+  const counts = new Map<string, number>();
+  for (const call of calls) {
+    counts.set(call.name, (counts.get(call.name) ?? 0) + 1);
+  }
+  return [
+    intl.formatMessage({
+      id: "thread.trace.stepCompleted",
+      defaultMessage: "Trace",
+    }),
+    ...Array.from(counts, ([tool, count]) =>
+      intl.formatMessage(
+        { id: "thread.trace.toolCount", defaultMessage: "{tool} ×{count}" },
+        { tool, count },
+      ),
+    ),
+  ].join(" · ");
+}
+
+// One round's step fold (ADR-0078's folding discipline): the fold head
+// speaks the round's work mix (the per-tool counts above) so a rail scan
+// shows which tools a round ran without expanding; the rows mount only
+// while expanded. Shared by the settled main trace's round adapter
+// (TurnCard) and the delegation sub-trace's rounds (issue #1355) so the
+// two faces cannot drift; `renderSubTrace` is the delegation panel
+// injection (issue #934) -- the sub-face passes none.
 export function TraceStepFold({
   calls,
   renderSubTrace,
@@ -96,6 +164,7 @@ export function TraceStepFold({
   renderSubTrace?: (entry: TraceEntry) => ReactNode;
 }) {
   const [stepsExpanded, setStepsExpanded] = useState(false);
+  const intl = useIntl();
   if (calls.length === 0) return null;
   return (
     <>
@@ -104,11 +173,7 @@ export function TraceStepFold({
         expanded={stepsExpanded}
         onToggle={() => setStepsExpanded((v) => !v)}
       >
-        <FormattedMessage
-          id="thread.trace.toggle"
-          defaultMessage="Trace · {count} {count, plural, one {call} other {calls}}"
-          values={{ count: calls.length }}
-        />
+        {foldLabel(intl, calls)}
       </FoldToggle>
       {stepsExpanded && (
         <TraceRowList entries={calls} renderSubTrace={renderSubTrace} />
@@ -137,6 +202,11 @@ export function TraceRow({
   subTrace?: ReactNode;
 }) {
   const [subOpen, setSubOpen] = useState(false);
+  const intl = useIntl();
+  // The failure anchor's text (issue #1610): the full model-visible error
+  // text when the entry carries one, the bounded excerpt when it does not
+  // (pre-#1610 records, no-text arms) -- one anchor face, two depths.
+  const failureText = entry.failure_detail ?? entry.result_excerpt;
   // The gate lives here, once: a row whose entry carries no sub-rounds (or
   // whose caller supplied no body) renders neither the toggle nor the panel,
   // so the callers inject the body unconditionally over their row lists.
@@ -153,6 +223,10 @@ export function TraceRow({
         <TraceSummaryFold
           summary={entry.summary}
           summaryClassName="trace-summary"
+          resultExcerpt={
+            entry.success && entry.result_excerpt !== "" ? entry.result_excerpt : undefined
+          }
+          replacements={entry.replacements}
           head={(
             <>
               {/* Tool name truncates with the row's summary family
@@ -162,6 +236,7 @@ export function TraceRow({
                   (issue #874). */}
               <span className="trace-name font-medium min-w-0 truncate">{entry.name}</span>
               <OperationBadge kind={entry.operation_kind} />
+              <WriteStatsBadge entry={entry} />
               {afterName}
               {hasSubTrace && (
                 // stopPropagation: the toggle sits inside the row head's
@@ -185,19 +260,28 @@ export function TraceRow({
             </>
           )}
         />
-        {/* The excerpt is the cross-turn retrospection anchor (ADR-0078).
-         * The one SUCCESS that carries one is a capped delegation report's
-         * truncation notice (issue #1047) -- the projections keep exactly
-         * that success excerpt -- rendered muted under the check glyph: the
-         * call completed, the answer was just cut. */}
-        {entry.result_excerpt !== "" && (
+        {/* The failure anchor is the cross-turn retrospection surface
+         * (ADR-0078, full text since #1610): visible without a click,
+         * destructive-styled, and height-capped since #1604 so a multi-KB
+         * error cannot push the whole screen out of view (the thinking
+         * fold's cap face and its #1363 keyboard-reachable region posture).
+         * It renders the model-visible failure text whole when the entry
+         * carries one (#1610) and falls back to the bounded excerpt for
+         * pre-#1610 records and no-text arms. A success never renders here
+         * anymore (#1604) -- the one success excerpt the projections keep,
+         * the capped delegation report's truncation notice (issue #1047),
+         * folds into the summary expand block above. */}
+        {!entry.success && failureText !== "" && (
           <span
-            className={cn(
-              "trace-excerpt block whitespace-pre-wrap break-words text-xs",
-              entry.success ? "text-muted-foreground" : "text-destructive",
-            )}
+            className="trace-excerpt block whitespace-pre-wrap break-words text-xs max-h-48 overflow-y-auto text-destructive"
+            tabIndex={0}
+            role="region"
+            aria-label={intl.formatMessage({
+              id: "thread.trace.excerptAria",
+              defaultMessage: "Error excerpt",
+            })}
           >
-            {entry.result_excerpt}
+            {failureText}
           </span>
         )}
         {/* The expanded panel mounts full width beneath the row; unmounting

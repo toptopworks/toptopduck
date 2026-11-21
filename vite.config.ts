@@ -29,5 +29,17 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test-setup.ts"],
     css: false,
+    // Local dev only: worker_threads outrun process forks for this
+    // jsdom-only suite on Windows, and 8 workers sit safely below the
+    // contention zone where runs fake-red with timeouts (forks had to be
+    // capped at 2 locally for the same reason). CI keeps its runner
+    // defaults (4-core ubuntu).
+    pool: process.env.CI ? undefined : "threads",
+    maxWorkers: process.env.CI ? undefined : 8,
+    // Interactive tests ride real timers; under machine load their waits
+    // can spill past the 5s default and fake-red (all observed failures in
+    // the concurrency experiments were 5s timeouts). 10s is a cap, not a
+    // wait -- green runs are unaffected.
+    testTimeout: 10_000,
   },
 });

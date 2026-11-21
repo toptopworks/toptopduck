@@ -38,7 +38,18 @@ const queryClient = new QueryClient({
 // (layer-4 content, untranslated) so the assertions hold under any locale.
 // Split element / render so the default-open pins (#1005) can rerender the
 // same tree.
-function cardEl(record: TurnRecord, defaultOpenDetail?: boolean, locale: EffectiveLocale = "zh-CN") {
+function cardEl(
+  record: TurnRecord,
+  defaultOpenDetail?: boolean,
+  locale: EffectiveLocale = "zh-CN",
+  processInitiallyExpanded?: boolean,
+  // Selection-prop overrides for the divergent-name guard (#1623): the
+  // defaults pin the null selection posture every other describe rides.
+  overrides?: {
+    selectedResult?: string | null;
+    onSelectResult?: (referenceName: string) => void;
+  },
+) {
   return (
     <IntlProvider locale={locale} messages={catalogFor(locale)}>
       <TooltipProvider>
@@ -55,6 +66,8 @@ function cardEl(record: TurnRecord, defaultOpenDetail?: boolean, locale: Effecti
             onRetryTurn={undefined}
             busy={false}
             defaultOpenDetail={defaultOpenDetail}
+            processInitiallyExpanded={processInitiallyExpanded}
+            {...overrides}
           />
         </QueryClientProvider>
       </TooltipProvider>
@@ -62,8 +75,13 @@ function cardEl(record: TurnRecord, defaultOpenDetail?: boolean, locale: Effecti
   );
 }
 
-function renderCard(record: TurnRecord, defaultOpenDetail?: boolean, locale: EffectiveLocale = "zh-CN") {
-  return render(cardEl(record, defaultOpenDetail, locale));
+function renderCard(
+  record: TurnRecord,
+  defaultOpenDetail?: boolean,
+  locale: EffectiveLocale = "zh-CN",
+  processInitiallyExpanded?: boolean,
+) {
+  return render(cardEl(record, defaultOpenDetail, locale, processInitiallyExpanded));
 }
 
 function recordWith(runtime: TurnRecord["provenance"]["runtime"]): TurnRecord {
@@ -180,6 +198,18 @@ describe("TurnCard narrow-column width caps (issue #860)", () => {
     const prose = container.querySelector(".round-text");
     expect(prose).not.toBeNull();
     expect(prose?.closest("[data-selection-source]")).not.toBeNull();
+  });
+
+  it("caps the materialized selection wrapper at the stream width (#1587)", () => {
+    // #1573's unclassed selection-source wrapper sits directly on the
+    // stream (flex-col items-start) as the face's own flex item -- unlike
+    // the textual face, whose cap rides .turn-outcome.textual. Without
+    // the cap the wrapper's min-content (a wide markdown table) blows it
+    // past the card and the rail's overflow-x crop hides the spill: the
+    // #860 materialized twin. jsdom cannot see the flex shrink chain, so
+    // the contract rides the class pin (the #826 precedent).
+    const { container } = renderCard(materializedRecord("物化正文回答"));
+    expect(container.querySelector("[data-selection-source]")).toHaveClass("max-w-full");
   });
 
   it("aligns the preview card with the prose column and paces its top gap", () => {
@@ -351,6 +381,86 @@ describe("TurnCard materialized link-row narrow-column caps (issue #872)", () =>
   });
 });
 
+describe("TurnCard result-name display axis (issue #1623)", () => {
+  // ADR-0037 dual-name: the thread surface shows the display name (the label
+  // the model supplied or the user chose); the reference name stays the SQL
+  // identity (ADR-0022) -- the selection guard below pins that the selection
+  // keys keep riding it while the rendered label diverges (the rail flows'
+  // equal-name fixtures cannot discriminate the two fields).
+  function labeledDataset(reference_name: string, display_name: string): DatasetDescriptor {
+    return { ...previewDataset, reference_name, display_name };
+  }
+
+  function labeledRecord(promotions: DatasetDescriptor[]): TurnRecord {
+    return {
+      ...recordWith(undefined),
+      outcome: {
+        kind: "Materialized",
+        data: {
+          promotions: promotions.map((dataset) => ({ dataset, sql: "SELECT 1" })),
+          viz: null,
+          body: null,
+          assumption: null,
+        },
+      },
+    };
+  }
+
+  it("labels the result link with the display name", () => {
+    const { getByRole } = renderCard(labeledRecord([labeledDataset("result_1", "销量汇总")]));
+    expect(getByRole("button", { name: "结果：销量汇总" })).toBeInTheDocument();
+  });
+
+  it("summarizes the antecedents line as a count trigger", () => {
+    const { getByRole, container } = renderCard(
+      labeledRecord([labeledDataset("result_1", "筛选后明细"), labeledDataset("result_2", "销量汇总")]),
+    );
+    expect(getByRole("button", { name: "结果：销量汇总" })).toBeInTheDocument();
+    // The names moved behind the count-sentence fold head (the process
+    // fold's chrome, no popover); the line reads the count sentence, the
+    // display names ride the chips inside the expansion.
+    const head = container.querySelector(".antecedents");
+    expect(head).toHaveTextContent("由 1 个中间结果派生");
+    // Collapsed baseline: the chips stay hidden until the head is clicked.
+    expect(container.querySelector(".antecedents")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("筛选后明细")).toBeNull();
+    fireEvent.click(head!);
+    expect(container.querySelector(".antecedents")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("筛选后明细")).toBeInTheDocument();
+  });
+
+  it("carries the display name into the preview card's accessible name", () => {
+    const { getByRole } = renderCard(labeledRecord([labeledDataset("result_1", "销量汇总")]));
+    expect(getByRole("button", { name: /销量汇总 的预览/ })).toBeInTheDocument();
+  });
+
+  it("renders the equal-name posture of an unlabelled result", () => {
+    const { getByRole } = renderCard(labeledRecord([labeledDataset("result_1", "result_1")]));
+    expect(getByRole("button", { name: "结果：result_1" })).toBeInTheDocument();
+  });
+
+  it("keeps the selection keys on the reference name while the label diverges", () => {
+    const onSelectResult = vi.fn();
+    const { getByRole } = render(
+      cardEl(
+        labeledRecord([labeledDataset("result_1", "销量汇总")]),
+        undefined,
+        "zh-CN",
+        undefined,
+        { selectedResult: "result_1", onSelectResult },
+      ),
+    );
+    // The active ring lands via the reference name while the link reads as
+    // its label, and both selection surfaces report the reference name.
+    const link = getByRole("button", { name: "结果：销量汇总" });
+    expect(link).toHaveAttribute("aria-current", "true");
+    fireEvent.click(link);
+    expect(onSelectResult).toHaveBeenLastCalledWith("result_1");
+    fireEvent.click(getByRole("button", { name: /销量汇总 的预览/ }));
+    expect(onSelectResult).toHaveBeenLastCalledWith("result_1");
+  });
+});
+
 describe("TurnCard textual outcome markdown (issue #827)", () => {
   function textualRecord(
     text_kind: TextKind,
@@ -512,8 +622,8 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     renderCard(dualRunRecord());
     // Issue #1282: the per-round folds live inside the turn-level process
     // fold -- the head opens first.
-    fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
-    screen.getAllByText("轨迹 · 1 次调用").forEach((t) => fireEvent.click(t));
+    fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
+    screen.getAllByText("轨迹 · analyst ×1").forEach((t) => fireEvent.click(t));
     fireEvent.click(screen.getAllByText("子智能体轨迹")[roundIndex]);
   };
 
@@ -540,8 +650,8 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     };
     renderCard(record);
     // Issue #1282: the head opens first; the per-round fold lives inside it.
-    fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
-    fireEvent.click(screen.getByText("轨迹 · 2 次调用"));
+    fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
+    fireEvent.click(screen.getByText("轨迹 · analyst ×2"));
     // The refusal renders no sub-trace fold (the row's own gate) --
     // exactly one openable expansion remains.
     const buttons = screen.getAllByText("子智能体轨迹");
@@ -598,7 +708,7 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     expect(head).not.toBeNull();
     expect(head).toHaveAttribute("aria-expanded", "false");
     // The per-round face mounts inside the fold on expand -- none of it at rest.
-    expect(screen.queryByText("轨迹 · 1 次调用")).not.toBeInTheDocument();
+    expect(container.querySelector(".trace-toggle")).toBeNull();
     expect(screen.queryByText("先看表")).not.toBeInTheDocument();
     // The answer is the reading mainstay -- outside the fold.
     expect(container.querySelector(".turn-outcome.textual")).not.toBeNull();
@@ -611,15 +721,20 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     // own text: the Textual Agent outcome word, seconds tier, fed by
     // settled_at - asked_at.
     const head = document.querySelector("button.process-toggle");
-    expect(head?.textContent).toBe("已回答 · 40秒");
+    expect(head?.textContent).toBe("已完成 · 40秒");
   });
 
   it("expands to the incumbent per-round face (thinking, prose, steps)", () => {
-    renderCard(tracedRecord());
-    fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
+    const { container } = renderCard(tracedRecord());
+    fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
     expect(screen.getByText("先看表")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "思考 · 3.2s" })).toBeInTheDocument();
-    expect(screen.getAllByText("轨迹 · 1 次调用")).toHaveLength(2);
+    // One count fold per round, labeled by the fixture's tool names
+    // (round 1 explore, round 2 materialize).
+    const folds = container.querySelectorAll(".trace-toggle");
+    expect(folds).toHaveLength(2);
+    expect(folds[0]).toHaveTextContent("轨迹 · explore ×1");
+    expect(folds[1]).toHaveTextContent("轨迹 · materialize ×1");
   });
 
   it("renders no head when the trace carries no content at all", () => {
@@ -628,6 +743,17 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     // The migrated empty-round shape (every member missing) guards the same.
     const emptyRound = renderCard({ ...recordWith(undefined), trace: [{ calls: [] }] });
     expect(emptyRound.container.querySelector("button.process-toggle")).toBeNull();
+  });
+
+  it("mounts the process fold already open when the live posture seeds it (issue #1606)", () => {
+    // The live activity line's expand posture lands as the turn-level
+    // process fold mounted open -- the process face the user was reading
+    // stays at the same spot across the settle swap.
+    renderCard(tracedRecord(), undefined, "zh-CN", true);
+    const head = screen.getByRole("button", { name: /已完成/ });
+    expect(head).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("先看表")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "思考 · 3.2s" })).toBeInTheDocument();
   });
 
   it("mounts the head for the pre-v5 migrated single round of bare calls", () => {
@@ -649,9 +775,17 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     expect(container.querySelector("button.process-toggle")).not.toBeNull();
   });
 
-  it("renders the en face with the latin tier suffix", () => {
-    renderCard(tracedRecord(), undefined, "en-US");
-    expect(document.querySelector("button.process-toggle")?.textContent).toBe("Answered · 40s");
+  it("renders the en face: latin tier suffix and the real-catalog fold words", () => {
+    const { container } = renderCard(tracedRecord(), undefined, "en-US");
+    expect(document.querySelector("button.process-toggle")?.textContent).toBe("Completed · 40s");
+    // The step prefix rides the real en-US catalog here -- its en word is
+    // otherwise asserted only through the defaultMessage face (TraceView,
+    // delegation), which the parity script's key-only check cannot cover.
+    fireEvent.click(screen.getByRole("button", { name: /Completed/ }));
+    const folds = container.querySelectorAll(".trace-toggle");
+    expect(folds).toHaveLength(2);
+    expect(folds[0]).toHaveTextContent("Trace · explore ×1");
+    expect(folds[1]).toHaveTextContent("Trace · materialize ×1");
   });
 
   it("keeps the collapsed head on a Failed turn with the failure card outside", () => {
@@ -671,14 +805,14 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     delete record.asked_at;
     delete record.settled_at;
     renderCard(record);
-    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已回答");
+    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已完成");
   });
 
   it("degrades honestly with one stamp missing: the head still carries no duration", () => {
     const record = tracedRecord();
     delete record.settled_at;
     renderCard(record);
-    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已回答");
+    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已完成");
   });
 
   it("degrades honestly on inverted stamps: no floor-seconds face", () => {
@@ -686,6 +820,6 @@ describe("TurnCard turn process fold (issue #1282)", () => {
     record.asked_at = 1e12;
     record.settled_at = 1e12 - 1500;
     renderCard(record);
-    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已回答");
+    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已完成");
   });
 });

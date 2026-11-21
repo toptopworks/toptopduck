@@ -159,6 +159,26 @@ export interface TraceEntry {
   // -- the capped delegation report's truncation notice excepted
   // (issue #1047).
   result_excerpt: string;
+  // The model-visible error text of a FAILED call (issue #1610), capped at
+  // the failure-detail budget: the full text the error branch handed the
+  // model, rendered by the failure anchor in place of the excerpt head.
+  // Absent on every success entry and on every arm that produced no real
+  // text (a denial constant, a synthesized marker); absent on pre-#1610
+  // records -- the anchor falls back to result_excerpt.
+  failure_detail?: string;
+  // The landed line counts of a successful built-in write/edit (issue
+  // #1621): added = the lines the call wrote (write: the whole content;
+  // edit: new_string), removed = the displaced old_string lines (absent on
+  // a write -- an overwrite's +N names the lines landed, not a diff).
+  // Absent on every failed / denied entry, every non-write call, and
+  // pre-#1621 records (serde degrade, zero migration).
+  lines_added?: number;
+  // The removed-line half of the landed counts -- see lines_added.
+  lines_removed?: number;
+  // The edit's replacement count (issue #1621): how many sites
+  // old_string replaced (a count beyond 1 implies replace_all). Absent on
+  // a write and every non-write arm; the expanded-block line reads it.
+  replacements?: number;
   // The delegation report's FULL text (ADR-0135 Decision 3), present only
   // on a live delegation's completion -- a display-face fact the slim
   // projection does not persist (after resume only the excerpt exists, so

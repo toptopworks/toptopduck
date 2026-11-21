@@ -30,6 +30,7 @@
 mod adapter;
 mod cancel;
 mod fold;
+mod invalid_tool;
 mod live;
 mod model;
 mod subagent;
@@ -70,6 +71,7 @@ use crate::session::turn_dispatch::{
 use adapter::{DispatchOutcome, DispatchRequest, PhaseSink, SharedTurnState};
 use cancel::CancelWatcher;
 use fold::EventFold;
+use invalid_tool::InvalidToolSkipper;
 use model::INVALID_CONFIG_PREFIX;
 
 pub(crate) use live::{one_shot_tool_turn, turn_loop_for};
@@ -368,13 +370,16 @@ impl LoopRuntime {
                         .completed
                         .lock()
                         .expect("completed lock poisoned")
-                        .push_back(TraceEntry::failed(
-                            call.id.clone(),
-                            call.name.clone(),
-                            operation_kind,
-                            summary,
-                            truncate_trace_excerpt(&refusal, TRACE_EXCERPT_MAX),
-                        ));
+                        .push_back(
+                            TraceEntry::failed(
+                                call.id.clone(),
+                                call.name.clone(),
+                                operation_kind,
+                                summary,
+                                truncate_trace_excerpt(&refusal, TRACE_EXCERPT_MAX),
+                            )
+                            .with_failure_detail(&refusal),
+                        );
                     channel.recorded_calls.fetch_add(1, Ordering::SeqCst);
                     let result = crate::provider::tool_calling::ToolResult {
                         tool_use_id: call.id.clone(),
@@ -960,6 +965,11 @@ async fn open_step_window(
         // cancel watcher rides. The clone reopens a window onto the same
         // watcher/record pair, keeping the last-turn semantics.
         .add_hook(finish_watcher.clone())
+        // The invalid-tool-call self-correction (issue #1625): a
+        // hallucinated tool name feeds back a synthetic error result the
+        // next turn corrects from, instead of failing the whole run.
+        // Stateless, so one registration per window needs no sharing.
+        .add_hook(InvalidToolSkipper)
         .into_future()
         .await
 }

@@ -455,6 +455,7 @@ mod tests {
             memory_limit: "1024MB".into(),
             threads: 8,
             row_cap: 500_000,
+            extension_channel: crate::app_config::ExtensionChannel::default(),
         };
         // Seed the ACTIVE profile's endpoint (the ADR-0098 defaults ship zero
         // profiles) so a successful round-trip is distinguishable from a
@@ -514,6 +515,7 @@ mod tests {
                 memory_limit: "1024MB".into(),
                 threads: 8,
                 row_cap: 500,
+                extension_channel: crate::app_config::ExtensionChannel::default(),
             }
         );
         write_at(&path, &cfg).expect("rewrite");
@@ -545,6 +547,7 @@ mod tests {
                 memory_limit: crate::guardrail::MEMORY_LIMIT.to_string(),
                 threads: 1,
                 row_cap: 1,
+                extension_channel: crate::app_config::ExtensionChannel::default(),
             }
         );
     }

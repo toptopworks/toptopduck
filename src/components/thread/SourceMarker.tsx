@@ -111,7 +111,7 @@ export function SourceMarker({
     <p
       className={cn(
         "source-lifecycle flex items-center gap-1.5 m-0 py-0.5",
-        "text-xs text-muted-foreground",
+        "text-sm text-muted-foreground",
         // Hook class kept for kind-targeted selectors/tests (.source-lifecycle.added etc.).
         event.kind.toLowerCase(),
         // Jump-select highlight (ADR-0047 chip-trace, issue #721): the row
@@ -130,7 +130,7 @@ export function SourceMarker({
           highlighted && "ring-2 ring-primary",
         )}
       >
-        <Icon className={cn("source-icon w-3 h-3 shrink-0", iconTone)} aria-hidden="true" />
+        <Icon className={cn("source-icon w-3.5 h-3.5 shrink-0", iconTone)} aria-hidden="true" />
       </span>
       <TruncatingTooltip
         text={staleSuffix ? <>{text}{staleSuffix}</> : text}

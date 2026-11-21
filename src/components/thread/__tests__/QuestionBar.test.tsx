@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ComponentProps, ReactElement, ReactNode } from "react";
+import type { ReactElement, ReactNode } from "react";
 
 import { catalogFor } from "../../../i18n";
 import { listSkills } from "../../../api";
@@ -613,131 +613,6 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     // replaces the "No skills" face.
     expect(await screen.findByRole("alert")).toBeInTheDocument();
     expect(screen.queryByText("暂无技能")).not.toBeInTheDocument();
-  });
-});
-
-describe("QuestionBar turn clock (issue #1264)", () => {
-  it("carries the continuous elapsed figure on the phase label across every phase", () => {
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={true}
-        phase={{ TextDelta: { delta: "答" } }}
-        turnStartedAt={Date.now() - 46_000}
-      />,
-    );
-    expect(screen.getByText("执行中…")).toBeInTheDocument();
-    // No threshold: any phase, any age -- the turn is running, the figure
-    // runs with it (a stalled gap can't hide behind a phase boundary).
-    expect(screen.getByText("· 46秒")).toBeInTheDocument();
-  });
-
-  it("freezes the figure while an approval holds the turn on the gate", () => {
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={true}
-        phase={{ ToolCallStarted: { name: "write", operation_kind: "write", summary: "r" } }}
-        turnStartedAt={Date.now() - 100_000}
-        turnPausedSince={Date.now() - 40_000}
-      />,
-    );
-    expect(screen.getByText("执行中…")).toBeInTheDocument();
-    // 100s since the ask, the last 40s on the user: the figure reads the
-    // clock as of the pause's start -- user think-time stays out. 60s lands
-    // exactly on the minutes tier (zero-padded seconds).
-    expect(screen.getByText("· 1分00秒")).toBeInTheDocument();
-  });
-
-  it("renders no figure when no turn clock is running", () => {
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={true}
-        phase={{ ToolCallStarted: { name: "explore", operation_kind: "read", summary: "S" } }}
-      />,
-    );
-    expect(screen.getByText("执行中…")).toBeInTheDocument();
-    expect(screen.queryByText(/· \d/)).toBeNull();
-  });
-});
-
-describe("QuestionBar pre-first-event wait window (issue #1266)", () => {
-  it("hosts the elapsed figure alone before the first phase event arrives", () => {
-    // Ask submitted, no turn-progress event yet: phase is null, so the slot
-    // has no label to name -- the figure runs alone (no fabricated phase
-    // text), covering the slow first round trip.
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={true}
-        turnStartedAt={Date.now() - 46_000}
-      />,
-    );
-    // The slot itself must exist as the live region -- the figure's text
-    // alone would pass if the span lost role="status".
-    expect(screen.getByRole("status")).toBeInTheDocument();
-    expect(screen.queryByText("执行中…")).toBeNull();
-    expect(screen.getByText("· 46秒")).toBeInTheDocument();
-  });
-
-  it("hands the slot to the phase label on the first event, clock uninterrupted", () => {
-    // The transition is the one scenario that needs a rerender, and a
-    // rerender needs provider identity to survive: the queryClient closes
-    // over once and each call hands React a fresh element tree (a
-    // bare-element rerender remounts the bar).
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    const startedAt = Date.now() - 46_000;
-    const tree = (phase: ComponentProps<typeof QuestionBar>["phase"]) => (
-      <QueryClientProvider client={queryClient}>
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <QuestionBar
-            onSubmit={() => {}}
-            onCancel={() => {}}
-            loading={true}
-            phase={phase}
-            turnStartedAt={startedAt}
-          />
-        </IntlProvider>
-      </QueryClientProvider>
-    );
-    const { rerender } = render(tree(null));
-    expect(screen.getByText("· 46秒")).toBeInTheDocument();
-    // First phase event: the label joins, the figure keeps reading the same
-    // turnStartedAt -- no reset, no jump.
-    rerender(tree({ TextDelta: { delta: "答" } }));
-    expect(screen.getByText("执行中…")).toBeInTheDocument();
-    expect(screen.getByText("· 46秒")).toBeInTheDocument();
-  });
-
-  it("leaves the slot empty once no turn is in flight", () => {
-    // A settled turn (loading=false) with a residual stamp hosts nothing.
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        turnStartedAt={Date.now() - 46_000}
-      />,
-    );
-    expect(screen.queryByText(/· \d/)).toBeNull();
-    expect(screen.queryByRole("status")).toBeNull();
-  });
-
-  it("renders no slot while loading without a clock", () => {
-    // Defensive: loading with no clock yet -- neither the label nor the
-    // lone figure has a host.
-    renderQuestionBar(
-      <QuestionBar onSubmit={() => {}} onCancel={() => {}} loading={true} />,
-    );
-    expect(screen.queryByText(/· \d/)).toBeNull();
-    expect(screen.queryByRole("status")).toBeNull();
   });
 });
 

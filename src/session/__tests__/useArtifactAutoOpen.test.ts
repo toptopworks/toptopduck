@@ -62,6 +62,25 @@ describe("useArtifactAutoOpen", () => {
     expect(h.selectFile).toHaveBeenLastCalledWith("/a/second.pdf");
   });
 
+  it("a new turn re-delivering the SAME paths re-arms (the regenerated file)", () => {
+    // Round 1 opens the report; round 2 overwrites the SAME file and
+    // re-presents it. The signature pins the owning turn's thread position,
+    // so the fresh delivery re-arms even though the paths are unchanged --
+    // the result page moves onto the regenerated content instead of sitting
+    // on the stale round-1 view.
+    const h = harness([]);
+    // The live sequence's first hop: the optimistic append carries no
+    // manifest, so the init scan spends nothing and the manifest hop fires.
+    act(() => h.rerender({ thread: [textual("optimistic append")] }));
+    act(() => h.rerender({ thread: [artifactTurn(["/a/report.pdf"])] }));
+    expect(h.selectFile).toHaveBeenCalledTimes(1);
+    act(() =>
+      h.rerender({ thread: [artifactTurn(["/a/report.pdf"]), artifactTurn(["/a/report.pdf"])] }),
+    );
+    expect(h.selectFile).toHaveBeenCalledTimes(2);
+    expect(h.selectFile).toHaveBeenLastCalledWith("/a/report.pdf");
+  });
+
   it("a both-present turn never steals the stage (ADR-0124 Decision 3)", () => {
     const h = harness([]);
     const both = artifactTurn(["/a/x.pdf"], (materialized("result_1").data as TurnRecord).outcome);

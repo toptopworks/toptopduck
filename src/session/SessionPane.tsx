@@ -48,7 +48,7 @@ import { useSkillsRegistry } from "../skills/registry";
 //
 // ADR-0092: QuestionBar moved to the shell level. SessionPane no longer owns
 // the bar or its composer controls. It reports its bar-relevant fields
-// (loading / queued / phase / handleAsk / handleCancel / handleIngestFiles)
+// (loading / queued / handleAsk / handleCancel / handleIngestFiles)
 // upward via onComposerFields so the shell-level bar can read them for the
 // active session.
 // Pending payloads from a cold-start submit (#500) are consumed on mount by
@@ -104,7 +104,7 @@ interface SessionPaneProps {
    *  precedent -- identity-stable, sid-addressed. */
   onStageQuote: (sessionId: string, text: string) => void;
   /** ADR-0092: lifts this session's bar-relevant fields (loading / queued /
-   *  phase / handleAsk / handleCancel / handleIngestFiles) to the
+   *  handleAsk / handleCancel / handleIngestFiles) to the
    *  shell-level bar. Called via useEffect whenever the fields change. */
   onComposerFields: (sessionId: string, fields: ComposerSessionFields) => void;
   /** ADR-0092: drop this session's bar-fields entry on unmount (close / delete
@@ -139,6 +139,14 @@ interface SessionPaneProps {
   /** ADR-0093 (issue #512): shell callback to permanently delete this
    *  session. Receives the recipe.json path + runtime sid. */
   onDelete: (recipePath: string, sessionId: string) => void;
+  /** Issue #1629: report this session's turn-running state (the turn domain's
+   *  `turnLoading`) to the shell, whose sidebar runningSids set drives the
+   *  row's running dot + the close/delete running guards. The sid-taking
+   *  shape mirrors onFirstTurnSettled: the shell passes a useCallback-stable
+   *  handler, so this effect re-fires only on the flag's own flips. The
+   *  cleanup reports false, so a close / unmount mid-turn cannot strand the
+   *  row lit. */
+  onTurnRunningChange: (sessionId: string, running: boolean) => void;
   /** Shell-wide busy gate: disables the header menu trigger during
    *  persistence / resume operations (ADR-0093, matching the sidebar's
    *  disabled={busy} contract). */
@@ -163,7 +171,7 @@ type RightSidebarTab = (typeof RIGHT_SIDEBAR_TABS)[number];
  * panel's pt stacks on the host's for a doubled 32px. */
 const EDGE_DOCKED_SCROLL_CLASS = "-m-4 overflow-y-auto p-4";
 
-/** The file stage posture (the WorkBuddy report pane): the panel retires as
+/** The file stage posture (the report pane): the panel retires as
  * a scroll container -- a breakout inside a scroll container enters its
  * scrollable overflow region (margins don't shrink it), so the panel would
  * grow scrollbars that re-indent the very edges the breakout opened. The
@@ -172,7 +180,7 @@ const EDGE_DOCKED_SCROLL_CLASS = "-m-4 overflow-y-auto p-4";
  * padding, or the stage header's border-b sits flush on the tab strip's. */
 const FILE_STAGE_CLASS = "-mx-4 -mb-4 overflow-hidden";
 
-export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onStageQuote, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, recipePath, onRename, onClose, onDelete, disabled }: SessionPaneProps) {
+export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onStageQuote, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, recipePath, onRename, onClose, onDelete, onTurnRunningChange, disabled }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -206,6 +214,16 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     handleApprovalsSettled,
     onFirstTurnSettled,
   );
+  // Issue #1629: mirror the turn domain's loading flag to the shell (the
+  // sidebar's running dot + the close/delete running guards). The stable
+  // sid-taking handler keeps this effect on the flag's own flips; the
+  // cleanup reports false, so a close / unmount mid-turn cannot strand the
+  // row lit.
+  const turnRunning = s.turnLoading;
+  useEffect(() => {
+    onTurnRunningChange(sessionId, turnRunning);
+    return () => onTurnRunningChange(sessionId, false);
+  }, [onTurnRunningChange, sessionId, turnRunning]);
   // Issue #1500: the composer question's queue behind an in-flight ingest
   // batch. The tracked ingestMany is the ingest arming point -- one of two
   // (#1512): the manual "+" section (the shell-reported handleIngestFiles),
@@ -270,8 +288,8 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // (the composer registry owns the registry and its identity contract --
   // see composerRegistry.ts; the reported handlers must stay
   // useCallback-stable).
-  // The payload is the pane-side selection: the TURN-domain turnLoading /
-  // phase, NOT the union `loading` (turn OR mutation, ADR-0040) -- a dataset
+  // The payload is the pane-side selection: the TURN-domain turnLoading,
+  // NOT the union `loading` (turn OR mutation, ADR-0040) -- a dataset
   // mutation's in-flight window must not flip the bar's Ask/Stop button (the
   // reported flicker). rightSidebarCollapsed (bar-shaping, ADR-0083 fold)
   // changes on the fold toggle + the one-shot first-Materialized expansion;
@@ -281,9 +299,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     onComposerFields(sessionId, {
       loading: s.turnLoading,
       queued,
-      phase: s.phase,
-      turnStartedAt: s.turnStartedAt,
-      turnPausedSince: s.turnPausedSince,
       handleAsk: queuedHandleAsk,
       handleCancel: s.handleCancel,
       handleIngestFiles: ingestMany,
@@ -293,9 +308,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     sessionId,
     s.turnLoading,
     queued,
-    s.phase,
-    s.turnStartedAt,
-    s.turnPausedSince,
     queuedHandleAsk,
     s.handleCancel,
     ingestMany,
@@ -417,7 +429,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     const text = selectionActive?.text;
     if (text === undefined) return;
     // Success: the toast announces, the toolbar leaves, the selection
-    // clears (the WorkBuddy shape). Failure: log + the toolbar stays put --
+    // clears. Failure: log + the toolbar stays put --
     // nothing was copied, so nothing may close.
     navigator.clipboard
       .writeText(text)
@@ -478,7 +490,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // resetSessionCache never touches them.
   const resetArtifactCache = (path: string) => {
     queryClient.removeQueries({ queryKey: artifactKeys.exists(path) });
-    queryClient.removeQueries({ queryKey: artifactKeys.text(path) });
+    queryClient.removeQueries({ queryKey: artifactKeys.textFamily(path) });
   };
 
   // Issue #758: the ask-again sink -- the stale banner's rerun and the rail's
@@ -566,7 +578,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           (issue #512): the `⋯` management menu (Rename / Close / Delete)
           follows the name. The header now lives INSIDE the conversation
           column (see session-body below) so the column divider runs
-          unbroken from the pane top -- WorkBuddy topology, no line break
+          unbroken from the pane top -- full-height topology, no line break
           at the header row. The right-sidebar toggle (ADR-0083, issue #298)
           rides the right-sidebar tab row's far edge while the panel is
           expanded, and falls back to this header's right edge while folded
@@ -610,6 +622,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               onRename={onRename}
               onClose={onClose}
               onDelete={onDelete}
+              turnRunning={turnRunning}
               disabled={disabled}
             />
             <div className="flex-1" data-tauri-drag-region />
@@ -684,11 +697,11 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   staleByReference={s.staleByReference}
                   datasetLabels={datasetLabels}
                   skillIndex={skillIndex}
-                  // ADR-0078/0083 (issue #297): the in-flight turn's progressive
-                  // trace card (tool-call rows + approval cards) trails the
-                  // recorded thread while a turn runs.
+                  // ADR-0078/0083 (issue #297; process face ADR-0151): the
+                  // in-flight turn's live exchange (prose segments + the
+                  // activity line + sealed folds) trails the recorded thread
+                  // while a turn runs.
                   liveTurn={s.liveTurn}
-                  waitStartedAt={s.waitStartedAt}
                   ingestProgress={s.ingestProgress}
                   replaceProgress={replaceProgress}
                   onRespondApproval={handleRespondApproval}
@@ -1107,13 +1120,18 @@ function RightSidebarResult({
       // fallback card).
       return (
         <ErrorBoundary
-          key={content.path}
+          // The delivery rides the path identity: a re-delivery of the SAME
+          // path (a regenerated file) remounts too -- the body re-reads the
+          // file and a crash degrade never pins the new delivery to the old
+          // card (the #1199 rationale, extended to the delivery axis).
+          key={`${content.path}:${content.delivery}`}
           name="artifact"
           onReset={() => onResetArtifact(content.path)}
         >
           <ArtifactView
             artifact={{ path: content.path, file_name: content.fileName }}
             render={content.render}
+            delivery={content.delivery}
           />
         </ErrorBoundary>
       );

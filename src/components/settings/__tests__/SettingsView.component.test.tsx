@@ -107,7 +107,7 @@ function SettingsViewHarness({
 
 describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => {
   const baseConfig = baseAppConfig({
-    engine: { memory_limit: "512MB", threads: 2, row_cap: 1000 },
+    engine: { memory_limit: "512MB", threads: 2, row_cap: 1000, extension_channel: "off" },
     provider: {
       profiles: [
         {
@@ -615,12 +615,11 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     // The pane copy stays truthful (issue #741 flipped the #739 statement):
     // saved values now reach sessions -- as the snapshot taken at session
     // creation, so only sessions created after a change see it.
-    expect(screen.getByText(/apply to newly created sessions/)).toBeInTheDocument();
-    expect(screen.getByText(/Changes affect new sessions only/)).toBeInTheDocument();
+    expect(screen.getByText(/apply to sessions created afterwards/)).toBeInTheDocument();
     // Three independent Save buttons (memory limit / threads / row cap).
     expect(screen.getAllByRole("button", { name: "Save" })).toHaveLength(3);
-    // Edit the threads input (the first spinbutton) and save just that field.
-    fireEvent.change(screen.getAllByRole("spinbutton")[0], { target: { value: "8" } });
+    // Edit the threads input (the second spinbutton) and save just that field.
+    fireEvent.change(screen.getAllByRole("spinbutton")[1], { target: { value: "8" } });
     fireEvent.click(screen.getAllByRole("button", { name: "Save" })[1]);
     await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(1));
     const committed = onCommitAppConfig.mock.calls[0][0];
@@ -1279,7 +1278,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("a numeric engine field can be cleared; an empty save clamps to the minimum", async () => {
     const { onCommitAppConfig } = renderView();
     fireEvent.click(screen.getByRole("button", { name: "Analysis Engine" }));
-    const threads = screen.getAllByRole("spinbutton")[0];
+    const threads = screen.getAllByRole("spinbutton")[1];
     fireEvent.change(threads, { target: { value: "" } });
     // The field stays clearable (no snap back to 1). RTL's toHaveValue reads an
     // empty number input as null, so assert on the DOM value directly.

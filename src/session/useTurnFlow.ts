@@ -66,6 +66,19 @@ export interface LiveCall {
   /** null until the completion event lands (a running dispatch). */
   success: boolean | null;
   resultExcerpt: string;
+  /** The completion's model-visible failure text (issue #1610), mirrored from
+   *  the wire entry; undefined until the completion lands, for a success
+   *  call, and for a no-text arm (the anchor falls back to the excerpt). */
+  failureDetail?: string;
+  /** The landed line counts of a successful built-in write/edit (issue
+   *  #1621), mirrored from the wire entry; undefined until the completion
+   *  lands and on every arm the wire omits them on. */
+  linesAdded?: number;
+  /** The removed-line half of the landed counts -- see linesAdded. */
+  linesRemoved?: number;
+  /** The edit's replacement count (issue #1621), mirrored from the wire
+   *  entry; undefined on a write and every non-edit arm. */
+  replacements?: number;
   /** The delegation entry's nested sub-rounds (issue #934), delivered by the
    *  completion event; undefined for an ordinary call. */
   subRounds?: TraceRound[];
@@ -107,6 +120,19 @@ export interface LiveTraceRow {
   running: boolean;
   success: boolean | null;
   resultExcerpt: string;
+  /** The completion's model-visible failure text (issue #1610), carried
+   *  through the merge; undefined for the same arms the wire entry omits
+   *  it on. */
+  failureDetail?: string;
+  /** The landed line counts of a successful built-in write/edit (issue
+   *  #1621), carried through the merge for the row's `+N −M` badge;
+   *  undefined for the same arms the wire entry omits them on. */
+  linesAdded?: number;
+  /** The removed-line half of the landed counts -- see linesAdded. */
+  linesRemoved?: number;
+  /** The edit's replacement count (issue #1621) for the expand block's
+   *  replacements line; undefined on a write and every non-edit arm. */
+  replacements?: number;
   /** The delegation entry's nested sub-rounds (issue #934), carried through
    *  the merge so the settled row renders the view affordance. */
   subRounds?: TraceRound[];
@@ -180,6 +206,14 @@ export interface LiveTurn {
    *  (ingest, skill changes) all converge the append onto the recorded row
    *  (ADR-0051 / issue #1088). */
   askedAt: number;
+  /** The turn clock's pause origin (issue #1264's ruling, re-hosted here by
+   *  #1612): the earliest PENDING approval's arrival stamp -- the elapsed
+   *  figure freezes there while the user decides; on release it jumps to the
+   *  turn's true wall age (the hold is hidden while it lasts, never
+   *  subtracted). null while no approval is pending. Derived in the liveTurn
+   *  memo -- the same single source the figure's host reads, so the clock
+   *  can never drift from the turn it belongs to. */
+  pausedSince: number | null;
   /** The skill names staged at submit (ADR-0119: the turn's user
    *  invocations, client-known before the IPC returns). The live bubble's
    *  badge renders from them; the settled card reads the recorded
@@ -203,8 +237,8 @@ export interface LiveTurn {
   runtime?: TurnRuntime;
 }
 
-/** Whether the live turn sits in an LLM round-trip wait -- the trailing
- *  status line's gate and the wait-elapsed stamp's arm (issue #1264): true
+/** Whether the live turn sits in an LLM round-trip wait -- the activity
+ *  line's face gate (ADR-0151): true
  *  while nothing else on the tail carries the CURRENT round's liveness.
  *  While a call dispatches (or waits at the gate) its row carries the
  *  motion, and while #1163 streams the current round's prose -- prose that
@@ -218,8 +252,8 @@ export interface LiveTurn {
  *  every LLM round-trip wait (ask start, the inter-round wait, the new
  *  round's pre-prose thinking, the sealed-tail wait beside settled rows),
  *  with the step surfaced past the first round-trip ("step N", ADR-0081).
- *  One predicate for the rail's status gate and the hook's stamp, so the
- *  two can never drift. */
+ *  One predicate for every wait-naming surface, so the faces reading it
+ *  can never drift. */
 export function isRoundTripWait(turn: Pick<LiveTurn, "rounds" | "step">): boolean {
   const rowInProgress = turn.rounds.some((round) =>
     round.rows.some((row) => row.running || row.success === null),
@@ -272,6 +306,10 @@ export function mergeLiveTrace(
         running: call.running,
         success: call.success,
         resultExcerpt: call.resultExcerpt,
+        failureDetail: call.failureDetail,
+        linesAdded: call.linesAdded,
+        linesRemoved: call.linesRemoved,
+        replacements: call.replacements,
         subRounds: call.subRounds,
         callId: call.callId,
       });
@@ -287,6 +325,10 @@ export function mergeLiveTrace(
         running: call.running,
         success: call.success,
         resultExcerpt: call.resultExcerpt,
+        failureDetail: call.failureDetail,
+        linesAdded: call.linesAdded,
+        linesRemoved: call.linesRemoved,
+        replacements: call.replacements,
         subRounds: call.subRounds,
         callId: call.callId,
       });
@@ -397,6 +439,10 @@ export function buildLiveRounds(
         running: r.running,
         success: r.success,
         resultExcerpt: r.resultExcerpt,
+        failureDetail: r.failureDetail,
+        linesAdded: r.linesAdded,
+        linesRemoved: r.linesRemoved,
+        replacements: r.replacements,
         subRounds: r.subRounds,
         callId: r.callId,
         delegation: r.callId !== undefined ? views.get(r.callId) : undefined,
@@ -429,6 +475,10 @@ function foldRounds(fold: RoundFold): LiveRound[] {
         running: c.running,
         success: c.success,
         resultExcerpt: c.resultExcerpt,
+        failureDetail: c.failureDetail,
+        linesAdded: c.linesAdded,
+        linesRemoved: c.linesRemoved,
+        replacements: c.replacements,
         subRounds: c.subRounds,
       })),
   }));
@@ -457,6 +507,10 @@ export function traceEntryFromRow(row: SettledLiveRow): TraceEntry {
     summary: row.summary,
     success: row.success,
     result_excerpt: row.resultExcerpt,
+    failure_detail: row.failureDetail,
+    lines_added: row.linesAdded,
+    lines_removed: row.linesRemoved,
+    replacements: row.replacements,
     sub_rounds: row.subRounds,
   };
 }
@@ -569,34 +623,18 @@ export interface UseTurnFlowDeps {
 }
 
 export interface UseTurnFlow {
-  /** The in-flight turn's latest progress event (ADR-0059): Thinking with the
-   *  1-based step, or the last tool-call event. null when no turn is running.
-   *  Client UI state only -- drives the QuestionBar's compact phase label. */
-  phase: TurnPhase | null;
-  /** The in-flight turn's live trace (ADR-0078, issue #297; chat form #610):
-   *  the rail renders it as a chat exchange -- the user bubble at submit plus
-   *  the streaming assistant side (round prose / thinking folds / rows +
-   *  approval cards). null when no turn is running. Built from the
+  /** The in-flight turn's live trace (ADR-0078, issue #297; chat form #610;
+   *  process face ADR-0151): the rail renders it as a chat exchange -- the
+   *  user bubble at submit plus the streaming assistant side (connective
+   *  prose segments + ONE activity line + sealed fold lines). null when no
+   *  turn is running. Built from the
    *  turn-progress tool-call events merged with the session's approval
    *  entries; folds into the optimistic TurnRecord.trace when the turn
-   *  settles. */
+   *  settles. The turn clock rides it too (issue #1264's ruling re-hosted,
+   *  #1612): `askedAt` + `pausedSince` ARE the clock -- the activity line's
+   *  elapsed figure derives from them, so the mirror fields that fed the
+   *  retired composer wait slot are gone. */
   liveTurn: LiveTurn | null;
-  /** The LLM round-trip wait window's start stamp (issue #1264): non-null
-   *  while the live turn sits in isRoundTripWait -- the rail's trailing
-   *  status line derives its elapsed-seconds suffix from it (the bar reads
-   *  the turn clock below instead). null outside a wait window. */
-  waitStartedAt: number | null;
-  /** The turn clock's start (issue #1264 turn-clock ruling): the ask's
-   *  submit stamp while a turn is in flight, null otherwise -- the
-   *  QuestionBar's continuous elapsed figure derives from it, across every
-   *  phase of the turn (a slow gap can't hide behind a phase boundary). */
-  turnStartedAt: number | null;
-  /** The turn clock's pause origin: the earliest PENDING approval's
-   *  arrival stamp -- the displayed figure freezes there while the user
-   *  decides; on release it jumps to the turn's true wall age (the hold is
-   *  hidden while it lasts, never subtracted). null while no approval is
-   *  pending. */
-  turnPausedSince: number | null;
   // Declared Promise<void> (not void) so the contract reflects the async
   // implementation: callers can await/.catch to chain post-ask work. Fire-
   // and-forget callers (QuestionBar onSubmit/onCancel) still accept it via
@@ -681,6 +719,7 @@ function callRow(
   resultExcerpt: string,
   subRounds?: TraceRound[],
   callId?: string,
+  failureDetail?: string,
 ): LiveCall {
   return {
     key: `call-${seq}`,
@@ -693,6 +732,7 @@ function callRow(
     subRounds,
     success,
     resultExcerpt,
+    failureDetail,
   };
 }
 
@@ -731,6 +771,17 @@ function completeCallAt(calls: LiveCall[], idx: number, entry: TraceEntry): Live
           running: false,
           success: entry.success,
           resultExcerpt: entry.result_excerpt,
+          // The model-visible failure text rides the completion beside its
+          // bounded head (issue #1610); undefined for a success / no-text arm.
+          failureDetail: entry.failure_detail,
+          // The landed write/edit stats ride the completion (issue #1621);
+          // undefined on every arm the wire omits them on (a failure, a
+          // denial, a non-write call). The unpaired append below never
+          // carries them: its sole producer is the gate-denied arm, whose
+          // wire entry has none.
+          linesAdded: entry.lines_added,
+          linesRemoved: entry.lines_removed,
+          replacements: entry.replacements,
           // The delegation entry's nested sub-trace rides the completion
           // event (issue #934); undefined for an ordinary call.
           subRounds: entry.sub_rounds,
@@ -821,6 +872,8 @@ function applyRoundFold(fold: RoundFold, phase: TurnPhase): RoundFold {
         entry.success,
         entry.result_excerpt,
         entry.sub_rounds,
+        undefined,
+        entry.failure_detail,
       ),
     ],
   };
@@ -946,7 +999,6 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
   // (issue #229), so destructuring here lets handleAsk keep its prior identity
   // across renders instead of rebuilding on every parent render.
   const { markProduced, suppressInit } = viewed;
-  const [phase, setPhase] = useState<TurnPhase | null>(null);
   // The in-flight turn's question + Thinking step + tool-call rows. null = no
   // turn running. The approval cards merge in at the liveTurn derivation below
   // (single source of truth: this state owns ONLY the turn-progress channel).
@@ -975,30 +1027,9 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
   // memo recomputes the same value). useCallback-stable (it closes over refs
   // + a setter + module constants only), so the listener effect mounts once
   // and handleAsk keeps its identity across renders.
-  const [waitStartedAt, setWaitStartedAt] = useState<number | null>(null);
-  // The wait stamp's synchronous mirror (the same refs-first idiom as the
-  // live mirrors above).
-  const waitStartedAtRef = useRef<number | null>(null);
   const commitLive = useCallback((next: LiveState | null) => {
     liveRef.current = next;
     roundsRef.current = next === null ? NO_ROUNDS : buildLiveRounds(next, approvalsRef.current);
-    // The wait stamp rides the same commits the live state takes (issue
-    // #1264): a commit whose rounds sit in the round-trip wait opens the
-    // window once -- the falsy guard keeps the opening stamp across the
-    // window's later commits -- and any other commit closes it: a live arm
-    // engaged (row dispatching / tail streaming), or the ask finally's
-    // null (a successor turn opens its own window, never inherits this
-    // one's). Render sites derive the elapsed-seconds suffix from the
-    // stamp -- derive-from-stamp, so a hidden keep-alive page's throttled
-    // ticker heals to the true elapsed time on visibility.
-    const waiting =
-      next !== null && isRoundTripWait({ rounds: roundsRef.current, step: next.step });
-    if (waiting && waitStartedAtRef.current === null) {
-      waitStartedAtRef.current = Date.now();
-    } else if (!waiting && waitStartedAtRef.current !== null) {
-      waitStartedAtRef.current = null;
-    }
-    setWaitStartedAt(waitStartedAtRef.current);
     setLive(next);
   }, []);
 
@@ -1020,7 +1051,6 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
     let unlisten: (() => void) | null = null;
     void onTurnProgress((ev) => {
       if (!active || ev.session_id !== sessionId) return;
-      setPhase(ev.phase);
       // applyPhase passes null through: a late event past the ask's finally
       // finds no live turn and drops.
       commitLive(applyPhase(liveRef.current, ev.phase));
@@ -1049,6 +1079,13 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
     return {
       question: live.question,
       askedAt: live.askedAt,
+      // The turn clock's pause origin (issue #1264's ruling, re-hosted by
+      // #1612): the earliest PENDING approval in arrival order (the rail
+      // renders cards in the order the gateway raised them, so the first
+      // pending is the earliest hold). approvals is already this memo's
+      // dependency, so the clock re-derives with the rounds it freezes.
+      pausedSince:
+        approvals.find((a) => a.status.kind === "pending")?.receivedAt ?? null,
       invocationNames: live.invocationNames,
       step: live.step,
       rounds: buildLiveRounds(live, approvals),
@@ -1156,15 +1193,14 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         void pollPersistError();
         return;
       } finally {
-        // ADR-0059: clear the phase on every ask end (incl. Cancelled outcome /
-        // IPC failure) -- the in-flight turn is done. Loading stays on through
-        // the post-outcome invalidation below; phase is a turn-lifecycle hint,
-        // not a UI-busy flag. The live card folds here too: roundsRef holds
+        // ADR-0059: the in-flight turn is done on every ask end (incl.
+        // Cancelled outcome / IPC failure). Loading stays on through
+        // the post-outcome invalidation below. The live card folds here too:
+        // roundsRef holds
         // the synchronously-mirrored settled rounds (captured above, so the
         // final event's row survives even when its render is still pending),
         // and the app-level approval hook clears this session's folded cards.
         settledTrace = liveRoundsToTrace(roundsRef.current, outcome);
-        setPhase(null);
         commitLive(null);
         onApprovalsSettled?.();
       }
@@ -1297,31 +1333,22 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
     try {
       await cancelQuery(sessionId);
     } catch (e) {
-      // Cancel owns only the error surface, not phase/loading. Those clear via
+      // Cancel owns only the error surface, not loading. That clears via
       // handleAsk's lifecycle once the in-flight ask settles: a successful cancel
-      // lands a Cancelled outcome -> handleAsk's finally clears phase + its tail
-      // clears loading. A cancel REJECT means the turn may still be running, so
+      // lands a Cancelled outcome -> handleAsk's finally folds the live turn and
+      // its tail clears loading. A cancel REJECT means the turn may still be running, so
       // leaving loading=true is the honest state, not a stuck bug.
       setError(toAppError(e, intl, "ask"));
     }
   }, [sessionId, intl, setError]);
 
-  // The turn clock (issue #1264 turn-clock ruling): derived, never stored --
-  // the ask stamp rides the live state, and the pause origin is the first
-  // PENDING approval in arrival order (the rail renders cards in the order
-  // the gateway raised them, so the first pending is the earliest hold).
-  // The QuestionBar displays the elapsed-with-user-pauses figure; the rail's
-  // wait-window stamp above stays the per-window figure.
-  const turnStartedAt = live?.askedAt ?? null;
-  const turnPausedSince =
-    approvals.find((a) => a.status.kind === "pending")?.receivedAt ?? null;
+  // The turn clock (issue #1264's turn-clock ruling, re-hosted by #1612):
+  // derived, never stored -- the ask stamp + the pause origin ride the
+  // liveTurn memo (`askedAt` / `pausedSince`), the single source the
+  // activity line's elapsed figure reads.
 
   return {
-    phase,
     liveTurn,
-    waitStartedAt,
-    turnStartedAt,
-    turnPausedSince,
     handleAsk,
     handleCancel,
     hasLiveTurn,

@@ -606,8 +606,8 @@ pub fn save_entry(
 
 /// Create a memory from the panel's form (issue #1538): the host stamps
 /// `source: manual` + today's absolute date + no origin session, and the
-/// body carries the description verbatim -- the form's textarea is
-/// multi-line, and only the frontmatter line folds. The blank-title
+/// body carries the description verbatim (the form's single-line input
+/// IS the body, #1591) -- only the frontmatter line folds. The blank-title
 /// guard lives HERE, not in the UI alone -- every future caller of the
 /// store inherits it. Rides [`save_entry`], so the caps, the global save
 /// lock, and the index reconcile all apply unchanged. Workspace-layer
@@ -644,6 +644,49 @@ pub fn create_entry(
 pub fn ensure_memory_dir(dir: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     Ok(dir.to_path_buf())
+}
+
+/// The delete guard (issue #1591): the name arrives over IPC. Only a bare
+/// `.md` file name inside the memory directory is deletable -- separators
+/// and non-`.md` names are refused, so no caller (panel bug, hostile
+/// script) can take a path outside the directory or delete the index
+/// (case-insensitively: NTFS resolves a case variant to the same file).
+/// Deliberately NOT a strict `<type>-<slug>.md` whitelist, and
+/// dot-prefixed names pass: the scan lists every parseable `.md` it
+/// meets (a dot-prefixed draft included), and the panel must never show
+/// a row it cannot act on.
+fn guard_deletable_file_name(file: &str) -> Result<(), MemoryError> {
+    let refused = |detail: String| MemoryError::Invalid { detail };
+    if !file.ends_with(".md") {
+        return Err(refused(format!("{file:?} is not a .md file name")));
+    }
+    if file.eq_ignore_ascii_case(MEMORY_INDEX_NAME) {
+        return Err(refused(
+            "the derived index is not a memory file".to_string(),
+        ));
+    }
+    if file.contains('/') || file.contains('\\') || file.ends_with(' ') {
+        return Err(refused(format!("{file:?} is not a bare file name")));
+    }
+    Ok(())
+}
+
+/// Delete a memory file (issue #1591, the panel's row delete): the file
+/// goes away and the index row with it -- NO index editing here, the next
+/// read's reconcile derives the rows from the files (the files are the
+/// truth). Rides the save lock: a concurrent extraction's [`save_entry`]
+/// must not mint the just-deleted name between its taken-set scan and its
+/// landing write (the same unique-name race the lock settles, #1530).
+/// Already-gone is success -- the panel may retry, and the 2s listing
+/// poll can race a hand delete in the folder.
+pub fn delete_entry(dir: &Path, file: &str) -> Result<(), MemoryError> {
+    guard_deletable_file_name(file)?;
+    let _guard = SAVE_ENTRY_LOCK.lock().expect("memory save lock poisoned");
+    match std::fs::remove_file(dir.join(file)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(MemoryError::io(e)),
+    }
 }
 
 #[cfg(test)]
@@ -930,6 +973,90 @@ mod tests {
         std::fs::remove_file(index_path(dir.path())).unwrap();
         load_rows(dir.path());
         assert!(index_path(dir.path()).is_file());
+    }
+
+    /// The panel's row delete (issue #1591): the file goes away, and the
+    /// index row with it -- with NO index editing on the delete side (the
+    /// next read's reconcile derives the rows from the files). The
+    /// surviving sibling is untouched.
+    #[test]
+    fn delete_entry_removes_the_file_and_the_index_row() {
+        let dir = mem_dir();
+        save_entry(dir.path(), &entry("fact a"), "b\n").expect("save");
+        save_entry(dir.path(), &entry("fact b"), "b\n").expect("save");
+        let victim = "feedback-fact-a.md";
+        assert!(dir.path().join(victim).is_file());
+        delete_entry(dir.path(), victim).expect("delete");
+        assert!(!dir.path().join(victim).exists());
+        assert!(dir.path().join("feedback-fact-b.md").is_file());
+        // The read reconciles: only the survivor remains, on disk and in
+        // the index.
+        let rows = load_rows(dir.path());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].file, "feedback-fact-b.md");
+        let index = std::fs::read_to_string(index_path(dir.path())).unwrap();
+        assert!(index.contains("- [fact b]"), "index: {index}");
+        assert!(!index.contains("[fact a]"), "index: {index}");
+    }
+
+    /// The delete guard (issue #1591): the name arrives over IPC. Only a
+    /// bare `.md` file name inside the memory directory is deletable --
+    /// separators, the index itself (in any case: NTFS resolves a case
+    /// variant to the same file), and non-.md names are refused BEFORE
+    /// any filesystem effect.
+    #[test]
+    fn delete_entry_refuses_names_that_are_not_bare_md_files() {
+        let dir = mem_dir();
+        save_entry(dir.path(), &entry("kept"), "b\n").expect("save");
+        for bad in [
+            "MEMORY.md",          // the derived index, not a memory
+            "memory.md",          // the index, lowercase (NTFS resolves it)
+            "",                   // nothing
+            "feedback-x.txt",     // not a .md file
+            "sub/feedback-x.md",  // a path, not a bare name
+            "sub\\feedback-x.md", // a Windows path
+            "feedback-x.md ",     // trailing space (a sibling name)
+        ] {
+            let err = delete_entry(dir.path(), bad).expect_err(bad);
+            assert!(matches!(err, MemoryError::Invalid { .. }), "{bad}: {err:?}");
+        }
+        // Nothing landed: the guard refuses before touching the FS.
+        assert_eq!(load_rows(dir.path()).len(), 1);
+    }
+
+    /// A hand-written file the panel lists (a parseable .md without the
+    /// `<type>-<slug>` prefix) is deletable -- the guard's invariant is
+    /// "a bare .md inside the directory", not "protocol-shaped". A
+    /// dot-prefixed draft the scan also lists deletes too: the guard
+    /// matches the scan surface, so the panel never lists an undeletable
+    /// row.
+    #[test]
+    fn delete_entry_takes_a_hand_written_non_protocol_name() {
+        let dir = mem_dir();
+        // A hand-authored file with valid frontmatter but a free-form name.
+        let text = render_memory_file(&entry("hand note"), "b\n");
+        let path = dir.path().join("my-own-notes.md");
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(&path, &text).unwrap();
+        delete_entry(dir.path(), "my-own-notes.md").expect("delete");
+        assert!(!path.exists());
+        // The dot-prefixed draft rides the same ruling.
+        let draft = dir.path().join(".draft.md");
+        std::fs::write(&draft, &text).unwrap();
+        delete_entry(dir.path(), ".draft.md").expect("delete");
+        assert!(!draft.exists());
+    }
+
+    /// Already-gone is success (idempotent): the panel may retry, the
+    /// 2s listing poll may race a hand delete in the folder.
+    #[test]
+    fn delete_entry_is_idempotent_when_already_gone() {
+        let dir = mem_dir();
+        delete_entry(dir.path(), "feedback-never-was.md").expect("idempotent");
+        // A real file deleted twice: the second delete is Ok too.
+        save_entry(dir.path(), &entry("gone"), "b\n").expect("save");
+        delete_entry(dir.path(), "feedback-gone.md").expect("first");
+        delete_entry(dir.path(), "feedback-gone.md").expect("second");
     }
 
     /// A regular file where the directory should be: `read_dir` fails

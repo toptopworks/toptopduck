@@ -161,6 +161,12 @@ struct WritePlan {
     attachments: Vec<FileAttachment>,
     /// `Some(n)` on `edit` (the replacement count), `None` on `write`.
     replacements: Option<usize>,
+    /// The landed line counts (issue #1621), counted off the same payloads
+    /// the text cap already bounds: `write` counts `content` (removed
+    /// stays `None` -- an overwrite is not a diff), `edit` counts
+    /// `new_string` / `old_string` (`replace_all` does not multiply).
+    lines_added: Option<u64>,
+    lines_removed: Option<u64>,
     summary: String,
 }
 
@@ -183,6 +189,7 @@ fn resolve_write(call: &ToolUse, workspace: Option<&Path>) -> WorkspaceToolOutco
         let workspace = require_workspace(WRITE_TOOL, workspace)?;
         let target = resolve_in_workspace(workspace, &file_path)
             .map_err(|reason| format!("{WRITE_TOOL}: {reason}"))?;
+        let lines_added = content.lines().count() as u64;
         Ok(WritePlan {
             target,
             content: content.clone(),
@@ -191,6 +198,8 @@ fn resolve_write(call: &ToolUse, workspace: Option<&Path>) -> WorkspaceToolOutco
                 content,
             }],
             replacements: None,
+            lines_added: Some(lines_added),
+            lines_removed: None,
             summary: file_path,
         })
     };
@@ -245,6 +254,10 @@ fn resolve_edit(call: &ToolUse, workspace: Option<&Path>) -> WorkspaceToolOutcom
         } else {
             existing.replacen(&old_string, &new_string, 1)
         };
+        // The landed counts (issue #1621): the strings' own line counts,
+        // not the file-level diff -- `replace_all` does not multiply them.
+        let lines_removed = old_string.lines().count() as u64;
+        let lines_added = new_string.lines().count() as u64;
         Ok(WritePlan {
             target,
             content: updated,
@@ -259,6 +272,8 @@ fn resolve_edit(call: &ToolUse, workspace: Option<&Path>) -> WorkspaceToolOutcom
                 },
             ],
             replacements: Some(if replace_all { count } else { 1 }),
+            lines_added: Some(lines_added),
+            lines_removed: Some(lines_removed),
             summary: file_path,
         })
     };
@@ -375,6 +390,7 @@ pub(crate) fn dispatch_workspace_tool(
                     plan.summary,
                     excerpt,
                 )
+                .with_failure_detail(&result.content)
             } else {
                 TraceEntry::succeeded(
                     call.id.clone(),
@@ -382,6 +398,11 @@ pub(crate) fn dispatch_workspace_tool(
                     OperationKind::Write,
                     plan.summary,
                     excerpt,
+                )
+                .with_write_stats(
+                    plan.lines_added,
+                    plan.lines_removed,
+                    plan.replacements.map(|n| n as u64),
                 )
             };
             on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
@@ -711,6 +732,32 @@ mod tests {
         assert_eq!(plan.content, "hello");
         assert!(plan.target.starts_with(&ws), "{}", plan.target.display());
         assert_eq!(plan.replacements, None);
+        assert_eq!(plan.lines_added, Some(1));
+        assert_eq!(plan.lines_removed, None);
+    }
+
+    /// The landed line counts (issue #1621): a write counts its content's
+    /// lines (removed stays `None` -- an overwrite is not a diff); an edit
+    /// counts the strings' own lines, and `replace_all` does not multiply
+    /// them.
+    #[test]
+    fn resolve_counts_the_landed_lines() {
+        let (_dir, ws) = ws_dir();
+        let plan = gated(resolve_write(
+            &write_call("notes.md", "one\ntwo\nthree\n"),
+            Some(&ws),
+        ));
+        assert_eq!(plan.lines_added, Some(3));
+        assert_eq!(plan.lines_removed, None);
+
+        let (dir, ws) = ws_dir();
+        std::fs::write(dir.path().join("s.py"), "a = 1\nb = 2\n").unwrap();
+        let plan = gated(resolve_edit(
+            &edit_call("s.py", "a = 1\nb = 2", "a = 11"),
+            Some(&ws),
+        ));
+        assert_eq!(plan.lines_added, Some(1));
+        assert_eq!(plan.lines_removed, Some(2));
     }
 
     /// A not-yet-existing nested path validates against its nearest
@@ -1050,7 +1097,15 @@ mod tests {
             !outside.path().join("pkg/script.py").exists(),
             "nothing landed outside the workspace"
         );
-        assert!(!entry.expect("a failed execute records an entry").success);
+        let entry = entry.expect("a failed execute records an entry");
+        assert!(!entry.success);
+        // The model-visible error text rides the failure detail (issue
+        // #1610): exactly the ToolResult.content the model saw.
+        assert_eq!(
+            entry.failure_detail.as_deref(),
+            Some(result.content.as_str()),
+            "the failed execute persists its full model-visible text"
+        );
     }
 
     /// (Windows) A verbatim `\\?\` spelling of an in-workspace path -- the
@@ -1130,6 +1185,8 @@ mod tests {
         assert_eq!(plan.attachments[0].content, "a = 1");
         assert_eq!(plan.attachments[1].param, "new_string");
         assert_eq!(plan.attachments[1].content, "a = 11");
+        assert_eq!(plan.lines_added, Some(1));
+        assert_eq!(plan.lines_removed, Some(1));
     }
 
     #[test]
@@ -1142,6 +1199,11 @@ mod tests {
         ));
         assert_eq!(plan.content, "y, y, y\n");
         assert_eq!(plan.replacements, Some(3));
+        // The counts are the strings' own lines -- three replacements of a
+        // one-line pair still land one added / one removed line (issue
+        // #1621: `replace_all` does not multiply).
+        assert_eq!(plan.lines_added, Some(1));
+        assert_eq!(plan.lines_removed, Some(1));
     }
 
     #[test]

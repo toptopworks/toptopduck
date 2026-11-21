@@ -5,7 +5,6 @@ import { Box } from "lucide-react";
 
 import { fmtError } from "../../lib/error-presentation";
 import { findActiveProfile } from "../../lib/findActiveProfile";
-import { usePointerCloseIntent } from "../../lib/usePointerCloseIntent";
 import {
   getAdapterCatalogs,
   getLastModelPosture,
@@ -35,13 +34,14 @@ import {
   heldPostureParts,
   MODEL_CONFIG_DEFAULT,
 } from "./posture-catalog";
-import { ComposerRuntimeMenu } from "./ComposerRuntimeMenu";
+import { MANAGE_RUNTIMES_VALUE, ComposerRuntimeMenu } from "./ComposerRuntimeMenu";
 import {
   PRESET_CUSTOM,
   derivePresetId,
   findPreset,
 } from "../settings/provider-presets";
-import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { Select, SelectTrigger } from "../ui/select";
+import { MENU_REENTRY_GRACE_MS } from "../../session/sidebarHoverCard";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 // Composer runtime entry (ADR-0099, issues #353/#574; ADR-0071/0081/0085/
@@ -51,21 +51,26 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 //     readout + cascade menu for the next turn's model / thought level --
 //     the posture label of ADR-0099 Decision 3 / #573 (the held pair,
 //     either dimension alone, or the default);
-//   - the ICON trigger's popover is the ONLY runtime-switching entry:
-//     two-level (level 1 "API Access" / "Local CLI" radio rows mirroring
-//     the Settings runtime sub-tab names; level 2 one Select per group --
-//     the profiles under API Access, the detected CLIs under Local CLI).
+//   - the runtime SELECT is the ONLY runtime-switching entry: one Select
+//     whose dropdown groups the targets optgroup-style -- the profiles
+//     under the "API Access" group, the detected CLIs under "Local CLI"
+//     (both labels mirror the Settings runtime sub-tab names) -- so every
+//     target is one click from the open dropdown.
 // Configuration actions (profile CRUD, profile.model editing, key
-// management, CLI management + probing) live in Settings -- this popover is
+// management, CLI management + probing) live in Settings -- the dropdown is
 // a pure selector (ADR-0099 Decision 1, calibrating ADR-0071's in-popover
-// configuration duties into retirement).
+// configuration duties into retirement); the Manage runtimes trailing item
+// is the only navigation out.
 //
-// Trigger glyph: a lucide Box, the Settings runtime section's icon -- the
-// unified entry glyph (NOT a provider logo; ADR-0071). Hover Tooltip: an
-// honest "{provider} · {model}" preview for the built-in runtime (+ an
+// Trigger face: the lucide Box icon alone (the Settings runtime section's
+// unified entry glyph, NOT a provider logo; ADR-0071) -- the runtime NAME
+// rides the aria-label + the hover Tooltip, never the bar. Hover Tooltip:
+// an honest "{provider} · {model}" preview for the built-in runtime (+ an
 // honest "no key" mark when the active profile has no key, ADR-0019) or the
-// external adapter name. The runtime NAME rides the tooltip; the posture
-// button carries the model/level readout.
+// external adapter name. The tooltip is PERMANENTLY controlled with the
+// #1438 refusal legs: Radix Select restores trigger focus on every close
+// (pointer included), and a focus-open would strand the tooltip with no
+// hover.
 //
 // Runtime state ownership: the per-session CHOICE is backend truth, read via
 // `getSessionRuntime` under the session-prefix query (a close drops it with
@@ -131,11 +136,15 @@ export function ComposerProviderPicker({
   coldStart,
 }: ComposerProviderPickerProps) {
   const intl = useIntl();
-  const [open, setOpen] = useState(false);
-  // Popover closes restore focus to the trigger; when that restore was
-  // pointer-initiated it must be dropped -- the Tooltip wrapper would
-  // focus-open and strand (usePointerCloseIntent).
-  const pointerCloseRef = usePointerCloseIntent();
+  // The runtime tooltip's controlled open state (the #1438 pattern): Radix
+  // Select restores trigger focus on every close (pointer-initiated
+  // included), and a focus-open would strand the tooltip with no hover.
+  // The refusal legs + the native pointerleave backstop are the
+  // ArtifactHeader machine's same ruling.
+  const [selectOpen, setSelectOpen] = useState(false);
+  const [tipOpen, setTipOpen] = useState(false);
+  const selectClosedAtRef = useRef(0);
+  const pointerOnTriggerRef = useRef(false);
 
   // Per-profile has_key overlay (issue #154 / ADR-0029). Fetched on mount AND
   // on a profileKeyEpoch bump -- App bumps the epoch on settings-close so a
@@ -445,14 +454,32 @@ export function ComposerProviderPicker({
     }
   }
 
-  // Level-1 "Local CLI" click with no external runtime held: select the
-  // first detected CLI so the group header is itself an operable radio
-  // target. No detected CLI (or already external): a no-op -- the group
-  // stays honest about having nothing to switch to.
-  function selectLocalCliGroup() {
-    if (isExternal || switching) return;
-    const first = adapters[0];
-    if (first) void selectRuntime({ kind: "external", data: first.id });
+  // The select's controlled value: the runtime choice namespaced under its
+  // kind so a profile id and an adapter id cannot collide in one option set.
+  // The `?? ""` fallbacks (zero profiles; a dangling active pointer) yield
+  // values matching no item on purpose: the icon-only trigger echoes
+  // nothing, and mapping them onto the placeholder sentinels would wrongly
+  // check a disabled row.
+  const runtimeValue = isExternal
+    ? `adapter:${activeAdapterId ?? ""}`
+    : `profile:${provider.active_profile ?? ""}`;
+
+  // The one onValueChange for the whole dropdown. A profile pick IS the
+  // built-in runtime pick (the old level-2 Select's onValueChange coupling):
+  // switch active_profile AND revert an external runtime to built-in. The
+  // sentinel value opens Settings; the Select closes itself on item select.
+  function handleRuntimeValue(next: string) {
+    if (next === MANAGE_RUNTIMES_VALUE) {
+      onOpenSettings();
+      return;
+    }
+    const sep = next.indexOf(":");
+    if (next.slice(0, sep) === "adapter") {
+      void selectRuntime({ kind: "external", data: next.slice(sep + 1) });
+      return;
+    }
+    onSwitchActive(next.slice(sep + 1));
+    if (isExternal) void selectRuntime({ kind: "built_in" });
   }
 
   const activeProfile = findActiveProfile(provider);
@@ -550,14 +577,6 @@ export function ComposerProviderPicker({
         : `${summary} · ${noKeyMark}`;
   const tooltipText = isExternal ? externalTooltip : builtInTooltip;
 
-  function handleOpenSettings() {
-    // Close BEFORE opening: the portaled PopoverContent would otherwise remain
-    // visible atop the settings overlay (ADR-0065 hides the shell via CSS, not
-    // the portal host in document.body).
-    setOpen(false);
-    onOpenSettings();
-  }
-
   // Honest read failure (issue #529): a rejected posture read must NOT
   // masquerade as an unselected default -- the posture trigger renders the
   // fault inline instead of the control. Scoped to external runtimes: the
@@ -603,61 +622,99 @@ export function ComposerProviderPicker({
           {fmtError(runtimeError, intl)}
         </span>
       ) : (
-        <Popover open={open} onOpenChange={setOpen}>
-          <Tooltip>
+        <Select
+          open={selectOpen}
+          onOpenChange={(o) => {
+            setSelectOpen(o);
+            if (!o) selectClosedAtRef.current = Date.now();
+          }}
+          value={runtimeValue}
+          onValueChange={handleRuntimeValue}
+          disabled={switching}
+        >
+          <Tooltip
+            open={tipOpen && !selectOpen}
+            onOpenChange={(next) => {
+              // The #1438 refusal legs: while the select is open, when the
+              // pointer is not ON the trigger, and within the close grace
+              // after it -- the select-close focus restore must never open
+              // the tooltip (the phantom re-open is exactly the strand).
+              if (
+                next &&
+                (selectOpen ||
+                  !pointerOnTriggerRef.current ||
+                  Date.now() - selectClosedAtRef.current <
+                    MENU_REENTRY_GRACE_MS)
+              )
+                return;
+              setTipOpen(next);
+            }}
+          >
             <TooltipTrigger asChild>
-              <PopoverTrigger asChild>
-                <button
-                  type="button"
-                  // ADR-0067 (#171): visual rules -> inline utilities. The trigger
-                  // is an icon button sized to the QuestionBar row; bg-card + border
-                  // ride the ADR-0050 token.
-                  className="composer-picker-trigger inline-flex items-center justify-center size-9 rounded-md border border-border bg-card text-foreground hover:bg-transit transition-colors"
-                  aria-label={intl.formatMessage(
-                    {
-                      id: "composer.providerPicker.triggerAria",
-                      defaultMessage: "Runtime: {label}",
-                    },
-                    {
-                      label: isExternal
-                        ? (activeAdapterDisplayName ?? activeAdapterId ?? "")
-                        : providerName,
-                    },
-                  )}
-                >
-                  {/* The unified entry glyph is the Settings runtime section's
-                    Box icon. Still NOT a provider logo (ADR-0071); the
-                    aria-label + tooltip are unchanged. */}
-                  <Box className="size-4 shrink-0" aria-hidden />
-                </button>
-              </PopoverTrigger>
+              <SelectTrigger
+                ref={(el) => {
+                  if (!el) return;
+                  // Native pointerleave backstop: when the pointer leaves
+                  // the trigger INTO the select's portal, the layer's
+                  // pointer-events suppression can keep React from deriving
+                  // the synthetic onPointerLeave -- the marker would strand
+                  // "on" and the pointer leg would wave a phantom open
+                  // through. The native event is authoritative; a double
+                  // run is idempotent. A ref callback (not a mount effect)
+                  // because the trigger unmounts and remounts across a
+                  // runtimeError transition -- the listener must rebind to
+                  // the new node, where a mount effect would stay attached
+                  // to the detached one.
+                  const onNativeLeave = () => {
+                    pointerOnTriggerRef.current = false;
+                  };
+                  el.addEventListener("pointerleave", onNativeLeave);
+                  return () =>
+                    el.removeEventListener("pointerleave", onNativeLeave);
+                }}
+                aria-label={intl.formatMessage(
+                  {
+                    id: "composer.providerPicker.triggerAria",
+                    defaultMessage: "Runtime: {label}",
+                  },
+                  {
+                    label: isExternal
+                      ? (activeAdapterDisplayName ?? activeAdapterId ?? "")
+                      : providerName,
+                  },
+                )}
+                className="size-9 justify-center border-border bg-card px-0 text-foreground shadow-none transition-colors hover:bg-transit dark:border-border dark:bg-card [&>svg:last-child]:hidden"
+                onPointerEnter={() => {
+                  pointerOnTriggerRef.current = true;
+                }}
+                onPointerLeave={() => {
+                  pointerOnTriggerRef.current = false;
+                }}
+              >
+                {/* The unified entry glyph alone (the Settings runtime
+                    section's Box icon, NOT a provider logo; ADR-0071) -- the
+                    runtime name rides the aria-label + the tooltip, never
+                    the bar. The trigger's own ChevronDown is hidden: the Box
+                    IS the face (the dropdown is the affordance). The face
+                    rides the composer resident-control family chrome (the
+                    posture button / auth-mode chip: border-border bg-card
+                    hover:bg-transit, no shadow) instead of the shadcn select
+                    input chrome. */}
+                <Box className="size-4 shrink-0 text-foreground" aria-hidden />
+              </SelectTrigger>
             </TooltipTrigger>
             <TooltipContent>{tooltipText}</TooltipContent>
           </Tooltip>
 
-          <PopoverContent
-            align="start"
-            className="w-80"
-            onCloseAutoFocus={(e) => {
-              if (pointerCloseRef.current) e.preventDefault();
-            }}
-          >
-            <ComposerRuntimeMenu
-              isExternal={isExternal}
-              switching={switching}
-              provider={provider}
-              profileKeys={profileKeys}
-              keysError={keysError}
-              adapters={adapters}
-              activeAdapterId={activeAdapterId}
-              activeAdapterStale={activeAdapterStale}
-              onSwitchActive={onSwitchActive}
-              onSelectRuntime={selectRuntime}
-              onSelectLocalCliGroup={selectLocalCliGroup}
-              onManageRuntimes={handleOpenSettings}
-            />
-          </PopoverContent>
-        </Popover>
+          <ComposerRuntimeMenu
+            provider={provider}
+            profileKeys={profileKeys}
+            keysError={keysError}
+            adapters={adapters}
+            activeAdapterId={activeAdapterId}
+            activeAdapterStale={activeAdapterStale}
+          />
+        </Select>
       )}
     </>
   );

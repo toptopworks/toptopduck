@@ -38,7 +38,7 @@
    The WebView2 default classic bar is ~17px and visually dominates the
    three-column shell; a 10px band with a 2px transparent inset (the thumb's
    background clips to the padding box) yields a 6px rounded thumb matching the
-   thin-bar reference look (ChatGPT desktop, WorkBuddy). Space-taking on
+   thin-bar reference look. Space-taking on
    purpose: the runtime scrollbar probe (--rail-sb-w in App.tsx) and the
    scrollbar-gutter reservations measure the styled band width, so the layout
    machinery keeps working unchanged. Thumb color rides the shadcn token system,
@@ -102,19 +102,27 @@
    scenegraph (and the #1093 exports) are unaffected. */
 .viz-chart svg { max-width: 100%; height: auto; }
 
-/* Working-set tab grid (legacy .layout). ADR-0067 Decision 1: a 280px/1fr
-   two-column master-detail grid is layout semantics, not a utility long-string,
-   so the grid stays here; per-consumer margins live on the consumer
-   (SessionPane RightSidebarWorkingSet) as utility. Single consumer. The detail
-   track is minmax(0, 1fr) and the panels carry min-width: 0 -- a bare 1fr
-   track resolves its automatic minimum to the content's min-content, so a
-   wide dataset (a 40-column preview table) re-widens the column into
-   right-sidebar-body overflow instead of scrolling inside the Table primitive's
-   overflow-x-auto container (ADR-0057). Same pin the narrow fallback below
-   carries. */
+/* Working-set tab grid (legacy .layout). ADR-0067 Decision 1: a two-column
+   master-detail grid is layout semantics, not a utility long-string, so the
+   grid stays here; per-consumer margins live on the consumer as utility. Two
+   consumers: the session pane's RightSidebarWorkingSet (inside the
+   .session-right-sidebar container, so the stacking query below applies to
+   it) and the workspace datasets dialog (outside any right-sidebar container
+   -- it keeps the two-column shape at every width, its master column now
+   flexing with the dialog, accepted). The master track is minmax(280px, 2fr)
+   -- a 280px floor that binds while the 2fr share stays under 280px (the
+   600-720px band, just above the stacking query), flexing to a 2:3 share on
+   a widened/maximized sidebar, so long dataset names (the list row truncates
+   first) gain the width instead of feeding an ever-wider detail column. The
+   detail track is minmax(0, 3fr) and the panels
+   carry min-width: 0 -- a bare fr track resolves its automatic minimum to the
+   content's min-content, so a wide dataset (a 40-column preview table)
+   re-widens the column into right-sidebar-body overflow instead of scrolling
+   inside the Table primitive's overflow-x-auto container (ADR-0057). Same pin
+   the narrow fallback below carries. */
 .layout {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: minmax(280px, 2fr) minmax(0, 3fr);
   gap: 1.25rem;
 }
 .layout > .panel { min-width: 0; }
@@ -122,7 +130,7 @@
 /* Narrow-right-sidebar fallback (issue #791): .session-right-sidebar is an
    inline-size container (rule with .session-right-sidebar below); when the
    panel lands in the 320px track floor (issue #770) to 600px band, the
-   280px/1fr pair starves the detail column (280px list + 1.25rem gap), so
+   master track's 280px floor + the 1.25rem gap starve the detail column, so
    the grid stacks one column -- list first, detail below (DOM order).
    minmax(0, 1fr) + the items' min-width: 0 pin the track and the panels
    to the container's free space (a bare 1fr track and the items' auto
@@ -924,7 +932,7 @@
   flex-direction: column;
   overflow: hidden;
   /* The column divider lives HERE, not on the scroll container: the header
-     row sits inside this column (WorkBuddy topology), so the line runs
+     row sits inside this column, so the line runs
      unbroken from the pane top through the header to the rail's tail. The
      white ground rides the column too, so the relocated header floats on
      the same field as the rail. */
@@ -1042,6 +1050,79 @@
    variant owns color/bg/padding/radius so the chip rides the token system. */
 .active-chip {
   margin-left: auto;
+}
+
+/* The live activity line's running face (#1619): the label itself carries
+   the liveness -- a highlight band sweeping the glyphs, both ends on the
+   theme's own text tokens -- with a small dot breathing in the SAME 2.4s
+   period so the pair reads as one organism, replacing the generic spinner
+   beside static gray text. The band is
+   twice the label's width and the keyframe percentages place it fully
+   outside the box at both ends of the sweep, so the loop reseams with the
+   box at pure base color. The sweep and the breath are decoration (the
+   text already carries the phase), so prefers-reduced-motion collapses
+   both to the plain static muted face. */
+@keyframes activity-shimmer {
+  from { background-position: 120% 0; }
+  to { background-position: -20% 0; }
+}
+.activity-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    var(--muted-foreground) 42%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 58%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: activity-shimmer 2.4s linear infinite;
+}
+@keyframes activity-live-dot {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+.activity-live-dot {
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: activity-live-dot 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .activity-shimmer {
+    animation: none;
+    background-image: none;
+    color: inherit;
+  }
+  .activity-live-dot {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+/* The sidebar row's running dot (issue #1629): the open dot's primary face
+   plus a static halo ring so the running state stays legible as a SHAPE even
+   under reduced motion (the global cutoff in app.css parks the breath on its
+   first frame; the halo carries the state there, the breath only underscores
+   it). The ring rides outline, the design system's color-ring posture (a
+   focus-ring sibling, not a shadow -- the 3-tier shadow scale stays the only
+   shadow usage). The breath reuses the activity-live-dot period (2.4s) so
+   both running faces read as one organism. */
+.sidebar-running-dot {
+  outline: 3px solid color-mix(in oklab, var(--primary) 25%, transparent);
+  animation: sidebar-running-dot 2.4s ease-in-out infinite;
+}
+@keyframes sidebar-running-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-running-dot {
+    animation: none;
+    opacity: 1;
+  }
 }
 
 /* Phase indicator (ADR-0059 discrete phase feedback). Sits between the input

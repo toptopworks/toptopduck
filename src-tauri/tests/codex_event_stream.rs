@@ -328,6 +328,10 @@ fn mcp_tool_call_rounds_settle_in_place_after_the_merge() {
         success: true,
         output_truncated: false,
         result_excerpt: String::new(),
+        failure_detail: None,
+        lines_added: None,
+        lines_removed: None,
+        replacements: None,
         sub_trace: None,
     };
     let gateway = GatewayOutcome {

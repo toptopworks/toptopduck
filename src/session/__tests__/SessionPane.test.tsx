@@ -4,7 +4,7 @@ import { IntlProvider } from "react-intl";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { SessionPane } from "../SessionPane";
-import { artifactKeys } from "../queryKeys";
+import { artifactKeys, sessionKeys } from "../queryKeys";
 import {
   artifactExists,
   askQuestion,
@@ -25,7 +25,7 @@ import { artifactTurn, failed, textual } from "./fixtures";
 import { log } from "../../lib/log";
 import type { ComposerSessionFields } from "../useComposerState";
 import type { ApprovalEntry } from "../useApprovalEvents";
-import type { ThreadEntry } from "../../types/thread";
+import type { ThreadEntry, TurnRecord } from "../../types/thread";
 import type { DatasetDescriptor, LoadOutcome } from "../../types/dataset";
 
 // The pane-level approval wiring pins (issue #1009 review, PR #1010): both
@@ -157,6 +157,7 @@ function renderPane(opts?: {
   onSeedDraft?: (sid: string, question: string) => void;
   onSeedInvocations?: (sid: string, names: string[]) => void;
   onStageQuote?: (sid: string, text: string) => void;
+  onTurnRunningChange?: (sid: string, running: boolean) => void;
 }) {
   if (opts?.thread) {
     vi.mocked(conversation).mockResolvedValue(opts.thread);
@@ -207,6 +208,7 @@ function renderPane(opts?: {
             onRename={noop}
             onClose={noop}
             onDelete={noop}
+            onTurnRunningChange={opts?.onTurnRunningChange ?? noop}
           />
         </IntlProvider>
       </TooltipProvider>
@@ -228,9 +230,51 @@ async function openArtifact(fileName: string) {
   fireEvent.click(await screen.findByRole("button", { name }));
 }
 
-describe("SessionPane approval wiring", () => {
+// The shell-facing running report (issue #1629): the ask flips the flag (the
+// hanging askQuestion keeps the turn in flight), the settle flips it back
+// while the pane stays mounted, and the unmount cleanup reports false -- a
+// close mid-turn cannot strand the sidebar row lit. All three faces ride the
+// same effect-deps flip, and each has its own pin.
+describe("SessionPane turn-running report (issue #1629)", () => {
   beforeEach(stubSessionApis);
 
+  it("reports (sid, true) when a turn goes in flight and (sid, false) on unmount", async () => {
+    const onTurnRunningChange = vi.fn();
+    const view = renderPane({ onTurnRunningChange });
+    await waitFor(() => expect(view.getComposerFields()).not.toBeNull());
+    view.ask();
+    await waitFor(() =>
+      expect(onTurnRunningChange).toHaveBeenCalledWith(SID, true),
+    );
+    view.unmount();
+    expect(onTurnRunningChange).toHaveBeenLastCalledWith(SID, false);
+  });
+
+  it("reports (sid, false) when the turn settles while the pane stays mounted", async () => {
+    // Resolve on a macrotask: an already-resolved promise settles inside the
+    // act batch and React merges the true edge away (a real IPC turn always
+    // crosses an async boundary, so the true report lands).
+    vi.mocked(askQuestion).mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve((textual("done").data as TurnRecord).outcome), 0),
+        ),
+    );
+    const onTurnRunningChange = vi.fn();
+    const view = renderPane({ onTurnRunningChange });
+    await waitFor(() => expect(view.getComposerFields()).not.toBeNull());
+    view.ask();
+    await waitFor(() =>
+      expect(onTurnRunningChange).toHaveBeenCalledWith(SID, true),
+    );
+    await waitFor(() =>
+      expect(onTurnRunningChange).toHaveBeenLastCalledWith(SID, false),
+    );
+  });
+});
+
+describe("SessionPane approval wiring", () => {
+  beforeEach(stubSessionApis);
   it("threads the full-view loader to the pending card with the pane's session id", async () => {
     vi.mocked(getApprovalAttachments).mockResolvedValue([
       { param: "code", content: "print(1); print(2)" },
@@ -303,7 +347,10 @@ describe("SessionPane artifact stage boundary", () => {
     // Seed both per-path entries so the drop assertion discriminates: an
     // unseeded cache is already empty and the removal would pass vacuously.
     queryClient.setQueryData(artifactKeys.exists(BAD_ARTIFACT_PATH), true);
-    queryClient.setQueryData(artifactKeys.text(BAD_ARTIFACT_PATH), "# poisoned");
+    queryClient.setQueryData(artifactKeys.text(BAD_ARTIFACT_PATH, 0), "# poisoned");
+    // A retired delivery's entry rides the same drop: seeding a second
+    // delivery discriminates the family sweep from a single-delivery key.
+    queryClient.setQueryData(artifactKeys.text(BAD_ARTIFACT_PATH, 1), "# poisoned too");
 
     // Flip the probe BEFORE the click: the boundary's retry runs onReset
     // (the synchronous cache drop) before clearing the error, so the
@@ -315,10 +362,39 @@ describe("SessionPane artifact stage boundary", () => {
       queryClient.getQueryState(artifactKeys.exists(BAD_ARTIFACT_PATH)),
     ).toBeUndefined();
     expect(
-      queryClient.getQueryState(artifactKeys.text(BAD_ARTIFACT_PATH)),
+      queryClient.getQueryState(artifactKeys.text(BAD_ARTIFACT_PATH, 0)),
+    ).toBeUndefined();
+    expect(
+      queryClient.getQueryState(artifactKeys.text(BAD_ARTIFACT_PATH, 1)),
     ).toBeUndefined();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByTestId("artifact-stub")).toHaveTextContent("bad.md");
+  });
+
+  it("renders after a same-path re-delivery -- the delivery key resets the boundary", async () => {
+    // A regenerated file arrives as a fresh turn re-presenting the SAME
+    // path. The boundary key carries the delivering turn's position, so the
+    // re-delivery remounts -- a crash degrade never pins the new delivery
+    // (the #1199 file-to-file reset, extended to the delivery axis).
+    const { queryClient } = renderPane({ thread: [artifactTurn([BAD_ARTIFACT_PATH])] });
+    await openArtifact("bad.md");
+    expect(screen.getByRole("alert")).toHaveAttribute("data-region", "artifact");
+
+    // The turn-end refetch lands the second round's manifest (same path,
+    // new turn) and the regenerated file renders clean.
+    artifactProbe.recovered = true;
+    await act(async () => {
+      queryClient.setQueryData(sessionKeys.thread(SID), [
+        artifactTurn([BAD_ARTIFACT_PATH]),
+        artifactTurn([BAD_ARTIFACT_PATH]),
+      ]);
+    });
+
+    // The cache write lands through the notify manager's scheduled batch, so
+    // the remount arrives on a later tick -- findBy waits it out (an inline
+    // not.toBeInTheDocument would race the notification).
+    expect(await screen.findByTestId("artifact-stub")).toHaveTextContent("bad.md");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
 
@@ -693,9 +769,7 @@ describe("SessionPane composer queue behind an in-flight replace (#1512)", () =>
     expect(askQuestion).not.toHaveBeenCalled();
 
     // The swap lands -> the flight verdict true -> auto-send, and the rail
-    // line clears with the settle (asserted by text: the auto-sent turn's
-    // own wait-status line is a second role="status" element, so the role
-    // query never returns to null).
+    // line clears with the settle (asserted by text).
     await act(async () => {
       resolveReplace({ kind: "Loaded", data: replaceDataset });
     });
@@ -853,7 +927,7 @@ describe("selection toolbar copy (#1573)", () => {
     expect(toolbar).not.toBeNull();
     fireEvent.click(copyButton(toolbar as HTMLElement));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("copy this passage"));
-    // The WorkBuddy shape rode the success leg: the toolbar leaves and the
+    // The success leg carries the shape: the toolbar leaves and the
     // selection clears.
     expect(document.querySelector("[data-selection-toolbar]")).toBeNull();
     expect(document.getSelection()?.isCollapsed ?? true).toBe(true);

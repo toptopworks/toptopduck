@@ -275,3 +275,63 @@ describe("DatasetDetail size line (issue #1485)", () => {
     expect(screen.queryByText(/大小/)).toBeNull();
   });
 });
+
+describe("DatasetDetail origin line (issue #1597)", () => {
+  it("renders no origin line for an uploaded row (the session default)", () => {
+    renderI18n(
+      <DatasetDetail
+        dataset={{ ...mockDataset, provenance: "uploaded" }}
+        {...LOADED_PREVIEW}
+      />,
+    );
+    expect(screen.queryByText("本会话上传")).toBeNull();
+  });
+
+  it("renders the shared origin with the alias cross-reference when the alias differs", () => {
+    renderI18n(
+      <DatasetDetail
+        dataset={{
+          ...mockDataset,
+          reference_name: "people_2",
+          provenance: "shared",
+          shared_entry_name: "people",
+        }}
+        {...LOADED_PREVIEW}
+      />,
+    );
+    expect(
+      screen.getByText("来自工作区共享数据集「people」，本会话中以「people_2」引用"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the plain shared origin when the alias matches the manifest entry", () => {
+    renderI18n(
+      <DatasetDetail
+        dataset={{
+          ...mockDataset,
+          provenance: "shared",
+          shared_entry_name: "people",
+        }}
+        {...LOADED_PREVIEW}
+      />,
+    );
+    expect(screen.getByText("来自工作区共享数据集「people」")).toBeInTheDocument();
+  });
+
+  it("renders the materialized sentence", () => {
+    renderI18n(
+      <DatasetDetail
+        dataset={{ ...mockDataset, provenance: "materialized" }}
+        {...LOADED_PREVIEW}
+      />,
+    );
+    expect(screen.getByText("本会话内 SQL 查询物化的结果")).toBeInTheDocument();
+  });
+
+  it("renders no origin line for a plain descriptor (the manifest face carries no origin)", () => {
+    renderI18n(<DatasetDetail dataset={mockDataset} {...LOADED_PREVIEW} />);
+    expect(screen.queryByText("本会话上传")).toBeNull();
+    expect(screen.queryByText(/共享数据集/)).toBeNull();
+    expect(screen.queryByText(/物化/)).toBeNull();
+  });
+});

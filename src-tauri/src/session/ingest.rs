@@ -387,13 +387,20 @@ impl super::Session {
         path: &Path,
         entries: Vec<(String, Vec<Vec<Data>>, RectifyProvenance)>,
     ) -> Result<DatasetDescriptor, LoadError> {
-        let mut reserved_ref: HashSet<String> = HashSet::new();
+        // The batch is a private registration face: seed the reserved set
+        // with the shared vocabulary (ADR-0141 D6 -- a sheet named like a
+        // manifest entry or a sticky 挂名 yields, same as ingest_structured
+        // and the derived staging).
+        let mut reserved_ref: HashSet<String> = super::shared_datasets::shared_reserved_names(
+            self.runtime_facts.workspace.as_deref(),
+            Some(&self.shared_attaches),
+        );
         let mut reserved_disp: HashSet<String> = HashSet::new();
-        // De-conflict both names up front against the working set AND each other:
-        // reference names (SQL-safe machine name) so two sheets that sanitize
-        // alike never collide at ATTACH time, display labels so two sheets
-        // sharing a name never show identical labels in the UI (ADR-0037, slice
-        // 4a issue #8).
+        // De-conflict both names up front against the working set, the
+        // reservation seed, AND each other: reference names (SQL-safe
+        // machine name) so two sheets that sanitize alike never collide at
+        // ATTACH time, display labels so two sheets sharing a name never
+        // show identical labels in the UI (ADR-0037, slice 4a issue #8).
         let resolved: Vec<(String, String)> = entries
             .iter()
             .map(|(display, _, _)| {
@@ -584,5 +591,54 @@ mod tests {
             .join(format!("{}.duckdb", d.reference_name));
         let len = fs::metadata(&store).expect("store file").len();
         assert_eq!(d.size_bytes, len);
+    }
+
+    /// ADR-0141 D6 on the Excel batch (issue #1597): a sheet named like a
+    /// bound workspace's manifest entry is a private registration and yields
+    /// -- the committed reference name takes people_2, so the attach table's
+    /// territory never holds a private row (which the provenance read face
+    /// would badge as shared).
+    #[test]
+    fn excel_sheet_names_yield_to_the_shared_vocabulary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The manifest entry whose name the sheet collides with.
+        let src = dir.path().join("people.csv");
+        fs::write(&src, "name,score\nAda,9\n").expect("csv");
+        let workspace = tempfile::tempdir().expect("workspace");
+        crate::workspace::datasets::add(workspace.path(), &src).expect("add");
+        // One-sheet workbook named exactly like the manifest entry.
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let sheet = book.add_worksheet();
+        sheet.set_name("people").expect("sheet name");
+        sheet.write_string(0, 0, "name").expect("header cell");
+        sheet.write_string(1, 0, "Bo").expect("data cell");
+        let book_path = dir.path().join("book.xlsx");
+        book.save(&book_path).expect("save");
+
+        let mut session = crate::session::Session::new().expect("session");
+        session.set_workspace(std::fs::canonicalize(workspace.path()).expect("canonical"));
+        match session.ingest(&book_path) {
+            LoadOutcome::NeedsGuidance(_) => {}
+            other => panic!("expected NeedsGuidance, got {other:?}"),
+        }
+        // The dialog's ticked sheet: the first row is the header, nothing
+        // skipped.
+        let outcome = session.ingest_guided(
+            &book_path,
+            &[crate::model::SheetGuidance {
+                name: "people".into(),
+                rectify: crate::model::SheetRectify {
+                    header_row: 1,
+                    skip_rows: vec![],
+                },
+            }],
+        );
+        match outcome {
+            LoadOutcome::Loaded(d) => assert_eq!(
+                d.reference_name, "people_2",
+                "the sheet yields, the manifest keeps its name"
+            ),
+            other => panic!("expected Loaded, got {other:?}"),
+        }
     }
 }

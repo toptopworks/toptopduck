@@ -31,7 +31,8 @@ vi.mock("../../../api", async (importOriginal) => ({
   listAdapters: vi.fn().mockResolvedValue([]),
 }));
 
-// A materialized-record fixture (reference_name overridden per test) -- the
+// A materialized-record fixture (reference_name and display_name overridden
+// per test) -- the
 // only outcome that needs a full dataset payload. File-local per the suite
 // convention: TurnCard.test.tsx carries its own descriptor (preview-card
 // pins, issue #860) rather than reaching into this suite's fixture.
@@ -123,7 +124,16 @@ describe("Thread", () => {
         kind: "Materialized",
         data: {
           promotions: [
-            { dataset: { ...mockDataset, reference_name: referenceName }, sql: "SELECT 1" },
+            {
+              dataset: {
+                ...mockDataset,
+                reference_name: referenceName,
+                // The unlabelled fallback posture (ADR-0037): display starts
+                // equal to the reference name; divergence is a later label/rename.
+                display_name: referenceName,
+              },
+              sql: "SELECT 1",
+            },
           ],
           viz: null,
           body,
@@ -151,8 +161,14 @@ describe("Thread", () => {
         kind: "Materialized",
         data: {
           promotions: [
-            { dataset: { ...mockDataset, reference_name: "result_1" }, sql: "SELECT 1" },
-            { dataset: { ...mockDataset, reference_name: "result_2" }, sql: "SELECT 2" },
+            {
+              dataset: { ...mockDataset, reference_name: "result_1", display_name: "result_1" },
+              sql: "SELECT 1",
+            },
+            {
+              dataset: { ...mockDataset, reference_name: "result_2", display_name: "result_2" },
+              sql: "SELECT 2",
+            },
           ],
           viz: null,
           body: null,
@@ -169,7 +185,7 @@ describe("Thread", () => {
     expect(screen.getByRole("button", { name: /结果：result_2/ })).toBeInTheDocument();
     // The antecedent is NOT a result link -- it rides the muted disclosure.
     expect(screen.queryByRole("button", { name: /结果：result_1/ })).not.toBeInTheDocument();
-    expect(screen.getByText(/由 result_1 派生/)).toBeInTheDocument();
+    expect(document.querySelector(".antecedents")).toHaveTextContent(/由 1 个中间结果.*派生/);
   });
 
   it("renders a Materialized turn's terminal text as markdown prose, not a side note (#847)", () => {
@@ -307,7 +323,7 @@ describe("Thread", () => {
     // since issue #827), labeled by its verbatim question.
     expect(screen.getByText("总共有多少客户")).toBeInTheDocument();
     expect(screen.getByText("共 128 位客户。")).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "已回答" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "已完成" })).toBeInTheDocument();
     // The reply body rides the conversation tier (text-sm, matching the user
     // bubble's question and RoundProse) -- the answer is discourse, not
     // chrome. Since issue #827 the body renders through RoundProse, so the
@@ -420,10 +436,10 @@ describe("Thread", () => {
     const turnCard = container.querySelector(".turn-card");
     expect(turnCard?.classList.contains("stale-ghost")).toBe(true);
     expect(turnCard?.getAttribute("data-stale")).toBe("true");
-    // CircleOff is the stale glyph (aria-label "结果已失效"), not the fresh
-    // Materialized's Table2 ("已出结果").
+    // CircleOff is the stale glyph (aria-label "结果已失效"), not the
+    // completed outcomes' shared glyph word ("已完成").
     expect(screen.getByRole("img", { name: "结果已失效" })).toBeInTheDocument();
-    expect(screen.queryByRole("img", { name: "已出结果" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "已完成" })).not.toBeInTheDocument();
     // Causal chip wording for a Replaced source.
     expect(screen.getByRole("button", { name: /源已更新/ })).toBeInTheDocument();
   });
@@ -507,8 +523,9 @@ describe("Thread", () => {
     const outs = container.querySelectorAll(".turn-entry");
     expect(outs).toHaveLength(4);
     expect(Array.from(outs).map((li) => li.getAttribute("data-outcome"))).toEqual(kinds);
-    // Each outcome's glyph is announced via its icon aria-label.
-    expect(screen.getByRole("img", { name: "已出结果" })).toBeInTheDocument();
+    // Each outcome's glyph is announced via its icon aria-label; the
+    // completed word is shared by the completed outcome kinds.
+    expect(screen.getByRole("img", { name: "已完成" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "需要澄清" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "失败" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "已取消" })).toBeInTheDocument();
@@ -1047,7 +1064,7 @@ describe("Thread", () => {
     }
 
     it("defaults COLLAPSED: question + outcome visible, the process behind the turn head", () => {
-      renderThread(
+      const { container } = renderThread(
         <Thread
           entries={[turnEntry(tracedRecord())]}
           selectedResult={null}
@@ -1060,7 +1077,7 @@ describe("Thread", () => {
       expect(screen.getByText("多少行")).toBeInTheDocument();
       const head = screen.getByRole("button", { name: /已取消/ });
       expect(head).toHaveAttribute("aria-expanded", "false");
-      expect(screen.queryByRole("button", { name: /轨迹 · 2 次调用/ })).not.toBeInTheDocument();
+      expect(container.querySelector(".trace-toggle")).toBeNull();
       expect(screen.queryByText("no such table")).not.toBeInTheDocument();
       expect(screen.queryByText("SELECT count(*) FROM people")).not.toBeInTheDocument();
     });
@@ -1075,8 +1092,8 @@ describe("Thread", () => {
       );
       // Issue #1282: the head opens first; the per-round folds live inside it.
       fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
-      fireEvent.click(screen.getByRole("button", { name: /轨迹 · 2 次调用/ }));
-      const toggle = screen.getByRole("button", { name: /轨迹 · 2 次调用/ });
+      fireEvent.click(screen.getByRole("button", { name: "轨迹 · explore ×1 · materialize ×1" }));
+      const toggle = screen.getByRole("button", { name: "轨迹 · explore ×1 · materialize ×1" });
       expect(toggle).toHaveAttribute("aria-expanded", "true");
       // Both calls render with their summaries + operation badges.
       expect(screen.getByText("explore")).toBeInTheDocument();
@@ -1089,14 +1106,14 @@ describe("Thread", () => {
     });
 
     it("omits the toggle for a zero-call turn (no trace to expand)", () => {
-      renderThread(
+      const { container } = renderThread(
         <Thread
           entries={[turnEntry({ question: "q", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } })]}
           selectedResult={null}
           onSelectResult={() => {}}
         />,
       );
-      expect(screen.queryByRole("button", { name: /轨迹/ })).not.toBeInTheDocument();
+      expect(container.querySelector(".trace-toggle")).toBeNull();
     });
   });
 
@@ -1303,14 +1320,14 @@ describe("Thread", () => {
       // per-round face -- connective prose, thinking folds, step folds --
       // mounts inside it on expand.
       expect(screen.queryByText("我先查一下数据")).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
+      fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
       expect(screen.getByText("我先查一下数据")).toBeInTheDocument();
       expect(screen.getByText("再聚合一次")).toBeInTheDocument();
       // Thinking + steps folds are per round, both default collapsed.
       const thinking = screen.getByRole("button", { name: "思考 · 1.5s" });
       expect(thinking).toHaveAttribute("aria-expanded", "false");
-      const round1 = screen.getByRole("button", { name: "轨迹 · 2 次调用" });
-      const round2 = screen.getByRole("button", { name: "轨迹 · 1 次调用" });
+      const round1 = screen.getByRole("button", { name: "轨迹 · explore ×1 · materialize ×1" });
+      const round2 = screen.getByRole("button", { name: "轨迹 · explore ×1" });
       expect(round1).toHaveAttribute("aria-expanded", "false");
       expect(round2).toHaveAttribute("aria-expanded", "false");
       expect(screen.queryByText("先推理一下")).not.toBeInTheDocument();
@@ -1320,20 +1337,20 @@ describe("Thread", () => {
     it("expands each round's thinking + steps folds independently", () => {
       renderChat(chatRecord());
       // Issue #1282: the head opens first; the per-round folds live inside it.
-      fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
+      fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
       fireEvent.click(screen.getByRole("button", { name: "思考 · 1.5s" }));
       expect(screen.getByText("先推理一下")).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "轨迹 · 2 次调用" }));
+      fireEvent.click(screen.getByRole("button", { name: "轨迹 · explore ×1 · materialize ×1" }));
       expect(screen.getByText("SELECT 1")).toBeInTheDocument();
       expect(screen.getByText("SELECT 2")).toBeInTheDocument();
       // Round 2's fold stays collapsed -- its call is still hidden.
       expect(screen.queryByText("SELECT 3")).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "轨迹 · 1 次调用" }));
+      fireEvent.click(screen.getByRole("button", { name: "轨迹 · explore ×1" }));
       expect(screen.getByText("SELECT 3")).toBeInTheDocument();
     });
 
     it("folds an all-prose round (no calls, no thinking) behind the head, with no inner fold chrome", () => {
-      renderChat(
+      const { container } = renderChat(
         chatRecord({
           trace: [
             { text: "直接答复", calls: [] },
@@ -1342,9 +1359,9 @@ describe("Thread", () => {
       );
       // The prose is process discourse: it rides inside the turn-level fold
       // (issue #1282) and carries no per-round fold chrome of its own.
-      fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
+      fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
       expect(screen.getByText("直接答复")).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: /轨迹/ })).not.toBeInTheDocument();
+      expect(container.querySelector(".trace-toggle")).toBeNull();
       expect(screen.queryByRole("button", { name: /思考/ })).not.toBeInTheDocument();
     });
 
@@ -1360,7 +1377,7 @@ describe("Thread", () => {
       const stream = container.querySelector(".assistant-stream");
       expect(stream).not.toBeNull();
       const glyph = stream!.querySelector(".turn-meta .outcome-icon");
-      expect(glyph?.getAttribute("aria-label")).toBe("已回答");
+      expect(glyph?.getAttribute("aria-label")).toBe("已完成");
       expect(stream!.querySelector(".turn-meta time")).not.toBeNull();
     });
 
@@ -1498,6 +1515,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "统计一下",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: null,
         rounds: [],
@@ -1522,6 +1540,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 2,
         rounds: [],
@@ -1532,10 +1551,11 @@ describe("Thread", () => {
       expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
     });
 
-    it("streams round prose, the thinking fold and rows grouped by round", () => {
+    it("streams round prose, the thinking fold and rows grouped by round", async () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 2,
         rounds: [
@@ -1561,44 +1581,38 @@ describe("Thread", () => {
       const { container } = renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
-      // Prose renders always-expanded and the thinking fold with its honest
-      // duration label (collapsed) -- both identical to the settled form, so
-      // the settle swap does not move them.
+      // The verb face paints only after the dwell (a 600ms minimum hold --
+      // the user ruling against face flashing), so wait it out on the
+      // real clock.
+      const head = await waitFor(() => {
+        const el = container.querySelector("button.process-toggle");
+        expect(el).toHaveTextContent("正在写入 · 已完成 1 次调用");
+        return el;
+      });
+      // The prose renders always-expanded; the thinking is NOT a rail line
+      // any more -- it lives behind the activity line's expand face (the
+      // single rotating line ruling, issue #1606).
       expect(screen.getByText("先看一眼数据。")).toBeInTheDocument();
-      expect(screen.getByText("思考 · 0.9s")).toBeInTheDocument();
-      // The grouping itself is the contract (liveRoundsToTrace projects the
-      // same rounds at settle): one block per round, each row inside ITS
-      // round.
-      const roundBlocks = container.querySelectorAll(".trace-round");
-      expect(roundBlocks).toHaveLength(2);
-      const round1 = within(roundBlocks[0] as HTMLElement);
-      expect(round1.getByText("explore")).toBeInTheDocument();
-      expect(round1.getByText("先看一眼数据。")).toBeInTheDocument();
-      const round1Toggle = roundBlocks[0]?.querySelector(".thinking-toggle") ?? null;
-      expect(round1Toggle).not.toBeNull();
-      // The live thinking fold defaults to collapsed (the settled posture).
-      expect(round1Toggle?.getAttribute("aria-expanded")).toBe("false");
-      // Round 2 had no thinking (null slot): no thinking fold, just its row.
-      const round2 = within(roundBlocks[1] as HTMLElement);
-      expect(round2.getByText("materialize")).toBeInTheDocument();
-      expect(round2.queryByText("思考 · 0.9s")).not.toBeInTheDocument();
-      expect(round2.queryByText("先看一眼数据。")).not.toBeInTheDocument();
-      expect(roundBlocks[1]?.querySelector(".thinking-toggle")).toBeNull();
-      // A dispatched row carries the motion, so the trailing thinking
-      // status steps aside (no second spinner row).
+      expect(screen.queryByRole("button", { name: "思考" })).not.toBeInTheDocument();
+      expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
+      // Nothing unfurled: the completed row hides behind the head and the
+      // running call is absorbed too (the runner's motion keeps the wait
+      // status off).
+      expect(screen.queryByText("explore")).not.toBeInTheDocument();
+      expect(screen.queryByText("materialize")).not.toBeInTheDocument();
       expect(screen.queryByText("思考中…")).not.toBeInTheDocument();
       expect(screen.queryByText("思考中（第 2 步）…")).not.toBeInTheDocument();
     });
 
-    it("renders rounds whose rows lead the slot arrays (a round with rows but no prose)", () => {
+    it("renders rounds whose rows lead the slot arrays (a round with rows but no prose)", async () => {
       // The single derivation (buildLiveRounds) already spanned by step; this
-      // pins the rendering side: a round carrying only rows renders its own
-      // block after the prose round, so the newest call still lands in its
-      // own block (the DOM contract the derivation's unit test asserts
-      // structurally).
+      // pins the rendering side: the prose round renders its block; the
+      // rows-only round renders no block (empty RoundBody) -- its row rides
+      // the TURN-level tail (issue #1606), in the document below the blocks.
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 3,
         rounds: [
@@ -1619,9 +1633,20 @@ describe("Thread", () => {
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
       const roundBlocks = container.querySelectorAll(".trace-round");
-      expect(roundBlocks).toHaveLength(2);
+      expect(roundBlocks).toHaveLength(1);
       expect(within(roundBlocks[0] as HTMLElement).getByText("先看一眼数据。")).toBeInTheDocument();
-      expect(within(roundBlocks[1] as HTMLElement).getByText("materialize")).toBeInTheDocument();
+      // The rows-only round's running call is absorbed by the ONE activity
+      // line at the tail (the spinner carries the motion) -- nothing
+      // unfurled. The verb face paints only after the dwell (a 600ms
+      // minimum hold -- the user ruling against face flashing), so wait
+      // it out on the real clock.
+      const head = await waitFor(() => {
+        const el = container.querySelector("button.process-toggle");
+        expect(el).toHaveTextContent("正在写入 · 已完成 0 次调用");
+        return el;
+      });
+      expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
+      expect(screen.queryByText("materialize")).not.toBeInTheDocument();
     });
 
     it("brings the thinking status back between rounds once every row settles", () => {
@@ -1633,6 +1658,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 2,
         rounds: [liveRound({ rows: [liveRow({ key: "call-0", running: false, success: true })] })],
@@ -1647,6 +1673,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
         rounds: [
@@ -1676,9 +1703,10 @@ describe("Thread", () => {
         />,
       );
       expect(screen.getByText("等待审批")).toBeInTheDocument();
-      // The pending gate wait carries the motion itself, so the trailing
-      // thinking status steps aside (no second spinner beside the card -- a
-      // predicate regression to `running` alone renders both).
+      // The gate hold keeps the TOOL face beside the card (the pending
+      // call is the imminent activity) -- the thinking face must be off
+      // (a predicate regression to `running` alone would claim 思考中
+      // while the card waits).
       expect(screen.queryByText("思考中…")).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
       expect(onRespondApproval).toHaveBeenCalledWith("req-1", "allow_once");
@@ -1697,6 +1725,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
         rounds: [
@@ -1735,10 +1764,17 @@ describe("Thread", () => {
       expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
     });
 
-    it("flips an answered approval to its resolved badge in place", () => {
+    it("folds an answered approval's row into the group with its resolved badge (#1606)", () => {
+      // A deny lands as a completion (the gateway fires only the completed
+      // event -- success false, the denial message as the excerpt), so the
+      // row is a settled one: it folds into the round's group like any
+      // completed call, the badge riding the row (ADR-0083's one-row-per-
+      // call) and the denial excerpt beneath it on expand (#1604's failure
+      // face). No buttons remain.
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
         rounds: [
@@ -1759,11 +1795,18 @@ describe("Thread", () => {
           }),
         ],
       };
-      renderThread(
+      const { container } = renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
-      // Resolved in place: the badge names the answer, the denial excerpt
-      // rides the row -- no buttons remain.
+      // The completion folded into the ONE activity line; with no call
+      // running the face has already rotated back to the thinking phase
+      // (the count waits behind the fold).
+      const head = container.querySelector("button.process-toggle");
+      expect(head).toHaveTextContent("思考中…");
+      expect(screen.queryByText("已拒绝")).not.toBeInTheDocument();
+      // Expand: the badge names the answer on the flat row, the denial
+      // excerpt rides beneath it -- no buttons remain.
+      fireEvent.click(head!);
       expect(screen.getByText("已拒绝")).toBeInTheDocument();
       expect(screen.getByText("denied by approval gateway")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "允许一次" })).not.toBeInTheDocument();
@@ -1773,6 +1816,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "第一问",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: null,
         rounds: [],
@@ -1795,6 +1839,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "在员工表上统计总销售额",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: null,
         rounds: [],
@@ -1836,6 +1881,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "随便看看",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: null,
         rounds: [],
@@ -1853,334 +1899,175 @@ describe("Thread", () => {
       expect(container.querySelector(".live-turn-exchange .stream-header")).toBeNull();
     });
 
-    it("keeps the live-opened thinking fold + prose across the settle swap (issue #620)", () => {
-      // The settle continuity: the exchange reports its open folds, and the
-      // swap frame seeds the appended entry's thinking folds with them. The
-      // prose stays by shared markup; the fold the user opened stays open,
-      // the one they left closed stays closed. The thinking blocks are the
-      // SAME references on both sides (the projection carries them), which
-      // is what the reference-keyed seed matches on.
-      const openedThinking = { duration_ms: 900, text: "推理一" };
-      const closedThinking = { duration_ms: 1200, text: "推理二" };
+    it("keeps the expanded activity line across the settle swap (issue #1606)", () => {
+      // The line's expand posture rides the settle frame: the swapped-in
+      // card's turn-level process fold mounts already open -- the process
+      // face the user was reading lands at the same spot. The round folds
+      // inside it keep the settled default (collapsed).
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
-        step: 2,
+        step: 1,
         rounds: [
-          liveRound({ thinking: openedThinking, text: "先看一眼数据。" }),
-          liveRound({ thinking: closedThinking }),
-        ],
-      };
-      const record: TurnRecord = {
-        question: "q",
-        outcome: { kind: "Textual", data: { text_kind: "Agent", body: "答", assumption: null } },
-        trace: [
-          { thinking: openedThinking, text: "先看一眼数据。", calls: [] },
-          { thinking: closedThinking, calls: [] },
-        ],
-        provenance: { skills: [] },
-        asked_at: ASKED_AT,
-        settled_at: ASKED_AT,
-      };
-      const { rerender } = renderThread(
-        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
-      );
-      // Open round 1's fold only; round 2's stays collapsed.
-      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
-      expect(screen.getByText("推理一")).toBeInTheDocument();
-      expect(screen.queryByText("推理二")).not.toBeInTheDocument();
-      // The settle swap in one commit: the live turn nulls AND the
-      // optimistic record appends (the same single rerender the hook's batch
-      // produces).
-      rerender(threadTree({ entries: [turnEntry(record)], liveTurn: null }));
-      // Issue #1282: the settled card tucks its process behind the turn-level
-      // head; expanding it reveals the seeded per-round face.
-      fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
-      // The prose stays (identical markup) and the opened fold stays open;
-      // the untouched fold stays collapsed. The answer body closes the turn.
-      expect(screen.getByText("先看一眼数据。")).toBeInTheDocument();
-      expect(screen.getByText("答")).toBeInTheDocument();
-      const toggles = document.querySelectorAll(".turn-entry .thinking-toggle");
-      expect(toggles).toHaveLength(2);
-      expect(toggles[0]?.getAttribute("aria-expanded")).toBe("true");
-      expect(toggles[1]?.getAttribute("aria-expanded")).toBe("false");
-      expect(screen.getByText("推理一")).toBeInTheDocument();
-      expect(screen.queryByText("推理二")).not.toBeInTheDocument();
-    });
-
-    it("maps the settle seed through the projection's round drop (issue #620)", () => {
-      // The seed keys on the thinking block's reference, not an array index:
-      // a gate-cancelled round (rows all unsettled, no prose, no thinking)
-      // renders on the live side but the projection drops it, shifting the
-      // settled trace's indices -- the reference key still finds the same
-      // fold. An index-keyed seed flips these assertions (the opened fold
-      // snaps shut, the next round's fold pops open).
-      const openedThinking = { duration_ms: 900, text: "推理一" };
-      const closedThinking = { duration_ms: 1200, text: "推理二" };
-      const liveTurn: LiveTurn = {
-        question: "q",
-        askedAt: ASKED_AT,
-        invocationNames: [],
-        step: 3,
-        rounds: [
-          // The round the projection drops: a pending card that never
-          // settled (denied at the gate, no dispatch).
           liveRound({
-            rows: [
-              liveRow({
-                key: "req-1",
-                name: "fetch",
-                server: "acme",
-                operationKind: "network",
-                summary: "GET /x",
-                approval: { requestId: "req-1", response: null },
-                running: false,
-                success: null,
-              }),
-            ],
+            rows: [liveRow({ key: "call-0", running: false, success: true })],
           }),
-          liveRound({ thinking: openedThinking }),
-          liveRound({ thinking: closedThinking }),
         ],
       };
       const record: TurnRecord = {
         question: "q",
         outcome: { kind: "Cancelled", data: null },
         trace: [
-          { thinking: openedThinking, calls: [] },
-          { thinking: closedThinking, calls: [] },
+          {
+            calls: [
+              {
+                name: "explore",
+                operation_kind: "read",
+                summary: "SELECT 1",
+                success: true,
+                result_excerpt: "",
+              },
+            ],
+          },
         ],
         provenance: { skills: [] },
       };
       const { rerender } = renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
-      // Open the middle round's fold (live index 1).
-      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
+      // The drained calls rotate the line back to the thinking face.
+      fireEvent.click(screen.getByRole("button", { name: "思考中…" }));
+      // The settle swap in one commit (the hook's batch shape).
       rerender(threadTree({ entries: [turnEntry(record)], liveTurn: null }));
-      // Issue #1282: expand the settled card's process head to reach the folds.
-      fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
-      // The opened fold now sits at trace index 0 (the gate round dropped);
-      // the reference seed keeps it open and leaves the other collapsed.
-      const toggles = document.querySelectorAll(".turn-entry .thinking-toggle");
-      expect(toggles).toHaveLength(2);
-      expect(toggles[0]?.getAttribute("aria-expanded")).toBe("true");
-      expect(toggles[1]?.getAttribute("aria-expanded")).toBe("false");
-      expect(screen.getByText("推理一")).toBeInTheDocument();
-      expect(screen.queryByText("推理二")).not.toBeInTheDocument();
+      // The process fold lands open -- no second click (issue #1282's
+      // collapsed default overridden by the seed).
+      const head = screen.getByRole("button", { name: /已取消/ });
+      expect(head).toHaveAttribute("aria-expanded", "true");
+      // The inner round folds keep the settled default (collapsed) -- the
+      // landing is the process face, not every row unfurled.
+      const roundFold = document.querySelector(".turn-entry .trace-toggle");
+      expect(roundFold?.getAttribute("aria-expanded")).toBe("false");
     });
 
-    it("keeps an opened live thinking fold mounted when new rows land in its round (issue #620)", () => {
-      // The round block's key is the round number: a row landing in the same
-      // round re-derives the rounds array but never remounts the block, so
-      // the fold's local state (open) survives the growth.
-      const thinking = { duration_ms: 900, text: "推理" };
+    it("keeps a line the user re-closed before the settle collapsed (issue #1606)", () => {
+      // The posture tracks both directions; a re-close before the swap
+      // seeds nothing and the process fold mounts collapsed.
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
-        rounds: [liveRound({ thinking })],
-      };
-      const { rerender } = renderThread(
-        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
-      );
-      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
-      expect(screen.getByText("推理")).toBeInTheDocument();
-      // A call starts in the same round: the fold must not snap shut.
-      rerender(threadTree({ entries: [], liveTurn: {
-        ...liveTurn,
-        rounds: [liveRound({ thinking, rows: [liveRow({ key: "call-0" })] })],
-      } }));
-      const toggle = document.querySelector(".live-turn-exchange .thinking-toggle");
-      expect(toggle?.getAttribute("aria-expanded")).toBe("true");
-      expect(screen.getByText("推理")).toBeInTheDocument();
-      expect(screen.getByText("explore")).toBeInTheDocument();
-    });
-
-    it("keeps the live-opened thinking fold across progress events landing after the open (issue #620)", () => {
-      // The collector's reset edge keys on the submit stamp, NOT the liveTurn
-      // identity: the memoized liveTurn takes a NEW identity on every
-      // progress event, so an identity-keyed reset would wipe the collector
-      // mid-turn and the settle seed would arrive empty -- the opened fold
-      // would snap shut. Open, then a progress event, then the settle: the
-      // exact sequence the swap tests above leave uncovered.
-      const openedThinking = { duration_ms: 900, text: "推理一" };
-      const liveTurn: LiveTurn = {
-        question: "q",
-        askedAt: ASKED_AT,
-        invocationNames: [],
-        step: 1,
-        rounds: [liveRound({ thinking: openedThinking })],
-      };
-      const record: TurnRecord = {
-        question: "q",
-        outcome: { kind: "Cancelled", data: null },
-        trace: [{ thinking: openedThinking, calls: [] }],
-        provenance: { skills: [] },
-      };
-      const { rerender } = renderThread(
-        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
-      );
-      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
-      // A later progress event (same turn -- the SAME submit stamp, a NEW
-      // liveTurn object: the memo rebuilds on every event): the collector
-      // must survive it.
-      rerender(threadTree({ entries: [], liveTurn: {
-        ...liveTurn,
-        step: 2,
         rounds: [
-          liveRound({ thinking: openedThinking }),
-          liveRound({ rows: [liveRow({ key: "call-0" })] }),
+          liveRound({
+            rows: [liveRow({ key: "call-0", running: false, success: true })],
+          }),
         ],
-      } }));
-      // The settle swap in one commit: the opened fold still seeds.
-      rerender(threadTree({ entries: [turnEntry(record)], liveTurn: null }));
-      // Issue #1282: expand the settled card's process head to reach the folds.
-      fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
-      const toggles = document.querySelectorAll(".turn-entry .thinking-toggle");
-      expect(toggles).toHaveLength(1);
-      expect(toggles[0]?.getAttribute("aria-expanded")).toBe("true");
-      expect(screen.getByText("推理一")).toBeInTheDocument();
-    });
-
-    it("keeps the fold open across the settle when a same-round repeated completion swaps the thinking block (issue #620)", () => {
-      // Last-wins: a repeated ThinkingCompleted for the same round overwrites
-      // the slot with a NEW block. The live fold keeps its open posture (the
-      // round block is position-keyed), and the fold re-reports against the
-      // replacement reference so the settle seed still hits -- without the
-      // re-report the collector holds the dead reference and the fold snaps
-      // shut at the swap.
-      const firstThinking = { duration_ms: 900, text: "推理一版" };
-      const replacedThinking = { duration_ms: 900, text: "推理二版" };
-      const liveTurn: LiveTurn = {
-        question: "q",
-        askedAt: ASKED_AT,
-        invocationNames: [],
-        step: 1,
-        rounds: [liveRound({ thinking: firstThinking })],
       };
       const record: TurnRecord = {
         question: "q",
         outcome: { kind: "Cancelled", data: null },
-        trace: [{ thinking: replacedThinking, calls: [] }],
+        trace: [
+          {
+            calls: [
+              {
+                name: "explore",
+                operation_kind: "read",
+                summary: "SELECT 1",
+                success: true,
+                result_excerpt: "",
+              },
+            ],
+          },
+        ],
         provenance: { skills: [] },
       };
       const { rerender } = renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
-      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
-      expect(screen.getByText("推理一版")).toBeInTheDocument();
-      // The same round completes again (last-wins): the slot now carries the
-      // replacement block and the fold stays open on it.
-      rerender(threadTree({ entries: [], liveTurn: { ...liveTurn, rounds: [liveRound({ thinking: replacedThinking })] } }));
-      const liveToggle = document.querySelector(".live-turn-exchange .thinking-toggle");
-      expect(liveToggle?.getAttribute("aria-expanded")).toBe("true");
-      expect(screen.getByText("推理二版")).toBeInTheDocument();
-      // The settle swap: the seed keys on the replacement reference.
+      const head = screen.getByRole("button", { name: "思考中…" });
+      fireEvent.click(head); // open
+      fireEvent.click(head); // re-close before the settle
       rerender(threadTree({ entries: [turnEntry(record)], liveTurn: null }));
-      // Issue #1282: expand the settled card's process head to reach the fold.
-      fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
-      const settledToggle = document.querySelector(".turn-entry .thinking-toggle");
-      expect(settledToggle?.getAttribute("aria-expanded")).toBe("true");
-      expect(screen.getByText("推理二版")).toBeInTheDocument();
+      const processHead = screen.getByRole("button", { name: /已取消/ });
+      expect(processHead).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
     });
 
-    it("keeps a fold the user re-closed before the settle collapsed (issue #620)", () => {
-      // The collector tracks both directions: re-closing removes the block
-      // from the set, so the settle seeds nothing and the fold mounts
-      // collapsed -- a growing-only collector would wrongly mount it open.
-      const thinking = { duration_ms: 900, text: "推理" };
-      const liveTurn: LiveTurn = {
-        question: "q",
+    it("the posture survives identity churn and never leaks across turns (issue #1606)", () => {
+      // Two edges, one behavior: the posture must SURVIVE every progress
+      // re-render (a new liveTurn identity under the same askedAt -- an
+      // identity edge would wipe the seed mid-turn), and one turn's open
+      // line must not seed the NEXT turn's process fold. The fresh-ask
+      // reset is defense in depth: the new line's mount report (folded)
+      // carries the posture back to false either way, so this pins the
+      // behavior, not one mechanism.
+      const cancelledRecord = (question: string): TurnRecord => ({
+        question,
+        outcome: { kind: "Cancelled", data: null },
+        trace: [
+          {
+            calls: [
+              {
+                name: "explore",
+                operation_kind: "read",
+                summary: "SELECT 1",
+                success: true,
+                result_excerpt: "",
+              },
+            ],
+          },
+        ],
+        provenance: { skills: [] },
+      });
+      const turnOne: LiveTurn = {
+        question: "q1",
         askedAt: ASKED_AT,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
-        rounds: [liveRound({ thinking })],
-      };
-      const record: TurnRecord = {
-        question: "q",
-        outcome: { kind: "Cancelled", data: null },
-        trace: [{ thinking, calls: [] }],
-        provenance: { skills: [] },
+        rounds: [liveRound({ rows: [liveRow({ key: "call-0", running: false, success: true })] })],
       };
       const { rerender } = renderThread(
-        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={turnOne} />,
       );
-      const toggle = screen.getByRole("button", { name: "思考 · 0.9s" });
-      fireEvent.click(toggle); // open
-      fireEvent.click(toggle); // re-close before the settle
-      rerender(threadTree({ entries: [turnEntry(record)], liveTurn: null }));
-      // Issue #1282: the head expansion reveals the fold; the re-closed
-      // posture mounts collapsed inside it.
-      fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
-      const settledToggle = document.querySelector(".turn-entry .thinking-toggle");
-      expect(settledToggle?.getAttribute("aria-expanded")).toBe("false");
-      expect(screen.queryByText("推理")).not.toBeInTheDocument();
-    });
-
-    it("resets the collected posture on a fresh turn so its folds mount collapsed (issue #620)", () => {
-      // Turn A's opened fold settles open (its card mounts seeded); the NEXT
-      // turn's folds mount collapsed -- the collector resets on the fresh
-      // turn's submit stamp, so turn B never inherits turn A's set.
-      const thinkingA = { duration_ms: 900, text: "推理甲" };
-      const thinkingB = { duration_ms: 1200, text: "推理乙" };
-      const recordA: TurnRecord = {
-        question: "问甲",
-        outcome: { kind: "Cancelled", data: null },
-        trace: [{ thinking: thinkingA, calls: [] }],
-        provenance: { skills: [] },
-      };
-      const recordB: TurnRecord = {
-        question: "问乙",
-        outcome: { kind: "Cancelled", data: null },
-        trace: [{ thinking: thinkingB, calls: [] }],
-        provenance: { skills: [] },
-      };
-      const { rerender } = renderThread(
-        <Thread
-          entries={[]}
-          selectedResult={null}
-          onSelectResult={() => {}}
-          liveTurn={{
-            question: "问甲",
-            askedAt: ASKED_AT,
-            invocationNames: [],
-            step: 1,
-            rounds: [liveRound({ thinking: thinkingA })],
-          }}
-        />,
+      fireEvent.click(screen.getByRole("button", { name: "思考中…" }));
+      // A progress event re-renders under a NEW liveTurn identity but the
+      // SAME submit stamp -- the posture survives (the identity must not
+      // be the reset edge).
+      rerender(
+        threadTree({
+          entries: [],
+          liveTurn: { ...turnOne, step: 2, rounds: [...turnOne.rounds, liveRound({})] },
+        }),
       );
-      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
-      // Turn A settles: its fold mounts already open.
-      rerender(threadTree({ entries: [turnEntry(recordA)], liveTurn: null }));
-      // Issue #1282: expand the settled card's process head to reach the fold.
-      fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
-      expect(document.querySelector(".turn-entry .thinking-toggle")?.getAttribute("aria-expanded")).toBe(
+      rerender(threadTree({ entries: [turnEntry(cancelledRecord("q1"))], liveTurn: null }));
+      expect(screen.getByRole("button", { name: /已取消/ })).toHaveAttribute(
+        "aria-expanded",
         "true",
       );
-      // Turn B goes live (a NEW submit stamp) with its own thinking block,
-      // then settles: B's fold mounts collapsed, A's stays open.
-      rerender(threadTree({ entries: [turnEntry(recordA)], liveTurn: {
-        question: "问乙",
+      // A FRESH ask (a new askedAt) resets the posture: the second turn's
+      // line never expanded, so its settle lands collapsed -- the first
+      // turn's open posture does not leak forward.
+      const turnTwo: LiveTurn = {
+        question: "q2",
         askedAt: ASKED_AT + 1000,
+        pausedSince: null,
         invocationNames: [],
         step: 1,
-        rounds: [liveRound({ thinking: thinkingB })],
-      } }));
-      rerender(threadTree({ entries: [turnEntry(recordA), turnEntry(recordB)], liveTurn: null }));
-      // Issue #1282: every still-collapsed head opens (A's is already open
-      // from the previous settle) -- each fold mounts inside its own.
-      screen
-        .getAllByRole("button", { name: /已取消/ })
-        .filter((head) => head.getAttribute("aria-expanded") === "false")
-        .forEach((head) => fireEvent.click(head));
-      const toggles = document.querySelectorAll(".turn-entry .thinking-toggle");
-      expect(toggles).toHaveLength(2);
-      expect(toggles[0]?.getAttribute("aria-expanded")).toBe("true");
-      expect(toggles[1]?.getAttribute("aria-expanded")).toBe("false");
-      expect(screen.queryByText("推理乙")).not.toBeInTheDocument();
+        rounds: [liveRound({ rows: [liveRow({ key: "call-1", running: false, success: true })] })],
+      };
+      rerender(threadTree({ entries: [turnEntry(cancelledRecord("q1"))], liveTurn: turnTwo }));
+      rerender(
+        threadTree({
+          entries: [turnEntry(cancelledRecord("q1")), turnEntry(cancelledRecord("q2"))],
+          liveTurn: null,
+        }),
+      );
+      const heads = screen.getAllByRole("button", { name: /已取消/ });
+      expect(heads[heads.length - 1]).toHaveAttribute("aria-expanded", "false");
     });
   });
 
@@ -2221,12 +2108,16 @@ describe("Thread", () => {
                 dataset: {
                   ...mockDataset,
                   reference_name: "result_1",
+                  display_name: "result_1",
                   sample: [["x"]],
                   columns: [{ name: "mid", canonical_type: "VARCHAR" }],
                 },
                 sql: "SELECT 1",
               },
-              { dataset: { ...mockDataset, reference_name: "result_2" }, sql: "SELECT 2" },
+              {
+                dataset: { ...mockDataset, reference_name: "result_2", display_name: "result_2" },
+                sql: "SELECT 2",
+              },
             ],
             viz: null,
             body: null,
@@ -2279,7 +2170,13 @@ describe("Thread", () => {
           data: {
             promotions: [
               {
-                dataset: { ...mockDataset, reference_name: "result_1", row_count: 0, sample: [] },
+                dataset: {
+                  ...mockDataset,
+                  reference_name: "result_1",
+                  display_name: "result_1",
+                  row_count: 0,
+                  sample: [],
+                },
                 sql: "SELECT 1 WHERE false",
               },
             ],
@@ -2353,6 +2250,7 @@ describe("Thread", () => {
                 dataset: {
                   ...mockDataset,
                   reference_name: "result_1",
+                  display_name: "result_1",
                   columns: [
                     { name: "a", canonical_type: "VARCHAR" },
                     { name: "b", canonical_type: "VARCHAR" },

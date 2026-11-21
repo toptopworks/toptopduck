@@ -121,53 +121,68 @@ describe("useTurnFlow", () => {
     turnProgressCb.current = null;
   });
 
-  describe("turn-progress listener + phase lifecycle (ADR-0059)", () => {
+  describe("turn-progress listener + live folding (ADR-0059)", () => {
     it("mounts a LONG-LIVED listener once (reused across turns, ADR-0059 C-4)", () => {
       const { deps } = setup();
       renderHook(() => useTurnFlow(SID, deps));
       expect(turnProgressCb.current).not.toBeNull();
     });
 
-    it("sets phase from a Thinking / tool-call event addressed to this session", async () => {
+    it("folds a Thinking / tool-call event addressed to this session into the live turn", async () => {
       const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
       emitProgress(SID, { Thinking: { attempt: 1 } });
-      expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
-      // ADR-0078: the tool-call event stream replaces the retired Querying
-      // marker; the latest event rides `phase` for the QuestionBar label.
+      expect(result.current.liveTurn?.step).toBe(1);
+      // ADR-0078: the tool-call event stream folds a running row.
       emitProgress(SID, {
         ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
       });
-      expect(result.current.phase).toEqual({
-        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
-      });
+      const rows = result.current.liveTurn?.rounds[0]?.rows ?? [];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ name: "explore", running: true });
     });
 
     it("filters out events addressed to ANOTHER session (ADR-0056 multi-session filter)", async () => {
       const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
       emitProgress(SID, { Thinking: { attempt: 1 } });
-      expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
-      // A sibling pane's event must never leak in.
+      expect(result.current.liveTurn?.step).toBe(1);
+      // A sibling pane's event must never leak in: no row folds.
       emitProgress(STRANGER, {
         ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
       });
-      expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
+      expect(result.current.liveTurn?.rounds[0]?.rows ?? []).toHaveLength(0);
     });
 
-    it("clears phase to null on every ask end (finally, incl. a Cancelled outcome)", async () => {
+    it("folds the live turn away on every ask end (finally, incl. a Cancelled outcome)", async () => {
       const { deps } = setup();
       vi.mocked(askQuestion).mockResolvedValue({ kind: "Cancelled", data: null });
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
-      emitProgress(SID, { Thinking: { attempt: 1 } });
-      expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
-      await act(async () => {
-        await result.current.handleAsk("q");
+      let ask!: Promise<void>;
+      act(() => {
+        ask = result.current.handleAsk("q");
       });
-      expect(result.current.phase).toBeNull();
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      expect(result.current.liveTurn).not.toBeNull();
+      await act(async () => {
+        await ask;
+      });
+      expect(result.current.liveTurn).toBeNull();
     });
 
     it("hasLiveTurn probes the live truth: false before, true mid-turn, false after the settle (#1503)", async () => {
@@ -204,17 +219,9 @@ describe("useTurnFlow", () => {
       vi.mocked(askQuestion).mockRejectedValue(new Error("ipc down"));
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
-      emitProgress(SID, {
-        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
-      });
-      expect(result.current.phase).toEqual({
-        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
-      });
       await act(async () => {
         await result.current.handleAsk("q");
       });
-      // The reject's finally clears the phase the mid-turn event set.
-      expect(result.current.phase).toBeNull();
       // Error + loading teardown on the failure path: setError(null) clears the
       // prior error at the ask start, then the reject sets a fresh AppError.
       expect(setError).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "ask" }));
@@ -569,10 +576,6 @@ describe("useTurnFlow", () => {
       emitProgress(SID, {
         ThinkingCompleted: { duration_ms: 900, text: "reasoning" },
       });
-      // Observable as the latest phase; the round carries the block, no row.
-      expect(result.current.phase).toEqual({
-        ThinkingCompleted: { duration_ms: 900, text: "reasoning" },
-      });
       // The thinking block rides the rounds (#610): the live fold renders
       // from it, so it must not be dropped.
       expect(result.current.liveTurn?.rounds).toEqual([
@@ -719,6 +722,111 @@ describe("useTurnFlow", () => {
         success: false,
         resultExcerpt: "denied by approval gateway",
         running: false,
+      });
+    });
+
+    // The wire's failure_detail enters the live chain at the merge
+    // ingestion site (issue #1610): a started+completed pair folds the
+    // completion into the open row (completeCallAt), and the merged row
+    // carries the field the anchor renders -- the ingestion hop the
+    // factory-based chain test bypasses.
+    it("a merged completion carries the wire failure_detail onto the row", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: false,
+          result_excerpt: "boom…",
+          failure_detail: "boom: relation not found (full text)",
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        running: false,
+        success: false,
+        failureDetail: "boom: relation not found (full text)",
+      });
+    });
+
+    // The wire's landed stats enter the live chain at the same merge hop
+    // (issue #1621): a started+completed pair folds the completion into
+    // the open row, and the merged row carries the fields the badge and
+    // the replacements line render.
+    it("a merged completion carries the wire landed stats onto the row (issue #1621)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "edit", operation_kind: "write", summary: "s.py" },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "edit",
+          operation_kind: "write",
+          summary: "s.py",
+          success: true,
+          result_excerpt: "",
+          lines_added: 1,
+          lines_removed: 2,
+          replacements: 2,
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        running: false,
+        success: true,
+        linesAdded: 1,
+        linesRemoved: 2,
+        replacements: 2,
+      });
+    });
+
+    // The append ingestion site (issue #1610): a completion with no started
+    // event rides applyRoundFold's positional callRow pass -- the trailing
+    // hole the factory-based tests never cross -- and the appended row
+    // keeps the field.
+    it("an appended completion (no started event) carries the failure_detail", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: false,
+          result_excerpt: "boom…",
+          failure_detail: "boom: relation not found (full text)",
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows).toHaveLength(1);
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        running: false,
+        success: false,
+        failureDetail: "boom: relation not found (full text)",
       });
     });
 
@@ -1288,6 +1396,114 @@ describe("useTurnFlow", () => {
       ]);
     });
 
+    it("threads the failure detail through merge + grouping + the settle projection (issue #1610)", () => {
+      // The wire's failure_detail rides the whole live chain -- the fold's
+      // call, the merge, the round grouping, and the settled projection back
+      // onto the trace shape -- so the live anchor and the optimistic record
+      // both render the full model-visible text. A row without one (a
+      // pre-#1610 record, a no-text arm) keeps an absent key: the anchor
+      // falls back to the excerpt.
+      const failed = call({
+        success: false,
+        resultExcerpt: "boom…",
+        failureDetail: "boom: relation not found (full text)",
+      });
+      const trace = liveRoundsToTrace(
+        buildLiveRounds(
+          { step: 1, calls: [failed], roundTexts: [], roundThinkings: [], delegations: {} },
+          [],
+        ),
+      );
+      expect(trace[0]?.calls[0]?.failure_detail).toBe(
+        "boom: relation not found (full text)",
+      );
+      const plain = call({ success: false, resultExcerpt: "boom" });
+      const plainTrace = liveRoundsToTrace(
+        buildLiveRounds(
+          { step: 1, calls: [plain], roundTexts: [], roundThinkings: [], delegations: {} },
+          [],
+        ),
+      );
+      expect(plainTrace[0]?.calls[0]?.failure_detail).toBeUndefined();
+    });
+
+    it("threads the landed write stats through merge + grouping + the settle projection (issue #1621)", () => {
+      // The wire's lines_added / lines_removed / replacements ride the
+      // whole live chain like the failure detail above -- the settled row
+      // renders the same badge a resumed (recipe-played) row would, the
+      // zero-mapping projection parity. A row without them (every
+      // non-write arm, a failed call) keeps absent keys: no badge, no
+      // replacements line.
+      const wrote = call({
+        success: true,
+        resultExcerpt: "",
+        linesAdded: 12,
+        linesRemoved: 3,
+        replacements: 2,
+      });
+      const trace = liveRoundsToTrace(
+        buildLiveRounds(
+          { step: 1, calls: [wrote], roundTexts: [], roundThinkings: [], delegations: {} },
+          [],
+        ),
+      );
+      expect(trace[0]?.calls[0]).toMatchObject({
+        lines_added: 12,
+        lines_removed: 3,
+        replacements: 2,
+      });
+      const plain = call({ success: true, resultExcerpt: "" });
+      const plainTrace = liveRoundsToTrace(
+        buildLiveRounds(
+          { step: 1, calls: [plain], roundTexts: [], roundThinkings: [], delegations: {} },
+          [],
+        ),
+      );
+      expect(plainTrace[0]?.calls[0]?.lines_added).toBeUndefined();
+      expect(plainTrace[0]?.calls[0]?.lines_removed).toBeUndefined();
+      expect(plainTrace[0]?.calls[0]?.replacements).toBeUndefined();
+    });
+
+    it("carries the landed write stats through a delegation's running fold (issue #1621)", () => {
+      // A sub-agent's completed write rides the shared completion landing
+      // (completeCallAt) into the buffer's fold, and foldRounds projects
+      // that fold onto the running panel's rows -- the panel's settled rows
+      // render through the same traceEntryFromRow as the main rail, so the
+      // stats must survive this hand-synced table too, or the running
+      // panel's write/edit rows show no badge until the delegation
+      // completes and the wire's sub_rounds take over (the settle
+      // isomorphism torn for the delegation's whole run).
+      const agent = call({ name: "agent", callId: "d1", summary: "fix things" });
+      const wrote = call({
+        key: "sub-0",
+        step: 1,
+        name: "write",
+        operationKind: "write",
+        success: true,
+        resultExcerpt: "",
+        linesAdded: 12,
+        linesRemoved: 3,
+        replacements: 2,
+      });
+      const rounds = buildLiveRounds(
+        {
+          step: 1,
+          calls: [agent],
+          roundTexts: [],
+          roundThinkings: [],
+          delegations: {
+            d1: { task: "fix the widget", fold: { step: 1, calls: [wrote], roundThinkings: [] } },
+          },
+        },
+        [],
+      );
+      expect(rounds[0]?.rows[0]?.delegation?.rounds[0]?.rows[0]).toMatchObject({
+        linesAdded: 12,
+        linesRemoved: 3,
+        replacements: 2,
+      });
+    });
+
     it("buildLiveRounds turns padded null slots into absent members (a round that emitted none)", () => {
       // withRoundSlot pads skipped rounds with null (round 1 emitted nothing
       // when round 2's event lands first); the derivation converts the
@@ -1671,152 +1887,11 @@ describe("useTurnFlow", () => {
     });
   });
 
-  describe("wait stamp (issue #1264)", () => {
-    // The LLM round-trip wait window's start stamp. The Date.now spy keys
-    // each window's stamp so the persistence / fresh-window assertions are
-    // deterministic (a real clock can return the same millisecond twice in
-    // a fast run).
-    function stampNow(value: number) {
-      return vi.spyOn(Date, "now").mockReturnValue(value);
-    }
-    const staysInFlight = () => new Promise<TurnOutcome>(() => {});
-
-    it("opens at ask start (empty rounds already name the wait) and persists through a bare Thinking", async () => {
-      const { deps } = setup();
-      const nowSpy = stampNow(1_000);
-      vi.mocked(askQuestion).mockImplementation(staysInFlight);
-      const { result } = renderHook(() => useTurnFlow(SID, deps));
-      expect(result.current.waitStartedAt).toBeNull();
-      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
-      act(() => {
-        void result.current.handleAsk("问");
-      });
-      expect(result.current.waitStartedAt).toBe(1_000);
-      // The wait continues -- the window keeps its opening stamp.
-      emitProgress(SID, { Thinking: { attempt: 1 } });
-      expect(result.current.waitStartedAt).toBe(1_000);
-      // And it keeps it across the window's LATER commits too: the clock
-      // moves INSIDE the window, so a re-stamping regression (a fresh stamp
-      // per waiting commit) would read 3_000 here.
-      nowSpy.mockReturnValue(3_000);
-      emitProgress(SID, { Thinking: { attempt: 2 } });
-      expect(result.current.waitStartedAt).toBe(1_000);
-      nowSpy.mockRestore();
-    });
-
-    it("closes when a call dispatches (the running row carries the liveness)", async () => {
-      const { deps } = setup();
-      const nowSpy = stampNow(1_000);
-      vi.mocked(askQuestion).mockImplementation(staysInFlight);
-      const { result } = renderHook(() => useTurnFlow(SID, deps));
-      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
-      act(() => {
-        void result.current.handleAsk("问");
-      });
-      expect(result.current.waitStartedAt).toBe(1_000);
-      emitProgress(SID, {
-        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
-      });
-      expect(result.current.waitStartedAt).toBeNull();
-      nowSpy.mockRestore();
-    });
-
-    it("closes while the tail round streams prose (the caret carries the liveness)", async () => {
-      const { deps } = setup();
-      const nowSpy = stampNow(1_000);
-      vi.mocked(askQuestion).mockImplementation(staysInFlight);
-      const { result } = renderHook(() => useTurnFlow(SID, deps));
-      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
-      act(() => {
-        void result.current.handleAsk("问");
-      });
-      emitProgress(SID, { Thinking: { attempt: 1 } });
-      expect(result.current.waitStartedAt).toBe(1_000);
-      emitProgress(SID, { TextDelta: { delta: "答" } });
-      expect(result.current.waitStartedAt).toBeNull();
-      nowSpy.mockRestore();
-    });
-
-    it("opens a FRESH stamp for the next round-trip window (no cross-window carry)", async () => {
-      const { deps } = setup();
-      const nowSpy = stampNow(1_000);
-      vi.mocked(askQuestion).mockImplementation(staysInFlight);
-      const { result } = renderHook(() => useTurnFlow(SID, deps));
-      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
-      act(() => {
-        void result.current.handleAsk("问");
-      });
-      expect(result.current.waitStartedAt).toBe(1_000);
-      emitProgress(SID, {
-        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
-      });
-      expect(result.current.waitStartedAt).toBeNull();
-      // The dispatch completes: the sealed row waits on the next round-trip
-      // -- a NEW window, stamped from the clock at ITS opening.
-      nowSpy.mockReturnValue(9_000);
-      emitProgress(SID, {
-        ToolCallCompleted: {
-          name: "explore",
-          operation_kind: "read",
-          summary: "SELECT 1",
-          success: true,
-          result_excerpt: "",
-        },
-      });
-      expect(result.current.waitStartedAt).toBe(9_000);
-      emitProgress(SID, { Thinking: { attempt: 2 } });
-      expect(result.current.waitStartedAt).toBe(9_000);
-      nowSpy.mockRestore();
-    });
-
-    it("dies with the turn: a settled ask clears the stamp (cancel rides the same finally)", async () => {
-      const { deps } = setup();
-      const nowSpy = stampNow(1_000);
-      let resolveAsk!: (outcome: TurnOutcome) => void;
-      vi.mocked(askQuestion).mockImplementationOnce(
-        () =>
-          new Promise<TurnOutcome>((res) => {
-            resolveAsk = res;
-          }),
-      );
-      const { result } = renderHook(() => useTurnFlow(SID, deps));
-      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
-      let askPromise!: Promise<void>;
-      act(() => {
-        askPromise = result.current.handleAsk("问");
-      });
-      expect(result.current.waitStartedAt).toBe(1_000);
-      await act(async () => {
-        resolveAsk(textualOutcome("答案"));
-        await askPromise;
-      });
-      expect(result.current.waitStartedAt).toBeNull();
-      nowSpy.mockRestore();
-    });
-
-    it("dies with the turn: an ask that rejects (IPC failure) clears the stamp too", async () => {
-      const { deps } = setup();
-      const nowSpy = stampNow(1_000);
-      vi.mocked(askQuestion).mockRejectedValueOnce(new Error("ipc down"));
-      const { result } = renderHook(() => useTurnFlow(SID, deps));
-      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
-      let askPromise!: Promise<void>;
-      act(() => {
-        askPromise = result.current.handleAsk("问");
-      });
-      expect(result.current.waitStartedAt).toBe(1_000);
-      await act(async () => {
-        await askPromise;
-      });
-      expect(result.current.waitStartedAt).toBeNull();
-      nowSpy.mockRestore();
-    });
-  });
-
-  describe("turn clock (issue #1264 turn-clock ruling)", () => {
-    // The bar's continuous figure: the ask stamp while the turn is in
-    // flight, frozen at the earliest PENDING approval's arrival while the
-    // gate holds the user's turn. Derived, never stored.
+  describe("turn clock (issue #1264 turn-clock ruling, #1612 re-host)", () => {
+    // The figure's stamps ride liveTurn (`askedAt` / `pausedSince`): the
+    // ask stamp while the turn is in flight, frozen at the earliest PENDING
+    // approval's arrival while the gate holds the user's turn. Derived,
+    // never stored.
     it("starts at the ask stamp and dies with the turn", async () => {
       const { deps } = setup();
       const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
@@ -1828,19 +1903,19 @@ describe("useTurnFlow", () => {
           }),
       );
       const { result } = renderHook(() => useTurnFlow(SID, deps));
-      expect(result.current.turnStartedAt).toBeNull();
+      expect(result.current.liveTurn).toBeNull();
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
       let askPromise!: Promise<void>;
       act(() => {
         askPromise = result.current.handleAsk("问");
       });
-      expect(result.current.turnStartedAt).toBe(1_000);
-      expect(result.current.turnPausedSince).toBeNull();
+      expect(result.current.liveTurn?.askedAt).toBe(1_000);
+      expect(result.current.liveTurn?.pausedSince).toBeNull();
       await act(async () => {
         resolveAsk(textualOutcome("答案"));
         await askPromise;
       });
-      expect(result.current.turnStartedAt).toBeNull();
+      expect(result.current.liveTurn).toBeNull();
       nowSpy.mockRestore();
     });
 
@@ -1872,14 +1947,14 @@ describe("useTurnFlow", () => {
       });
       // Arrival order is gateway order -- the FIRST pending is the earliest
       // hold, and the figure freezes there.
-      expect(result.current.turnPausedSince).toBe(5_000);
+      expect(result.current.liveTurn?.pausedSince).toBe(5_000);
       // The first approval resolves: the clock resumes (null) only when no
       // pending remains -- the later hold re-freezes the figure at ITS
       // arrival.
       rerender({ approvals: [entry(5_000, "resolved"), entry(9_000, "pending")] });
-      expect(result.current.turnPausedSince).toBe(9_000);
+      expect(result.current.liveTurn?.pausedSince).toBe(9_000);
       rerender({ approvals: [entry(5_000, "resolved"), entry(9_000, "resolved")] });
-      expect(result.current.turnPausedSince).toBeNull();
+      expect(result.current.liveTurn?.pausedSince).toBeNull();
     });
   });
 });

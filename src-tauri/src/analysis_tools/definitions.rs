@@ -117,8 +117,15 @@ pub(crate) fn materialize_definition() -> ToolDefinition {
                 },
                 "display_name": {
                     "type": "string",
-                    "description": "Optional human-readable label for the promoted \
-                                    result. Defaults to the reference name (result_N)."
+                    "description": "A short human-readable label for the promoted \
+                                    result, in the user's language -- a few words \
+                                    naming the analysis step it represents (shown \
+                                    to the user everywhere the result appears). \
+                                    Always supply one; when omitted it defaults to \
+                                    the reference name (result_N). Labels must be \
+                                    unique across the working set; a duplicate or \
+                                    blank label is rejected with a `label_warning` \
+                                    and the reference name is used instead."
                 }
             },
             "required": ["sql"]
@@ -419,6 +426,43 @@ mod tests {
         assert!(
             sample_required.iter().any(|v| v == "reference_name"),
             "sample must require reference_name"
+        );
+    }
+
+    /// The materialize `display_name` description instructs the model to
+    /// supply a meaningful label every call (issue #1623): the imperative
+    /// "Always supply one", the user's-language clause, the result_N fallback,
+    /// and the `label_warning` rejection loop. The field stays OPTIONAL --
+    /// the wording steers behavior, the call contract never shifts (ADR-0037
+    /// display-layer alias).
+    #[test]
+    fn materialize_display_name_description_carries_the_label_guidance() {
+        let def = materialize_definition();
+        let desc = def.input_schema["properties"]["display_name"]["description"]
+            .as_str()
+            .expect("display_name description is a string");
+        assert!(
+            desc.contains("Always supply one"),
+            "imperative supply guidance: {desc}"
+        );
+        assert!(
+            desc.contains("user's language"),
+            "language clause steers label locale: {desc}"
+        );
+        assert!(
+            desc.contains("result_N"),
+            "names the fallback identity: {desc}"
+        );
+        assert!(
+            desc.contains("label_warning"),
+            "previews the rejection loop: {desc}"
+        );
+        let required = def.input_schema["required"]
+            .as_array()
+            .expect("materialize required is an array");
+        assert!(
+            !required.iter().any(|v| v == "display_name"),
+            "display_name stays optional"
         );
     }
 

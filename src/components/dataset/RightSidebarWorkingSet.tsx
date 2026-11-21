@@ -84,7 +84,7 @@ export function RightSidebarWorkingSet({
         </section>
       ) : (
         // ADR-0067 (issue #184): the layout div carries the .layout grid
-        // (280px/1fr two-column master-detail, ADR-0067 Decision 1;
+        // (a floored 2:3 two-column master-detail, ADR-0067 Decision 1;
         // single-column fallback at container widths <=600px, styles.css
         // issue #791); both sections share the PANEL_CARD_BASE chrome
         // (defined above). The .layout / .working-set-layout / .panel class

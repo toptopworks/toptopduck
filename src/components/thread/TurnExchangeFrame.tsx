@@ -117,7 +117,7 @@ export function TurnExchangeFrame({
             {drifted.map((name) => (
               <span
                 key={name}
-                className="skill-drift-name inline-flex items-center gap-0.5 rounded-sm bg-muted px-1 py-0.5"
+                className="skill-drift-name inline-flex items-center gap-0.5 rounded-sm bg-muted px-1 py-0.5 dark:bg-white/[0.08]"
               >
                 <PencilLine aria-hidden="true" className="w-3 h-3 shrink-0" />
                 <span className="truncate">{name}</span>

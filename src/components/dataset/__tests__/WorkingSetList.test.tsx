@@ -5,7 +5,7 @@ import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 import { TooltipProvider } from "../../ui/tooltip";
 import { WorkingSetList } from "../WorkingSetList";
-import type { DatasetDescriptor, StaleReason } from "../../../types/dataset";
+import type { DatasetDescriptor, StaleReason, WorkingSetRow } from "../../../types/dataset";
 import { mockDataset, staleDataset } from "./helpers";
 import { withIntl } from "../../common/__tests__/helpers";
 
@@ -788,6 +788,102 @@ describe("WorkingSetList", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已删除而失效");
   });
 
+  it("badges a shared row with the alias-to-entry sentence on the tooltip (issue #1597)", async () => {
+    // The origin badge is the hardcoded "S" monogram pill after the label
+    // (locale-neutral literal, no i18n key); the short 共享数据集 label rides
+    // the tooltip AND the button's aria-describedby carrier (the #1062
+    // one-source pattern), so the keyboard path and the hover path can never
+    // drift apart. The aliased
+    // fixture shape renders the same short label -- the alias cross-reference
+    // retired with the letter swap (the full origin lives on the detail face).
+    const aliased = {
+      ...mockDataset,
+      reference_name: "people_2",
+      display_name: "员工表",
+      provenance: "shared" as const,
+      shared_entry_name: "people",
+    };
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[aliased]}
+        activeName={null}
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const badge = screen.getByText("S").closest(".provenance-badge")!;
+    // Plain, non-interactive span: no aria-label of its own -- the sentence
+    // rides the select button's aria-describedby carrier (#1062).
+    expect(badge).not.toHaveAttribute("aria-label");
+    expect(badge).not.toHaveAttribute("tabindex");
+    const carrier = screen.getByText("共享数据集", { selector: ".sr-only" });
+    expect(carrier.id).toBe("people_2-origin-desc");
+    expect(badge.closest("li")!.querySelector("button")!).toHaveAttribute(
+      "aria-describedby",
+      "people_2-origin-desc",
+    );
+    fireEvent.pointerMove(badge);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("共享数据集");
+  });
+
+  it("badges a same-name shared row with the plain sentence (issue #1597)", async () => {
+    // The alias-equals-entry arm (the common no-collision attach): the
+    // tooltip and the described-by carrier carry the plain shared sentence
+    // -- no alias cross-reference arm to render.
+    const sameName = {
+      ...mockDataset,
+      reference_name: "people",
+      display_name: "员工表",
+      provenance: "shared" as const,
+      shared_entry_name: "people",
+    };
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[sameName]}
+        activeName="people"
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const badge = screen.getByText("S").closest(".provenance-badge")!;
+    const carrier = screen.getByText("共享数据集", { selector: ".sr-only" });
+    expect(carrier.id).toBe("people-origin-desc");
+    expect(badge.closest("li")!.querySelector("button")!).toHaveAttribute(
+      "aria-describedby",
+      "people-origin-desc",
+    );
+    fireEvent.pointerMove(badge);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("共享数据集");
+  });
+
+  it("badges a materialized row and leaves an uploaded row quiet (issue #1597)", () => {
+    // The three origins diverge: a materialized result carries the "M"
+    // monogram pill (its sentence needs no cross-reference), an uploaded
+    // source renders no badge at all -- the quiet default.
+    const materialized = {
+      ...mockDataset,
+      reference_name: "result_1",
+      display_name: "count",
+      provenance: "materialized" as const,
+    };
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[materialized, mockDataset]}
+        activeName="people"
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    expect(screen.getByText("M")).toBeInTheDocument();
+    expect(screen.queryByText("S")).toBeNull();
+  });
+
   it("renders the row-count plural 'one' branch via the en defaultMessage (ADR-0052)", () => {
     // The zh-CN catalog collapses workingSet.rowCount to "{count} 行", so the
     // en {count, plural, ...} branches are reachable only via defaultMessage.
@@ -838,7 +934,7 @@ describe("WorkingSetList", () => {
     // either defaultMessage stayed green behind the zh hits. The empty
     // English provider (the rowCount plural precedent above) routes both
     // keys to the canonical copy -- chip label and causal sentence alike
-    // (the aria-label shares the hint's formatted output).
+    // (the described-by carrier shares the hint's formatted output).
     render(
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
         <TooltipProvider>
@@ -855,8 +951,8 @@ describe("WorkingSetList", () => {
     );
     expect(screen.getByText("Stale")).toBeInTheDocument();
     const chip = screen.getByText("Stale").closest(".stale-badge")!;
-    expect(chip).toHaveAttribute("aria-label", "Invalidated because people was deleted");
-    fireEvent.focus(chip);
+    expect(chip).not.toHaveAttribute("aria-label");
+    fireEvent.pointerMove(chip);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       "Invalidated because people was deleted",
     );
@@ -892,14 +988,14 @@ describe("WorkingSetList", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已更新而失效");
   });
 
-  it("focuses the stale chip in the Tab order and opens its tooltip on keyboard focus (issue #1062)", async () => {
+  it("carries the stale sentence through the row button's aria-describedby (issue #1062)", async () => {
     // #1062: hover was the only path to the causal sentence -- a span chip
-    // neither tabs nor announces. The chip now carries tabIndex and the
-    // causal sentence as aria-label (same formatted output as the tooltip
-    // copy), and Radix's own focus path bridges into the controlled open
-    // slot: the chip keeps no handlers of its own, and its opens need no
-    // restore gate -- the dialog-close restore never lands on the chip (the
-    // rowHints setTip note).
+    // neither tabs nor announces. The sentence now rides the row's select
+    // button as its aria-describedby (an sr-only carrier span at the ROW
+    // level, a button sibling so it never joins the button's accessible
+    // name): focus lands on the button and the AT reads the description.
+    // The badge itself stays a plain, non-interactive span -- a tabIndex
+    // inside the button would be an invalid interactive descendant.
     // The neighboring stale fixtures carry a zh display name so the causal
     // sentence reads fully in zh.
     const stale: DatasetDescriptor = {
@@ -917,27 +1013,65 @@ describe("WorkingSetList", () => {
       />,
     );
     const chip = screen.getByText("已失效").closest(".stale-badge")!;
-    expect(chip).toHaveAttribute("tabindex", "0");
-    // The ring is the visible half of keyboard reach: the three outline
-    // tokens mirror the row's action buttons, so tabbing reads the same.
-    // Pinned at class level -- jsdom renders no actual outline.
-    const chipClasses = chip.className.split(/\s+/);
-    expect(chipClasses).toContain("focus-visible:outline-2");
-    expect(chipClasses).toContain("focus-visible:outline-offset-2");
-    expect(chipClasses).toContain("focus-visible:outline-ring");
+    expect(chip).not.toHaveAttribute("tabindex");
+    expect(chip).not.toHaveAttribute("aria-label");
     expect(chip).not.toHaveAttribute("title");
-    expect(chip).toHaveAttribute("aria-label", "因「员工表」已删除而失效");
-    fireEvent.focus(chip);
+    const row = chip.closest("li")!;
+    const button = row.querySelector("button")!;
+    expect(button).toHaveAttribute("aria-describedby", "people-stale-desc");
+    const carrier = row.querySelector("#people-stale-desc")!;
+    expect(carrier).toHaveTextContent("因「员工表」已删除而失效");
+    // The pointer path still opens the tooltip through the controlled slot.
+    fireEvent.pointerMove(chip);
     expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已删除而失效");
-    fireEvent.blur(chip);
-    await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
   });
 
-  it("yields a held hint to the chip's focus open -- opens take the slot (rowHints sequence 1, issue #1062)", async () => {
-    // Keyboard tab order runs action buttons -> chip; the chip's Radix
-    // focus open takes the mutex slot from a pointer-opened hint without an
-    // explicit close (reduceTip: opens take the slot), so the two tooltips
-    // never coexist on one row.
+  it("joins both carrier ids on the button when origin and stale coexist (issue #1062)", () => {
+    // The common stale case is a materialized result (the rerun path), so a
+    // row often carries BOTH sentences: the origin carrier and the stale
+    // carrier ride the select button's aria-describedby together -- two
+    // whitespace-free ids joined by one space, origin first (the
+    // originDescIds build order), each carrier span a row-level sibling
+    // after the label-tail wrapper.
+    const row: WorkingSetRow = {
+      ...mockDataset,
+      reference_name: "result_1",
+      display_name: "result_1",
+      provenance: "materialized",
+      stale: { reference_name: "people", display_name: "员工表", reason: "Deleted" },
+    };
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[row]}
+        activeName={null}
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    // The action buttons' aria-labels embed the dataset name too, so the
+    // row-scoped first button (the select button) is the safe query here.
+    const button = screen.getByText("result_1").closest("li")!.querySelector("button")!;
+    expect(button).toHaveAttribute(
+      "aria-describedby",
+      "result_1-origin-desc result_1-stale-desc",
+    );
+    const li = button.closest("li")!;
+    // The wrapper plus the two sr-only carriers: the combined row's shape.
+    expect(li.children).toHaveLength(3);
+    expect(li.querySelector("#result_1-origin-desc")).toHaveTextContent("物化结果");
+    expect(li.querySelector("#result_1-stale-desc")).toHaveTextContent(
+      "因「员工表」已删除而失效",
+    );
+  });
+
+  it("yields a held hint to the chip's hover open -- opens take the slot (rowHints sequence 1, issue #1062)", async () => {
+    // The chip's pointer open takes the mutex slot from a pointer-opened
+    // hint without an explicit close (reduceTip: opens take the slot), so
+    // the two tooltips never coexist on one row. (The chip's focus leg
+    // retired with the non-interactive badge -- the keyboard path is the
+    // row button's aria-describedby carrier now, which opens no tooltip.)
     const stale: DatasetDescriptor = {
       ...staleDataset("Deleted"),
       stale: { reference_name: "people", display_name: "员工表", reason: "Deleted" },
@@ -955,8 +1089,13 @@ describe("WorkingSetList", () => {
     const rename = screen.getByRole("button", { name: /重命名/ });
     fireEvent.pointerEnter(rename, { pointerType: "mouse" });
     expect(await screen.findByRole("tooltip")).toHaveTextContent("重命名");
-    fireEvent.focus(screen.getByText("已失效").closest(".stale-badge")!);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已删除而失效");
+    fireEvent.pointerMove(screen.getByText("已失效").closest(".stale-badge")!);
+    // The chip's open rides Radix's delayed-open timer (setTimeout even at
+    // delayDuration 0), and the rename tooltip still matches role=tooltip
+    // during that window -- waitFor the TEXT, not the role.
+    await waitFor(() =>
+      expect(screen.getByRole("tooltip")).toHaveTextContent("因「员工表」已删除而失效"),
+    );
     expect(screen.getAllByRole("tooltip")).toHaveLength(1);
   });
 
@@ -1033,8 +1172,9 @@ describe("WorkingSetList", () => {
     const selectClasses = select.className.split(/\s+/);
     expect(selectClasses).toContain("flex-1");
     expect(selectClasses).toContain("min-w-0");
-    // All four controls share one row <li>, which is itself the flex container
-    // and the overlay pill's positioning anchor.
+    // All four controls share one row <li>: the li is the flex container,
+    // while the label-tail wrapper inside it owns the overlay pill's
+    // positioning anchor.
     const row = select.closest("li")!;
     expect(row.querySelectorAll("button")).toHaveLength(4);
     const rowClasses = row.className.split(/\s+/);
@@ -1105,15 +1245,14 @@ describe("WorkingSetList", () => {
     const classes = pill.className.split(/\s+/);
     expect(classes).toContain("absolute");
     // The pill anchors to the label-tail wrapper's trailing edge: right-1 +
-    // z-10 float it over the label's tail, clear of the chip that follows in
-    // flow (see the DOM-order pin in the stale-chip layout test).
+    // z-10 float it over the row-count zone, whose small fades under the
+    // revealed pill (see the DOM-order pin in the stale-chip layout test).
     expect(classes).toContain("right-1");
     expect(classes).toContain("z-10");
     // The pill carries no ground: the hover band underneath (the li's
     // transit tint) shows straight through, so the strip reads as part of
     // the row -- a translucent pill would double-tint the band, an opaque
-    // one can never match an alpha band. The label keeps clear via the
-    // select button's static pr-24 reserve.
+    // one can never match an alpha band.
     expect(classes).not.toContain("bg-transit");
     expect(classes).not.toContain("bg-card");
     expect(classes).not.toContain("shadow-md");
@@ -1286,7 +1425,7 @@ describe("WorkingSetList", () => {
   // the opens-take-the-slot rule there (issue #1073 moved the protocol's
   // authority into that module).
 
-  it("renders the stale chip inline after the row actions, retiring the wrapped second line (issue #790, #793)", () => {
+  it("renders the stale chip inline inside the select button, retiring the wrapped second line (issue #790, #793)", () => {
     const stale: DatasetDescriptor = {
       ...mockDataset,
       stale: {
@@ -1310,30 +1449,51 @@ describe("WorkingSetList", () => {
     // jsdom has no layout engine, so the guard pins the DOM order and the
     // class contract the single-line layout depends on: the label-tail
     // wrapper (select button + the overlay pill with the three icon actions
-    // anchored inside it) first, then the short chip as the row's trailing
-    // flow child -- the pill's anchor stays structurally clear of the chip,
-    // so the chip keeps its hover beside the revealed pill (#865). The #790
-    // shape (basis-full badge wrapping onto its own line via flex-wrap) is
-    // retired with #793 -- the chip is a shrink-0 inline peer that never
-    // compresses and never needs to wrap, so the row stays one flex line.
+    // anchored inside it) is the row's only flow child, and the row's info
+    // group (origin badge / stale chip / row count) rides INSIDE the select
+    // button after the label -- the count is the group's last member and the
+    // pill's cover target, so it fades under the same two reveal conditions
+    // the pill has (row hover / focus inside the pill; the session sidebar's
+    // actions-over-timestamp posture). The #790 shape (basis-full badge
+    // wrapping onto its own line via flex-wrap) stays retired -- the chips
+    // are shrink-0 inline peers that never compress, so the row stays one
+    // flex line.
     const row = screen.getByRole("button", { name: /^people/ }).closest("li")!;
     const rowClasses = row.className.split(/\s+/);
     expect(rowClasses).toContain("flex");
     expect(rowClasses).not.toContain("flex-wrap");
     const children = [...row.children];
+    // Two flow children: the wrapper, plus the #1062 sr-only sentence
+    // carrier (a deliberate row SIBLING of the button -- see the stale
+    // described-by test).
     expect(children).toHaveLength(2);
+    expect(children[1].className.split(/\s+/)).toContain("sr-only");
     const wrapper = children[0];
     expect(wrapper.tagName).toBe("DIV");
     expect(wrapper.className.split(/\s+/)).toContain("flex-1");
-    expect(wrapper.querySelector("button")).not.toBeNull();
+    const button = wrapper.querySelector("button")!;
     const pill = wrapper.children[wrapper.children.length - 1];
     expect(pill.tagName).toBe("DIV");
+    // The pill's hook class is what the count's has() hide leg scopes to.
+    expect(pill.className.split(/\s+/)).toContain("working-set-row-actions");
     expect(pill.querySelectorAll("button")).toHaveLength(3);
-    const badge = children[children.length - 1];
+    const badge = button.querySelector(".stale-badge")!;
     const badgeClasses = badge.className.split(/\s+/);
-    expect(badgeClasses).toContain("stale-badge");
     expect(badgeClasses).toContain("shrink-0");
     expect(badgeClasses).not.toContain("basis-full");
+    const count = button.querySelector("small")!;
+    const countClasses = count.className.split(/\s+/);
+    expect(countClasses).toContain("group-hover:opacity-0");
+    expect(countClasses).toContain(
+      "group-has-[.working-set-row-actions_:focus-visible]:opacity-0",
+    );
+    // The count owns the row tail alone (ml-auto) -- the pill's only cover
+    // target on hover; the cover posture depends on this far-right pin.
+    expect(countClasses).toContain("ml-auto");
+    // The badge and the count both trail the label inside the button, count
+    // last (the row's far right).
+    const order = [...button.children];
+    expect(order.indexOf(count)).toBeGreaterThan(order.indexOf(badge));
   });
 
   it("retires the ' · current table' suffix; the active fact rides the bold label alone (issue #793)", () => {

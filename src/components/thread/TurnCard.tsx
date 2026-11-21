@@ -12,10 +12,11 @@
 // TurnExchangeFrame / RoundBody -- the modules the live exchange mounts too,
 // so the settle swap cannot move a member.
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { cn } from "@/lib/utils";
 import { Button } from "../ui/button";
+import { FoldToggle } from "./FoldToggle";
 import { DelegationSubTraceBody } from "./DelegationSubTraceBody";
 import { TraceStepFold } from "./TraceRow";
 import { ArtifactCard } from "./ArtifactCard";
@@ -34,11 +35,10 @@ import {
   userInvocationNames,
   type DatasetLabel,
 } from "./turn-visual";
-import type { StaleAnchor } from "../../types/dataset";
+import type { DatasetDescriptor, StaleAnchor } from "../../types/dataset";
 import type { SkillEntry } from "../../types/skills";
 import type {
   SubagentUsage,
-  ThinkingTrace,
   TraceEntry,
   TraceRound,
   TurnRecord,
@@ -74,14 +74,11 @@ interface TurnCardProps {
    * when hasJumpTarget is false (the chip is disabled, so no handler is wired). */
   onStaleChipJump: (() => void) | undefined;
   mentionedDataset: DatasetLabel | null;
-  /** The thinking blocks whose fold mounts already expanded -- the live ->
-   *  settled continuity (issue #620): the thread injects the live turn's
-   *  open folds (keyed by the thinking block reference, which the settle
-   *  projection carries onto the trace's own round) into the entry appended
-   *  at the settle swap, so a fold the user opened while the turn ran stays
-   *  open across the swap. Undefined (or an empty set) is the default
-   *  collapsed posture. */
-  thinkingInitiallyExpanded?: ReadonlySet<ThinkingTrace>;
+  /** Issue #1606: the live activity line's expand posture rides the settle
+   *  swap -- an expanded line lands as the turn-level process fold mounted
+   *  already open (the process face the user was reading stays at the same
+   *  spot). Undefined is the default collapsed posture. */
+  processInitiallyExpanded?: boolean;
   /** The registry index for skill drift detection (issue #381). undefined when
    *  the caller does not wire the registry: drift detection is skipped (honest
    *  degrade -- the timeline stays readable). */
@@ -130,7 +127,7 @@ export function TurnCard({
   hasJumpTarget,
   onStaleChipJump,
   mentionedDataset,
-  thinkingInitiallyExpanded,
+  processInitiallyExpanded,
   skillIndex,
   onRetryTurn,
   busy,
@@ -203,6 +200,7 @@ export function TurnCard({
     >
       <TurnProcessFold
         trace={record.trace}
+        initialExpanded={processInitiallyExpanded}
         label={outcome.label}
         askedAt={record.asked_at}
         settledAt={record.settled_at}
@@ -213,7 +211,6 @@ export function TurnCard({
           <TraceRoundBlock
             key={i}
             round={round}
-            thinkingInitiallyExpanded={thinkingInitiallyExpanded}
             onSelectViz={onSelectViz}
             selectedVizSpec={selectedVizSpec}
             subtotalByEntry={subtotalByEntry}
@@ -256,7 +253,7 @@ export function TurnCard({
         // A <div>: the row is a control cluster (the outcome glyph, the
         // usage pill's dialog trigger, copy), not prose -- the flex layout
         // owns it, so it never becomes a <p>.
-        <div className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+        <div className="turn-meta m-0 mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
           {/* The glyph rides the card-level mark (see above); Failed/Cancelled
                 never mount it here -- their glyph derives in TurnBody's card
                 head, and the process fold's head word carries the vocabulary. */}
@@ -310,21 +307,17 @@ function OutcomeGlyph({ visual }: { visual: ReturnType<typeof outcomeVisual> }) 
 
 // One round of the round-grouped trace (ADR-0103, calibrating ADR-0078): the
 // skeleton (thinking fold + connective prose) rides RoundBody -- the module
-// the live round block mounts too, so the settle swap does not move them;
-// `thinkingInitiallyExpanded` seeds the fold with the live turn's open
-// posture at the settle swap (issue #620). The round's step fold rides the
-// shared TraceStepFold (default collapsed, ADR-0078 long-rail posture).
-// Fold state is session-ephemeral UI state; the trace data persists on the
-// TurnRecord / recipe.
+// the live exchange mounts too, so the settle swap does not move them; the
+// round's step fold rides the shared TraceStepFold (default collapsed,
+// ADR-0078 long-rail posture). Fold state is session-ephemeral UI state;
+// the trace data persists on the TurnRecord / recipe.
 function TraceRoundBlock({
   round,
-  thinkingInitiallyExpanded,
   onSelectViz,
   selectedVizSpec,
   subtotalByEntry,
 }: {
   round: TraceRound;
-  thinkingInitiallyExpanded: ReadonlySet<ThinkingTrace> | undefined;
   onSelectViz?: (spec: string) => void;
   selectedVizSpec?: string | null;
   /** ADR-0129 Decision 6 (issue #1270): the turn-scoped entry-to-subtotal
@@ -338,9 +331,6 @@ function TraceRoundBlock({
     <RoundBody
       thinking={thinking}
       text={text}
-      initialThinkingExpanded={
-        thinking !== undefined && (thinkingInitiallyExpanded?.has(thinking) ?? false)
-      }
       onSelectViz={onSelectViz}
       selectedVizSpec={selectedVizSpec}
     >
@@ -465,26 +455,20 @@ function TurnBody({
         <>
           {/* max-w-full + break-words: the link row rides the stream as a
               non-stretched flex item (the #860 prose twin's branch-mate),
-              and a long unbroken dataset name in the antecedents line or
-              the result link stretches its min-content past the column --
-              the rail's overflow-x crop eats it (issue #872). break-words
-              sits here once and inherits into both riders; the button
-              below carries its own cap so the break can engage inside it. */}
-          <p className="turn-outcome mt-1 max-w-full break-words text-xs leading-snug">
-            {antecedents.length > 0 && (
-              <span className="antecedents block mb-0.5 text-muted-foreground">
-                <FormattedMessage
-                  id="thread.antecedents"
-                  defaultMessage="Derived from {names}"
-                  values={{
-                    names: intl.formatList(
-                      antecedents.map((p) => p.dataset.reference_name),
-                      { type: "conjunction" },
-                    ),
-                  }}
-                />
-              </span>
-            )}
+              and a long unbroken dataset name in the result link stretches
+              its min-content past the column -- the rail's overflow-x crop
+              eats it (issue #872). break-words sits here once and inherits
+              into the result link, its one heir: the lineage fold above is
+              a sibling and carries its own caps. The button below carries
+              its own cap so the break can engage inside it. */}
+          {/* The lineage line is a fold head (the process fold's chrome --
+              the user ruling: same expand pattern, no popover): a long
+              chain's names read as a wall once the intermediates pile up --
+              the line stays one short count sentence, the chips open in
+              place below. Sits OUTSIDE the outcome <p>: the expanded chip
+              flow is a block the paragraph cannot host. */}
+          <AntecedentsFold antecedents={antecedents} />
+          <p className="turn-outcome mt-2 mb-2 max-w-full break-words text-xs leading-snug">
             {/* result-link is a real <button> (clickable, focusable) stripped
                 of native chrome by appearance-none + bg-transparent -- the
                 ADR-0067 bareButtonReset pair without border-0, since the
@@ -503,8 +487,8 @@ function TurnBody({
             <button
               type="button"
               className={cn(
-                "result-link appearance-none bg-transparent inline-block max-w-full text-primary",
-                "px-1.5 py-0.5 rounded-md border border-transparent",
+                "result-link appearance-none bg-transparent inline-block max-w-full text-xs text-primary",
+                "px-1.5 py-1 rounded-md border border-transparent",
                 "hover:bg-transit",
                 active && "active font-semibold border-primary",
                 staleAnchor && "stale text-muted-foreground border-dashed",
@@ -515,7 +499,7 @@ function TurnBody({
               <FormattedMessage
                 id="result.title"
                 defaultMessage="Result: {name}"
-                values={{ name: primary.dataset.reference_name }}
+                values={{ name: primary.dataset.display_name }}
               />
             </button>
             {staleAnchor && (
@@ -534,8 +518,14 @@ function TurnBody({
               caption-row -> prose -> note rhythm. */}
           {body && (
             // #1573 selection-source: the Materialized turn's prose answer
-            // is a quoting surface like the textual body.
-            <div data-selection-source="">
+            // is a quoting surface like the textual body. max-w-full: this
+            // wrapper IS the stream's non-stretched flex item (unlike the
+            // textual face, whose cap rides .turn-outcome.textual), so the
+            // prose root's own clamp cannot reach this layer -- a wide
+            // markdown table's min-content would stretch the wrapper past
+            // the card and the rail's overflow-x would crop it (the #860
+            // materialized twin).
+            <div data-selection-source="" className="max-w-full">
               <RoundProse text={body} onSelectViz={onSelectViz} selectedVizSpec={selectedVizSpec} />
             </div>
           )}
@@ -689,4 +679,51 @@ function TurnBody({
       throw new Error(`unhandled turn outcome: ${JSON.stringify(unhandled)}`);
     }
   }
+}
+
+// The antecedents lineage fold (the process fold's chrome, the user ruling):
+// the head reads the count sentence ("由 13 个中间结果派生"), the chips
+// (the badge-secondary face pair: muted light, white-alpha dark -- muted's
+// opaque value sits ~1.2:1 on the dark card and reads as no chip at all,
+// DESIGN.md's muted-dark law) open in place below -- the long-chain names
+// read as a wall once the intermediates pile up, so the collapsed line
+// stays short and the list is on demand. Session-ephemeral fold state, the
+// TraceStepFold convention; chevronSide right rides the process fold's
+// affordance posture.
+function AntecedentsFold({
+  antecedents,
+}: {
+  antecedents: ReadonlyArray<{ dataset: DatasetDescriptor }>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (antecedents.length === 0) return null;
+  return (
+    <>
+      <FoldToggle
+        hookClass="antecedents-toggle"
+        expanded={expanded}
+        onToggle={() => setExpanded((v) => !v)}
+        className="antecedents mt-1 mb-1"
+        chevronSide="right"
+      >
+        <FormattedMessage
+          id="thread.antecedents"
+          defaultMessage="Derived from {count, plural, one {# intermediate} other {# intermediates}}"
+          values={{ count: antecedents.length }}
+        />
+      </FoldToggle>
+      {expanded && (
+        <div className="mb-1 flex max-w-full flex-wrap items-center gap-1 text-sm text-muted-foreground">
+          {antecedents.map((p) => (
+            <span
+              key={p.dataset.reference_name}
+              className="min-w-0 rounded-md bg-muted px-1.5 py-px break-words dark:bg-white/[0.08]"
+            >
+              {p.dataset.display_name}
+            </span>
+          ))}
+        </div>
+      )}
+    </>
+  );
 }

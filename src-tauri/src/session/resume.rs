@@ -660,6 +660,13 @@ impl From<&RecipeTraceEntry> for TraceEntryView {
             summary: entry.summary.clone(),
             success: entry.success,
             result_excerpt: entry.result_excerpt.clone(),
+            failure_detail: entry.failure_detail.clone(),
+            // The write/edit landed stats (issue #1621) resume verbatim --
+            // a pre-#1621 recipe degrades to absent and the row renders
+            // no badge, the same honest absence as the wire.
+            lines_added: entry.lines_added,
+            lines_removed: entry.lines_removed,
+            replacements: entry.replacements,
             report: None,
             // The nested sub-trace (ADR-0117 Decision 6, issue #934) resumes
             // verbatim: the sub-rounds map through the round-level mapping
@@ -1712,6 +1719,10 @@ mod tests {
             summary: "clean the sheet".into(),
             success: false,
             result_excerpt: "no such table".into(),
+            failure_detail: Some("the full model-visible failure text".into()),
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
             sub_rounds: Some(vec![RecipeTraceRound {
                 thinking: None,
                 text: Some("child prose".into()),
@@ -1721,6 +1732,10 @@ mod tests {
                     summary: "SELECT 1".into(),
                     success: true,
                     result_excerpt: String::new(),
+                    failure_detail: None,
+                    lines_added: None,
+                    lines_removed: None,
+                    replacements: None,
                     sub_rounds: None,
                 }],
             }]),
@@ -1739,6 +1754,13 @@ mod tests {
         assert_eq!(rounds[0].text.as_deref(), Some("child prose"));
         assert_eq!(rounds[0].calls[0].name, "explore");
         assert!(rounds[0].calls[0].success);
+        // The failure detail survives the resume projection (issue #1610):
+        // the reopened session's anchor renders the full text, not the
+        // excerpt head.
+        assert_eq!(
+            view.failure_detail.as_deref(),
+            Some("the full model-visible failure text")
+        );
 
         // A pre-#934 entry (no sub_rounds key on the wire) resumes without
         // one -- the serde default degrades honestly.
@@ -1753,6 +1775,34 @@ mod tests {
             serde_json::from_value(legacy_json).expect("legacy entry deserializes");
         assert!(legacy.sub_rounds.is_none());
         assert!(TraceEntryView::from(&legacy).sub_rounds.is_none());
+    }
+
+    /// The write/edit landed stats resume verbatim (issue #1621): the
+    /// mapping copies the persisted counts onto the display view, so a
+    /// reopened session renders the same badge the live turn landed -- a
+    /// dropped field here would silently strip badges from resumed rows
+    /// with nothing red (the mutation run caught this mapping unpinned).
+    #[test]
+    fn the_landed_write_stats_resume_onto_the_view() {
+        use crate::approval::OperationKind;
+        use crate::persistence::recipe::RecipeTraceEntry;
+
+        let persisted = RecipeTraceEntry {
+            name: "write".into(),
+            operation_kind: OperationKind::Write,
+            summary: "land the sheet".into(),
+            success: true,
+            result_excerpt: String::new(),
+            failure_detail: None,
+            lines_added: Some(12),
+            lines_removed: Some(3),
+            replacements: Some(2),
+            sub_rounds: None,
+        };
+        let view = TraceEntryView::from(&persisted);
+        assert_eq!(view.lines_added, Some(12));
+        assert_eq!(view.lines_removed, Some(3));
+        assert_eq!(view.replacements, Some(2));
     }
 
     #[test]

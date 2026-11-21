@@ -1,16 +1,23 @@
-// The memory panel's render contract (issue #1529): the read-only list
-// (title + category badge + hook), the reveal wiring, the empty guide, the
-// toggle-off deactivated face, and the listing error banner. The suite
-// mocks the api module (the IPC boundary) and the opener plugin; the
-// component owns no mutation machine beyond the toggle boolean, so there
-// is no seam module to stub.
+// The memory panel's render contract (issue #1529, row actions by #1591):
+// the list (title + category badge + hook), the open wiring, the
+// confirm-gated row delete, the empty guide, the toggle-off deactivated
+// face, and the listing error banner. The suite mocks the api module (the
+// IPC boundary) and the opener plugin; the component owns its mutations
+// directly against the api module (the toggle, the auto-extraction
+// switch, and the row delete), so there is no seam module to stub.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
-  revealItemInDir: vi.fn(),
   openPath: vi.fn(),
 }));
 
@@ -30,13 +37,15 @@ vi.mock("../../api", async (importOriginal) => {
     setWorkspaceAutoExtraction: vi.fn(),
     getWorkspaceExtractionStatus: vi.fn(),
     createWorkspaceMemory: vi.fn(),
+    deleteWorkspaceMemory: vi.fn(),
     openWorkspaceMemoryDir: vi.fn(),
   };
 });
 
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath } from "@tauri-apps/plugin-opener";
 import {
   createWorkspaceMemory,
+  deleteWorkspaceMemory,
   getWorkspaceAutoExtraction,
   getWorkspaceExtractionStatus,
   getWorkspaceMemoryEnabled,
@@ -58,8 +67,8 @@ const mockedSet = vi.mocked(setWorkspaceMemoryEnabled);
 const mockedAutoExtraction = vi.mocked(getWorkspaceAutoExtraction);
 const mockedSetExtraction = vi.mocked(setWorkspaceAutoExtraction);
 const mockedExtractionStatus = vi.mocked(getWorkspaceExtractionStatus);
-const mockedReveal = vi.mocked(revealItemInDir);
 const mockedCreate = vi.mocked(createWorkspaceMemory);
+const mockedDelete = vi.mocked(deleteWorkspaceMemory);
 const mockedOpenDir = vi.mocked(openWorkspaceMemoryDir);
 const mockedOpenPath = vi.mocked(openPath);
 const mockedToast = vi.mocked(toast);
@@ -134,6 +143,7 @@ describe("WorkspaceMemoryDialog", () => {
     mockedAutoExtraction.mockResolvedValue(false);
     mockedExtractionStatus.mockResolvedValue(null);
     mockedCreate.mockResolvedValue(undefined);
+    mockedDelete.mockResolvedValue(undefined);
     mockedOpenDir.mockResolvedValue("/ws/.toptopduck/memory");
     mockedOpenPath.mockResolvedValue(undefined);
   });
@@ -237,18 +247,99 @@ describe("WorkspaceMemoryDialog", () => {
     ).toBeInTheDocument();
   });
 
-  it("reveals the row's memory file in the folder", async () => {
+  // The row's open action (#1591) opens the FILE in the system editor via
+  // the opener -- the editing surface (#1540's any-editor ruling, one hop
+  // faster than the folder reveal it replaces).
+  it("opens the row's memory file in the system editor", async () => {
     mockedEnabled.mockResolvedValue(true);
     mockedList.mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
-    mockedReveal.mockResolvedValue(undefined);
     renderPanel();
-    const reveal = await screen.findByRole("button", { name: "在文件夹中显示" });
-    fireEvent.click(reveal);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "打开" }),
+    );
     await waitFor(() =>
-      expect(mockedReveal).toHaveBeenCalledWith(
+      expect(mockedOpenPath).toHaveBeenCalledWith(
         "/ws/.toptopduck/memory/project-quarterly.md",
       ),
     );
+  });
+
+  // The row delete (#1591): the confirm carries the two-sentence
+  // description (permanent removal + the re-extraction semantics); a
+  // confirmed delete calls the command with the row's file and the
+  // invalidated listing re-reads (the staged second read renders the
+  // emptied face).
+  it("deletes a row through the confirm dialog and refreshes the listing", async () => {
+    mockedEnabled.mockResolvedValue(true);
+    mockedList
+      .mockResolvedValueOnce({ rows: [memory()], usage_percent: 0, unreadable: [] })
+      .mockResolvedValue({ rows: [], usage_percent: 0, unreadable: [] });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "删除" }));
+    expect(await screen.findByText("删除这条记忆？")).toBeInTheDocument();
+    expect(
+      screen.getByText(/删除后无法恢复/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/可能会被重新记下来/),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", { name: "删除" }),
+    );
+    await waitFor(() =>
+      expect(mockedDelete).toHaveBeenCalledWith("/ws", "project-quarterly.md"),
+    );
+    expect(await screen.findByText(/还没有记忆/)).toBeInTheDocument();
+  });
+
+  // Cancel keeps everything as it was: no command call, no dialog.
+  it("keeps the row when the delete confirm is cancelled", async () => {
+    mockedEnabled.mockResolvedValue(true);
+    mockedList.mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "删除" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+    );
+    expect(mockedDelete).not.toHaveBeenCalled();
+    expect(screen.getByText("季度报表走 DuckDB")).toBeInTheDocument();
+  });
+
+  // A refused delete (#1591) surfaces through the footer's alert face --
+  // never a silently surviving row.
+  it("surfaces a refused delete as the footer alert", async () => {
+    mockedEnabled.mockResolvedValue(true);
+    mockedList.mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
+    mockedDelete.mockRejectedValueOnce(new Error("guard refused"));
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "删除" }));
+    fireEvent.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", { name: "删除" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("guard refused");
+    // The error leg closes the confirm (the action's preventDefault means
+    // radix will not): no stuck alertdialog behind the banner.
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+    );
+  });
+
+  // The delete confirm is scoped to ONE panel open: closing the dialog
+  // with the confirm half-open (the workspace prop nulls, the component
+  // stays mounted) discards the target, so the alert never reopens
+  // pointing at another workspace's row (#1591).
+  it("discards a half-confirmed delete when the dialog closes and reopens", async () => {
+    mockedEnabled.mockResolvedValue(true);
+    mockedList.mockResolvedValue({ rows: [memory()], usage_percent: 0, unreadable: [] });
+    const { closeAndReopen } = renderMountedPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "删除" }));
+    expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
+    closeAndReopen();
+    expect(await screen.findByText("季度报表走 DuckDB")).toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(mockedDelete).not.toHaveBeenCalled();
   });
 
   it("renders the empty guide when the workspace has no memories", async () => {
@@ -357,17 +448,20 @@ describe("WorkspaceMemoryDialog", () => {
     fireEvent.change(screen.getByLabelText("标题"), {
       target: { value: "偏好中文回复" },
     });
-    // A multi-line description rides verbatim -- the textarea is the
-    // point (the store folds only its frontmatter line).
+    // The single-line description rides verbatim -- the input IS the body
+    // (#1591: the multi-line prose is the row's edit-in-editor action's
+    // job, the form captures the one-line hook). The tagName pins the
+    // single-line posture: a Textarea revert reddens here.
+    expect(screen.getByLabelText("说明").tagName).toBe("INPUT");
     fireEvent.change(screen.getByLabelText("说明"), {
-      target: { value: "始终用简体中文回复\n代码注释用英文" },
+      target: { value: "始终用简体中文回复" },
     });
     fireEvent.click(screen.getByRole("radio", { name: "用户" }));
     fireEvent.submit(screen.getByLabelText("标题").closest("form")!);
     await waitFor(() =>
       expect(mockedCreate).toHaveBeenCalledWith("/ws", {
         title: "偏好中文回复",
-        description: "始终用简体中文回复\n代码注释用英文",
+        description: "始终用简体中文回复",
         type: "user",
       }),
     );

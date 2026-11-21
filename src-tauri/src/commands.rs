@@ -38,7 +38,7 @@ use crate::model::{
     DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, GuidanceRequest, LoadOutcome, ProfileId,
     ProfileKeyStatus, ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView,
     RemoveSourceError, RowPage, SessionNamedPayload, SheetGuidance, ThreadEntry, TurnOutcome,
-    TurnProgress,
+    TurnProgress, WorkingSetRow,
 };
 use crate::persistence::recipe::LastRuntime;
 use crate::persistence::{
@@ -1009,6 +1009,19 @@ pub fn create_workspace_memory(
     .map_err(|e| e.to_string())
 }
 
+/// Delete a memory file from the panel's row action (issue #1591): the
+/// store takes the file name (guard inside), the index self-heals on the
+/// next read. Workspace-layer only -- the user layer's panel has no
+/// delete (the hand-written-files ruling, #1531 D4).
+#[tauri::command]
+pub fn delete_workspace_memory(workspace: String, file: String) -> Result<(), String> {
+    crate::persistence::memory::delete_entry(
+        &crate::persistence::memory::workspace_memory_dir(std::path::Path::new(&workspace)),
+        &file,
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Open the workspace's memory directory (issue #1538): create the family
 /// on demand (the zero-footprint fresh workspace included) and hand back
 /// the absolute path for the front-end opener.
@@ -1309,9 +1322,9 @@ pub async fn discard_guided_retention(
 pub async fn list_working_set(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
-) -> Result<Vec<DatasetDescriptor>, SessionError> {
+) -> Result<Vec<WorkingSetRow>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    with_session_lock_off_thread(&handle, |s| Ok(s.list())).await
+    with_session_lock_off_thread(&handle, |s| Ok(s.list_rows())).await
 }
 
 #[tauri::command]

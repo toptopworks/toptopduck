@@ -84,6 +84,7 @@ use crate::util::is_latched;
 
 use super::adapter::{emit_phase, next_call_id, DispatchRequest, PhaseSink, SharedTurnState};
 use super::cancel::CancelWatcher;
+use super::invalid_tool::InvalidToolSkipper;
 use super::truncation;
 use super::EventFold;
 
@@ -565,6 +566,11 @@ async fn run_subagent(
         // last turn stopped is read off the same hook seam the main loop's
         // watcher rides.
         .add_hook(finish_watcher)
+        // The invalid-tool-call self-correction (issue #1625): the same
+        // Skip resolver the host loop registers -- a sub-agent's
+        // hallucinated name feeds back as a synthetic error result it
+        // corrects from, instead of failing the whole delegation.
+        .add_hook(InvalidToolSkipper)
         .into_future()
         .await;
     // The tagged sink (ADR-0135 Decision 1): replaces the noop -- every
@@ -689,6 +695,9 @@ fn land_delegation_entry(
             truncation::marked_reply_excerpt(report, TRACE_EXCERPT_MAX),
         )
     } else {
+        // A failed run's report IS the model-visible failure text (issue
+        // #1610): the bounded excerpt stays the anchor head, the detail
+        // keeps the report capped at the detail budget.
         TraceEntry::failed(
             id.to_string(),
             name.to_string(),
@@ -696,6 +705,7 @@ fn land_delegation_entry(
             delegation_summary(task),
             truncation::marked_reply_excerpt(report, TRACE_EXCERPT_MAX),
         )
+        .with_failure_detail(report)
     };
     // The cap-cut stamp (issue #1047): keys the projections' exception --
     // the capped report's marker-bearing notice survives where every
@@ -791,6 +801,10 @@ mod tests {
                 summary: "clean the sheet".to_string(),
                 success: true,
                 result_excerpt: String::new(),
+                failure_detail: None,
+                lines_added: None,
+                lines_removed: None,
+                replacements: None,
                 id: None,
                 report: None,
                 sub_rounds: None,

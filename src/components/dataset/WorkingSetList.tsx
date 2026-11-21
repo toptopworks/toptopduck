@@ -29,7 +29,7 @@ import {
   type TipKey,
 } from "./rowHints";
 import { cn } from "../../lib/utils";
-import type { DatasetDescriptor } from "../../types/dataset";
+import type { DatasetDescriptor, WorkingSetRow } from "../../types/dataset";
 
 // ADR-0067 (issue #184): the .working-set button rule (all: unset + cursor +
 // padding + radius + display:block + width:100%) retired onto Tailwind
@@ -47,17 +47,22 @@ const BUTTON_CHROME = "appearance-none border-0 rounded-md";
 // is centered). The active dataset's font-semibold emphasis layers on via
 // cn() at the call site. The selection band and the hover tint are NOT here:
 // both live on the row <li> (see DatasetRow) so the pointer anywhere on the
-// row -- the action pill included -- lights the same full-height band.
-const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left pr-24`;
+// row -- the action pill included -- lights the same full-height band. The
+// row's content splits left/right inside the button: the label plus its
+// S/M / stale chips hug the left (the label truncates first -- min-w-0, no
+// grow), the row count pins to the far right (ml-auto) and is the pill's
+// only cover target on hover -- the session sidebar row's
+// actions-over-timestamp posture.
+const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left`;
 // The row-actions overlay: the rename/replace/delete actions sit in an
 // absolutely-positioned pill anchored inside the label-tail wrapper (the
 // flow child holding the select button, see DatasetRow), floating ABOVE the
-// truncated label instead of reserving flow width -- an un-hovered row gives
-// the label the full row width, and a hovered row reveals the pill over the
-// label's tail (the select button's truncate point sits under the pill).
-// Anchoring inside the wrapper rather than the row keeps the pill
-// structurally clear of whatever follows the button in flow: on a stale row
-// the chip stays fully hoverable beside the revealed pill. The strip is
+// row-count zone -- an un-hovered row gives the count the row tail (the
+// S/M / stale chips hug the label's tail, far from the strip), and a
+// hovered row reveals the pill OVER the count while the
+// count fades out under the same reveal conditions (the session sidebar
+// row's actions-over-timestamp posture; the pill has no ground, so a visible
+// count would peek through between the icons). The strip is
 // packed tight -- no gap, no inlay: the 28px squares butt together into one
 // compact bar (the glyphs keep ~7px of visual air inside their own hit
 // areas). The wrapper spans exactly the row's bg-clip-content band (the li's
@@ -66,9 +71,12 @@ const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 fl
 // hover band underneath (the li's transit tint) shows straight through, so
 // the strip reads as part of the row rather than a floating widget -- a
 // translucent pill would double-tint over the band, and an opaque one can
-// never match an alpha band. The label keeps clear of the icons via the
-// select button's static pr-24 reserve (the truncate point retreats before
-// the pill's footprint; no hover reflow). Visibility is the #865 hover-reveal
+// never match an alpha band. When the count is narrower than the strip
+// (short counts), the pill's left edge lands on the truncated label's tail
+// -- the same under-the-pill truncate point the sidebar row carries;
+// hover-transient, accepted. The working-set-row-actions class hook is what
+// the count's has() hide leg scopes to (keep in sync with the small below).
+// Visibility is the #865 hover-reveal
 // contract moved one
 // level up: the CONTAINER owns opacity-0 + pointer-events-none, restored on
 // row hover (group-hover) or keyboard focus-visible -- any tabbed-into
@@ -83,7 +91,7 @@ const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 fl
 // the buttons from the a11y tree). Show/hide snaps (no transition): a
 // per-row 150ms fade cross-fades the outgoing row's icons with the incoming
 // row's on every row-to-row sweep, which reads as the strip flashing.
-const ROW_ACTIONS_OVERLAY = `absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto`;
+const ROW_ACTIONS_OVERLAY = `working-set-row-actions absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto`;
 // The per-row icon actions (issue #790): a 28px square hit area (h-7 w-7)
 // wrapping a 14px glyph -- the #774 header-chrome spec. Visibility is owned
 // by the ROW_ACTIONS_OVERLAY container (see above); the buttons carry only
@@ -160,10 +168,11 @@ function RowActionButton({
   );
 }
 
-// One working-set row: the select button (label + row count), the floating
-// action pill (rename / replace / delete via RowActionButton), and the stale
-// chip. See the constants above for the band / pill / icon contracts and
-// rowHints.ts for the row-tooltip mutex the hints share.
+// One working-set row: the select button (label + S/M / stale badges + row
+// count inside it), the floating action pill (rename / replace / delete via
+// RowActionButton), and the row-level sr-only described-by carriers. See
+// the constants above for the band / pill / icon contracts and rowHints.ts
+// for the row-tooltip mutex the hints share.
 function DatasetRow({
   d,
   isActive,
@@ -176,7 +185,7 @@ function DatasetRow({
   onOpenDelete,
   onPickReplace,
 }: {
-  d: DatasetDescriptor;
+  d: WorkingSetRow;
   // The ACTIVE dataset (server truth): bolds the label. The accent band is
   // NOT this state's -- it follows the selection (see isSelected), since a
   // management click must move the highlight with the detail pane.
@@ -187,8 +196,9 @@ function DatasetRow({
   isSelected: boolean;
   loading: boolean;
   tip: RowTipControls;
-  // An optional extra marker beside the stale chip's slot (the right-sidebar
-  // panel flags a missing store file here); the private face passes none.
+  // An optional extra marker at the row's tail, after the label-tail
+  // wrapper (the right-sidebar panel flags a missing store file here); the
+  // private face passes none.
   extraBadge?: ReactNode;
   onSelect: (referenceName: string) => void;
   // The trigger argument is the focus-restorable opener element: the pill
@@ -202,8 +212,9 @@ function DatasetRow({
   const key = (kind: RowTipKind): TipKey => ({ row: d.reference_name, kind });
   const isTipOpen = (kind: RowTipKind) => openKey !== null && sameTipKey(openKey, key(kind));
   // The stale causal sentence, formatted once for both consumers (#1062):
-  // the tooltip's copy and the chip's aria-label stay one source, so the
-  // keyboard/AT path and the visual hover path can never drift apart.
+  // the tooltip's copy and the sr-only described-by carrier stay one
+  // source, so the keyboard/AT path and the visual hover path can never
+  // drift apart.
   const staleCause = d.stale
     ? intl.formatMessage(
         {
@@ -214,6 +225,58 @@ function DatasetRow({
         { name: d.stale.display_name, reason: d.stale.reason },
       )
     : undefined;
+  // The origin face (issue #1597): the badge's short tooltip label and its
+  // locale-neutral monogram letter as ONE mapping, so a future provenance
+  // variant can never render a stale letter -- the two axes move together.
+  // The label is formatted once for the tooltip AND the keyboard carrier
+  // (the #1062 one-source pattern: the sr-only aria-describedby node at the
+  // row level; the badge itself carries no aria-label). The long
+  // cross-reference sentence (the de-conflicted alias arm) retired with the
+  // letter swap -- the full origin stays on the detail face. An uploaded row
+  // derives null -- no badge, the quiet default.
+  const provenanceFace = (() => {
+    switch (d.provenance) {
+      case "shared":
+        return {
+          letter: "S",
+          label: intl.formatMessage({
+            id: "workingSet.provenance.sharedShort",
+            defaultMessage: "Shared dataset",
+          }),
+        };
+      case "materialized":
+        return {
+          letter: "M",
+          label: intl.formatMessage({
+            id: "workingSet.provenance.materializedShort",
+            defaultMessage: "Materialized result",
+          }),
+        };
+      case "uploaded":
+      case undefined:
+        // An uploaded row and the manifest face (a plain descriptor): no
+        // badge, the quiet default.
+        return null;
+      default: {
+        // Exhaustiveness guard: `d.provenance` narrows to never here, so a
+        // future provenance variant is a compile error instead of a silent
+        // badge gap (the ResumeProgress issue #205 posture).
+        const unhandled: never = d.provenance;
+        throw new Error(`Unhandled DatasetProvenance: ${JSON.stringify(unhandled)}`);
+      }
+    }
+  })();
+  // The keyboard/a11y carriers (#1062): the sentences live in sr-only nodes
+  // at the row level and ride the select button's aria-describedby -- the
+  // badges sit INSIDE the button (phrasing content, hugging the label), and
+  // a tabIndex there would be an invalid interactive descendant. Described-by
+  // keeps the sentence in the AT read on button focus without a nested tab
+  // stop -- and without polluting the button's accessible name: the carriers
+  // are button SIBLINGS, not button content.
+  const originDescIds = [
+    provenanceFace !== null ? `${d.reference_name}-origin-desc` : null,
+    d.stale ? `${d.reference_name}-stale-desc` : null,
+  ].filter((id): id is string => id !== null);
   // The context menu captures its target from the row it opens on (#1570):
   // the <li> is both the trigger and the focus-restorable opener element, so
   // the dialog-close restore lands back on the row (mirroring the pill
@@ -235,15 +298,16 @@ function DatasetRow({
         >
           {/* The label-tail wrapper: the flow child filling the row's leftover
           width. It owns the select button AND the action pill's positioning
-          anchor -- the pill's right edge lands at the button's tail,
-          structurally clear of whatever follows in flow (the stale chip),
-          so the chip keeps its hover beside the revealed pill. The wrapper
+          anchor -- the pill's right edge lands over the row-count zone, the
+          count hiding under the same reveal conditions (see the small below;
+          the session sidebar's actions-over-timestamp posture). The wrapper
           spans the li's content box, i.e. exactly the bg-clip-content band. */}
           <div className="relative flex-1 min-w-0 flex">
             <button
               type="button"
               className={cn(SELECT_BUTTON_BASE, isActive && "font-semibold")}
               onClick={() => onSelect(d.reference_name)}
+              aria-describedby={originDescIds.length > 0 ? originDescIds.join(" ") : undefined}
             >
               {/* The truncated label's full text rides the OS-native title:
             truncation recovery without any Radix machinery (no popper to
@@ -253,16 +317,85 @@ function DatasetRow({
             surfaces only its own text, so the OS chrome costs nothing. The
             hand cursor on the button below no longer flips when the
             affordance surfaces -- a native title never touches the cursor. */}
-              <span className="min-w-0 flex-1 truncate" title={d.display_name}>
+              <span className="min-w-0 truncate" title={d.display_name}>
                 {d.display_name}
               </span>
+              {provenanceFace !== null && (
+              // The origin badge (issue #1597): the single-letter S/M monogram
+              // pill riding right after the label (never the row tail -- a
+              // tail-side chip collides with the hover pill over narrow
+              // counts). A plain, NON-interactive span: the tooltip is the
+              // pointer path; the keyboard path rides the button's
+              // aria-describedby via the row-level sr-only carrier (#1062) --
+              // a tabIndex inside the button would be an invalid interactive
+              // descendant. stopPropagation keeps a stray click on the
+              // informational chip from selecting the row. The letter is a
+              // hardcoded literal, not an i18n key: S/M are locale-neutral
+              // monograms, so no catalog entry exists for them (the
+              // delete-dialog precedent does not apply -- there is no message
+              // here to translate). The rowHints mutex owns the open (the
+              // "provenance" kind); the badge keeps no handlers of its own.
+                <Tooltip open={isTipOpen("provenance")} onOpenChange={(next) => setTip(key("provenance"), next)}>
+                  <TooltipTrigger asChild>
+                    <Badge
+                      variant="secondary"
+                      className="provenance-badge"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {provenanceFace.letter}
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    data-hit-transparent
+                    className="pointer-events-none data-[state=closed]:animate-none!"
+                  >
+                    {provenanceFace.label}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+              {d.stale && (
+              // #793: a short chip with the full causal sentence on the tooltip --
+              // the sentence used to wrap inside the badge and break the chip shape
+              // in narrow columns. No action outlet here: the rerun path lives with
+              // the result panel's stale banner (#758). Same non-interactive
+              // posture as the origin badge: the keyboard path rides the
+              // button's aria-describedby carrier (#1062), not a nested tab
+              // stop; stopPropagation keeps the click from selecting the row.
+              // The badge-variants base already carries shrink-0, so the call
+              // site stays lean.
+                <Tooltip open={isTipOpen("stale")} onOpenChange={(next) => setTip(key("stale"), next)}>
+                  <TooltipTrigger asChild>
+                    <Badge
+                      variant="secondary"
+                      className="stale-badge"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <FormattedMessage id="workingSet.staleRow" defaultMessage="Stale" />
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    data-hit-transparent
+                    className="pointer-events-none data-[state=closed]:animate-none!"
+                  >
+                    {staleCause}
+                  </TooltipContent>
+                </Tooltip>
+              )}
               {/* font-normal overrides the active button's font-semibold so the
             row-count annotation stays muted-weight in either state;
             shrink-0 + nowrap keep truncation from ever eliding the note.
             text-xs pins the caption token: the preflight small rule (80%)
             would resolve an unsized small at 11.2px under the panel's 14px
-            baseline (issue #864) -- below the ladder's 12px floor. */}
-              <small className="shrink-0 whitespace-nowrap text-xs text-muted-foreground font-normal">
+            baseline (issue #864) -- below the ladder's 12px floor. Pinned to
+            the row's far right (ml-auto), alone on the tail -- the pill's
+            only cover target. On hover -- or keyboard
+            focus inside the action pill -- the count fades under the
+            revealed pill: the pill has no ground, so a visible count would
+            peek through between the icons (the sidebar timestamp posture).
+            The has() leg scopes to the pill's working-set-row-actions hook
+            (keep in sync with ROW_ACTIONS_OVERLAY above) so a focused badge
+            or label never hides the count. */}
+              <small className="ml-auto shrink-0 whitespace-nowrap text-xs text-muted-foreground font-normal group-hover:opacity-0 group-has-[.working-set-row-actions_:focus-visible]:opacity-0">
                 {" "}
                 <FormattedMessage
                   id="workingSet.rowCount"
@@ -331,37 +464,19 @@ function DatasetRow({
             </div>
           </div>
           {extraBadge}
+          {/* The #1062 keyboard carriers: sr-only sentence nodes referenced
+          by the select button's aria-describedby (see originDescIds). Row
+          SIBLINGS, not button content -- a described-by target inside the
+          button would join its accessible-name computation. */}
+          {provenanceFace !== null && (
+            <span id={`${d.reference_name}-origin-desc`} className="sr-only">
+              {provenanceFace.label}
+            </span>
+          )}
           {d.stale && (
-          // #793: a short chip with the full causal sentence on the tooltip --
-          // the sentence used to wrap inside the badge and break the chip shape
-          // in narrow columns. No action outlet here: the rerun path lives with
-          // the result panel's stale banner (#758). #1062 makes the sentence
-          // keyboard-reachable too: tabIndex + the staleCause aria-label put it in
-          // the tab order and the a11y tree, and Radix's own focus path opens
-          // the tooltip through the controlled slot (the chip keeps no
-          // handlers of its own; its opens need no restore gate -- the
-          // dialog-close restore never lands on the chip, the rowHints setTip
-          // note). The focus ring follows the action buttons' outline tokens
-          // so tabbing reads the same across the row, and the badge-variants
-          // base already carries shrink-0, so the call site stays lean.
-            <Tooltip open={isTipOpen("stale")} onOpenChange={(next) => setTip(key("stale"), next)}>
-              <TooltipTrigger asChild>
-                <Badge
-                  variant="secondary"
-                  className="stale-badge focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                  tabIndex={0}
-                  aria-label={staleCause}
-                >
-                  <FormattedMessage id="workingSet.staleRow" defaultMessage="Stale" />
-                </Badge>
-              </TooltipTrigger>
-              <TooltipContent
-                data-hit-transparent
-                className="pointer-events-none data-[state=closed]:animate-none!"
-              >
-                {staleCause}
-              </TooltipContent>
-            </Tooltip>
+            <span id={`${d.reference_name}-stale-desc`} className="sr-only">
+              {staleCause}
+            </span>
           )}
         </li>
       </ContextMenuTrigger>
@@ -569,7 +684,7 @@ export function WorkingSetList({
   // the right-sidebar panel (no session) omits it, and its delete confirm
   // renders without the impact preview.
   sessionId?: string;
-  datasets: DatasetDescriptor[];
+  datasets: WorkingSetRow[];
   // The ACTIVE dataset (server truth, ADR-0051): bolds the row's label. The
   // authoritative naming is the tab header's Targets chip; bold is the row's
   // only VISUAL in-list active marker (since #793 retired the " · current
@@ -613,10 +728,10 @@ export function WorkingSetList({
   // window: ask in flight -> source management disabled), preventing concurrent
   // IPC and source-vs-turn interleaving.
   loading?: boolean;
-  // An extra per-row marker beside the stale chip's slot: the right-sidebar
-  // panel flags a missing store file. Undefined rows render nothing; the
-  // private face passes none.
-  badgeFor?: (d: DatasetDescriptor) => ReactNode;
+  // An extra per-row marker at the row's tail, after the label-tail
+  // wrapper: the right-sidebar panel flags a missing store file. Undefined
+  // rows render nothing; the private face passes none.
+  badgeFor?: (d: WorkingSetRow) => ReactNode;
   // The delete confirm's title copy slot (see WorkingSetDeleteDialog); the
   // private face keeps its working-set wording.
   deleteTitleFor?: (name: string) => ReactNode;

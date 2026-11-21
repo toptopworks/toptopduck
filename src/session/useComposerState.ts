@@ -1,5 +1,4 @@
 import { useCallback, useState } from "react";
-import type { TurnPhase } from "../types/session";
 import { log } from "../lib/log";
 
 // The QuestionBar-facing slice of session state (ADR-0092). ADR-0092 hoists
@@ -12,7 +11,7 @@ import { log } from "../lib/log";
 // Record<sessionId, string> for open sessions + a separate cold-start draft.
 // The draft switches per activeSessionId — each keep-alive session retains its
 // own input text across switches. The session-reported fields (loading /
-// queued / phase / handleAsk / handleCancel / handleIngestFiles) are passed
+// queued / handleAsk / handleCancel / handleIngestFiles) are passed
 // through the `session` parameter and merged with the owned drafts.
 
 // Session-derived bar fields the hook can't own yet (sourced from
@@ -29,12 +28,6 @@ export interface ComposerSessionFields {
    *  axis owned by useComposerQueue; it deliberately does NOT fold into
    *  `loading` (the turn-domain ruling above). */
   queued: boolean;
-  phase: TurnPhase | null;
-  /** The turn clock (issue #1264 turn-clock ruling): the bar's phase label
-   *  derives its continuous elapsed-seconds figure from it, freezing while
-   *  an approval holds the turn. null when no turn is in flight. */
-  turnStartedAt: number | null;
-  turnPausedSince: number | null;
   handleAsk: (question: string, invocations?: string[]) => Promise<void>;
   handleCancel: () => Promise<void>;
   /** Multi-file ingest from the composer "+" file section (ADR-0083).
@@ -97,7 +90,7 @@ export interface QuoteEntry {
 let quoteSeq = 0;
 
 // Idle handlers for the null-sessionId cold-start bar (ADR-0092). The bar
-// renders but no turn can run — loading is false, phase is null, and the
+// renders but no turn can run — loading is false, and the
 // handlers are no-ops. handleAsk logs a warning so an unwired cold-start bar
 // (missing upstream session-creation intercept) is observable instead of
 // silently discarding the user's question. The question text itself is never
@@ -112,15 +105,12 @@ const idleHandleAsk = async (question: string): Promise<void> => {
 const idleHandleCancel = async (): Promise<void> => {};
 const idleHandleIngestFiles = (): void => {};
 /** Idle bar fields. The default bar state when no session is active (cold
- *  start). All handlers are no-ops; loading is false, phase is null. The shell
+ *  start). All handlers are no-ops; loading is false. The shell
  *  uses this as the fallback when activeSessionId is null or the active
  *  session has not reported its fields yet. */
 export const IDLE_SESSION_FIELDS: ComposerSessionFields = {
   loading: false,
   queued: false,
-  phase: null,
-  turnStartedAt: null,
-  turnPausedSince: null,
   handleAsk: idleHandleAsk,
   handleCancel: idleHandleCancel,
   handleIngestFiles: idleHandleIngestFiles,
