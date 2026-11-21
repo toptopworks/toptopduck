@@ -4695,19 +4695,35 @@ mod tests {
     /// `interrupt_pending`, the same wake the real cancel path uses.
     #[test]
     fn handle_tools_call_cli_tool_cancel_ends_as_jsonrpc_error() {
-        struct ParkingSink(std::sync::Mutex<Vec<ApprovalRequestBody>>);
+        #[derive(Default)]
+        struct ParkingSink {
+            cards: std::sync::Mutex<Vec<ApprovalRequestBody>>,
+            card_landed: std::sync::Condvar,
+        }
         impl ApprovalSink for ParkingSink {
             fn emit_request(&self, body: &ApprovalRequestBody) {
-                self.0.lock().expect("cards lock").push(body.clone());
+                self.cards.lock().expect("cards lock").push(body.clone());
+                self.card_landed.notify_all();
             }
             fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
         }
         let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
-        let sink: &'static ParkingSink = Box::leak(Box::new(ParkingSink(Default::default())));
+        let sink: &'static ParkingSink = Box::leak(Box::new(ParkingSink::default()));
         let mut ctx = gate_ctx(vec![cli_fixture()], approval, sink);
         let mut outcome = GatewayOutcome::default();
+        // Fire only after the card has landed. The gate clears its
+        // stale-interrupt latch BEFORE installing the pending slot, so a
+        // fixed 100ms sleep could fire inside that window on a slow runner
+        // and be wiped, leaving the wait with no future wake. The card's
+        // emission is ordered after the clear, and a user cancel can only
+        // arrive once the card is up -- so card-anchored firing matches the
+        // real `fire_cancel` timing.
         let waker = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            let mut cards = sink.cards.lock().expect("cards lock");
+            while cards.is_empty() {
+                cards = sink.card_landed.wait(cards).expect("cards lock");
+            }
+            drop(cards);
             approval.interrupt_pending();
         });
         let msg = json!({
@@ -4732,7 +4748,7 @@ mod tests {
             "a cancelled call records no trace row"
         );
         assert_eq!(
-            sink.0.lock().unwrap().len(),
+            sink.cards.lock().expect("cards lock").len(),
             1,
             "the card did surface first"
         );
