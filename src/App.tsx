@@ -27,6 +27,7 @@ import { useBarWheelForward } from "./shell/useBarWheelForward";
 import { useComposerState } from "./session/useComposerState";
 import type { ComposerSessionFields } from "./session/useComposerState";
 import { useComposerRegistry } from "./session/composerRegistry";
+import { resolveDisplayName } from "./session/displayName";
 import { COMPOSER_INPUT_ID, QuestionBar } from "./components/thread/QuestionBar";
 import { ComposerAuthModeChip } from "./components/thread/ComposerAuthModeChip";
 import { ComposerWorkspacePicker } from "./components/thread/ComposerWorkspacePicker";
@@ -293,6 +294,7 @@ export default function App() {
     clearPendingQuestion,
     closeOpen,
     deletePersisted,
+    closeOpenAndWait,
     renameEntry,
     syncSessionName,
     setPinned,
@@ -750,8 +752,7 @@ export default function App() {
   // flight silently discards the turn (the close is fire-and-forget), so the
   // request first lands in a confirm dialog -- one gate covering both close
   // entry points (the pane header menu + the sidebar row menu). A non-running
-  // sid closes immediately; the previous behavior is untouched. Declared
-  // after closeSessionWithCleanup (it routes into the teardown body).
+  // sid closes immediately; the previous behavior is untouched.
   const [closeRunningTarget, setCloseRunningTarget] = useState<{
     sid: string;
     name: string;
@@ -760,9 +761,17 @@ export default function App() {
   // Shared teardown for "close this session": the pane header menu (ADR-0093)
   // and the sidebar row menu (ADR-0133, issue #1319) both fire cancel +
   // approval cleanup + draft drop -- one body keeps the two surfaces in
-  // lockstep.
-  const closeSessionWithCleanup = (sid: string) => {
-    void closeOpen(sid);
+  // lockstep. The guard confirm passes awaitRelease: its dialog promised the
+  // stop, so the close rides the wait-release variant (whose rejection already
+  // surfaces on the shell error bar) instead of the fire-and-forget close the
+  // plain paths keep (the pane is gone there; a silent background failure has
+  // no promise to break).
+  const closeSessionWithCleanup = (sid: string, opts?: { awaitRelease?: boolean }) => {
+    if (opts?.awaitRelease) {
+      void closeOpenAndWait(sid);
+    } else {
+      void closeOpen(sid);
+    }
     // A closed session's cards can never be answered (close fires cancel, the
     // gate resolves to deny); drop them so the coloring + a later reopen start
     // clean (re-wired from the retired sidebar trigger by ADR-0093 slice 2,
@@ -798,7 +807,14 @@ export default function App() {
   const requestCloseSession = (sid: string) => {
     if (runningSids.has(sid)) {
       const open = openSessions.find((s) => s.sid === sid);
-      setCloseRunningTarget({ sid, name: open?.name ?? "" });
+      // Resolve through the display-name fallback: a first turn in flight is
+      // exactly when this guard fires, and the pane's name is still "" until
+      // the auto-naming lands -- the sibling delete dialogs all show the
+      // resolved placeholder, not the raw empty string.
+      setCloseRunningTarget({
+        sid,
+        name: resolveDisplayName(open?.name ?? "", intl),
+      });
       return;
     }
     closeSessionWithCleanup(sid);
@@ -1431,7 +1447,7 @@ export default function App() {
                   onConfirm={() => {
                     const sid = closeRunningTarget.sid;
                     setCloseRunningTarget(null);
-                    closeSessionWithCleanup(sid);
+                    closeSessionWithCleanup(sid, { awaitRelease: true });
                   }}
                 />
               )}

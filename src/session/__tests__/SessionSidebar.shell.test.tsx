@@ -927,8 +927,33 @@ describe("SessionSidebar running-turn state (issue #1629)", () => {
 
   it("leaves every row unmarked when no session is running (default)", () => {
     const { container } = renderShell(<SessionSidebar {...baseProps()} />);
+    // Would-render baseline first: the absence assertions below only mean
+    // something if the rows themselves rendered.
+    expect(
+      container.querySelectorAll(".session-entry").length,
+    ).toBeGreaterThan(0);
     expect(container.querySelector("[data-turn-running]")).toBeNull();
     expect(container.querySelector(".sidebar-running-dot")).toBeNull();
+  });
+
+  it("forwards turnRunning down the row menu to the delete dialog's running body (issue #1629)", async () => {
+    const { container } = renderShell(
+      <SessionSidebar {...baseProps()} runningSids={new Set(["sess-bg"])} />,
+    );
+    // The running row's own menu lands the running variant -- the full
+    // renderRows -> RowActionsMenu -> DeleteSessionDialog chain, not just the
+    // dialog in isolation.
+    const runningRow = container.querySelector(
+      ".session-entry[data-turn-running=\"true\"]",
+    );
+    expect(runningRow).not.toBeNull();
+    fireEvent.click(
+      within(runningRow as HTMLElement).getByRole("menuitem", {
+        name: /^Delete$/,
+      }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog.textContent).toContain("still working");
   });
 });
 

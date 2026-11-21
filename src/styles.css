@@ -1112,7 +1112,6 @@
    both running faces read as one organism. */
 .sidebar-running-dot {
   outline: 3px solid color-mix(in oklab, var(--primary) 25%, transparent);
-  outline-offset: 0;
   animation: sidebar-running-dot 2.4s ease-in-out infinite;
 }
 @keyframes sidebar-running-dot {

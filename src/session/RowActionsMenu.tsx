@@ -44,7 +44,7 @@ export function RowActionsMenu({
   onRename,
   onClose,
   onDelete,
-  turnRunning = false,
+  turnRunning,
   onMenuOpenChange,
 }: {
   entry: SidebarEntry;
@@ -65,8 +65,9 @@ export function RowActionsMenu({
   onClose: (sid: string) => void;
   onDelete: (path: string, sid: string | null) => void;
   /** Issue #1629: a turn is in flight on this row's session -- the delete
-   *  dialog's body names the cancel cost beside the delete cost. */
-  turnRunning?: boolean;
+   *  dialog's body names the cancel cost beside the delete cost. Required: a
+   *  forgotten prop would silently drop that sentence, not default it away. */
+  turnRunning: boolean;
   /** The DropdownMenu root's open flips, forwarded verbatim: the parent
    *  retires the metadata card on open -- the pointer is necessarily on
    *  the row (it reached the trigger), so the card is necessarily open

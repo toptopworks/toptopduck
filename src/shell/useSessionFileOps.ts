@@ -76,6 +76,11 @@ export function useSessionFileOps({
   ) => Promise<void>;
   syncSessionName: (sid: string) => Promise<void>;
   persistenceBusy: boolean;
+  /** Wait-release close (ADR-0063): resolves after the canonical key is free,
+   *  unmounts the pane itself, and surfaces a rejection on the shell error
+   *  bar. Exposed for the shell's guard-confirm path, whose dialog promised
+   *  the stop -- a silent background failure there would break that promise. */
+  closeOpenAndWait: (sid: string) => Promise<boolean>;
 } {
   const [persistenceBusy, setPersistenceBusy] = useState(false);
 
@@ -233,5 +238,6 @@ export function useSessionFileOps({
     renameEntry,
     syncSessionName,
     persistenceBusy,
+    closeOpenAndWait,
   };
 }

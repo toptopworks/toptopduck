@@ -25,7 +25,7 @@ import { artifactTurn, failed, textual } from "./fixtures";
 import { log } from "../../lib/log";
 import type { ComposerSessionFields } from "../useComposerState";
 import type { ApprovalEntry } from "../useApprovalEvents";
-import type { ThreadEntry } from "../../types/thread";
+import type { ThreadEntry, TurnRecord } from "../../types/thread";
 import type { DatasetDescriptor, LoadOutcome } from "../../types/dataset";
 
 // The pane-level approval wiring pins (issue #1009 review, PR #1010): both
@@ -231,10 +231,10 @@ async function openArtifact(fileName: string) {
 }
 
 // The shell-facing running report (issue #1629): the ask flips the flag (the
-// hanging askQuestion keeps the turn in flight), and the unmount cleanup
-// reports false -- a close mid-turn cannot strand the sidebar row lit. The
-// settle-time false rides the same effect-deps flip, so this pins both AC
-// faces (settle drop + close cleanup) at the mechanism level.
+// hanging askQuestion keeps the turn in flight), the settle flips it back
+// while the pane stays mounted, and the unmount cleanup reports false -- a
+// close mid-turn cannot strand the sidebar row lit. All three faces ride the
+// same effect-deps flip, and each has its own pin.
 describe("SessionPane turn-running report (issue #1629)", () => {
   beforeEach(stubSessionApis);
 
@@ -248,6 +248,28 @@ describe("SessionPane turn-running report (issue #1629)", () => {
     );
     view.unmount();
     expect(onTurnRunningChange).toHaveBeenLastCalledWith(SID, false);
+  });
+
+  it("reports (sid, false) when the turn settles while the pane stays mounted", async () => {
+    // Resolve on a macrotask: an already-resolved promise settles inside the
+    // act batch and React merges the true edge away (a real IPC turn always
+    // crosses an async boundary, so the true report lands).
+    vi.mocked(askQuestion).mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve((textual("done").data as TurnRecord).outcome), 0),
+        ),
+    );
+    const onTurnRunningChange = vi.fn();
+    const view = renderPane({ onTurnRunningChange });
+    await waitFor(() => expect(view.getComposerFields()).not.toBeNull());
+    view.ask();
+    await waitFor(() =>
+      expect(onTurnRunningChange).toHaveBeenCalledWith(SID, true),
+    );
+    await waitFor(() =>
+      expect(onTurnRunningChange).toHaveBeenLastCalledWith(SID, false),
+    );
   });
 });
 
