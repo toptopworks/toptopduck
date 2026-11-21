@@ -5,7 +5,10 @@ import { FormattedMessage, IntlProvider } from "react-intl";
 import { SessionPane } from "./session/SessionPane";
 import { SessionSearchDialog } from "./session/SessionSearchDialog";
 import { SessionSidebar } from "./session/SessionSidebar";
-import { CloseRunningSessionDialog } from "./session/SessionDialogs";
+import {
+  ArchiveRunningSessionDialog,
+  CloseRunningSessionDialog,
+} from "./session/SessionDialogs";
 import { useApprovalEvents } from "./session/useApprovalEvents";
 import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
@@ -758,6 +761,19 @@ export default function App() {
     name: string;
   } | null>(null);
 
+  // The running-archive guard (issue #1631): archiving a session with a turn
+  // in flight rides the same silent cancel-and-teardown as closing (the
+  // setArchived chain's closeOpenAndWait), so the sidebar's archive entry
+  // -- the single archive entry point -- parks here first. Confirming
+  // re-enters the setArchived chain (its closeOpenAndWait keeps the stop
+  // promise); cancelling only clears the park -- the turn keeps running and
+  // the row stays unarchived.
+  const [archiveRunningTarget, setArchiveRunningTarget] = useState<{
+    path: string;
+    sid: string;
+    name: string;
+  } | null>(null);
+
   // Shared teardown for "close this session": the pane header menu (ADR-0093)
   // and the sidebar row menu (ADR-0133, issue #1319) both fire cancel +
   // approval cleanup + draft drop -- one body keeps the two surfaces in
@@ -818,6 +834,28 @@ export default function App() {
       return;
     }
     closeSessionWithCleanup(sid);
+  };
+
+  // The running-archive guard's request router (issue #1631), mirroring the
+  // close router above. Only archiving an open running row parks: restore
+  // passes sid=null (an archived row is never open -- open-is-unarchive),
+  // and an idle row archives immediately (the prior behavior, untouched).
+  // Plain identity: it rides only the sidebar's onArchive prop, never an
+  // effect dep.
+  const requestArchiveSession = (path: string, archived: boolean, sid: string | null) => {
+    if (archived && sid && runningSids.has(sid)) {
+      const open = openSessions.find((s) => s.sid === sid);
+      // Same display-name fallback as the close router: a first turn in
+      // flight is exactly when this guard fires, and the pane's name is
+      // still "" until the auto-naming lands.
+      setArchiveRunningTarget({
+        path,
+        sid,
+        name: resolveDisplayName(open?.name ?? "", intl),
+      });
+      return;
+    }
+    void setArchived(path, archived, sid);
   };
 
   // ADR-0092 (#500): shell-level file ingest. When active, delegate to the
@@ -1041,8 +1079,7 @@ export default function App() {
                   showArchived={showArchived}
                   onToggleArchived={() => setShowArchived((v) => !v)}
                   onSetPinned={(path, pinned) => void setPinned(path, pinned)}
-                  onArchive={(path, archived, sid) =>
-                    void setArchived(path, archived, sid)}
+                  onArchive={requestArchiveSession}
                   onDelete={deleteSessionWithCleanup}
                   onRename={(path, sid, newName) =>
                     void renameEntry(sid, path, newName)}
@@ -1448,6 +1485,23 @@ export default function App() {
                     const sid = closeRunningTarget.sid;
                     setCloseRunningTarget(null);
                     closeSessionWithCleanup(sid, { awaitRelease: true });
+                  }}
+                />
+              )}
+              {/* The running-archive confirm (issue #1631): parked by
+                  requestArchiveSession when archiving targets a session with
+                  a turn in flight. Confirming re-enters the setArchived chain
+                  (whose closeOpenAndWait fires the cancel); cancelling only
+                  clears the parked state -- the turn keeps running and the
+                  row stays unarchived. */}
+              {archiveRunningTarget && (
+                <ArchiveRunningSessionDialog
+                  name={archiveRunningTarget.name}
+                  onCancel={() => setArchiveRunningTarget(null)}
+                  onConfirm={() => {
+                    const target = archiveRunningTarget;
+                    setArchiveRunningTarget(null);
+                    void setArchived(target.path, true, target.sid);
                   }}
                 />
               )}

@@ -140,6 +140,53 @@ export function CloseRunningSessionDialog({
   );
 }
 
+// The archive-flavored sibling of CloseRunningSessionDialog (issue #1631):
+// archiving a running session rides the same silent cancel-and-teardown
+// (the setArchived chain's closeOpenAndWait), so the request parks here
+// first. Same AlertDialog posture -- overlay-click dismiss blocked, ESC
+// routes to onCancel, Cancel renders first (the auto-focused safe escape).
+// The copy names the archive cost: the stop is the same as close's, but the
+// session itself is kept and restorable from the archived view.
+export function ArchiveRunningSessionDialog({
+  name,
+  onCancel,
+  onConfirm,
+}: {
+  name: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog defaultOpen>
+      <AlertDialogContent onEscapeKeyDown={() => onCancel()}>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            <FormattedMessage
+              id="session.archiveRunning.title"
+              defaultMessage="Archive a running session?"
+            />
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            <FormattedMessage
+              id="session.archiveRunning.body"
+              defaultMessage="“{name}” is still working. Archiving stops it; the session is kept and can be restored from the archived view."
+              values={{ name }}
+            />
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={onCancel}>
+            <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
+          </AlertDialogCancel>
+          <AlertDialogAction onClick={onConfirm}>
+            <FormattedMessage id="session.archiveRunning.confirm" defaultMessage="Stop and archive" />
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 // Rename dialog (ADR-0060, single entry point). Pre-fills the current name (or
 // empty for a never-saved session); blank submit is refused (Save disabled).
 // The shell is now a Radix Dialog (issue #105): portal + focus-trap +
