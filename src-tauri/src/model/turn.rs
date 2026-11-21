@@ -553,6 +553,13 @@ pub struct TraceEntryView {
     pub operation_kind: OperationKind,
     /// Short argument summary (the SQL or reference_name), NOT the full args.
     pub summary: String,
+    /// The FULL text behind a cut summary (issue #1636): the model's original
+    /// argument, carried only when the summary cap actually cut it, bounded
+    /// at the summary-detail cap (4KB, the failure-detail scale). Rides both
+    /// success and failure arms. Absent when uncut, on the fallback arm, and
+    /// on pre-#1636 records -- the render falls back to `summary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_detail: Option<String>,
     /// Whether the call succeeded. A tool-level error (incl. an approval
     /// denial) routes back to the agent (ADR-0077); the trace records it.
     pub success: bool,
@@ -642,6 +649,13 @@ pub enum TurnPhase {
         name: String,
         operation_kind: OperationKind,
         summary: String,
+        /// The FULL text behind a cut summary (issue #1636): carried at the
+        /// started event too (the classification ran before dispatch), so a
+        /// live row expands to the same text its completion will persist.
+        /// Absent on an ordinary call whose summary was not cut and on every
+        /// external-runtime face (their summaries are their own).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary_detail: Option<String>,
         /// The delegation task's full text (ADR-0135 Decision 3), present
         /// only on a delegation row: the reader-facing task the trace's
         /// bounded summary stands in for while live. Absent on an ordinary

@@ -658,6 +658,7 @@ impl From<&RecipeTraceEntry> for TraceEntryView {
             name: entry.name.clone(),
             operation_kind: entry.operation_kind,
             summary: entry.summary.clone(),
+            summary_detail: entry.summary_detail.clone(),
             success: entry.success,
             result_excerpt: entry.result_excerpt.clone(),
             failure_detail: entry.failure_detail.clone(),
@@ -1714,6 +1715,7 @@ mod tests {
         use crate::persistence::recipe::{RecipeTraceEntry, RecipeTraceRound};
 
         let persisted = RecipeTraceEntry {
+            summary_detail: None,
             name: "analyst".into(),
             operation_kind: OperationKind::Execute,
             summary: "clean the sheet".into(),
@@ -1727,6 +1729,7 @@ mod tests {
                 thinking: None,
                 text: Some("child prose".into()),
                 calls: vec![RecipeTraceEntry {
+                    summary_detail: None,
                     name: "explore".into(),
                     operation_kind: OperationKind::Read,
                     summary: "SELECT 1".into(),
@@ -1788,6 +1791,7 @@ mod tests {
         use crate::persistence::recipe::RecipeTraceEntry;
 
         let persisted = RecipeTraceEntry {
+            summary_detail: None,
             name: "write".into(),
             operation_kind: OperationKind::Write,
             summary: "land the sheet".into(),
@@ -1803,6 +1807,35 @@ mod tests {
         assert_eq!(view.lines_added, Some(12));
         assert_eq!(view.lines_removed, Some(3));
         assert_eq!(view.replacements, Some(2));
+    }
+
+    /// The cut argument's full text resumes onto the view (issue #1636):
+    /// the mapping copies the persisted `summary_detail` beside its bounded
+    /// head, so a reopened session's fold expands the model's original
+    /// argument -- a dropped field here would silently revert resumed rows
+    /// to the head with nothing red (the review's mutation run caught this
+    /// mapping unpinned).
+    #[test]
+    fn the_cut_summary_detail_resumes_onto_the_view() {
+        use crate::approval::OperationKind;
+        use crate::persistence::recipe::RecipeTraceEntry;
+
+        let full_text = "SELECT * FROM people WHERE name = 'ada' ORDER BY id";
+        let persisted = RecipeTraceEntry {
+            summary_detail: Some(full_text.into()),
+            name: "sandbox_sql".into(),
+            operation_kind: OperationKind::Execute,
+            summary: "SELECT * FROM people WHERE…".into(),
+            success: true,
+            result_excerpt: String::new(),
+            failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
+            sub_rounds: None,
+        };
+        let view = TraceEntryView::from(&persisted);
+        assert_eq!(view.summary_detail.as_deref(), Some(full_text));
     }
 
     #[test]

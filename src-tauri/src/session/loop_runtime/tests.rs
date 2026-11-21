@@ -524,6 +524,7 @@ fn dispatch_forward_switches_sink_by_delegation_id() {
         recorder.lock().unwrap().push(p);
     }));
     let started = TurnPhase::ToolCallStarted {
+        summary_detail: None,
         id: None,
         name: "explore".into(),
         operation_kind: crate::OperationKind::Read,

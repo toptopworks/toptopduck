@@ -121,3 +121,54 @@ describe("TraceSummaryFold replacements line (issue #1621)", () => {
     expect(block?.querySelector(".border-b")).toBeNull();
   });
 });
+
+// Issue #1636: a cut summary's expand block upgrades to the persisted full
+// text when the wire carries one; absent detail keeps the bounded head (an
+// uncut argument, a pre-#1636 record, the approval card).
+describe("TraceSummaryFold summary detail upgrade (issue #1636)", () => {
+  it("expands to the full text when the detail is present", () => {
+    const { container } = renderWithProviders(
+      <TraceSummaryFold
+        summary="SELECT …"
+        summaryDetail="SELECT * FROM people WHERE region = 'north'"
+        summaryClassName="trace-summary"
+      />,
+    );
+    // The line itself stays the bounded head.
+    expect(container.querySelector(".trace-summary")).toHaveTextContent(
+      "SELECT …",
+    );
+    fireEvent.click(container.querySelector(".summary-fold-toggle") as Element);
+    const block = document.querySelector(".summary-fold-block");
+    expect(block).toHaveTextContent("SELECT * FROM people WHERE region = 'north'");
+    expect(block).not.toHaveTextContent("SELECT …");
+  });
+
+  it("keeps the head in the block when no detail is given", () => {
+    const { container } = renderWithProviders(
+      <TraceSummaryFold
+        summary="SELECT * FROM result_1"
+        summaryClassName="trace-summary"
+      />,
+    );
+    fireEvent.click(container.querySelector(".summary-fold-toggle") as Element);
+    expect(document.querySelector(".summary-fold-block")).toHaveTextContent(
+      "SELECT * FROM result_1",
+    );
+  });
+
+  it("upgrades the argument column of the two-column block too", () => {
+    const { container } = renderWithProviders(
+      <TraceSummaryFold
+        summary="SELECT …"
+        summaryDetail="SELECT * FROM people"
+        summaryClassName="trace-summary"
+        resultExcerpt="42 rows returned"
+      />,
+    );
+    fireEvent.click(container.querySelector(".summary-fold-toggle") as Element);
+    const block = document.querySelector(".summary-fold-block");
+    expect(block).toHaveTextContent("SELECT * FROM people");
+    expect(block).toHaveTextContent("42 rows returned");
+  });
+});

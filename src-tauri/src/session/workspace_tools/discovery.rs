@@ -268,6 +268,7 @@ pub(crate) fn dispatch_readonly(
         name: call.name.clone(),
         operation_kind: crate::approval::OperationKind::Read,
         summary: summary.clone(),
+        summary_detail: None,
         task: None,
     });
     let resolved = match call.name.as_str() {

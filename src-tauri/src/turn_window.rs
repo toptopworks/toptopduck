@@ -757,6 +757,7 @@ mod tests {
         let trace_failure_excerpt = "SENTINEL_TRACE_FAILURE";
         let trace_failure_detail = "SENTINEL_TRACE_FAILURE_DETAIL";
         let trace_summary = "SENTINEL_TRACE_SUMMARY";
+        let trace_summary_detail = "SENTINEL_ARG_FULLTEXT";
         // The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
         // #934) rides the same exclusion: the sub-agent's rounds live under
         // the delegation entry in the persisted trace, and NONE of it -- prose
@@ -771,6 +772,7 @@ mod tests {
             text: None,
             calls: vec![
                 TraceEntryView {
+                    summary_detail: Some(trace_summary_detail.into()),
                     id: None,
                     name: "explore".into(),
                     operation_kind: OperationKind::Read,
@@ -785,6 +787,7 @@ mod tests {
                     sub_rounds: None,
                 },
                 TraceEntryView {
+                    summary_detail: Some(trace_summary_detail.into()),
                     id: None,
                     name: "materialize".into(),
                     operation_kind: OperationKind::Write,
@@ -799,6 +802,7 @@ mod tests {
                     sub_rounds: None,
                 },
                 TraceEntryView {
+                    summary_detail: None,
                     id: None,
                     name: "analyst".into(),
                     operation_kind: OperationKind::Execute,
@@ -814,6 +818,7 @@ mod tests {
                         thinking: None,
                         text: Some(sub_prose.into()),
                         calls: vec![TraceEntryView {
+                            summary_detail: None,
                             id: None,
                             name: "explore".into(),
                             operation_kind: OperationKind::Read,
@@ -867,8 +872,8 @@ mod tests {
             "ADR-0078: a failure trace text (excerpt or #1610 detail) leaked into an in-window Full TurnPayload:\n{full}"
         );
         assert!(
-            !full.contains(trace_summary),
-            "ADR-0078: a trace summary leaked into an in-window Full TurnPayload:\n{full}"
+            !full.contains(trace_summary) && !full.contains(trace_summary_detail),
+            "ADR-0078: a trace summary or its cut-argument full text (issue #1636) leaked into an in-window Full TurnPayload:\n{full}"
         );
         assert!(
             !full.contains(sub_prose)
@@ -889,8 +894,8 @@ mod tests {
             "ADR-0078: a failure trace text (excerpt or #1610 detail) leaked into a far-window Summary TurnPayload:\n{summary}"
         );
         assert!(
-            !summary.contains(trace_summary),
-            "ADR-0078: a trace summary leaked into a far-window Summary TurnPayload:\n{summary}"
+            !summary.contains(trace_summary) && !summary.contains(trace_summary_detail),
+            "ADR-0078: a trace summary or its cut-argument full text (issue #1636) leaked into a far-window Summary TurnPayload:\n{summary}"
         );
         assert!(
             !summary.contains(sub_prose)

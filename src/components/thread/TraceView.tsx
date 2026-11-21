@@ -84,6 +84,7 @@ function RunningRow({
     <li className="trace-row live-running py-0.5 text-xs">
       <TraceSummaryFold
         summary={row.summary}
+        summaryDetail={row.summaryDetail}
         summaryClassName="trace-summary"
         head={(
           <>

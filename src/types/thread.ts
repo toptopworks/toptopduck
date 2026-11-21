@@ -152,6 +152,12 @@ export interface TraceEntry {
   operation_kind: OperationKind;
   // Short argument summary (the SQL or reference_name), NOT the full args.
   summary: string;
+  // The full text behind a cut summary (issue #1636): the model's original
+  // argument, carried only when the summary cap actually cut it, capped at
+  // the summary-detail budget (4KB, the failure-detail scale). Rides both
+  // success and failure arms. Absent for an uncut argument and on
+  // pre-#1636 records -- the fold falls back to the summary head.
+  summary_detail?: string;
   // Whether the call succeeded. An approval denial records success: false
   // with the denial message as the excerpt.
   success: boolean;

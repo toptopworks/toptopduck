@@ -62,6 +62,10 @@ export interface LiveCall {
   name: string;
   operationKind: OperationKind;
   summary: string;
+  /** The full text behind a cut summary (issue #1636), mirrored from the
+   *  wire events; undefined for an uncut argument and every arm the wire
+   *  omits it on (the fold falls back to the summary head). */
+  summaryDetail?: string;
   running: boolean;
   /** null until the completion event lands (a running dispatch). */
   success: boolean | null;
@@ -102,6 +106,9 @@ export interface LiveTraceRow {
   server: string | null;
   operationKind: OperationKind;
   summary: string;
+  /** The full text behind a cut summary (issue #1636), carried through the
+   *  merge; undefined for the same arms the wire entry omits it on. */
+  summaryDetail?: string;
   /** The approval card's state when this call went through the gate:
    *  `response` null while PENDING (three live buttons), the user's answer
    *  once resolved (badge), or `"abandoned"` when the external caller
@@ -307,6 +314,7 @@ export function mergeLiveTrace(
         success: call.success,
         resultExcerpt: call.resultExcerpt,
         failureDetail: call.failureDetail,
+        summaryDetail: call.summaryDetail,
         linesAdded: call.linesAdded,
         linesRemoved: call.linesRemoved,
         replacements: call.replacements,
@@ -326,6 +334,7 @@ export function mergeLiveTrace(
         success: call.success,
         resultExcerpt: call.resultExcerpt,
         failureDetail: call.failureDetail,
+        summaryDetail: call.summaryDetail,
         linesAdded: call.linesAdded,
         linesRemoved: call.linesRemoved,
         replacements: call.replacements,
@@ -440,6 +449,7 @@ export function buildLiveRounds(
         success: r.success,
         resultExcerpt: r.resultExcerpt,
         failureDetail: r.failureDetail,
+        summaryDetail: r.summaryDetail,
         linesAdded: r.linesAdded,
         linesRemoved: r.linesRemoved,
         replacements: r.replacements,
@@ -476,6 +486,7 @@ function foldRounds(fold: RoundFold): LiveRound[] {
         success: c.success,
         resultExcerpt: c.resultExcerpt,
         failureDetail: c.failureDetail,
+        summaryDetail: c.summaryDetail,
         linesAdded: c.linesAdded,
         linesRemoved: c.linesRemoved,
         replacements: c.replacements,
@@ -508,6 +519,7 @@ export function traceEntryFromRow(row: SettledLiveRow): TraceEntry {
     success: row.success,
     result_excerpt: row.resultExcerpt,
     failure_detail: row.failureDetail,
+    summary_detail: row.summaryDetail,
     lines_added: row.linesAdded,
     lines_removed: row.linesRemoved,
     replacements: row.replacements,
@@ -720,6 +732,7 @@ function callRow(
   subRounds?: TraceRound[],
   callId?: string,
   failureDetail?: string,
+  summaryDetail?: string,
 ): LiveCall {
   return {
     key: `call-${seq}`,
@@ -733,6 +746,7 @@ function callRow(
     success,
     resultExcerpt,
     failureDetail,
+    summaryDetail,
   };
 }
 
@@ -771,6 +785,9 @@ function completeCallAt(calls: LiveCall[], idx: number, entry: TraceEntry): Live
           running: false,
           success: entry.success,
           resultExcerpt: entry.result_excerpt,
+          // The full text behind a cut summary rides the completion beside
+          // its bounded head (issue #1636); undefined for an uncut argument.
+          summaryDetail: entry.summary_detail,
           // The model-visible failure text rides the completion beside its
           // bounded head (issue #1610); undefined for a success / no-text arm.
           failureDetail: entry.failure_detail,
@@ -814,7 +831,7 @@ function applyRoundFold(fold: RoundFold, phase: TurnPhase): RoundFold {
     };
   }
   if ("ToolCallStarted" in phase) {
-    const { id, name, operation_kind, summary } = phase.ToolCallStarted;
+    const { id, name, operation_kind, summary, summary_detail } = phase.ToolCallStarted;
     const step = fold.step ?? 1;
     return {
       ...fold,
@@ -831,6 +848,8 @@ function applyRoundFold(fold: RoundFold, phase: TurnPhase): RoundFold {
           "",
           undefined,
           id,
+          undefined,
+          summary_detail,
         ),
       ],
     };
@@ -874,6 +893,7 @@ function applyRoundFold(fold: RoundFold, phase: TurnPhase): RoundFold {
         entry.sub_rounds,
         undefined,
         entry.failure_detail,
+        entry.summary_detail,
       ),
     ],
   };

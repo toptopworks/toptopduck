@@ -269,6 +269,17 @@ pub struct RecipeTraceEntry {
     pub operation_kind: OperationKind,
     /// Short argument summary (the SQL or reference_name), NOT the full args.
     pub summary: String,
+    /// The FULL text behind a cut summary (issue #1636): the model's original
+    /// argument (the SQL verbatim from `call.input`, not the executed
+    /// transform), carried ONLY when the summary cap actually cut it -- the
+    /// audit face that survives the session. Bounded at the summary-detail
+    /// cap (same 4KB scale as the failure-detail budget) with the shared
+    /// truncation marker. Absent when the summary was not cut (short
+    /// arguments duplicate nothing), on the fallback arm, and on pre-#1636
+    /// sessions (serde degrade, zero migration) -- the render falls back to
+    /// `summary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_detail: Option<String>,
     /// Whether the call succeeded. A tool-level error routes back to the agent
     /// (ADR-0077); the trace records the failure for audit + cross-turn
     /// debugging.
@@ -459,6 +470,14 @@ impl TurnProvenance {
 /// persisted trace stays bounded.
 const TRACE_SUMMARY_MAX: usize = 512;
 
+/// Maximum length of a cut summary's persisted full text (issue #1636): the
+/// summary-detail budget, sharing the 4KB scale of the failure-detail cap
+/// (`TRACE_FAILURE_DETAIL_MAX`) -- two constants, one scale: kinship, not a
+/// contract (either budget may drift if its face ever needs its own). An
+/// argument longer than this still cuts -- honestly marked, same as the
+/// summary head.
+const TRACE_SUMMARY_DETAIL_MAX: usize = 4 * 1024;
+
 /// Synthesize the single-call execution trace for a Materialized turn's SQL
 /// (ADR-0078). v1-era turns ran exactly one productive SQL under the single-SQL
 /// contract, so their trajectory is one `materialize` call -- the v1->v2
@@ -466,12 +485,15 @@ const TRACE_SUMMARY_MAX: usize = 512;
 /// trajectory it produced live. Live agent-loop turns persist the loop's
 /// recorded multi-call trace instead (issue #319), so this helper's sole
 /// remaining caller is the migration path. The summary is the verbatim SQL
-/// truncated to [`TRACE_SUMMARY_MAX`].
+/// truncated to [`TRACE_SUMMARY_MAX`]; a cut summary carries the full text in
+/// [`RecipeTraceEntry::summary_detail`] (issue #1636), same predicate as the
+/// live classification.
 pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
     let entry = RecipeTraceEntry {
         name: crate::analysis_tools::definitions::TOOL_MATERIALIZE.to_string(),
         operation_kind: OperationKind::Write,
         summary: truncate_trace_summary(sql),
+        summary_detail: summary_detail_for(sql),
         success: true,
         result_excerpt: String::new(),
         failure_detail: None,
@@ -498,6 +520,24 @@ pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
 /// persisted trace never bloats the `recipe.json` file while staying recognizable.
 pub(crate) fn truncate_trace_summary(s: &str) -> String {
     crate::util::truncate_chars_with_ellipsis(s, TRACE_SUMMARY_MAX)
+}
+
+/// The full text behind a cut summary (issue #1636): `Some` only when the
+/// argument actually exceeded [`TRACE_SUMMARY_MAX`] (the cut predicate
+/// mirrors the approval surface's on-cut attachment rule), bounded at
+/// [`TRACE_SUMMARY_DETAIL_MAX`] with the shared truncation marker -- an
+/// uncut argument duplicates nothing, so the detail stays honestly absent.
+/// Shared by [`synthetic_materialize_trace`] and the live classification's
+/// `summarize_field` so both construction sites land the same predicate.
+pub(crate) fn summary_detail_for(s: &str) -> Option<String> {
+    if s.chars().count() > TRACE_SUMMARY_MAX {
+        Some(crate::util::truncate_chars_with_ellipsis(
+            s,
+            TRACE_SUMMARY_DETAIL_MAX,
+        ))
+    } else {
+        None
+    }
 }
 
 /// One turn in the recipe timeline (ADR-0028): the verbatim question paired
@@ -1188,6 +1228,7 @@ mod tests {
         // a pre-#1621 entry (none of the three keys) degrades to absent --
         // zero migration, the resumed row simply renders no badge.
         let entry = RecipeTraceEntry {
+            summary_detail: None,
             name: "edit".into(),
             operation_kind: OperationKind::Write,
             summary: "s.py".into(),
@@ -1219,6 +1260,47 @@ mod tests {
             (old.lines_added, old.lines_removed, old.replacements),
             (None, None, None),
             "a pre-#1621 entry degrades to absent stats"
+        );
+    }
+
+    #[test]
+    fn trace_entry_summary_detail_round_trips_with_pre_1636_degrade() {
+        // Issue #1636: a cut summary's full text rides the wire as an
+        // optional key and survives a serialize -> deserialize cycle; a
+        // pre-#1636 entry (no key) degrades to absent -- zero migration,
+        // the render falls back to `summary`.
+        let entry = RecipeTraceEntry {
+            name: "explore".into(),
+            operation_kind: OperationKind::Read,
+            summary: "SELECT …".into(),
+            summary_detail: Some("SELECT * FROM people".into()),
+            success: true,
+            result_excerpt: String::new(),
+            failure_detail: None,
+            lines_added: None,
+            lines_removed: None,
+            replacements: None,
+            sub_rounds: None,
+        };
+        let value = serde_json::to_value(&entry).expect("serialize");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "name": "explore", "operation_kind": "read", "summary": "SELECT …",
+                "summary_detail": "SELECT * FROM people",
+                "success": true, "result_excerpt": "",
+            }),
+        );
+        let back: RecipeTraceEntry = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back, entry);
+        let old: RecipeTraceEntry = serde_json::from_value(serde_json::json!({
+            "name": "explore", "operation_kind": "read", "summary": "SELECT …",
+            "success": true, "result_excerpt": "",
+        }))
+        .expect("deserialize pre-#1636 form");
+        assert_eq!(
+            old.summary_detail, None,
+            "a pre-#1636 entry degrades to absent detail"
         );
     }
 
@@ -1733,10 +1815,41 @@ mod tests {
         let trace = synthetic_materialize_trace(&fits);
         assert_eq!(trace[0].summary.chars().count(), 512);
         assert!(!trace[0].summary.ends_with('…'), "uncut at the bound");
+        assert_eq!(trace[0].summary_detail, None, "uncut carries no detail");
         let long_sql = "x".repeat(513);
         let trace = synthetic_materialize_trace(&long_sql);
         assert_eq!(trace[0].summary.chars().count(), 512);
         assert!(trace[0].summary.ends_with('…'), "cut with ellipsis");
+        // Issue #1636: a cut summary carries the full text as the detail --
+        // the audit face survives the session, same predicate as the live
+        // classification.
+        assert_eq!(
+            trace[0].summary_detail.as_deref(),
+            Some(long_sql.as_str()),
+            "a 513-char SQL fits the detail budget uncut"
+        );
+    }
+
+    /// The summary-detail predicate (issue #1636): `Some` only past the
+    /// summary cap, bounded at the detail budget with the shared marker --
+    /// an uncut argument duplicates nothing.
+    #[test]
+    fn summary_detail_for_cut_predicate_and_detail_cap() {
+        assert_eq!(summary_detail_for("SELECT 1"), None, "uncut stays absent");
+        assert_eq!(
+            summary_detail_for(&"y".repeat(512)),
+            None,
+            "exactly at the cap is not cut"
+        );
+        let cut = summary_detail_for(&"x".repeat(513)).expect("513 is cut");
+        assert_eq!(cut.chars().count(), 513, "past the cap, under the budget");
+        let huge = summary_detail_for(&"z".repeat(4 * 1024 + 100)).expect("over-cap still lands");
+        assert_eq!(
+            huge.chars().count(),
+            4 * 1024,
+            "capped at the detail budget"
+        );
+        assert!(huge.ends_with('…'), "cut carries the shared marker");
     }
 
     #[test]

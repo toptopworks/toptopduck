@@ -347,6 +347,7 @@ mod tests {
     /// replacement, issue #817).
     fn trace_entry(id: &str, name: &str, success: bool) -> TraceEntry {
         TraceEntry {
+            summary_detail: None,
             tool_use_id: id.into(),
             name: name.into(),
             operation_kind: OperationKind::Read,

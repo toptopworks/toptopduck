@@ -760,6 +760,50 @@ describe("useTurnFlow", () => {
       });
     });
 
+    // The wire's summary_detail rides both events of the pair (issue
+    // #1636): the started event lands it on the RUNNING row (a live row
+    // expands to the full text before the completion exists) and the
+    // merged completion keeps it -- the ingestion hop the factory-based
+    // chain test bypasses.
+    it("a started row and its merged completion carry the wire summary_detail", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallStarted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT …",
+          summary_detail: "SELECT * FROM people",
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        running: true,
+        summaryDetail: "SELECT * FROM people",
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT …",
+          summary_detail: "SELECT * FROM people",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        running: false,
+        success: true,
+        summaryDetail: "SELECT * FROM people",
+      });
+    });
+
     // The wire's landed stats enter the live chain at the same merge hop
     // (issue #1621): a started+completed pair folds the completion into
     // the open row, and the merged row carries the fields the badge and
@@ -1501,6 +1545,71 @@ describe("useTurnFlow", () => {
         linesAdded: 12,
         linesRemoved: 3,
         replacements: 2,
+      });
+    });
+
+    it("threads the cut summary detail through merge + grouping + the settle projection (issue #1636)", () => {
+      // The wire's summary_detail rides the whole live chain like the
+      // failure detail above -- the settled row's fold expands the model's
+      // original argument while the line keeps the bounded head, and the
+      // optimistic record matches what a resumed (recipe-played) row would
+      // render. A row without one (an uncut argument, every arm the wire
+      // omits it on) keeps an absent key: the fold falls back to the head.
+      const fullText = "SELECT * FROM people WHERE name = 'ada' ORDER BY id";
+      const cut = call({
+        name: "sandbox_sql",
+        operationKind: "execute",
+        summary: "SELECT * FROM people WHERE…",
+        summaryDetail: fullText,
+      });
+      const trace = liveRoundsToTrace(
+        buildLiveRounds(
+          { step: 1, calls: [cut], roundTexts: [], roundThinkings: [], delegations: {} },
+          [],
+        ),
+      );
+      expect(trace[0]?.calls[0]?.summary_detail).toBe(fullText);
+      const plain = call({ summary: "SELECT 1" });
+      const plainTrace = liveRoundsToTrace(
+        buildLiveRounds(
+          { step: 1, calls: [plain], roundTexts: [], roundThinkings: [], delegations: {} },
+          [],
+        ),
+      );
+      expect(plainTrace[0]?.calls[0]?.summary_detail).toBeUndefined();
+    });
+
+    it("carries the cut summary detail through a delegation's running fold (issue #1636)", () => {
+      // Mirror of the landed-stats fold test above: a sub-agent's cut SQL
+      // rides the shared completion landing (completeCallAt) into the
+      // buffer's fold, and foldRounds projects it onto the running panel's
+      // rows -- the panel's rows expand through the same summaryDetail the
+      // main rail's rows carry, or the running panel degrades to the head
+      // for the delegation's whole run.
+      const fullText = "SELECT * FROM people WHERE name = 'ada' ORDER BY id";
+      const agent = call({ name: "agent", callId: "d1", summary: "fix things" });
+      const cut = call({
+        key: "sub-0",
+        step: 1,
+        name: "sandbox_sql",
+        operationKind: "execute",
+        summary: "SELECT * FROM people WHERE…",
+        summaryDetail: fullText,
+      });
+      const rounds = buildLiveRounds(
+        {
+          step: 1,
+          calls: [agent],
+          roundTexts: [],
+          roundThinkings: [],
+          delegations: {
+            d1: { task: "fix the widget", fold: { step: 1, calls: [cut], roundThinkings: [] } },
+          },
+        },
+        [],
+      );
+      expect(rounds[0]?.rows[0]?.delegation?.rounds[0]?.rows[0]).toMatchObject({
+        summaryDetail: fullText,
       });
     });
 

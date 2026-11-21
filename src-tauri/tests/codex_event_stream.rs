@@ -321,6 +321,7 @@ fn mcp_tool_call_rounds_settle_in_place_after_the_merge() {
     // namespaced call, the resolved handle for the `mcp_invoke` dispatch,
     // plus one unechoed builtin row for the residual.
     let gateway_row = |id: &str, name: &str| TraceEntry {
+        summary_detail: None,
         tool_use_id: id.into(),
         name: name.into(),
         operation_kind: OperationKind::Execute,

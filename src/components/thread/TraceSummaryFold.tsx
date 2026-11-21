@@ -38,12 +38,18 @@ type SummaryHookClass = "trace-summary" | "approval-summary";
 
 export function TraceSummaryFold({
   summary,
+  summaryDetail,
   summaryClassName,
   head = null,
   resultExcerpt,
   replacements,
 }: {
   summary: string;
+  /** The full text behind a cut summary (issue #1636): the expand block's
+   *  argument column upgrades from the bounded head to this when present;
+   *  absent (an uncut argument, a pre-#1636 record, the approval card)
+   *  keeps the head. The line itself always stays the bounded head. */
+  summaryDetail?: string;
   /** The hook class for the truncated summary span -- the visual
    *  utilities live here, shared. */
   summaryClassName: SummaryHookClass;
@@ -64,6 +70,10 @@ export function TraceSummaryFold({
 }) {
   const [expanded, setExpanded] = useState(false);
   const intl = useIntl();
+  // Issue #1636: the expand block recovers the full argument when the
+  // backend persisted one; every fallback keeps the old single-string
+  // behavior.
+  const expandText = summaryDetail ?? summary;
   return (
     <>
       <span
@@ -124,13 +134,13 @@ export function TraceSummaryFold({
             </span>
           )}
           {resultExcerpt === undefined ? (
-            summary
+            expandText
           ) : (
             // Both faces of the call in one capped block (issue #1604):
             // the argument summary left, the result excerpt right of the
             // divider -- each column free to wrap, the cap bounds the pair.
             <span className="flex gap-2">
-              <span className="min-w-0 flex-1">{summary}</span>
+              <span className="min-w-0 flex-1">{expandText}</span>
               <span className="min-w-0 flex-1 border-l border-border pl-2">
                 {resultExcerpt}
               </span>

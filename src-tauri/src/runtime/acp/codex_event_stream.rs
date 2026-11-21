@@ -941,6 +941,7 @@ impl JsonPump {
                     name: command,
                     operation_kind: OperationKind::Execute,
                     summary,
+                    summary_detail: None,
                     task: None,
                 });
                 on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
@@ -1016,6 +1017,7 @@ impl JsonPump {
                         name,
                         operation_kind,
                         summary,
+                        summary_detail: None,
                         task: None,
                     });
                     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));

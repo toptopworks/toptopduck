@@ -1634,6 +1634,7 @@ fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
         vec![
             TurnPhase::Thinking { attempt: 1 },
             TurnPhase::ToolCallStarted {
+                summary_detail: None,
                 id: None,
                 name: "materialize".into(),
                 operation_kind: OperationKind::Write,
@@ -1641,6 +1642,7 @@ fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
                 task: None,
             },
             TurnPhase::ToolCallCompleted(TraceEntryView {
+                summary_detail: None,
                 id: None,
                 name: "materialize".into(),
                 operation_kind: OperationKind::Write,

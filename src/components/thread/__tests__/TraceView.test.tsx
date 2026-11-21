@@ -4,7 +4,7 @@ import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 
 import { LiveRow } from "../TraceView";
-import { TraceStepFold } from "../TraceRow";
+import { TraceRow, TraceStepFold } from "../TraceRow";
 import type { LiveRoundRow } from "../../../session/useTurnFlow";
 import type { FileAttachment } from "../../../types/approval";
 import type { TraceEntry } from "../../../types/thread";
@@ -257,6 +257,31 @@ describe("LiveRow excerpt gate (issue #1047, #1604)", () => {
     expect(anchor).toHaveAttribute("aria-label", "Error excerpt");
   });
 
+  it("expands the cut argument's full text over the summary head (issue #1636)", () => {
+    // The live row's fold upgrade (#1636): a call whose summary was cut
+    // renders the model's original argument in the expand block while the
+    // line keeps the bounded head -- the wiring must hand the row's
+    // summaryDetail down, or the running row degrades to the head. The
+    // no-detail fallback face is the un-folded tests above (the block
+    // shows the summary itself).
+    const fullText = "SELECT * FROM people WHERE name = 'ada' ORDER BY id";
+    const withDetail = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: false,
+          success: true,
+          resultExcerpt: "",
+          summaryDetail: fullText,
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    fireEvent.click(summaryFoldToggle(withDetail.container));
+    expect(foldBlock(withDetail.container)).toHaveTextContent(fullText);
+    expect(foldBlock(withDetail.container)).not.toHaveTextContent(SUMMARY);
+  });
+
   it("renders neither excerpt face for a clean success row", () => {
     const clean = renderWithProviders(
       <LiveRow
@@ -272,6 +297,30 @@ describe("LiveRow excerpt gate (issue #1047, #1604)", () => {
     expect(clean.container.querySelector(".trace-excerpt")).toBeNull();
     fireEvent.click(summaryFoldToggle(clean.container));
     expect(foldBlock(clean.container)).toHaveTextContent(SUMMARY);
+  });
+});
+
+// The settled row's fold upgrade (#1636): the persisted entry's
+// summary_detail must reach the fold, or a reopened session's cut rows
+// expand the bounded head again -- the live face above carries the same
+// upgrade through the running row's wiring.
+describe("TraceRow fold upgrade (issue #1636)", () => {
+  it("expands the settled row's cut argument full text over the head", () => {
+    const fullText = "SELECT * FROM people WHERE name = 'ada' ORDER BY id";
+    const settled = renderWithProviders(
+      <TraceRow
+        entry={{
+          name: "sandbox_sql",
+          operation_kind: "execute",
+          summary: "SELECT * FROM people WHERE…",
+          summary_detail: fullText,
+          success: true,
+          result_excerpt: "",
+        }}
+      />,
+    );
+    fireEvent.click(summaryFoldToggle(settled.container));
+    expect(foldBlock(settled.container)).toHaveTextContent(fullText);
   });
 });
 

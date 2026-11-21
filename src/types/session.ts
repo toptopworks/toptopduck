@@ -228,6 +228,11 @@ export type TurnPhase =
       name: string;
       operation_kind: OperationKind;
       summary: string;
+      // The full text behind a cut summary (issue #1636), carried at the
+      // started event so a live row expands to the same text its
+      // completion persists. Absent for an uncut argument and on every
+      // external-runtime face.
+      summary_detail?: string;
       // The delegation task's full text (ADR-0135 Decision 3), present
       // only on a delegation row -- live-only, never persisted.
       task?: string;

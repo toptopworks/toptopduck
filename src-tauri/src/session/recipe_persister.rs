@@ -869,6 +869,7 @@ mod tests {
             thinking: None,
             text: None,
             calls: vec![RecipeTraceEntry {
+                summary_detail: None,
                 name: "explore".into(),
                 operation_kind: crate::approval::OperationKind::Read,
                 summary: "SELECT 1".into(),

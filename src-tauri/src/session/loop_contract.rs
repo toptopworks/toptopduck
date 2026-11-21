@@ -171,6 +171,15 @@ pub struct TraceEntry {
     pub operation_kind: OperationKind,
     /// Short argument summary (the SQL or reference_name), NOT the full args.
     pub summary: String,
+    /// The FULL text behind a cut summary (issue #1636): the model's original
+    /// argument, carried only when the summary cap actually cut it (the
+    /// classification runs the predicate) and bounded at the summary-detail
+    /// budget (4KB, the failure-detail scale). Unlike the failure detail this
+    /// rides BOTH success and failure arms -- the argument text belongs to the
+    /// call, not to its outcome. `None` when uncut, on the fallback arm, and
+    /// on pre-#1636 records (serde degrade, the render falls back to
+    /// `summary`).
+    pub summary_detail: Option<String>,
     pub success: bool,
     /// The call's outcome text stopped at the output cap (issue #1047):
     /// stamped by the delegation landing from the report builder's own cap
@@ -257,6 +266,7 @@ impl TraceEntry {
             name: name.into(),
             operation_kind,
             summary: summary.into(),
+            summary_detail: None,
             success: true,
             output_truncated: false,
             result_excerpt: result_excerpt.into(),
@@ -285,6 +295,7 @@ impl TraceEntry {
             name: name.into(),
             operation_kind,
             summary: summary.into(),
+            summary_detail: None,
             success: false,
             output_truncated: false,
             result_excerpt: if message.is_empty() {
@@ -329,6 +340,17 @@ impl TraceEntry {
         if !detail.is_empty() {
             self.failure_detail = Some(truncate_trace_excerpt(detail, TRACE_FAILURE_DETAIL_MAX));
         }
+        self
+    }
+
+    /// Attach the full text behind a cut summary (issue #1636): the
+    /// classification already ran the cut predicate and applied the
+    /// summary-detail budget, so the builder takes the verdict as-is --
+    /// `None` (uncut / fallback arm) leaves the field absent. Rides both
+    /// success and failure arms: the argument text belongs to the call, not
+    /// to its outcome.
+    pub fn with_summary_detail(mut self, detail: Option<String>) -> Self {
+        self.summary_detail = detail;
         self
     }
 
@@ -378,6 +400,10 @@ fn reduced_trace(entry: &TraceEntry) -> TraceEntryView {
         name: entry.name.clone(),
         operation_kind: entry.operation_kind,
         summary: entry.summary.clone(),
+        // The summary detail rides both outcome arms (issue #1636) -- the
+        // argument text belongs to the call, not to its outcome -- so the
+        // projection passes it through verbatim.
+        summary_detail: entry.summary_detail.clone(),
         success: entry.success,
         result_excerpt: if entry.success && !entry.output_truncated {
             String::new()
@@ -462,6 +488,7 @@ impl RecipeTraceEntry {
             name: v.name,
             operation_kind: v.operation_kind,
             summary: v.summary,
+            summary_detail: v.summary_detail,
             success: v.success,
             result_excerpt: v.result_excerpt,
             failure_detail: v.failure_detail,
@@ -724,6 +751,7 @@ mod tests {
     #[test]
     fn persisted_trace_mapping_empties_success_and_carries_failure_messages() {
         let base = |success: bool, excerpt: &str| TraceEntry {
+            summary_detail: None,
             tool_use_id: "tu_1".into(),
             name: "materialize".into(),
             operation_kind: OperationKind::Write,
@@ -792,6 +820,7 @@ mod tests {
     #[test]
     fn display_trace_mapping_empties_success_and_carries_failure_messages() {
         let base = |success: bool, excerpt: &str| TraceEntry {
+            summary_detail: None,
             tool_use_id: "tu_1".into(),
             name: "explore".into(),
             operation_kind: OperationKind::Read,
@@ -880,6 +909,7 @@ mod tests {
     #[should_panic(expected = "a failed trace entry keeps its result message")]
     fn persisted_trace_mapping_rejects_a_silent_failure() {
         let entry = TraceEntry {
+            summary_detail: None,
             tool_use_id: "tu_1".into(),
             name: "explore".into(),
             operation_kind: OperationKind::Read,
@@ -987,6 +1017,44 @@ mod tests {
         );
     }
 
+    /// The summary detail rides BOTH outcome arms (issue #1636) -- the
+    /// argument text belongs to the call, not to its outcome, the mirror
+    /// image of the failure detail's success-side clearing above.
+    #[test]
+    fn summary_detail_rides_both_reduced_projections_on_both_arms() {
+        let full = "SELECT * FROM people";
+        for entry in [
+            TraceEntry::succeeded(
+                "tu_1",
+                "explore",
+                OperationKind::Read,
+                "SELECT …",
+                "42 rows",
+            ),
+            TraceEntry::failed(
+                "tu_2",
+                "explore",
+                OperationKind::Read,
+                "SELECT …",
+                "no such table",
+            ),
+        ] {
+            let entry = entry.with_summary_detail(Some(full.to_string()));
+            assert_eq!(
+                RecipeTraceEntry::from_live_trace(&entry)
+                    .summary_detail
+                    .as_deref(),
+                Some(full),
+                "the persisted form carries the full text on both arms"
+            );
+            assert_eq!(
+                TraceEntryView::from(&entry).summary_detail.as_deref(),
+                Some(full),
+                "the wire form carries the full text on both arms"
+            );
+        }
+    }
+
     /// Pre-#1610 records carry no `failure_detail` key (issue #1610): the
     /// field degrades to absent on deserialize -- zero migration -- and the
     /// key is absent on the wire when unset, so old recipe.json files stay
@@ -1052,6 +1120,7 @@ mod tests {
             ],
         };
         let delegation = TraceEntry {
+            summary_detail: None,
             tool_use_id: "tu_d".into(),
             name: "analyst".into(),
             operation_kind: OperationKind::Execute,

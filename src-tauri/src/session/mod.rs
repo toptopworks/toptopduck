@@ -2667,6 +2667,7 @@ mod tests {
 
         // A recipe turn carrying data that must survive the round-trip.
         let harvested_trace = vec![RecipeTraceEntry {
+            summary_detail: None,
             name: "explore".into(),
             operation_kind: OperationKind::Read,
             summary: "SELECT 1 AS n".into(),

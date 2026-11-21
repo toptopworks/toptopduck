@@ -1265,6 +1265,7 @@ impl Pump {
                         name: name.clone(),
                         operation_kind,
                         summary: summary.clone(),
+                        summary_detail: None,
                         task: None,
                     });
                 }
