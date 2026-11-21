@@ -760,6 +760,50 @@ describe("useTurnFlow", () => {
       });
     });
 
+    // The wire's summary_detail rides both events of the pair (issue
+    // #1636): the started event lands it on the RUNNING row (a live row
+    // expands to the full text before the completion exists) and the
+    // merged completion keeps it -- the ingestion hop the factory-based
+    // chain test bypasses.
+    it("a started row and its merged completion carry the wire summary_detail", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallStarted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT …",
+          summary_detail: "SELECT * FROM people",
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        running: true,
+        summaryDetail: "SELECT * FROM people",
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT …",
+          summary_detail: "SELECT * FROM people",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        running: false,
+        success: true,
+        summaryDetail: "SELECT * FROM people",
+      });
+    });
+
     // The wire's landed stats enter the live chain at the same merge hop
     // (issue #1621): a started+completed pair folds the completion into
     // the open row, and the merged row carries the fields the badge and

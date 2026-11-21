@@ -359,6 +359,7 @@ pub(crate) fn dispatch_workspace_tool(
                 name: call.name.clone(),
                 operation_kind: OperationKind::Write,
                 summary: plan.summary.clone(),
+                summary_detail: None,
                 task: None,
             });
             let (result, excerpt) = match execute(&plan, workspace) {

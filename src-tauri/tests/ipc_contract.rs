@@ -791,6 +791,7 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
     use toptopduck_lib::{OperationKind, TraceEntryView, TraceRound};
     assert_wire(
         &TraceEntryView {
+            summary_detail: None,
             id: None,
             name: "explore".into(),
             operation_kind: OperationKind::Read,
@@ -814,6 +815,7 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
     // own flat shape).
     assert_wire(
         &TraceEntryView {
+            summary_detail: None,
             id: None,
             name: "analyst".into(),
             operation_kind: OperationKind::Execute,
@@ -829,6 +831,7 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
                 thinking: None,
                 text: Some("child prose".into()),
                 calls: vec![TraceEntryView {
+                    summary_detail: None,
                     id: None,
                     name: "explore".into(),
                     operation_kind: OperationKind::Read,
@@ -852,6 +855,7 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
     // absence every field above pins.
     assert_wire(
         &TraceEntryView {
+            summary_detail: None,
             id: None,
             name: "edit".into(),
             operation_kind: OperationKind::Write,
@@ -1227,6 +1231,7 @@ fn turn_phase_serializes_externally_tagged() {
     );
     assert_wire(
         &TurnPhase::ToolCallStarted {
+            summary_detail: None,
             id: None,
             name: "materialize".into(),
             operation_kind: OperationKind::Write,
@@ -1237,6 +1242,7 @@ fn turn_phase_serializes_externally_tagged() {
     );
     assert_wire(
         &TurnPhase::ToolCallCompleted(TraceEntryView {
+            summary_detail: None,
             id: None,
             name: "materialize".into(),
             operation_kind: OperationKind::Write,
@@ -1285,6 +1291,7 @@ fn delegation_live_phases_carry_identity_and_full_text() {
     use toptopduck_lib::{OperationKind, TraceEntryView, TurnPhase};
     assert_wire(
         &TurnPhase::ToolCallStarted {
+            summary_detail: None,
             id: Some("gateway-1".into()),
             name: "analyst".into(),
             operation_kind: OperationKind::Execute,
@@ -1295,6 +1302,7 @@ fn delegation_live_phases_carry_identity_and_full_text() {
     );
     assert_wire(
         &TurnPhase::ToolCallCompleted(TraceEntryView {
+            summary_detail: None,
             id: Some("gateway-1".into()),
             name: "analyst".into(),
             operation_kind: OperationKind::Execute,
@@ -1336,6 +1344,7 @@ fn turn_record_carries_round_grouped_trace_and_timestamps() {
         }),
         text: Some("先看一眼数据。".into()),
         calls: vec![TraceEntryView {
+            summary_detail: None,
             id: None,
             name: "explore".into(),
             operation_kind: OperationKind::Read,

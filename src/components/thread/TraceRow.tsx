@@ -222,6 +222,7 @@ export function TraceRow({
          * stays the cross-turn retrospection anchor below it. */}
         <TraceSummaryFold
           summary={entry.summary}
+          summaryDetail={entry.summary_detail}
           summaryClassName="trace-summary"
           resultExcerpt={
             entry.success && entry.result_excerpt !== "" ? entry.result_excerpt : undefined

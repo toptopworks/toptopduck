@@ -465,6 +465,7 @@ fn delegation_started_phase(id: &str, name: &str, task: &str) -> TurnPhase {
         name: name.to_string(),
         operation_kind: OperationKind::Execute,
         summary: delegation_summary(task),
+        summary_detail: None,
         task: Some(task.to_string()),
     }
 }
@@ -796,6 +797,7 @@ mod tests {
     fn the_live_completed_view_carries_the_id_and_report() {
         let view = delegation_completed_view(
             crate::model::TraceEntryView {
+                summary_detail: None,
                 name: "analyst".to_string(),
                 operation_kind: OperationKind::Execute,
                 summary: "clean the sheet".to_string(),
@@ -863,6 +865,7 @@ mod tests {
                 text: "child reasoning".into(),
             },
             TurnPhase::ToolCallStarted {
+                summary_detail: None,
                 id: None,
                 name: "explore".into(),
                 operation_kind: crate::approval::OperationKind::Read,

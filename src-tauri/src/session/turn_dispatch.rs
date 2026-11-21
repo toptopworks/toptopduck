@@ -54,7 +54,7 @@ use crate::ingest::schema::quote_ident;
 use crate::mcp::aggregator::{self, McpAggregator, RouteError};
 use crate::mcp::meta_tools;
 use crate::model::{Promotion, TraceEntryView, TurnPhase};
-use crate::persistence::recipe::truncate_trace_summary;
+use crate::persistence::recipe::{summary_detail_for, truncate_trace_summary};
 use crate::provider::tool_calling::{ToolResult, ToolUse};
 use crate::session::loop_contract::{
     truncate_trace_excerpt, Termination, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
@@ -492,6 +492,7 @@ fn dispatch_gated_call_inner(
                                 name: call.name.clone(),
                                 operation_kind: OperationKind::Write,
                                 summary: summary.clone(),
+                                summary_detail: None,
                                 task: None,
                             });
                             match crate::skills::create::execute_skill_creation(
@@ -583,6 +584,7 @@ fn dispatch_gated_call_inner(
         key,
         operation_kind,
         summary,
+        summary_detail,
         file_attachments,
         cli_tool,
     } = classify_with_cli_tool(cli, call, deps.temp_path);
@@ -610,7 +612,8 @@ fn dispatch_gated_call_inner(
             // completion event fires (success: false) -- the frontend's
             // pending approval card flips to its resolved-deny row in place.
             let entry =
-                TraceEntry::denied(call.id.clone(), call.name.clone(), operation_kind, summary);
+                TraceEntry::denied(call.id.clone(), call.name.clone(), operation_kind, summary)
+                    .with_summary_detail(summary_detail);
             // The completed event carries the persisted-shape view (a failure
             // keeps its message -- here the denial -- so the resolved card
             // and the recorded trace show the same why).
@@ -638,6 +641,7 @@ fn dispatch_gated_call_inner(
         name: call.name.clone(),
         operation_kind,
         summary: summary.clone(),
+        summary_detail: summary_detail.clone(),
         task: None,
     });
     // ADR-0076 (slice C-loop) + ADR-0105 Decision 4: route by name shape. A
@@ -728,6 +732,7 @@ fn dispatch_gated_call_inner(
             summary,
             excerpt,
         )
+        .with_summary_detail(summary_detail)
     } else {
         TraceEntry::failed(
             call.id.clone(),
@@ -737,6 +742,7 @@ fn dispatch_gated_call_inner(
             excerpt,
         )
         .with_failure_detail(&result.content)
+        .with_summary_detail(summary_detail)
     };
     // ADR-0078: complete the live row with the persisted-shape view (success
     // excerpt emptied -- see TraceEntryView's mapping below), paired with the
@@ -765,6 +771,7 @@ fn local_meta_call(
         name: call.name.clone(),
         operation_kind: OperationKind::Read,
         summary: summary.to_string(),
+        summary_detail: None,
         task: None,
     });
     // A success is emptied at the persisted mapping; the in-memory form
@@ -1229,6 +1236,11 @@ pub(crate) struct ResolvedClassification<'a> {
     pub key: ToolKey,
     pub operation_kind: OperationKind,
     pub summary: String,
+    /// The full text behind a cut summary (issue #1636): `Some` only on the
+    /// builtin arm (an over-cap SQL / reference_name), `None` on the CLI and
+    /// external arms (their summaries are argv digests / framed previews
+    /// with their own on-cut channels).
+    pub summary_detail: Option<String>,
     pub file_attachments: Vec<crate::approval::FileAttachment>,
     /// The registration the call's name matched, for the dispatch arm;
     /// `None` when the name is not a registered CLI tool.
@@ -1257,16 +1269,19 @@ pub(crate) fn classify_with_cli_tool<'a>(
                 key,
                 operation_kind,
                 summary,
+                summary_detail: None,
                 file_attachments,
                 cli_tool: Some(tool),
             }
         }
         None => {
-            let (key, operation_kind, summary, file_attachments) = classify_call(call);
+            let (key, operation_kind, summary, summary_detail, file_attachments) =
+                classify_call(call);
             ResolvedClassification {
                 key,
                 operation_kind,
                 summary,
+                summary_detail,
                 file_attachments,
                 cli_tool: None,
             }
@@ -1280,17 +1295,24 @@ pub(crate) fn classify_call(
     ToolKey,
     OperationKind,
     String,
+    Option<String>,
     Vec<crate::approval::FileAttachment>,
 ) {
     match definitions::builtin_metadata(&call.name) {
-        Some(spec) => (
-            ToolKey::builtin(spec.definition.name.as_str()),
-            spec.operation_kind,
-            summarize_field(&call.input, spec.summary_field, spec.summary_fallback),
-            // The builtin arm never gates (ADR-0080 Decision 1 pass-through),
-            // so it has no approval surface to mount attachments for.
-            Vec::new(),
-        ),
+        Some(spec) => {
+            let (summary, summary_detail) =
+                summarize_field(&call.input, spec.summary_field, spec.summary_fallback);
+            (
+                ToolKey::builtin(spec.definition.name.as_str()),
+                spec.operation_kind,
+                summary,
+                summary_detail,
+                // The builtin arm never gates (ADR-0080 Decision 1
+                // pass-through), so it has no approval surface to mount
+                // attachments for.
+                Vec::new(),
+            )
+        }
         None => {
             // External arm (issue #301 slice C-loop): a namespaced
             // `mcp__<slug>__<tool>` name resolves the server slug for the
@@ -1355,21 +1377,28 @@ pub(crate) fn classify_call(
                     content: full_args,
                 });
             }
-            (key, OperationKind::Network, summary, attachments)
+            (key, OperationKind::Network, summary, None, attachments)
         }
     }
 }
 
-/// Render one `input` field as the call summary, truncated. Falls back to
-/// `fallback` when the field is absent (a mis-shaped call the executor will
-/// itself refuse -- the summary is best-effort). Shared by the `sql`- and
-/// `reference_name`-keyed tools so the truncation + fallback shape has one
-/// source rather than one near-duplicate per field. The truncation cap +
-/// helper live in `persistence::recipe` ([`truncate_trace_summary`]) so a
-/// synthetic single-call trace and a live `materialize` summary match.
-fn summarize_field(input: &Value, field: &str, fallback: &str) -> String {
-    let value = input.get(field).and_then(Value::as_str).unwrap_or(fallback);
-    truncate_trace_summary(value)
+/// Render one `input` field as the call summary pair (issue #1636): the
+/// bounded head plus the cut-verdict detail. Falls back to `fallback` when
+/// the field is absent (a mis-shaped call the executor will itself refuse --
+/// the summary is best-effort, and the fallback arm carries no detail).
+/// Shared by the `sql`- and `reference_name`-keyed tools so the truncation +
+/// fallback + cut-predicate shape has one source rather than one
+/// near-duplicate per field. The truncation cap + helpers live in
+/// `persistence::recipe` ([`truncate_trace_summary`] /
+/// [`summary_detail_for`]) so a synthetic single-call trace and a live
+/// `materialize` summary match.
+fn summarize_field(input: &Value, field: &str, fallback: &str) -> (String, Option<String>) {
+    match input.get(field).and_then(Value::as_str) {
+        Some(value) => (truncate_trace_summary(value), summary_detail_for(value)),
+        // The fallback string is host-owned (short by construction), and a
+        // field-absent call has no model argument to preserve -- no detail.
+        None => (truncate_trace_summary(fallback), None),
+    }
 }
 
 #[cfg(test)]
@@ -1959,7 +1988,7 @@ mod tests {
             name: "mcp__github__search".into(),
             input: serde_json::json!({}),
         };
-        let (key, kind, summary, _) = classify_call(&namespaced);
+        let (key, kind, summary, _, _) = classify_call(&namespaced);
         assert_eq!(key, ToolKey::external("github", "mcp__github__search"));
         assert_eq!(kind, OperationKind::Network);
         assert!(summary.contains("mcp__github__search"));
@@ -1969,7 +1998,7 @@ mod tests {
             name: "stray_tool".into(),
             input: serde_json::json!({}),
         };
-        let (key, _, _, _) = classify_call(&bare);
+        let (key, _, _, _, _) = classify_call(&bare);
         assert_eq!(key, ToolKey::external("unknown", "stray_tool"));
     }
 
@@ -1989,13 +2018,58 @@ mod tests {
             name: "mcp__github__search".into(),
             input: serde_json::json!({ "q": "z".repeat(600) }),
         };
-        let (_, _, summary, _) = classify_call(&tool);
+        let (_, _, summary, _, _) = classify_call(&tool);
         assert!(
             summary.starts_with("external tool `mcp__github__search` with "),
             "frame survives the construction-site trim"
         );
         assert_eq!(summary.chars().count(), 512);
         assert!(summary.ends_with("..."), "cut with the approval ellipsis");
+    }
+
+    /// Issue #1636: a builtin call whose SQL exceeds the summary cap carries
+    /// the full model-emitted text as the classification's summary detail;
+    /// an uncut SQL and a field-absent (fallback) call carry none. The
+    /// external arm never carries one (its on-cut channel is the approval
+    /// attachment, not the trace).
+    #[test]
+    fn classify_call_carries_summary_detail_only_for_a_cut_builtin_argument() {
+        let long_sql = format!("SELECT {} AS n", "x".repeat(600));
+        let (_, _, summary, detail, _) = classify_call(&ToolUse {
+            id: "tu_1".into(),
+            name: "explore".into(),
+            input: json!({ "sql": long_sql }),
+        });
+        assert_eq!(summary.chars().count(), 512, "head stays at the cap");
+        assert_eq!(
+            detail.as_deref(),
+            Some(long_sql.as_str()),
+            "the cut builtin argument rides as the detail"
+        );
+
+        let (_, _, _, detail, _) = classify_call(&ToolUse {
+            id: "tu_2".into(),
+            name: "explore".into(),
+            input: json!({ "sql": "SELECT 1" }),
+        });
+        assert_eq!(detail, None, "an uncut argument carries no detail");
+
+        let (_, _, _, detail, _) = classify_call(&ToolUse {
+            id: "tu_3".into(),
+            name: "explore".into(),
+            input: json!({}),
+        });
+        assert_eq!(detail, None, "the fallback arm carries no detail");
+
+        let (_, _, _, detail, _) = classify_call(&ToolUse {
+            id: "tu_4".into(),
+            name: "mcp__github__search".into(),
+            input: json!({ "q": "z".repeat(600) }),
+        });
+        assert_eq!(
+            detail, None,
+            "the external arm's full args ride the approval attachment, not the trace"
+        );
     }
 
     /// Issue #1370: when either truncation cap cuts into the external call's
@@ -2129,6 +2203,7 @@ mod tests {
         assert_eq!(
             phases[0],
             TurnPhase::ToolCallStarted {
+                summary_detail: None,
                 id: None,
                 name: "explore".into(),
                 operation_kind: OperationKind::Read,
@@ -2179,6 +2254,7 @@ mod tests {
         assert_eq!(
             phases[0],
             TurnPhase::ToolCallStarted {
+                summary_detail: None,
                 id: None,
                 name: "materialize".into(),
                 operation_kind: OperationKind::Write,
@@ -2191,6 +2267,91 @@ mod tests {
                 assert_eq!(view.name, "materialize");
                 assert!(view.success);
                 assert!(view.result_excerpt.is_empty(), "success excerpt emptied");
+            }
+            other => panic!("expected ToolCallCompleted, got {other:?}"),
+        }
+    }
+
+    /// Issue #1636: a cut SQL's full text rides BOTH wire events -- the
+    /// started event (so a live row expands to the same text) and the
+    /// completed view (what persists) -- plus the recorded entry, one
+    /// string everywhere.
+    #[test]
+    fn started_and_completed_events_carry_the_summary_detail_of_a_cut_sql() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = DispatchDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let cancel = CancelToken::new();
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &sink,
+            cancel: &cancel,
+        };
+        let long_sql = format!("SELECT {} AS n", "x".repeat(600));
+        let call = ToolUse {
+            id: "tu_1".into(),
+            name: "explore".into(),
+            input: json!({ "sql": long_sql.clone() }),
+        };
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
+        let (_, entry, _, _) = dispatch_gated_call(
+            &call,
+            CallFace::Builtin,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
+            &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
+            &gate,
+            &mut on_phase,
+            None,
+        )
+        .expect("the long-SQL explore dispatches");
+        let entry = entry.expect("a dispatched call records an entry");
+        assert_eq!(
+            entry.summary_detail.as_deref(),
+            Some(long_sql.as_str()),
+            "the recorded entry carries the full text"
+        );
+        let phases = phases.into_inner().unwrap();
+        assert_eq!(phases.len(), 2, "one dispatch -> Started + Completed");
+        match &phases[0] {
+            TurnPhase::ToolCallStarted {
+                summary,
+                summary_detail,
+                ..
+            } => {
+                assert_eq!(summary.chars().count(), 512, "head stays at the cap");
+                assert_eq!(
+                    summary_detail.as_deref(),
+                    Some(long_sql.as_str()),
+                    "the started event carries the full text"
+                );
+            }
+            other => panic!("expected ToolCallStarted, got {other:?}"),
+        }
+        match &phases[1] {
+            TurnPhase::ToolCallCompleted(view) => {
+                assert_eq!(
+                    view.summary_detail.as_deref(),
+                    Some(long_sql.as_str()),
+                    "the completion carries the full text"
+                );
             }
             other => panic!("expected ToolCallCompleted, got {other:?}"),
         }
@@ -2325,6 +2486,7 @@ mod tests {
         assert_eq!(
             phases[0],
             TurnPhase::ToolCallStarted {
+                summary_detail: None,
                 id: None,
                 name: "create_skill".into(),
                 operation_kind: OperationKind::Write,
@@ -3685,7 +3847,8 @@ mod tests {
         assert_eq!(explore.0.tool, "explore");
         assert_eq!(explore.1, OperationKind::Read);
         assert_eq!(explore.2, "SELECT 1");
-        assert!(explore.3.is_empty());
+        assert_eq!(explore.3, None, "an uncut summary carries no detail");
+        assert!(explore.4.is_empty());
 
         // materialize: builtin server, Write badge, sql summary.
         let materialize = classify_call(&ToolUse {
@@ -3753,7 +3916,7 @@ mod tests {
     /// gracefully (no panic on untrusted input).
     #[test]
     fn classify_call_routes_builtin_spoof_to_reserved_sentinel() {
-        let (key, _, _, _) = classify_call(&ToolUse {
+        let (key, _, _, _, _) = classify_call(&ToolUse {
             id: "x".into(),
             name: "mcp__builtin__foo".into(),
             input: json!({}),

@@ -658,6 +658,7 @@ impl From<&RecipeTraceEntry> for TraceEntryView {
             name: entry.name.clone(),
             operation_kind: entry.operation_kind,
             summary: entry.summary.clone(),
+            summary_detail: entry.summary_detail.clone(),
             success: entry.success,
             result_excerpt: entry.result_excerpt.clone(),
             failure_detail: entry.failure_detail.clone(),
@@ -1714,6 +1715,7 @@ mod tests {
         use crate::persistence::recipe::{RecipeTraceEntry, RecipeTraceRound};
 
         let persisted = RecipeTraceEntry {
+            summary_detail: None,
             name: "analyst".into(),
             operation_kind: OperationKind::Execute,
             summary: "clean the sheet".into(),
@@ -1727,6 +1729,7 @@ mod tests {
                 thinking: None,
                 text: Some("child prose".into()),
                 calls: vec![RecipeTraceEntry {
+                    summary_detail: None,
                     name: "explore".into(),
                     operation_kind: OperationKind::Read,
                     summary: "SELECT 1".into(),
@@ -1788,6 +1791,7 @@ mod tests {
         use crate::persistence::recipe::RecipeTraceEntry;
 
         let persisted = RecipeTraceEntry {
+            summary_detail: None,
             name: "write".into(),
             operation_kind: OperationKind::Write,
             summary: "land the sheet".into(),

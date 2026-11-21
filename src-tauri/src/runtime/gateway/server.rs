@@ -3463,6 +3463,7 @@ mod tests {
             got,
             vec![
                 TurnPhase::ToolCallStarted {
+                    summary_detail: None,
                     id: None,
                     name: "explore".into(),
                     operation_kind: OperationKind::Read,
@@ -3578,6 +3579,7 @@ mod tests {
             got,
             vec![
                 TurnPhase::ToolCallStarted {
+                    summary_detail: None,
                     id: None,
                     name: "mcp_list_servers".into(),
                     operation_kind: OperationKind::Read,
