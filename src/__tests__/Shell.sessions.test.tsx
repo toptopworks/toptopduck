@@ -775,6 +775,10 @@ describe("App running-session close guard (issue #1629)", () => {
     // running mark stays lit behind the dialog.
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog.textContent).toContain("还在处理中");
+    // The parked session has no auto-name yet (a first turn in flight is
+    // exactly when this guard fires), so the dialog renders the resolved
+    // placeholder -- not the raw empty name.
+    expect(dialog.textContent).toContain("新会话");
     expect(
       document.querySelector(".session-entry[data-turn-running=\"true\"]"),
     ).not.toBeNull();
@@ -898,6 +902,10 @@ describe("App running-session archive guard (issue #1631)", () => {
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog.textContent).toContain("还在处理中");
     expect(dialog.textContent).toContain("归档");
+    // The parked session has no auto-name yet (a first turn in flight is
+    // exactly when this guard fires), so the dialog renders the resolved
+    // placeholder -- not the raw empty name.
+    expect(dialog.textContent).toContain("新会话");
     expect(
       document.querySelector(".session-entry[data-turn-running=\"true\"]"),
     ).not.toBeNull();
@@ -961,6 +969,54 @@ describe("App running-session archive guard (issue #1631)", () => {
     // bar.
     await waitFor(() =>
       expect(screen.getByText(/问一个数据问题/)).toBeInTheDocument(),
+    );
+  });
+
+  it("archiving a non-active running row stops the parked row, not the active pane", async () => {
+    let n = 0;
+    vi.mocked(createSession).mockImplementation(async () => ({ session_id: `sess-${++n}`, recipe_path: `/sessions/sess-${n}/recipe.json` }));
+    render(<App />);
+    await openSession();
+    await openSession();
+    await fireRunningTurn();
+    // Light the other row too and make it the active pane: switch to the
+    // idle one (the first turn left its session's bar face on the stop
+    // button, and the sidebar orders by recency, so target by the running
+    // mark -- not by index), then fire.
+    const idleRow = Array.from(
+      document.querySelectorAll(".session-entry.open"),
+    ).find((r) => !r.hasAttribute("data-turn-running"));
+    expect(idleRow).not.toBeUndefined();
+    fireEvent.click(
+      (idleRow as HTMLElement).querySelector(".session-entry-main") as HTMLElement,
+    );
+    await fireRunningTurn();
+    expect(
+      document.querySelectorAll(".session-entry[data-turn-running=\"true\"]").length,
+    ).toBe(2);
+
+    // Park the archive on the non-active row: the confirm must re-enter the
+    // chain with the parked row's sid, not the active pane's -- reading the
+    // active session here would stop and archive the wrong turn.
+    const nonActiveIndex = Array.from(
+      document.querySelectorAll(".session-entry"),
+    ).findIndex((r) => r.classList.contains("open") && !r.classList.contains("active"));
+    expect(nonActiveIndex).toBeGreaterThanOrEqual(0);
+    await openRowMenu(nonActiveIndex);
+    fireEvent.click(screen.getByRole("menuitem", { name: /^归档$/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "停止并归档" }));
+    await waitFor(() =>
+      expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("sess-2"),
+    );
+    await waitFor(() =>
+      expect(setSessionArchived).toHaveBeenCalledWith("/sessions/sess-2/recipe.json", true),
+    );
+    // The archived row's pane is gone; the active pane's turn survives.
+    await waitFor(() =>
+      expect(
+        document.querySelectorAll(".session-entry[data-turn-running=\"true\"]").length,
+      ).toBe(1),
     );
   });
 });
