@@ -419,7 +419,14 @@ describe("TurnCard result-name display axis (issue #1623)", () => {
     // The names moved behind the count-sentence fold head (the process
     // fold's chrome, no popover); the line reads the count sentence, the
     // display names ride the chips inside the expansion.
-    expect(container.querySelector(".antecedents")).toHaveTextContent("由 1 个中间结果派生");
+    const head = container.querySelector(".antecedents");
+    expect(head).toHaveTextContent("由 1 个中间结果派生");
+    // Collapsed baseline: the chips stay hidden until the head is clicked.
+    expect(container.querySelector(".antecedents")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("筛选后明细")).toBeNull();
+    fireEvent.click(head!);
+    expect(container.querySelector(".antecedents")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("筛选后明细")).toBeInTheDocument();
   });
 
   it("carries the display name into the preview card's accessible name", () => {

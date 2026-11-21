@@ -455,20 +455,19 @@ function TurnBody({
         <>
           {/* max-w-full + break-words: the link row rides the stream as a
               non-stretched flex item (the #860 prose twin's branch-mate),
-              and a long unbroken dataset name in the antecedents line or
-              the result link stretches its min-content past the column --
-              the rail's overflow-x crop eats it (issue #872). break-words
-              sits here once and inherits into both riders; the button
-              below carries its own cap so the break can engage inside it. */}
+              and a long unbroken dataset name in the result link stretches
+              its min-content past the column -- the rail's overflow-x crop
+              eats it (issue #872). break-words sits here once and inherits
+              into the result link, its one heir: the lineage fold above is
+              a sibling and carries its own caps. The button below carries
+              its own cap so the break can engage inside it. */}
           {/* The lineage line is a fold head (the process fold's chrome --
               the user ruling: same expand pattern, no popover): a long
               chain's names read as a wall once the intermediates pile up --
               the line stays one short count sentence, the chips open in
               place below. Sits OUTSIDE the outcome <p>: the expanded chip
               flow is a block the paragraph cannot host. */}
-          {antecedents.length > 0 && (
-            <AntecedentsFold antecedents={antecedents} />
-          )}
+          <AntecedentsFold antecedents={antecedents} />
           <p className="turn-outcome mt-2 mb-2 max-w-full break-words text-xs leading-snug">
             {/* result-link is a real <button> (clickable, focusable) stripped
                 of native chrome by appearance-none + bg-transparent -- the
@@ -697,6 +696,7 @@ function AntecedentsFold({
   antecedents: ReadonlyArray<{ dataset: DatasetDescriptor }>;
 }) {
   const [expanded, setExpanded] = useState(false);
+  if (antecedents.length === 0) return null;
   return (
     <>
       <FoldToggle
