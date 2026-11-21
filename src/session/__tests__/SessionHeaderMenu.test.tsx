@@ -74,6 +74,7 @@ function renderMenu(overrides: {
   onRename?: (sid: string, path: string, newName: string) => void;
   onClose?: (sid: string) => void;
   onDelete?: (path: string, sid: string) => void;
+  turnRunning?: boolean;
 } = {}) {
   const onRename = overrides.onRename ?? vi.fn();
   const onClose = overrides.onClose ?? vi.fn();
@@ -87,6 +88,7 @@ function renderMenu(overrides: {
         onRename={onRename}
         onClose={onClose}
         onDelete={onDelete}
+        turnRunning={overrides.turnRunning ?? false}
       />
     </IntlProvider>,
   );
@@ -161,6 +163,16 @@ describe("SessionHeaderMenu (issue #512)", () => {
     fireEvent.click(confirmButton);
 
     expect(onDelete).toHaveBeenCalledWith("/test/recipe.json", "sess-1");
+  });
+
+  it("turnRunning forwards to the delete dialog's running body (issue #1629)", async () => {
+    renderMenu({ turnRunning: true });
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Delete$/ }));
+
+    // The pane-to-header-menu forwarding chain lands the running variant:
+    // the body names the stop cost beside the delete cost.
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog.textContent).toContain("still working");
   });
 
   it("Rename dialog dismisses after submit (setDialog(null) fires)", async () => {

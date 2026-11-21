@@ -45,6 +45,66 @@ import { Label } from "@/components/ui/label";
 // isolation.
 export function DeleteSessionDialog({
   name,
+  turnRunning = false,
+  onCancel,
+  onConfirm,
+}: {
+  name: string;
+  /** Issue #1629: a turn is in flight on this session -- the body names the
+   *  cancel cost beside the delete cost. Static literal ids only (a ternary
+   *  id would break the i18n:check CI gate). */
+  turnRunning?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog defaultOpen>
+      <AlertDialogContent onEscapeKeyDown={() => onCancel()}>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            <FormattedMessage id="session.delete.title" defaultMessage="Delete this session?" />
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            {turnRunning ? (
+              <FormattedMessage
+                id="session.delete.runningBody"
+                defaultMessage="“{name}” is still working. Deleting stops it and permanently removes the session. This cannot be undone."
+                values={{ name }}
+              />
+            ) : (
+              <FormattedMessage
+                id="session.delete.body"
+                defaultMessage="“{name}” will be permanently deleted. This cannot be undone."
+                values={{ name }}
+              />
+            )}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={onCancel}>
+            <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
+          </AlertDialogCancel>
+          <AlertDialogAction
+            className={buttonVariants({ variant: "destructive" })}
+            onClick={onConfirm}
+          >
+            <FormattedMessage id="session.delete.confirm" defaultMessage="Delete permanently" />
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+// The running-close confirm (issue #1629): a turn is in flight on the session
+// being closed -- the plain close is immediate and silent (the in-flight
+// turn's post-check discards it), so this dialog names the cancel cost before
+// the teardown proceeds. Same Radix AlertDialog posture as the delete dialog:
+// overlay-click dismiss blocked, ESC routes to onCancel via onEscapeKeyDown,
+// Cancel renders first (the auto-focused safe escape). Rendered by App at the
+// shell root when the close request targets a session in runningSids.
+export function CloseRunningSessionDialog({
+  name,
   onCancel,
   onConfirm,
 }: {
@@ -57,12 +117,12 @@ export function DeleteSessionDialog({
       <AlertDialogContent onEscapeKeyDown={() => onCancel()}>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            <FormattedMessage id="session.delete.title" defaultMessage="Delete this session?" />
+            <FormattedMessage id="session.closeRunning.title" defaultMessage="Close a running session?" />
           </AlertDialogTitle>
           <AlertDialogDescription>
             <FormattedMessage
-              id="session.delete.body"
-              defaultMessage="“{name}” will be permanently deleted. This cannot be undone."
+              id="session.closeRunning.body"
+              defaultMessage="“{name}” is still working. Closing stops it; your history is kept."
               values={{ name }}
             />
           </AlertDialogDescription>
@@ -71,11 +131,8 @@ export function DeleteSessionDialog({
           <AlertDialogCancel onClick={onCancel}>
             <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
           </AlertDialogCancel>
-          <AlertDialogAction
-            className={buttonVariants({ variant: "destructive" })}
-            onClick={onConfirm}
-          >
-            <FormattedMessage id="session.delete.confirm" defaultMessage="Delete permanently" />
+          <AlertDialogAction onClick={onConfirm}>
+            <FormattedMessage id="session.closeRunning.confirm" defaultMessage="Stop and close" />
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

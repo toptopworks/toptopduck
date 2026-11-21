@@ -62,6 +62,9 @@ const NO_PENDING_APPROVALS: ReadonlySet<string> = new Set();
 // Same frozen-empty posture for the turn-failure set (issue #1005).
 const NO_TURN_FAILURES: ReadonlySet<string> = new Set();
 
+// Same frozen-empty posture for the running-turn set (issue #1629).
+const NO_RUNNING: ReadonlySet<string> = new Set();
+
 interface SessionSidebarProps {
   // Collapse state (ADR-0054 level 1, issue #287): when true the whole
   // subtree goes inert so keyboard / screen-reader focus cannot land on the
@@ -92,6 +95,13 @@ interface SessionSidebarProps {
    *  landing non-Failed, a close, or a pane-level cache reset. Keyed by
    *  runtime sid, so only OPEN entries match. */
   turnFailedSids?: ReadonlySet<string>;
+  /** Runtime sids with a turn currently in flight (issue #1629): the matching
+   *  entry rows carry the running state -- a breathing status dot + sr-only
+   *  label -- so a session executing a turn is visible from anywhere in the
+   *  shell. Mirrors the two sibling sets' state-style posture: it rides the
+   *  pane-reported turnLoading and extinguishes at settle / close / unmount.
+   *  Keyed by runtime sid, so only OPEN entries match. */
+  runningSids?: ReadonlySet<string>;
   /** The archived rows (ADR-0127 Decision 7, issue #1175; #1403): the
    *  caller's usePersistedSessions partitions the unconditional
    *  includeArchived scan into this, so the list is populated whether or
@@ -157,6 +167,7 @@ export function SessionSidebar({
   loadError,
   pendingApprovalSids = NO_PENDING_APPROVALS,
   turnFailedSids = NO_TURN_FAILURES,
+  runningSids = NO_RUNNING,
   archivedSessions,
   showArchived,
   onNew,
@@ -316,41 +327,46 @@ export function SessionSidebar({
   // workspace subtrees render the EXACT same rows as the recent body --
   // same SidebarRow, same actions menu, same hover-card machine).
   const renderRows = (entries: SidebarEntry[], archived: boolean) =>
-    entries.map((entry) => (
-      <SidebarRow
-        key={entry.key}
-        entry={entry}
-        displayName={resolveDisplayName(entry.name, intl)}
-        now={now}
-        hasPendingApproval={
-          entry.sid !== null && pendingApprovalSids.has(entry.sid)
-        }
-        hasTurnFailed={
-          entry.sid !== null && turnFailedSids.has(entry.sid)
-        }
-        disabled={disabled}
-        archived={archived}
-        hover={hover}
-        onActivate={() => {
-          if (entry.sid) onActivate(entry.sid);
-          else onOpenPersisted(entry.path, entry.name);
-        }}
-        menu={(
-          <RowActionsMenu
-            entry={entry}
-            displayName={resolveDisplayName(entry.name, intl)}
-            disabled={disabled}
-            archived={archived}
-            onSetPinned={onSetPinned}
-            onArchive={onArchive}
-            onRename={onRename}
-            onClose={onClose}
-            onDelete={onDelete}
-            onMenuOpenChange={(open) => hover.menuOpenChange(entry.key, open)}
-          />
-        )}
-      />
-    ));
+    entries.map((entry) => {
+      const turnRunning = entry.sid !== null && runningSids.has(entry.sid);
+      return (
+        <SidebarRow
+          key={entry.key}
+          entry={entry}
+          displayName={resolveDisplayName(entry.name, intl)}
+          now={now}
+          hasPendingApproval={
+            entry.sid !== null && pendingApprovalSids.has(entry.sid)
+          }
+          hasTurnFailed={
+            entry.sid !== null && turnFailedSids.has(entry.sid)
+          }
+          hasTurnRunning={turnRunning}
+          disabled={disabled}
+          archived={archived}
+          hover={hover}
+          onActivate={() => {
+            if (entry.sid) onActivate(entry.sid);
+            else onOpenPersisted(entry.path, entry.name);
+          }}
+          menu={(
+            <RowActionsMenu
+              entry={entry}
+              displayName={resolveDisplayName(entry.name, intl)}
+              disabled={disabled}
+              archived={archived}
+              turnRunning={turnRunning}
+              onSetPinned={onSetPinned}
+              onArchive={onArchive}
+              onRename={onRename}
+              onClose={onClose}
+              onDelete={onDelete}
+              onMenuOpenChange={(open) => hover.menuOpenChange(entry.key, open)}
+            />
+          )}
+        />
+      );
+    });
 
   const renderSection = (
     section: (typeof sections)[number],
@@ -607,6 +623,7 @@ function SidebarRow({
   now,
   hasPendingApproval,
   hasTurnFailed,
+  hasTurnRunning,
   disabled,
   archived = false,
   onActivate,
@@ -626,6 +643,13 @@ function SidebarRow({
    *  as the approval tint. Lower priority than the approval tint: when both
    *  hold, the approval dot + label win (the classes coexist on the row). */
   hasTurnFailed: boolean;
+  /** A turn is in flight on the session (issue #1629): the status dot breathes
+   *  (a static halo keeps it legible under reduced motion) + an sr-only
+   *  label, same visibility contract as the sibling states. Sits BETWEEN the
+   *  other two in priority: an approval gate suspends the running turn (the
+   *  warning reads as the sharper "needs you"), while a failure is the
+   *  previous turn's terminal state -- the live turn outranks it. */
+  hasTurnRunning: boolean;
   disabled: boolean;
   /** Archived-view variant (ADR-0127 Decision 7): the main button is
    *  non-activatable (aria-disabled + an activation guard) + muted --
@@ -681,10 +705,12 @@ function SidebarRow({
             entry.sid && "open",
             hasPendingApproval && "pending-approval",
             hasTurnFailed && "turn-failed",
+            hasTurnRunning && "turn-running",
             archived && "archived",
           )}
           data-pending-approval={hasPendingApproval ? "true" : undefined}
           data-turn-failed={hasTurnFailed ? "true" : undefined}
+          data-turn-running={hasTurnRunning ? "true" : undefined}
         >
           <button
             type="button"
@@ -722,6 +748,13 @@ function SidebarRow({
                     defaultMessage="(awaiting approval)"
                   />
                 </span>
+              ) : hasTurnRunning ? (
+                <span className="sr-only">
+                  <FormattedMessage
+                    id="sidebar.turnRunning"
+                    defaultMessage="(running)"
+                  />
+                </span>
               ) : hasTurnFailed ? (
                 <span className="sr-only">
                   <FormattedMessage
@@ -732,20 +765,23 @@ function SidebarRow({
               ) : null}
             </span>
             {/* Status dot on the right edge (ADR-0093): open = primary dot,
-                  pending approval = warning dot, turn failed = destructive
-                  dot, not-open = no dot. Priority approval > failure > plain
-                  open; the row classes coexist, the dot + label take the
-                  highest (issue #1005). shrink-0 prevents truncation from
-                  consuming the dot. */}
+                  pending approval = warning dot, turn running = breathing
+                  primary dot with a static halo (styles.css), turn failed =
+                  destructive dot, not-open = no dot. Priority approval >
+                  running > failure > plain open (issue #1629); the row classes
+                  coexist, the dot + label take the highest (issue #1005).
+                  shrink-0 prevents truncation from consuming the dot. */}
             {entry.sid && (
               <span
                 className={cn(
                   "sidebar-status-dot inline-block h-2 w-2 shrink-0 rounded-full",
                   hasPendingApproval
                     ? "bg-warning"
-                    : hasTurnFailed
-                      ? "bg-destructive"
-                      : "bg-primary",
+                    : hasTurnRunning
+                      ? "sidebar-running-dot bg-primary"
+                      : hasTurnFailed
+                        ? "bg-destructive"
+                        : "bg-primary",
                 )}
                 aria-hidden="true"
               />

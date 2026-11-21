@@ -25,7 +25,7 @@ import { artifactTurn, failed, textual } from "./fixtures";
 import { log } from "../../lib/log";
 import type { ComposerSessionFields } from "../useComposerState";
 import type { ApprovalEntry } from "../useApprovalEvents";
-import type { ThreadEntry } from "../../types/thread";
+import type { ThreadEntry, TurnRecord } from "../../types/thread";
 import type { DatasetDescriptor, LoadOutcome } from "../../types/dataset";
 
 // The pane-level approval wiring pins (issue #1009 review, PR #1010): both
@@ -157,6 +157,7 @@ function renderPane(opts?: {
   onSeedDraft?: (sid: string, question: string) => void;
   onSeedInvocations?: (sid: string, names: string[]) => void;
   onStageQuote?: (sid: string, text: string) => void;
+  onTurnRunningChange?: (sid: string, running: boolean) => void;
 }) {
   if (opts?.thread) {
     vi.mocked(conversation).mockResolvedValue(opts.thread);
@@ -207,6 +208,7 @@ function renderPane(opts?: {
             onRename={noop}
             onClose={noop}
             onDelete={noop}
+            onTurnRunningChange={opts?.onTurnRunningChange ?? noop}
           />
         </IntlProvider>
       </TooltipProvider>
@@ -228,9 +230,51 @@ async function openArtifact(fileName: string) {
   fireEvent.click(await screen.findByRole("button", { name }));
 }
 
-describe("SessionPane approval wiring", () => {
+// The shell-facing running report (issue #1629): the ask flips the flag (the
+// hanging askQuestion keeps the turn in flight), the settle flips it back
+// while the pane stays mounted, and the unmount cleanup reports false -- a
+// close mid-turn cannot strand the sidebar row lit. All three faces ride the
+// same effect-deps flip, and each has its own pin.
+describe("SessionPane turn-running report (issue #1629)", () => {
   beforeEach(stubSessionApis);
 
+  it("reports (sid, true) when a turn goes in flight and (sid, false) on unmount", async () => {
+    const onTurnRunningChange = vi.fn();
+    const view = renderPane({ onTurnRunningChange });
+    await waitFor(() => expect(view.getComposerFields()).not.toBeNull());
+    view.ask();
+    await waitFor(() =>
+      expect(onTurnRunningChange).toHaveBeenCalledWith(SID, true),
+    );
+    view.unmount();
+    expect(onTurnRunningChange).toHaveBeenLastCalledWith(SID, false);
+  });
+
+  it("reports (sid, false) when the turn settles while the pane stays mounted", async () => {
+    // Resolve on a macrotask: an already-resolved promise settles inside the
+    // act batch and React merges the true edge away (a real IPC turn always
+    // crosses an async boundary, so the true report lands).
+    vi.mocked(askQuestion).mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve((textual("done").data as TurnRecord).outcome), 0),
+        ),
+    );
+    const onTurnRunningChange = vi.fn();
+    const view = renderPane({ onTurnRunningChange });
+    await waitFor(() => expect(view.getComposerFields()).not.toBeNull());
+    view.ask();
+    await waitFor(() =>
+      expect(onTurnRunningChange).toHaveBeenCalledWith(SID, true),
+    );
+    await waitFor(() =>
+      expect(onTurnRunningChange).toHaveBeenLastCalledWith(SID, false),
+    );
+  });
+});
+
+describe("SessionPane approval wiring", () => {
+  beforeEach(stubSessionApis);
   it("threads the full-view loader to the pending card with the pane's session id", async () => {
     vi.mocked(getApprovalAttachments).mockResolvedValue([
       { param: "code", content: "print(1); print(2)" },

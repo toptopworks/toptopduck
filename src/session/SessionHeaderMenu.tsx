@@ -37,6 +37,10 @@ type SessionHeaderMenuProps = {
   onClose: (sessionId: string) => void;
   /** Shell callback: delete this session permanently. */
   onDelete: (recipePath: string, sessionId: string) => void;
+  /** Issue #1629: a turn is in flight on this session -- the delete dialog's
+   *  body names the cancel cost beside the delete cost. Required: a forgotten
+   *  prop would silently drop that sentence, not default it away. */
+  turnRunning: boolean;
   /** Shell-wide busy gate: disables the trigger during persistence / resume
    *  operations, matching the sidebar's disabled={busy} contract (H1 fix). */
   disabled?: boolean;
@@ -49,6 +53,7 @@ export function SessionHeaderMenu({
   onRename,
   onClose,
   onDelete,
+  turnRunning,
   disabled = false,
 }: SessionHeaderMenuProps) {
   const intl = useIntl();
@@ -118,6 +123,7 @@ export function SessionHeaderMenu({
       {dialog === "delete" && (
         <DeleteSessionDialog
           name={displayName}
+          turnRunning={turnRunning}
           onCancel={() => setDialog(null)}
           onConfirm={() => {
             setDialog(null);

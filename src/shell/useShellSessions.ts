@@ -193,6 +193,8 @@ export function useShellSessions({
   /** ADR-0092: clear a consumed pending question after SessionPane fires it. */
   clearPendingQuestion: (sid: string) => void;
   closeOpen: (sid: string) => Promise<void>;
+  /** Wait-release close (ADR-0063): resolves after the canonical key is free, unmounts the pane, and surfaces a rejection on the shell error bar. The guard-confirm path rides this so its stop promise survives a close failure. */
+  closeOpenAndWait: (sid: string) => Promise<boolean>;
   deletePersisted: (path: string, sid: string | null) => Promise<void>;
   /** Pin/unpin a persisted session (ADR-0127, issue #1175) -- see
    *  useSessionFileOps for the error-surface + refetch contract. */
@@ -957,6 +959,7 @@ export function useShellSessions({
     renameEntry,
     syncSessionName,
     persistenceBusy,
+    closeOpenAndWait,
   } = useSessionFileOps({
     intl,
     refreshSessions,
@@ -1001,6 +1004,7 @@ export function useShellSessions({
     clearPendingQuestion,
     closeOpen,
     deletePersisted,
+    closeOpenAndWait,
     setPinned,
     setArchived,
     renameEntry,

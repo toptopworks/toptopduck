@@ -1102,6 +1102,29 @@
   }
 }
 
+/* The sidebar row's running dot (issue #1629): the open dot's primary face
+   plus a static halo ring so the running state stays legible as a SHAPE even
+   under reduced motion (the global cutoff in app.css parks the breath on its
+   first frame; the halo carries the state there, the breath only underscores
+   it). The ring rides outline, the design system's color-ring posture (a
+   focus-ring sibling, not a shadow -- the 3-tier shadow scale stays the only
+   shadow usage). The breath reuses the activity-live-dot period (2.4s) so
+   both running faces read as one organism. */
+.sidebar-running-dot {
+  outline: 3px solid color-mix(in oklab, var(--primary) 25%, transparent);
+  animation: sidebar-running-dot 2.4s ease-in-out infinite;
+}
+@keyframes sidebar-running-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-running-dot {
+    animation: none;
+    opacity: 1;
+  }
+}
+
 /* Phase indicator (ADR-0059 discrete phase feedback). Sits between the input
    and the stop button while a turn is in flight; reads as a muted status line
    so it never competes with the primary input affordance. ADR-0067 (issue
