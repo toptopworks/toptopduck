@@ -102,6 +102,9 @@ export function buildShellApiMocks({ state, turnProgressCb, resumeProgressCb }: 
     closeSessionAndWaitRelease: vi.fn(async () => {}),
     createSession: vi.fn(async () => ({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" })),
     deleteSession: vi.fn(async () => {}),
+    // Issue #1631: the archive guard's confirm routes into the setArchived
+    // chain, whose sidecar write must not hit the real Tauri invoke in jsdom.
+    setSessionArchived: vi.fn(async () => {}),
     listSessions: vi.fn(async () => []),
     renameSession: vi.fn(async () => ""),
     ingestFile: vi.fn(),

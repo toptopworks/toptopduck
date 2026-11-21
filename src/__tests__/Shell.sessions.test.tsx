@@ -5,7 +5,7 @@ import type { DatasetDescriptor } from "../types/dataset";
 import type { ResumeProgress, TurnProgress } from "../types/session";
 import type { DropCapture } from "./setup/shellFixtures";
 import type { ThreadEntry } from "../types/thread";
-import { askQuestion, closeSession, closeSessionAndWaitRelease, conversation, createSession, getAppConfig, getAuthorizationMode, ingestFile, listAdapters, listProviderProfiles, listSkills, readRows, setAuthorizationMode, setSessionRuntime } from "../api";
+import { askQuestion, closeSession, closeSessionAndWaitRelease, conversation, createSession, getAppConfig, getAuthorizationMode, ingestFile, listAdapters, listProviderProfiles, listSkills, readRows, setAuthorizationMode, setSessionArchived, setSessionRuntime } from "../api";
 import { open } from "@tauri-apps/plugin-dialog";
 import { skillEntry } from "../test-fixtures";
 import { buildTauriWindowMock } from "./setup/tauriWindowMock";
@@ -732,6 +732,27 @@ describe("App session soft-cap hint (ADR-0046/0050, issue #108)", () => {
 // an idle sid closes immediately. Black-box: the row's data-turn-running
 // attribute is the CSS-consumed DOM contract, the dialogs assert by role and
 // visible copy.
+// Fires a follow-up turn on the active session: the fixtures' default
+// askQuestion mock never resolves, so the turn stays in flight and the row
+// lights up. Shared by the close-guard and archive-guard describes (issues
+// #1629/#1631) -- same light-a-turn posture.
+async function fireRunningTurn() {
+  fireEvent.change(screen.getByLabelText("提问"), { target: { value: "follow-up question" } });
+  fireEvent.click(screen.getByRole("button", { name: "提问" }));
+  await waitFor(() =>
+    expect(
+      document.querySelector(".session-entry[data-turn-running=\"true\"]"),
+    ).not.toBeNull(),
+  );
+}
+
+async function openRowMenu(index = 0) {
+  const triggers = screen.getAllByRole("button", { name: "行操作" });
+  fireEvent.pointerDown(triggers[index], { button: 0, pointerType: "mouse" });
+  fireEvent.click(triggers[index]);
+  await screen.findByRole("menuitem", { name: /^关闭$/ });
+}
+
 describe("App running-session close guard (issue #1629)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -740,26 +761,6 @@ describe("App running-session close guard (issue #1629)", () => {
     vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
-
-  // Fires a follow-up turn on the active session: the fixtures' default
-  // askQuestion mock never resolves, so the turn stays in flight and the
-  // row lights up.
-  async function fireRunningTurn() {
-    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "follow-up question" } });
-    fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() =>
-      expect(
-        document.querySelector(".session-entry[data-turn-running=\"true\"]"),
-      ).not.toBeNull(),
-    );
-  }
-
-  async function openRowMenu(index = 0) {
-    const triggers = screen.getAllByRole("button", { name: "行操作" });
-    fireEvent.pointerDown(triggers[index], { button: 0, pointerType: "mouse" });
-    fireEvent.click(triggers[index]);
-    await screen.findByRole("menuitem", { name: /^关闭$/ });
-  }
 
   it("close on a running session parks the guard dialog; confirming stops and closes", async () => {
     vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
@@ -774,6 +775,10 @@ describe("App running-session close guard (issue #1629)", () => {
     // running mark stays lit behind the dialog.
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog.textContent).toContain("还在处理中");
+    // The parked session has no auto-name yet (a first turn in flight is
+    // exactly when this guard fires), so the dialog renders the resolved
+    // placeholder -- not the raw empty name.
+    expect(dialog.textContent).toContain("新会话");
     expect(
       document.querySelector(".session-entry[data-turn-running=\"true\"]"),
     ).not.toBeNull();
@@ -859,6 +864,155 @@ describe("App running-session close guard (issue #1629)", () => {
     );
 
     // The fold dropped exactly one sid: the surviving row keeps its mark.
+    await waitFor(() =>
+      expect(
+        document.querySelectorAll(".session-entry[data-turn-running=\"true\"]").length,
+      ).toBe(1),
+    );
+  });
+});
+
+// The running-session archive guard (issue #1631): the sidebar's row menu is
+// the single archive entry point, and archiving a running session rides the
+// same silent cancel-and-teardown as closing -- so the entry routes through
+// the guard: a running sid parks the archive confirm (confirm re-enters the
+// setArchived chain, cancel keeps the turn running and the row unarchived),
+// an idle sid archives immediately. Black-box posture mirrors the close
+// guard above.
+describe("App running-session archive guard (issue #1631)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("archive on a running session parks the guard dialog; confirming stops and archives", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
+    render(<App />);
+    await openSession();
+    await fireRunningTurn();
+
+    await openRowMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: /^归档$/ }));
+
+    // The guard dialog parks instead of archiving: the row survives and the
+    // running mark stays lit behind the dialog, and no archive chain ran.
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog.textContent).toContain("还在处理中");
+    expect(dialog.textContent).toContain("归档");
+    // The parked session has no auto-name yet (a first turn in flight is
+    // exactly when this guard fires), so the dialog renders the resolved
+    // placeholder -- not the raw empty name.
+    expect(dialog.textContent).toContain("新会话");
+    expect(
+      document.querySelector(".session-entry[data-turn-running=\"true\"]"),
+    ).not.toBeNull();
+    expect(setSessionArchived).not.toHaveBeenCalled();
+    expect(closeSessionAndWaitRelease).not.toHaveBeenCalled();
+
+    // Confirm re-enters the setArchived chain: the wait-release close keeps
+    // the stop promise, then the sidecar write lands and the shell returns
+    // to the empty state.
+    fireEvent.click(within(dialog).getByRole("button", { name: "停止并归档" }));
+    await waitFor(() =>
+      expect(closeSessionAndWaitRelease).toHaveBeenCalledTimes(1),
+    );
+    await waitFor(() =>
+      expect(setSessionArchived).toHaveBeenCalledWith("/sessions/sess-1/recipe.json", true),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog")).toBeNull(),
+    );
+    expect(screen.getByText(/问一个数据问题/)).toBeInTheDocument();
+  });
+
+  it("cancelling the archive guard keeps the session and the running turn", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
+    render(<App />);
+    await openSession();
+    await fireRunningTurn();
+
+    await openRowMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: /^归档$/ }));
+    const dialog = await screen.findByRole("alertdialog");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+
+    // The session survives unarchived with the turn still in flight -- the
+    // row stays lit and no archive chain ran.
+    expect(
+      document.querySelector(".session-entry[data-turn-running=\"true\"]"),
+    ).not.toBeNull();
+    expect(setSessionArchived).not.toHaveBeenCalled();
+    expect(closeSessionAndWaitRelease).not.toHaveBeenCalled();
+  });
+
+  it("archive on an idle session archives immediately with no dialog (prior behavior)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
+    render(<App />);
+    await openSession();
+
+    // openSession() rejected the creation turn, so the session is idle: the
+    // archive goes straight through the setArchived chain.
+    await openRowMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: /^归档$/ }));
+
+    await waitFor(() =>
+      expect(setSessionArchived).toHaveBeenCalledWith("/sessions/sess-1/recipe.json", true),
+    );
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    // The open-row archive contract closes first (Decision 6) even for an
+    // idle row -- the pane unmounts and the shell returns to the centered
+    // bar.
+    await waitFor(() =>
+      expect(screen.getByText(/问一个数据问题/)).toBeInTheDocument(),
+    );
+  });
+
+  it("archiving a non-active running row stops the parked row, not the active pane", async () => {
+    let n = 0;
+    vi.mocked(createSession).mockImplementation(async () => ({ session_id: `sess-${++n}`, recipe_path: `/sessions/sess-${n}/recipe.json` }));
+    render(<App />);
+    await openSession();
+    await openSession();
+    await fireRunningTurn();
+    // Light the other row too and make it the active pane: switch to the
+    // idle one (the first turn left its session's bar face on the stop
+    // button, and the sidebar orders by recency, so target by the running
+    // mark -- not by index), then fire.
+    const idleRow = Array.from(
+      document.querySelectorAll(".session-entry.open"),
+    ).find((r) => !r.hasAttribute("data-turn-running"));
+    expect(idleRow).not.toBeUndefined();
+    fireEvent.click(
+      (idleRow as HTMLElement).querySelector(".session-entry-main") as HTMLElement,
+    );
+    await fireRunningTurn();
+    expect(
+      document.querySelectorAll(".session-entry[data-turn-running=\"true\"]").length,
+    ).toBe(2);
+
+    // Park the archive on the non-active row: the confirm must re-enter the
+    // chain with the parked row's sid, not the active pane's -- reading the
+    // active session here would stop and archive the wrong turn.
+    const nonActiveIndex = Array.from(
+      document.querySelectorAll(".session-entry"),
+    ).findIndex((r) => r.classList.contains("open") && !r.classList.contains("active"));
+    expect(nonActiveIndex).toBeGreaterThanOrEqual(0);
+    await openRowMenu(nonActiveIndex);
+    fireEvent.click(screen.getByRole("menuitem", { name: /^归档$/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "停止并归档" }));
+    await waitFor(() =>
+      expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("sess-2"),
+    );
+    await waitFor(() =>
+      expect(setSessionArchived).toHaveBeenCalledWith("/sessions/sess-2/recipe.json", true),
+    );
+    // The archived row's pane is gone; the active pane's turn survives.
     await waitFor(() =>
       expect(
         document.querySelectorAll(".session-entry[data-turn-running=\"true\"]").length,
