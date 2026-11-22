@@ -140,26 +140,23 @@ export interface CatalogModel {
 
 // One row of the built-in runtime's posture menu: the active profile
 // endpoint's first-hand model id plus the model catalog's metadata (an
-// uncataloged id renders verbatim with no tiers). The `CatalogModel` shape
-// minus the CLI-current fields -- no CLI reports a current here; the
-// payload-level `profile_model` is the effective default's one carrier.
-// Mirrors the Rust `BuiltinCatalogModel` (snake_case serde).
+// uncataloged id renders verbatim with no tiers; only the tiers the built-in
+// wire carries reach the row). The `CatalogModel` shape minus the
+// CLI-current fields -- no CLI reports a current here, and the effective
+// default is the profile's own model, read live from app-config. Mirrors the
+// Rust `BuiltinCatalogModel` (snake_case serde).
 export interface BuiltinCatalogModel {
   id: string;
   display_name: string;
   supported_reasoning_efforts: string[];
 }
 
-// The built-in posture menu's catalog payload. An empty `models` renders the
-// fallback menu (the held profile model's synthetic row + the clearing row)
-// -- the honest shape before the probe answers and after it fails (the probe
-// is silent by contract). `profile_model` is the effective current (the
-// active profile's model field; null when blank -- no honest current).
-// Mirrors the Rust `BuiltinPostureCatalog`.
-export interface BuiltinPostureCatalog {
-  models: BuiltinCatalogModel[];
-  profile_model: string | null;
-}
+// The built-in posture menu's catalog payload: the merged first-hand list.
+// Endpoint-domain only. An empty list renders the fallback menu (the held
+// profile model's synthetic row + the clearing row) -- the honest shape both
+// before the probe answers and after it fails (the probe is silent by
+// contract). Mirrors the Rust `BuiltinPostureCatalog`.
+export type BuiltinPostureCatalog = BuiltinCatalogModel[];
 
 // --- Adapter catalog cache (ADR-0096 D5, issue #536) ------------------------
 //

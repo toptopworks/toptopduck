@@ -20,6 +20,7 @@ import type { ProfileKeyStatus, ProviderConfig } from "../../types/provider";
 import type { SaveError } from "../../types/session";
 import type {
   AdapterEntry,
+  BuiltinPostureCatalog,
   SessionModelConfig,
   SessionRuntimeChoice,
 } from "../../types/runtime";
@@ -299,9 +300,13 @@ export function ComposerProviderPicker({
   // the stale arm no longer matches, and the query stays disabled until the
   // menu opens AGAIN on the new endpoint (an armed-for-A fetch must never
   // fire for B on a mere re-render). staleTime Infinity keeps one fetch per
-  // endpoint; the backend's in-process cache (keyed by the /v1-normalized
-  // list URL, so variant base spellings collapse server-side) is the
-  // second, server-side dedupe. Zero profiles: never enabled, no IPC.
+  // endpoint while the answer is non-empty; an EMPTY answer re-asks on every
+  // later open (onMenuOpen below), because it may be a failed probe -- the
+  // backend caches successes only, an honest empty included, so the re-ask
+  // re-probes a failure (ADR-0153: the next open retries) and costs zero
+  // egress for an endpoint that honestly lists nothing. The backend's
+  // in-process cache is the second, server-side dedupe. Zero profiles:
+  // never enabled, no IPC.
   const [armedEndpoint, setArmedEndpoint] = useState("");
   const activeProfileForList = isExternal ? null : activeProfile;
   const builtinEndpoint =
@@ -344,40 +349,39 @@ export function ComposerProviderPicker({
   // The posture-catalog projection (ADR-0096 D6 priority chain, issues
   // #529/#586, in posture-catalog.ts): the cascade menu's EXTERNAL catalog,
   // its one provenance note, and the tooltip's live payload -- derived pure
-  // from the query reads assembled above. External-only: the built-in
-  // runtime's catalog comes from the first-hand probe query above (no
-  // discovery chain, no note, no live currents -- nothing to derive).
+  // from the query reads assembled above. Every projection inside is gated
+  // on isExternal, so the built-in runtime reads all-null here: its catalog
+  // comes from the first-hand probe query above (no discovery chain, no
+  // note, no live currents -- nothing to derive).
   const {
     catalog: externalCatalog,
     note: catalogNote,
     liveValue,
-  } = isExternal
-    ? derivePostureCatalog({
-        isExternal,
-        activeAdapterId,
-        activeAdapter,
-        discovered,
-        probeEntry,
-        posture,
-      })
-    : { catalog: null, note: null, liveValue: null };
+  } = derivePostureCatalog({
+    isExternal,
+    activeAdapterId,
+    activeAdapter,
+    discovered,
+    probeEntry,
+    posture,
+  });
 
   // The built-in segment's catalog (issue #1639, ADR-0153): a profile row
   // exists -> the menu always seats (the fallback shape before the probe
   // answers and after it fails -- the held model's synthetic row + the
   // clear row, silent); zero profiles -> no catalog (the static "Not
-  // configured" label). The pre-probe profileModel falls back to the
-  // local app-config read so even the never-opened menu shows the held
-  // current; the probe's own value supersedes it (same field).
+  // configured" label). The payload is endpoint-domain only: the effective
+  // current is the active profile's model, read live from app-config (a
+  // probe-time copy would go stale beside it after a model edit or a
+  // same-endpoint profile switch).
   const postureCatalog: PostureCatalog | null = isExternal
     ? externalCatalog
     : noProfiles
       ? null
       : {
           kind: "builtin",
-          models: builtinCatalogData?.models ?? [],
-          profileModel:
-          builtinCatalogData?.profile_model ?? (builtInModel || null),
+          models: builtinCatalogData ?? [],
+          profileModel: builtInModel || null,
         };
 
   // The posture read's settle gate (issue #603 review): the full-pair wire
@@ -408,6 +412,30 @@ export function ComposerProviderPicker({
         })
       : null;
   const writePort = sessionPort ?? coldStart?.port ?? null;
+
+  // A built-in posture pair belongs to the endpoint it was selected under
+  // (issue #1639): model ids are endpoint facts, so a change of endpoint
+  // identity -- another profile, or this profile's base edited in Settings,
+  // arriving here as a prop change from any entry point -- is the
+  // namespace reset a runtime switch already is. The same runtime write the
+  // dropdown's switch makes reseeds both channels (the session port slots
+  // the empty pair server-side, the cold-start port drops the pending
+  // pair); a same-endpoint profile switch keeps the held pair.
+  const builtInNamespace =
+    isExternal || builtinEndpoint === "" ? null : builtinEndpoint;
+  const prevNamespaceRef = useRef(builtInNamespace);
+  useEffect(() => {
+    const prev = prevNamespaceRef.current;
+    prevNamespaceRef.current = builtInNamespace;
+    if (
+      prev !== null &&
+      builtInNamespace !== null &&
+      prev !== builtInNamespace &&
+      writePort !== null
+    ) {
+      void writePort.writeRuntime({ kind: "built_in" });
+    }
+  }, [builtInNamespace, writePort]);
 
   // The selectors' shared write sequence: delegates to the port (the
   // session adapter seeds the caches and lands the persist verdict, the
@@ -660,7 +688,24 @@ export function ComposerProviderPicker({
         thoughtLevel={posture.thought_level}
         onSelectModel={(m) => void selectModel(m)}
         onSelectThoughtLevel={(l) => void selectThoughtLevel(l)}
-        onMenuOpen={() => setArmedEndpoint(builtinEndpoint)}
+        onMenuOpen={() => {
+          setArmedEndpoint(builtinEndpoint);
+          // The re-ask on an empty answer (the lazy-probe comment above):
+          // only a settled empty answer of the endpoint already armed -- the
+          // first open arms and fetches by itself, and an in-flight probe is
+          // left alone.
+          const key = adapterKeys.builtinPostureCatalog(builtinEndpoint);
+          const state = queryClient.getQueryState(key);
+          const cached = queryClient.getQueryData<BuiltinPostureCatalog>(key);
+          if (
+            armedEndpoint === builtinEndpoint &&
+            state?.status === "success" &&
+            state.fetchStatus !== "fetching" &&
+            (cached?.length ?? 0) === 0
+          ) {
+            void queryClient.refetchQueries({ queryKey: key });
+          }
+        }}
         configFault={modelConfigFault}
         setFault={postureSetError}
         persistFault={posturePersistFault}

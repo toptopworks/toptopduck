@@ -187,9 +187,24 @@ fn egress_client() -> Result<reqwest::blocking::Client, reqwest::Error> {
     crate::egress::blocking_client()
 }
 
-/// Issue `GET {base_url}/<models_path>` and classify the result.
-fn list_models(protocol: Protocol, base_url: &str, key: &str) -> ModelsOutcome {
-    let url = join_url(base_url, models_path(protocol));
+/// One models-list request's outcome on the shared no-redirect egress
+/// client -- the single wire posture behind the preflight probe and the
+/// posture menu's first-hand list (issue #1639): per-protocol auth
+/// headers, the request timeout, redirects pinned off. The caller owns
+/// the URL and reads the body itself.
+pub(crate) enum ModelsReply {
+    /// A 2xx answer; carries the status and the raw body text.
+    Answered(reqwest::StatusCode, String),
+    /// 401 / 403: the endpoint refused the key.
+    KeyRejected,
+    /// Another status: 3xx (not followed), 404, 5xx, any non-auth 4xx.
+    Status(reqwest::StatusCode),
+    /// No response (DNS / TCP / TLS / timeout) or no client at all.
+    Unreachable,
+}
+
+/// Issue one models-list GET and classify the transport outcome.
+pub(crate) fn models_get(protocol: Protocol, url: &str, key: &str) -> ModelsReply {
     // AC #244: the shared egress client disables redirect-following, so
     // x-api-key (anthropic) and Authorization (openai) cannot reach a second
     // host via a 3xx Location -- uniform with the turn path.
@@ -197,52 +212,61 @@ fn list_models(protocol: Protocol, base_url: &str, key: &str) -> ModelsOutcome {
         Ok(client) => client,
         // A construction failure means no request can leave the process at
         // all; that reads as unreachable (the probe's closest verdict) and
-        // the failed build stays uncached so the next press retries. Logged
-        // so a local TLS/runtime failure cannot masquerade as a network
-        // diagnosis with no trace.
+        // the failed build stays uncached so the next attempt retries.
+        // Logged so a local TLS/runtime failure cannot masquerade as a
+        // network diagnosis with no trace.
         Err(err) => {
-            log::warn!("preflight egress client construction failed: {err}");
-            return ModelsOutcome::Unreachable;
+            log::warn!("egress client construction failed for a models request: {err}");
+            return ModelsReply::Unreachable;
         }
     };
     let request = match protocol {
         Protocol::Anthropic => client
-            .get(&url)
+            .get(url)
             .timeout(REQUEST_TIMEOUT)
             .header("x-api-key", key)
             .header("anthropic-version", ANTHROPIC_VERSION),
         Protocol::Openai => client
-            .get(&url)
+            .get(url)
             .timeout(REQUEST_TIMEOUT)
             .header("Authorization", format!("Bearer {key}")),
     };
+    // Every response the endpoint produced (2xx/3xx/4xx/5xx) lands in the
+    // Ok arm: the no-redirect client surfaces status distinctions instead
+    // of sorting them into the transport library's error bucket, so
+    // classification reads the status directly.
     match request.send() {
-        // Every response the endpoint produced (2xx/3xx/4xx/5xx) lands in
-        // the Ok arm: the no-redirect client surfaces status distinctions
-        // instead of sorting them into the transport library's error bucket,
-        // so classification reads the status directly.
-        Ok(response) => {
+        Ok(response) if is_auth_rejected(response.status().as_u16()) => ModelsReply::KeyRejected,
+        Ok(response) if response.status().is_success() => {
             let status = response.status();
-            if is_auth_rejected(status.as_u16()) {
-                ModelsOutcome::KeyRejected
-            } else if status.is_success() {
-                match response.json::<ModelsResponse>() {
-                    Ok(list) => ModelsOutcome::Listed(list.into_ids()),
-                    // 200 but not a `{data:[{id}]}` shape -- the endpoint
-                    // answered but does not implement the models contract; a
-                    // turn may still work.
-                    Err(_) => ModelsOutcome::NeedsFallback,
-                }
-            } else {
-                // 3xx (not followed), 404 (path not implemented), 5xx
-                // (overloaded), or another non-auth 4xx -- the endpoint
-                // responded, so let the ping decide whether a turn actually
-                // works.
-                ModelsOutcome::NeedsFallback
-            }
+            // A body that cannot be read (stream fault, bad charset) is an
+            // empty answer: unusable for every caller, classified by each
+            // one's own body read.
+            ModelsReply::Answered(status, response.text().unwrap_or_default())
         }
+        Ok(response) => ModelsReply::Status(response.status()),
         // Transport (DNS / TCP / TLS / timeout) -- the endpoint is unreachable.
-        Err(_) => ModelsOutcome::Unreachable,
+        Err(_) => ModelsReply::Unreachable,
+    }
+}
+
+/// Issue `GET {base_url}/<models_path>` and classify the result.
+fn list_models(protocol: Protocol, base_url: &str, key: &str) -> ModelsOutcome {
+    let url = join_url(base_url, models_path(protocol));
+    match models_get(protocol, &url, key) {
+        ModelsReply::Answered(_, body) => match serde_json::from_str::<ModelsResponse>(&body) {
+            Ok(list) => ModelsOutcome::Listed(list.into_ids()),
+            // 200 but not a `{data:[{id}]}` shape -- the endpoint answered
+            // but does not implement the models contract; a turn may still
+            // work.
+            Err(_) => ModelsOutcome::NeedsFallback,
+        },
+        ModelsReply::KeyRejected => ModelsOutcome::KeyRejected,
+        // 3xx (not followed), 404 (path not implemented), 5xx (overloaded),
+        // or another non-auth 4xx -- the endpoint responded, so let the
+        // ping decide whether a turn actually works.
+        ModelsReply::Status(_) => ModelsOutcome::NeedsFallback,
+        ModelsReply::Unreachable => ModelsOutcome::Unreachable,
     }
 }
 

@@ -1355,9 +1355,11 @@ export async function setSessionPosture(
 // profile endpoint's first-hand model list merged with the model catalog's
 // metadata. No arguments -- the backend resolves the active profile itself so
 // the probe always carries that profile's key to that profile's own base_url.
-// Call it ONLY on posture-menu open (the lazy-probe contract): the backend's
-// in-process cache absorbs later calls, but nothing before the first open may
-// egress. Never rejects.
+// An empty list is the menu's fallback shape (the probe is silent by
+// contract). Call it ONLY on posture-menu open (the lazy-probe contract): the
+// backend's in-process cache absorbs later calls, but nothing before the
+// first open may egress. No probe outcome rejects -- only a panicking
+// blocking task surfaces, as a rejected invoke.
 export async function getBuiltinPostureCatalog(): Promise<BuiltinPostureCatalog> {
   return invoke<BuiltinPostureCatalog>("get_builtin_posture_catalog");
 }

@@ -33,6 +33,7 @@ import type { ProviderConfig, ProfileKeyStatus } from "../../../types/provider";
 import type {
   AdapterEntry,
   AdapterCatalogs,
+  BuiltinCatalogModel,
   CatalogModel,
   DiscoveredRuntime,
   SessionModelConfig,
@@ -91,13 +92,10 @@ const PERSIST_OK: SetPosturePersistOutcome = {
 const EMPTY_POSTURE = { model: null, thought_level: null };
 
 // The built-in catalog's fallback answer (issue #1639): no first-hand list
-// (probe pending or failed -- silent either way), the profile's model as the
-// effective current. The default mock return so every pre-existing test
-// renders the honest fallback shape.
-const BUILTIN_FALLBACK = {
-  models: [],
-  profile_model: "claude-sonnet-4-6",
-};
+// (probe pending or failed -- silent either way). The default mock return so
+// every pre-existing test renders the honest fallback shape (the effective
+// current is the profile's model, read live from app-config).
+const BUILTIN_FALLBACK: BuiltinCatalogModel[] = [];
 
 // The shared ACP handshake catalog fixture (issue #527), typed against the
 // wire shape so a new required field breaks the fixture at compile time.
@@ -288,6 +286,7 @@ beforeEach(() => {
     cached_discovered: null,
   });
   vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+  vi.mocked(getBuiltinPostureCatalog).mockResolvedValue(BUILTIN_FALLBACK);
   vi.mocked(getLastModelPosture).mockResolvedValue(EMPTY_POSTURE);
 });
 
@@ -719,18 +718,52 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
     expect(getBuiltinPostureCatalog).not.toHaveBeenCalled();
   });
 
-  it("probes lazily: zero calls before the menu opens, one on the first open, none on a re-open", async () => {
+  it("probes lazily: zero calls before the menu opens, one on the first open, none on a re-open while the answer is non-empty", async () => {
+    vi.mocked(getBuiltinPostureCatalog).mockResolvedValue([
+      {
+        id: "claude-sonnet-4-5",
+        display_name: "Claude Sonnet 4.5",
+        supported_reasoning_efforts: [],
+      },
+    ]);
     renderPicker(pickerJsx());
     expect(getBuiltinPostureCatalog).not.toHaveBeenCalled();
     // The menu-open event (the mock's captured handler) is the one arm.
     act(() => openChangeCapture.handler?.(true));
-    await waitFor(() =>
-      expect(getBuiltinPostureCatalog).toHaveBeenCalledTimes(1),
-    );
+    await screen.findByRole("menuitemradio", { name: "Claude Sonnet 4.5" });
     // A re-open arms nothing new: the arm already matches this endpoint and
     // the query's staleTime is Infinity -- one fetch per endpoint.
     act(() => openChangeCapture.handler?.(true));
     expect(getBuiltinPostureCatalog).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-asks on every open that follows an empty answer: a failed probe stays retryable (ADR-0153)", async () => {
+    const { queryClient } = renderPicker(pickerJsx());
+    act(() => openChangeCapture.handler?.(true));
+    // The default mock answers the empty list -- a failed probe's shape on
+    // the wire, indistinguishable from an honest empty. Only the backend
+    // knows whether a failure is over (it caches successes, never
+    // failures), so the next open must reach it again.
+    // find() is exact by default; the prefix form needs the flag.
+    const catalogQuery = () =>
+      queryClient
+        .getQueryCache()
+        .find({ queryKey: ["adapters", "builtinPostureCatalog"], exact: false });
+    await waitFor(() =>
+      expect(getBuiltinPostureCatalog).toHaveBeenCalledTimes(1),
+    );
+    await waitFor(() => expect(catalogQuery()?.state.status).toBe("success"));
+    // The second answer hangs: a re-open while a probe is in flight must
+    // not start another one.
+    vi.mocked(getBuiltinPostureCatalog).mockImplementationOnce(
+      () => new Promise<BuiltinCatalogModel[]>(() => {}),
+    );
+    act(() => openChangeCapture.handler?.(true));
+    await waitFor(() =>
+      expect(getBuiltinPostureCatalog).toHaveBeenCalledTimes(2),
+    );
+    act(() => openChangeCapture.handler?.(true));
+    expect(getBuiltinPostureCatalog).toHaveBeenCalledTimes(2);
   });
 
   it("stays zero-egress after a profile endpoint edit until the menu opens again", async () => {
@@ -767,21 +800,18 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
   });
 
   it("lists the probe's models with display names and writes the selection through the set IPC", async () => {
-    vi.mocked(getBuiltinPostureCatalog).mockResolvedValue({
-      models: [
-        {
-          id: "claude-sonnet-4-5",
-          display_name: "Claude Sonnet 4.5",
-          supported_reasoning_efforts: ["low", "high"],
-        },
-        {
-          id: "custom-deploy-7",
-          display_name: "custom-deploy-7",
-          supported_reasoning_efforts: [],
-        },
-      ],
-      profile_model: "claude-sonnet-4-5",
-    });
+    vi.mocked(getBuiltinPostureCatalog).mockResolvedValue([
+      {
+        id: "claude-sonnet-4-5",
+        display_name: "Claude Sonnet 4.5",
+        supported_reasoning_efforts: ["low", "high"],
+      },
+      {
+        id: "custom-deploy-7",
+        display_name: "custom-deploy-7",
+        supported_reasoning_efforts: [],
+      },
+    ]);
     renderPicker(pickerJsx());
     act(() => openChangeCapture.handler?.(true));
     // The probed rows render once the query lands: the display name for
@@ -798,6 +828,118 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
         thought_level: null,
       }),
     );
+    // The selected-state readout: the write's cache seed flips the button
+    // to the held pair's model (the external runtime's readout form).
+    expect(
+      await screen.findByRole("button", { name: /^Model: claude-sonnet-4-5/ }),
+    ).toBeTruthy();
+  });
+
+  it("resets a held built-in posture when the endpoint identity changes (issue #1639 namespace reset)", async () => {
+    // A model picked under one endpoint is that endpoint's fact. When the
+    // active profile moves to another endpoint -- a prop change here, the
+    // same way the top-bar switcher and a Settings save land it -- the held
+    // pair must not ride into the new endpoint: the reset is the runtime
+    // write a runtime switch already makes (the server re-seeds the empty
+    // pair).
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: "claude-sonnet-4-5",
+      thought_level: "high",
+      cached_discovered: null,
+    });
+    const { rerender, queryClient } = renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /^Model: claude-sonnet-4-5/ });
+    expect(setSessionRuntime).not.toHaveBeenCalled();
+    rerender(wrap(pickerJsx({ provider: pickerProvider("glm") }), queryClient));
+    await waitFor(() =>
+      expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+        kind: "built_in",
+      }),
+    );
+  });
+
+  it("drops a pending cold-start posture when the endpoint identity changes (issue #1639)", () => {
+    // The cold-start bar's half of the same reset: the channel's runtime
+    // write is the pending pair's single reset point (ADR-0100 D2).
+    const channel = staticColdStartChannel(
+      { model: "claude-sonnet-4-5", thought_level: null },
+      { kind: "built_in" },
+    );
+    const { rerender, queryClient } = renderPicker(
+      pickerJsx({ sessionId: null, coldStart: channel }),
+    );
+    expect(channel.port.writeRuntime).not.toHaveBeenCalled();
+    rerender(
+      wrap(
+        pickerJsx({
+          sessionId: null,
+          coldStart: channel,
+          provider: pickerProvider("glm"),
+        }),
+        queryClient,
+      ),
+    );
+    expect(channel.port.writeRuntime).toHaveBeenCalledWith({
+      kind: "built_in",
+    });
+  });
+
+  it("clears a held level the newly picked built-in model does not support in the same submit (issue #537 linkage)", async () => {
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: "claude-sonnet-4-6",
+      thought_level: "high",
+      cached_discovered: null,
+    });
+    vi.mocked(getBuiltinPostureCatalog).mockResolvedValue([
+      {
+        id: "claude-sonnet-4-5",
+        display_name: "Claude Sonnet 4.5",
+        supported_reasoning_efforts: ["low"],
+      },
+    ]);
+    renderPicker(pickerJsx());
+    act(() => openChangeCapture.handler?.(true));
+    const row = await screen.findByRole("menuitemradio", {
+      name: "Claude Sonnet 4.5",
+    });
+    fireEvent.click(row);
+    // The held "high" is outside the picked model's set, so the linkage
+    // clear rides the SAME wire submit: one call carries the pick and the
+    // level null.
+    await waitFor(() =>
+      expect(setSessionPosture).toHaveBeenCalledWith("sess-1", {
+        model: "claude-sonnet-4-5",
+        thought_level: null,
+      }),
+    );
+  });
+
+  it("renders the built-in read failure as an inline status line instead of the menu (issue #529)", async () => {
+    // The read guards are runtime-agnostic since #1639: on a built-in
+    // session too, a rejected read must not masquerade as the unselected
+    // default -- the fault replaces the control, so no fallback row can be
+    // clicked into an explicit clear of the server-held pair.
+    vi.mocked(getSessionModelConfig).mockRejectedValue(new Error("ipc down"));
+    renderPicker(pickerJsx());
+    expect(await screen.findByRole("status")).toBeTruthy();
+    expect(screen.queryByRole("menuitemradio")).toBeNull();
+  });
+
+  it("never submits a built-in selection while the model-config read is unsettled (issue #603)", async () => {
+    vi.mocked(getSessionModelConfig).mockImplementation(
+      () => new Promise<SessionModelConfig>(() => {}),
+    );
+    renderPicker(pickerJsx());
+    const trigger = await screen.findByRole("button", { name: /^Model: / });
+    expect((trigger as HTMLButtonElement).disabled).toBe(true);
+    // Radix items ignore the trigger's disabled state, so the handler drops
+    // the gesture too.
+    fireEvent.click(
+      screen.getByRole("menuitemradio", {
+        name: "claude-sonnet-4-6 (not offered by this runtime)",
+      }),
+    );
+    expect(setSessionPosture).not.toHaveBeenCalled();
   });
 });
 

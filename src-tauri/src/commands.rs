@@ -4272,9 +4272,10 @@ pub fn clear_last_model_posture(
 /// metadata (display names, effort tiers). The posture menu's ONLY
 /// egress point -- the frontend arms it on menu open, the in-process
 /// cache absorbs every later call, and a keyless / zero-profile state
-/// answers the empty catalog without any probe. Never refuses: a failed
-/// probe degrades to the empty list (the menu's fallback shape), never
-/// an error surface.
+/// answers the empty catalog without any probe. No probe outcome refuses
+/// -- a failed probe degrades to the empty list (the menu's fallback
+/// shape), never an error surface; only a panicking blocking task
+/// surfaces, as the join failure the Result carries.
 #[tauri::command]
 pub async fn get_builtin_posture_catalog(
     live: State<'_, LiveProviderConfig>,

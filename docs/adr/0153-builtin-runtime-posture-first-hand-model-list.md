@@ -2,7 +2,7 @@
 
 ## Decision
 
-内置运行时（BYOK 档案）的 composer 姿势按钮升级为与外部通道同形制的级联菜单，模型 id 集取自活跃档案端点的一手模型列表：菜单打开时惰性拉取一次（此外零探测出网），成功结果进进程内缓存（按协议 + 归一化列表基址键控，会话内存级；失败不入缓存、下次打开重试，空列表算成功），元数据（显示名、effort 档）由模型目录（ADR-0152）补齐，未收录 id 按 id 原样渲染。协议分叉：openai 协议 bearer 认证解析 `data` 数组与富对象两种形状（数组优先、对象条目取属性键）；anthropic 协议 `x-api-key` + `anthropic-version` 头、`?limit=1000` 单页不跟分页。仅列表 URL 归一化末尾 `/v1`（补齐或去重，模型/轮次请求保持配置的 `base_url` 原样）；请求携带该档案的 key、仅发往该档案自己的 `base_url`，无任何 SDK 冒充身份，走共享无重定向阻塞 egress client（镜像 ADR-0070 探测姿势）。探测失败静默：菜单回退为「当前 `profile.model` 合成行 + 默认（推荐）清除行」形态，不报错。推理强度 v1 只接 effort 离散档：持有模型有 effort 档才渲染强度行，仅 toggle / 仅 budget / 未收录模型不渲染（持有强度值时行保留并出合成行）。选择写入会话级 `PosturePair` 下一轮生效：model 半边在轮次构造时覆盖档案 model，thought_level 走既有注入通道（anthropic adaptive effort / openai `reasoning_effort`）；`profile.model` 必填语义不动，冷启动回落 profile，跨会话持久化语义归后续票；零档案态保持「未配置」无箭头静态标签。
+内置运行时（BYOK 档案）的 composer 姿势按钮升级为与外部通道同形制的级联菜单，模型 id 集取自活跃档案端点的一手模型列表：菜单打开时惰性拉取一次（此外零探测出网），成功结果进进程内缓存（按协议 + 归一化列表基址键控，会话内存级；失败不入缓存、下次打开重试，空列表算成功），元数据（显示名、effort 档）由模型目录（ADR-0152）补齐，未收录 id 按 id 原样渲染。协议分叉：openai 协议 bearer 认证解析 `data` 数组与富对象两种形状（数组优先、对象条目取属性键）；anthropic 协议 `x-api-key` + `anthropic-version` 头、`?limit=1000` 单页不跟分页。仅 anthropic 协议的列表 URL 归一化末尾 `/v1`（补齐或去重；openai 协议的 base 自带版本段，其列表 URL 与模型/轮次请求一样保持配置的 `base_url` 原样拼接）；请求携带该档案的 key、仅发往该档案自己的 `base_url`，无任何 SDK 冒充身份，走共享无重定向阻塞 egress client（与 ADR-0070 探测共用同一列表请求）。探测失败静默：菜单回退为「当前 `profile.model` 合成行 + 默认（推荐）清除行」形态，不报错。推理强度 v1 只接 effort 离散档：持有模型有 effort 档才渲染强度行，仅 toggle / 仅 budget / 未收录模型不渲染（持有强度值时行保留并出合成行）。选择写入会话级 `PosturePair` 下一轮生效：model 半边在轮次构造时覆盖档案 model，thought_level 走既有注入通道（anthropic adaptive effort / openai `reasoning_effort`）；姿势对按端点身份（协议 + `base_url`）归属——内置运行时下端点身份变更（切换到另一端点的档案、或本档案改了端点）即命名空间重置，与运行时切换同构，同端点换档案保留持有对；`profile.model` 必填语义不动，冷启动回落 profile，跨会话持久化语义归后续票；零档案态保持「未配置」无箭头静态标签。
 
 ## Context
 
@@ -14,7 +14,7 @@ ADR-0099 Decision 3 把内置段姿势按钮定为无目录的静态标签（当
 2. **打开才探测是结构性零出网**：拉取只挂在菜单打开这一个事件上，配合进程内缓存，其余路径（渲染、冷启动、turn）零新增出网；零档案/无 key 状态在命令入口即返回空目录，连探测都不发。
 3. **静默降级是诚实不是吞错**：探测失败的回退形（当前 `profile.model` 合成行 + 清除行）本身就是菜单的合法形态——探测前与探测失败同形，用户可见行为一致，无需错误 UI；失败不缓存保证下次打开自动重试。
 4. **复用既有写路径零新增机制**：选择落既有会话级 `PosturePair` 槽与全对写 IPC，注入走既有 `thought_level` 通道，model 半边只在轮次构造时完成覆盖——会话级/机器级分离（ADR-0099 Decision 4）与档案必填语义原样。
-5. **仅列表 URL 归一化**：`/v1` 补齐只发生在列表请求上（协议约定路径），轮次请求保持配置 `base_url` 原样——归一化绝不改变用户配置的实际出网目标。
+5. **仅列表 URL 归一化**：`/v1` 补齐只发生在 anthropic 协议的列表请求上（该协议的 base 是 host root，轮次请求自行补 `/v1/messages`）；openai 协议的 base 自带版本段，其列表请求与轮次请求一样保持配置 `base_url` 原样——版本段不是 `/v1` 的兼容端点（如 `/api/paas/v4`）轮次可用则列表同样可用，归一化绝不改变用户配置的实际出网目标。
 
 ## Considered options
 
@@ -28,9 +28,9 @@ ADR-0099 Decision 3 把内置段姿势按钮定为无目录的静态标签（当
 ## Consequences
 
 - **校准 ADR-0099 Decision 3**：内置段四态中「无目录静态标签」态退役为零档案专属；有档案即级联菜单，探测前与探测失败渲染同一回退形（当前 `profile.model` 合成行 + 默认（推荐）清除行），已选择态显示「{model} · {strength}」与外部通道同形。见 ADR-0153。
-- **校准 ADR-0095 的「内置不消费姿势」表述**：`PosturePair` 的消费面从外部 CLI 通道扩展到内置 turn——model 半边在轮次构造时覆盖档案 model，thought_level 半边走既有注入通道；槽位、写 IPC、切换时的命名空间重置机制全部原样。
+- **校准 ADR-0095 的「内置不消费姿势」表述**：`PosturePair` 的消费面从外部 CLI 通道扩展到内置 turn——model 半边在轮次构造时覆盖档案 model，thought_level 半边走既有注入通道；槽位、写 IPC、切换时的命名空间重置机制全部原样；内置姿势对另按端点身份归属，端点变更即重置——重置面是 composer 在挂载期间观察到的端点变更，未挂载 composer 的会话与 resume 恢复的会话不在其内（按钮仍显示持有模型），其归属语义归后续票。
 - ADR-0152 的 effort 档查询入口自此接线：目录元数据（显示名、effort 档）成为姿势菜单的补齐来源，其 0 值过滤与确定性合并由目录层保证，菜单端不重复设防。
 - 目录元数据中窗口与输出上限不进 v1 菜单面（与外部通道同形制——外部菜单同样不显窗口；菜单行只显显示名，强度行只吃 effort 档）：其功能面已随所选模型生效——窗口与输出上限按轮次实际使用的模型解析，选中即换档，无需菜单展示。窗口读数若未来成为菜单 affordance，属展示层增量另议。
 - 探测是内置姿势面唯一新增出网点：仅在菜单首次打开且进程内缓存 miss 时发生，携带档案 key 发往档案自己的 `base_url`；缓存键为（协议，归一化列表基址），端点或协议变更自然失效。
-- 强度档集与 wire 档位的映射沿用既有事实（minimal shares low's tier、unknown id 降级 Off）；目录标记仅 toggle / 仅 budget 的模型在 v1 无强度行——budget 通道接入另议。
+- 强度档集与 wire 档位的映射沿用既有事实（minimal shares low's tier、unknown id 降级 Off）；菜单只列 wire 可承载的档位（minimal、low、medium、high）——目录里 wire 会丢弃的档位在合并时滤除，谓词与请求转译同一定义，全被滤掉的模型不出强度行。目录标记仅 toggle / 仅 budget 的模型在 v1 无强度行——budget 通道接入另议。
 - `profile.model` 必填语义与冷启动回落 profile 不变：跨会话的内置姿势持久化（回填条目、可选化、内置起步回填）归后续票。

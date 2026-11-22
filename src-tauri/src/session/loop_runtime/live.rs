@@ -205,7 +205,7 @@ pub(crate) fn thought_level_params(
 ) -> serde_json::Map<String, serde_json::Value> {
     // Unknown ids degrade to Off, not to a guessed tier: the app does not
     // second-guess a level it cannot interpret.
-    let Some(level) = level.filter(|l| matches!(*l, "minimal" | "low" | "medium" | "high")) else {
+    let Some(level) = level.filter(|l| crate::provider::is_wire_effort(l)) else {
         return serde_json::Map::new();
     };
     let params = match protocol {

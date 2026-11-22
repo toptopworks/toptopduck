@@ -121,10 +121,11 @@ export const adapterKeys = {
    *  (protocol + base_url, raw app-config spelling here) so a settings edit
    *  on the profile re-fetches on the NEXT menu open -- the arm is
    *  endpoint-scoped in the picker, so the new key never fires on a mere
-   *  re-render. The backend's in-process cache (keyed by the
-   *  /v1-normalized list URL) absorbs repeat opens and collapses variant
-   *  base spellings server-side. staleTime Infinity: one fetch per endpoint
-   *  per arm. */
+   *  re-render. The backend's in-process cache (keyed by protocol + list
+   *  URL) absorbs repeat opens. staleTime Infinity: one fetch per endpoint
+   *  per arm while the answer is non-empty; the picker re-asks explicitly
+   *  on every open that follows an empty answer (it may be a failed probe,
+   *  which the backend leaves uncached). */
   builtinPostureCatalog: (endpoint: string) =>
     ["adapters", "builtinPostureCatalog", endpoint] as const,
 } as const;

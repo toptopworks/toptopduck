@@ -27,10 +27,10 @@
 //!
 //! Refresh is lazy and silent: nothing fetches at startup, on a schedule,
 //! or on a miss -- only a cache older than 24h plus a consuming built-in
-//! turn start (the live factory; the future posture menu joins at #1639)
-//! spawns ONE detached background fetch that answers the triggering turn
-//! from the old data. CLI channel occupancy stamps read the chain but
-//! never trigger, so zero-profile and CLI-only setups make the process
+//! turn start (the live factory) spawns ONE detached background fetch that
+//! answers the triggering turn from the old data. CLI channel occupancy
+//! stamps and the posture menu (issue #1639) read the chain but never
+//! trigger, so zero-profile and CLI-only setups make the process
 //! egress nothing to this endpoint. Fetch/offline/parse failures keep the
 //! old cache (or the snapshot) with no UI and no user-visible state; the
 //! retry cadence is the same TTL, not a backoff ladder.
@@ -257,15 +257,6 @@ pub(crate) fn output_cap(model_name: &str) -> u32 {
     tiered_output_cap(cache.as_deref(), Some(snapshot_catalog()), model_name)
 }
 
-/// Resolve a model's discrete effort tiers (exact-id tiers only; the
-/// prefix tables carry no reasoning data). The posture-menu consumption
-/// entry -- dead code until #1639 wires its caller.
-#[allow(dead_code)]
-pub(crate) fn effort_tiers(model_name: &str) -> Option<Vec<String>> {
-    let cache = cache_catalog();
-    tiered_effort_tiers(cache.as_deref(), Some(snapshot_catalog()), model_name)
-}
-
 /// The posture menu's metadata view (#1639): one exact-id chain read
 /// (cache -> snapshot; the prefix tables carry no display names or
 /// reasoning data) serving both fields the menu consumes. `None` in a
@@ -307,15 +298,6 @@ fn tiered_output_cap(
 ) -> u32 {
     let exact = exact_entry(cache, snapshot, model_name).and_then(|entry| entry.output_cap);
     output_cap::clamp_entry(exact.or_else(|| output_cap::catalog_output(model_name)))
-}
-
-#[allow(dead_code)]
-fn tiered_effort_tiers(
-    cache: Option<&CompactCatalog>,
-    snapshot: Option<&CompactCatalog>,
-    model_name: &str,
-) -> Option<Vec<String>> {
-    exact_entry(cache, snapshot, model_name).and_then(|entry| entry.effort_tiers.clone())
 }
 
 /// Exact-id lookup across the two fresher tiers (cache outranks snapshot).
@@ -758,18 +740,6 @@ mod tests {
         assert_eq!(tiered_output_cap(None, None, "gpt-4.1"), OUTPUT_TOKEN_CAP);
     }
 
-    /// Effort tiers resolve from the exact-id tiers only; no prefix
-    /// fallback exists (the tables carry no reasoning data).
-    #[test]
-    fn effort_tiers_resolve_from_exact_ids_only() {
-        let (cache, snapshot) = fixture_tiers();
-        assert_eq!(
-            tiered_effort_tiers(Some(&cache), Some(&snapshot), "zz-model"),
-            Some(vec!["low".to_string(), "high".to_string()])
-        );
-        assert_eq!(tiered_effort_tiers(None, Some(&snapshot), "ss-model"), None);
-    }
-
     /// The cadence decision table: fresh cache never fetches; a stale (or
     /// absent) cache fetches once per TTL window regardless of outcome.
     #[test]
@@ -1041,7 +1011,7 @@ mod tests {
         let _ = crate::provider::output_cap::output_token_cap("gpt-4o");
         let _ = context_window("claude-3-5-sonnet");
         let _ = output_cap("deepseek-chat");
-        let _ = effort_tiers("zz-nothing");
+        let _ = catalog_metadata("zz-nothing");
         assert_eq!(
             TEST_TRIGGER_CALLS.load(std::sync::atomic::Ordering::SeqCst),
             before,
@@ -1121,7 +1091,7 @@ mod tests {
         assert_eq!(context_window("ZZ-Fixture-Model"), Some(123_456));
         assert_eq!(output_cap("zz-fixture-model"), 4_321);
         assert_eq!(
-            effort_tiers("zz-fixture-model"),
+            catalog_metadata("zz-fixture-model").effort_tiers,
             Some(vec!["low".to_string(), "high".to_string()])
         );
         // the occupancy stamp rides the same chain

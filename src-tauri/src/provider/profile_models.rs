@@ -5,23 +5,20 @@
 //! failure degrades the menu to the profile-model-only fallback shape,
 //! never an error surface.
 //!
-//! Wire posture mirrors the preflight probe (ADR-0070): the shared
-//! no-redirect blocking egress client, per-protocol auth headers -- only
-//! what the protocol itself requires, nothing that impersonates an SDK.
-//! The request carries the profile's key and goes to the profile's own
-//! base_url, nothing else. Only the LIST url normalizes a trailing
-//! `/v1` onto the base; turn requests keep the configured base verbatim.
+//! Wire posture is the preflight probe's (ADR-0070): the shared models
+//! request on the shared no-redirect blocking egress client, per-protocol
+//! auth headers -- only what the protocol itself requires, nothing that
+//! impersonates an SDK. The request carries the profile's key and goes to
+//! the profile's own base_url, nothing else. Only the anthropic LIST url
+//! normalizes a trailing `/v1` onto the base; the openai LIST url and
+//! every turn request join their path onto the configured base as-is.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use crate::model::Protocol;
 use crate::provider::keychain::ProviderConfigSource;
-
-/// The models-list request timeout: one round-trip against the user's own
-/// endpoint, the same envelope as the preflight probe's (30s).
-const LIST_TIMEOUT: Duration = Duration::from_secs(30);
+use crate::provider::preflight::{models_get, ModelsReply};
 
 /// The anthropic list wire's page cap: one `?limit=1000` request, no
 /// pagination follow (ADR-0153 -- a directory that outgrows one page
@@ -33,9 +30,9 @@ const ANTHROPIC_PAGE_LIMIT: u32 = 1000;
 /// menu renders (the model catalog fills the name and effort tiers; an
 /// uncataloged id renders verbatim with no strength row). The probe-cache
 /// `CatalogModel` shape minus the CLI-current fields -- the built-in
-/// surface has no CLI reporting a current; the payload-level
-/// `profile_model` is the one carrier of the effective default (a row
-/// flag would state the same fact twice with no consumer).
+/// surface has no CLI reporting a current, and the effective default is
+/// the profile's own model, which the frontend reads live from
+/// app-config (a row flag would restate that fact with no consumer).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BuiltinCatalogModel {
     pub id: String,
@@ -44,18 +41,15 @@ pub struct BuiltinCatalogModel {
 }
 
 /// The built-in posture menu's catalog payload: the merged first-hand id
-/// set + catalog metadata, plus the effective current model (`None` when
-/// the active profile's model field is blank -- no honest current to
-/// show). An empty `models` renders the fallback menu (the held profile
-/// model's synthetic row + the clearing row) -- the honest shape both
-/// before the probe answers and after it fails.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
-pub struct BuiltinPostureCatalog {
-    pub models: Vec<BuiltinCatalogModel>,
-    pub profile_model: Option<String>,
-}
+/// set + catalog metadata. Endpoint-domain only -- the effective current
+/// model is the profile's own, app-config the frontend reads live, never
+/// a probe-time snapshot that could go stale beside it. An empty list
+/// renders the fallback menu (the held profile model's synthetic row +
+/// the clearing row) -- the honest shape both before the probe answers
+/// and after it fails.
+pub type BuiltinPostureCatalog = Vec<BuiltinCatalogModel>;
 
-/// The cache key: the protocol + the normalized list base. An endpoint
+/// The cache key: the protocol + the list URL. An endpoint
 /// edit or protocol switch mints a new key (a fresh probe); a key change
 /// alone reuses the same endpoint's list. The stored key never includes
 /// the API key -- it names the endpoint, not the credential.
@@ -100,19 +94,21 @@ fn cached_or_probe_at(
     })
 }
 
-/// The models-list URL: the base normalized to end with exactly one
-/// `/v1` segment, then `/models` (anthropic adds the page cap). This is
-/// the ONLY `/v1` normalization in the request path -- turn requests use
-/// the configured base verbatim (the adapters join their own paths).
-pub(crate) fn list_url(protocol: Protocol, base_url: &str) -> String {
+/// The models-list URL, joined the way each protocol's turn wire joins
+/// its own path. anthropic: the base is the host root, so the list
+/// normalizes it to end with exactly one `/v1` segment (fill or dedupe --
+/// the turn wire's own normalization) before `/models` and the page cap.
+/// openai: the base carries its version segment per the SDK convention,
+/// so `/models` joins as-is -- a base whose version segment is not `/v1`
+/// (the GLM preset's `/api/paas/v4`) must not gain one, or the probe 404s
+/// where the turn succeeds.
+fn list_url(protocol: Protocol, base_url: &str) -> String {
     let base = base_url.trim_end_matches('/');
-    let base = if base.ends_with("/v1") {
-        base.to_string()
-    } else {
-        format!("{base}/v1")
-    };
     match protocol {
-        Protocol::Anthropic => format!("{base}/models?limit={ANTHROPIC_PAGE_LIMIT}"),
+        Protocol::Anthropic => {
+            let base = base.strip_suffix("/v1").unwrap_or(base);
+            format!("{base}/v1/models?limit={ANTHROPIC_PAGE_LIMIT}")
+        }
         Protocol::Openai => format!("{base}/models"),
     }
 }
@@ -123,15 +119,23 @@ pub(crate) fn list_url(protocol: Protocol, base_url: &str) -> String {
 /// endpoints may instead answer a rich object keyed by model id, and the
 /// array shape outranks it when present (the documented contract).
 /// `None` on any other shape -- the caller degrades silently.
-pub(crate) fn parse_model_ids(protocol: Protocol, body: &serde_json::Value) -> Option<Vec<String>> {
+fn parse_model_ids(protocol: Protocol, body: &serde_json::Value) -> Option<Vec<String>> {
     let data = body.get("data")?;
     match data {
-        serde_json::Value::Array(entries) => Some(
-            entries
+        serde_json::Value::Array(entries) => {
+            let ids: Vec<String> = entries
                 .iter()
                 .filter_map(|entry| entry.get("id")?.as_str().map(str::to_string))
-                .collect(),
-        ),
+                .collect();
+            // Rows that all lacked a string id (a gateway keying rows by
+            // name) are a shape mismatch, not an honestly empty list --
+            // `None` keeps the answer uncached. An empty array is honest.
+            if ids.is_empty() && !entries.is_empty() {
+                None
+            } else {
+                Some(ids)
+            }
+        }
         // The openai-only rich-object fallback (compatible gateways key
         // the map by model id); the anthropic wire is the array contract
         // alone.
@@ -143,61 +147,50 @@ pub(crate) fn parse_model_ids(protocol: Protocol, body: &serde_json::Value) -> O
 }
 
 /// Probe the endpoint's model list once. Any failure -- non-http base,
-/// client construction fault, transport error, non-2xx, unparseable body
-/// -- is `None` (the silent degrade); only a 2xx parseable body answers.
-pub(crate) fn fetch_model_ids(
-    protocol: Protocol,
-    base_url: &str,
-    key: &str,
-) -> Option<Vec<String>> {
+/// client construction fault, transport error, non-2xx, unparseable or
+/// unsupported body -- is `None` (the silent degrade); only a 2xx body in
+/// a documented shape answers. No error surface by contract, so every
+/// failure arm leaves an info-level trace: in a release build this log is
+/// the only way to tell a wrong key from an endpoint that offers no list.
+fn fetch_model_ids(protocol: Protocol, base_url: &str, key: &str) -> Option<Vec<String>> {
     if let Err(e) = crate::provider::http::validate_http_base_url(base_url) {
-        log::debug!("profile model list skipped: invalid base url: {e}");
+        log::info!("profile model list skipped: invalid base url: {e}");
         return None;
     }
-    let client = match crate::egress::blocking_client() {
-        Ok(client) => client,
-        Err(err) => {
-            log::warn!("profile model list egress client construction failed: {err}");
-            return None;
-        }
-    };
     let url = list_url(protocol, base_url);
-    let request = match protocol {
-        Protocol::Anthropic => client
-            .get(&url)
-            .timeout(LIST_TIMEOUT)
-            .header("x-api-key", key)
-            .header(
-                "anthropic-version",
-                crate::provider::preflight::ANTHROPIC_VERSION,
-            ),
-        Protocol::Openai => client
-            .get(&url)
-            .timeout(LIST_TIMEOUT)
-            .header("Authorization", format!("Bearer {key}")),
-    };
-    let response = match request.send() {
-        Ok(response) => response,
-        Err(err) => {
-            log::debug!("profile model list probe failed ({url}): {err}");
-            return None;
+    match models_get(protocol, &url, key) {
+        ModelsReply::Answered(status, body) => {
+            let ids = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|body| parse_model_ids(protocol, &body));
+            if ids.is_none() {
+                log::info!(
+                    "profile model list probe got an unsupported body (HTTP {status}, {url}): {}",
+                    crate::provider::http::truncate(&body)
+                );
+            }
+            ids
         }
-    };
-    if !response.status().is_success() {
-        log::debug!(
-            "profile model list probe answered HTTP {} ({url})",
-            response.status()
-        );
-        return None;
+        ModelsReply::KeyRejected => {
+            log::info!("profile model list probe refused the key ({url})");
+            None
+        }
+        ModelsReply::Status(status) => {
+            log::info!("profile model list probe answered HTTP {status} ({url})");
+            None
+        }
+        ModelsReply::Unreachable => {
+            log::info!("profile model list probe got no response ({url})");
+            None
+        }
     }
-    let body = response.json::<serde_json::Value>().ok()?;
-    parse_model_ids(protocol, &body)
 }
 
 /// Merge the first-hand ids with the model catalog's metadata: the
 /// display name and effort tiers fill from the catalog (`metadata`), an
-/// uncataloged id renders verbatim with no tiers, and `is_default` flags
-/// the profile's configured model (the menu's effective default).
+/// uncataloged id renders verbatim with no tiers, and only the tiers the
+/// built-in wire can carry as an effort reach the menu -- a tier the wire
+/// would drop is a menu row that silently does nothing.
 fn merge_builtin_catalog(
     ids: &[String],
     metadata: impl Fn(&str) -> crate::provider::model_catalog::CatalogMetadata,
@@ -208,7 +201,12 @@ fn merge_builtin_catalog(
             BuiltinCatalogModel {
                 id: id.clone(),
                 display_name: meta.display_name.unwrap_or_else(|| id.clone()),
-                supported_reasoning_efforts: meta.effort_tiers.unwrap_or_default(),
+                supported_reasoning_efforts: meta
+                    .effort_tiers
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|tier| crate::provider::is_wire_effort(tier))
+                    .collect(),
             }
         })
         .collect()
@@ -222,7 +220,7 @@ pub(crate) fn builtin_posture_catalog(
     live: &crate::provider::live_config::LiveProviderConfig,
 ) -> BuiltinPostureCatalog {
     let Some(api_key) = live.api_key() else {
-        return BuiltinPostureCatalog::default();
+        return Vec::new();
     };
     let protocol = live.protocol();
     let base = live.base_url();
@@ -231,21 +229,11 @@ pub(crate) fn builtin_posture_catalog(
         base: list_url(protocol, &base),
     };
     let ids = cached_or_probe(cache_key, || fetch_model_ids(protocol, &base, &api_key));
-    let profile_model = live.model();
-    // The effective current: the profile's model field verbatim; a blank
-    // field has no honest current (the backend default never masquerades
-    // as the user's configured choice here).
-    let current = profile_model.trim();
-    let current = (!current.is_empty()).then(|| current.to_string());
-    let models = match ids.as_deref() {
+    match ids.as_deref() {
         Some(ids) => merge_builtin_catalog(ids, crate::provider::model_catalog::catalog_metadata),
         // A failed probe: the empty list IS the fallback shape (the menu
         // renders the held profile model's synthetic row + the clear row).
         None => Vec::new(),
-    };
-    BuiltinPostureCatalog {
-        models,
-        profile_model: current,
     }
 }
 
@@ -301,6 +289,19 @@ mod tests {
             parse_model_ids(Protocol::Openai, &serde_json::json!({})),
             None
         );
+        // Rows that all lack a string id are no list either (a shape
+        // mismatch stays uncached); an empty array is an honest empty list.
+        assert_eq!(
+            parse_model_ids(
+                Protocol::Openai,
+                &serde_json::json!({"data": [{"name": "m-a"}]})
+            ),
+            None
+        );
+        assert_eq!(
+            parse_model_ids(Protocol::Openai, &serde_json::json!({"data": []})),
+            Some(Vec::new())
+        );
     }
 
     #[test]
@@ -336,17 +337,14 @@ mod tests {
         );
     }
 
-    // --- the list url: only this path normalizes the trailing /v1.
+    // --- the list url: only the anthropic arm normalizes the trailing /v1;
+    // the openai arm joins onto the configured base as-is, like its turn.
 
     #[test]
-    fn list_url_appends_v1_when_the_base_lacks_it() {
+    fn list_url_fills_v1_for_the_anthropic_host_root() {
         assert_eq!(
             list_url(Protocol::Anthropic, "https://api.anthropic.com"),
             "https://api.anthropic.com/v1/models?limit=1000"
-        );
-        assert_eq!(
-            list_url(Protocol::Openai, "https://gateway.example.com"),
-            "https://gateway.example.com/v1/models"
         );
     }
 
@@ -359,6 +357,17 @@ mod tests {
         assert_eq!(
             list_url(Protocol::Anthropic, "https://proxy.example.com/v1/"),
             "https://proxy.example.com/v1/models?limit=1000"
+        );
+    }
+
+    #[test]
+    fn list_url_never_fills_v1_onto_an_openai_base() {
+        // The repo's own GLM preset: its version segment is /api/paas/v4
+        // and its turn joins as-is -- a filled /v1 would 404 where the turn
+        // succeeds.
+        assert_eq!(
+            list_url(Protocol::Openai, "https://open.bigmodel.cn/api/paas/v4"),
+            "https://open.bigmodel.cn/api/paas/v4/models"
         );
     }
 
@@ -432,7 +441,13 @@ mod tests {
             if id == "claude-sonnet-4-5" {
                 crate::provider::model_catalog::CatalogMetadata {
                     display_name: Some("Claude Sonnet 4.5".into()),
-                    effort_tiers: Some(vec!["low".into(), "high".into()]),
+                    effort_tiers: Some(vec![
+                        "none".into(),
+                        "low".into(),
+                        "xhigh".into(),
+                        "high".into(),
+                        "max".into(),
+                    ]),
                 }
             } else {
                 crate::provider::model_catalog::CatalogMetadata {
@@ -446,6 +461,8 @@ mod tests {
             BuiltinCatalogModel {
                 id: "claude-sonnet-4-5".into(),
                 display_name: "Claude Sonnet 4.5".into(),
+                // Only the tiers the wire carries reach the menu: the
+                // catalog's none / xhigh / max would silently drop.
                 supported_reasoning_efforts: vec!["low".into(), "high".into()],
             }
         );
@@ -466,7 +483,7 @@ mod tests {
     #[test]
     fn fetch_answers_none_on_a_non_2xx_endpoint() {
         let mut server = mockito::Server::new();
-        let mock = server.mock("GET", "/v1/models").with_status(500).create();
+        let mock = server.mock("GET", "/models").with_status(500).create();
         assert_eq!(
             fetch_model_ids(Protocol::Openai, &server.url(), "sk-test"),
             None
@@ -479,5 +496,37 @@ mod tests {
         // A non-http base never egresses at all (mirrors the preflight's
         // boundary check).
         assert_eq!(fetch_model_ids(Protocol::Openai, "file:///etc", "k"), None);
+    }
+
+    #[test]
+    fn fetch_answers_the_id_set_on_a_success_round_trip() {
+        // The wire posture rides the shared models request: the path joined
+        // as-is, the openai Bearer header, the documented data array.
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/v1/models")
+            .match_header("Authorization", "Bearer sk-test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"m-b"},{"id":"m-a"}]}"#)
+            .create();
+        assert_eq!(
+            fetch_model_ids(Protocol::Openai, &format!("{}/v1", server.url()), "sk-test"),
+            Some(vec!["m-b".to_string(), "m-a".to_string()])
+        );
+        mock.assert();
+    }
+
+    #[test]
+    fn a_profileless_config_answers_the_empty_catalog_without_a_probe() {
+        // The command's entry: no profile means no key, and the empty list
+        // returns before the cache or the network is touched (ADR-0153's
+        // zero-egress guarantee for keyless and zero-profile setups).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = crate::provider::live_config::LiveProviderConfig::new(
+            crate::provider::keychain::KeychainStore::new(),
+            dir.path().join("nonexistent").join("config.json"),
+        );
+        assert!(builtin_posture_catalog(&live).is_empty());
     }
 }
