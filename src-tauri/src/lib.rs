@@ -352,6 +352,17 @@ pub fn run() {
             // skills root; minted lazily on first create.
             let agents_root = app_data_path(app.handle(), "agents", "agents registry");
 
+            // Model catalog disk cache (#1638, ADR-0152): the same
+            // app-data-dir resolution + honest temp-dir fallback, anchored
+            // process-globally. Anchoring the PATH is all setup does -- the
+            // cache file itself is minted lazily by the first successful
+            // background refresh (a built-in turn start is the only trigger),
+            // and an unresolved dir only means the catalog rides the
+            // embedded snapshot every launch.
+            let model_catalog_cache =
+                app_data_path(app.handle(), "model-catalog.json.gz", "model catalog cache");
+            provider::model_catalog::init_cache_path(model_catalog_cache);
+
             let keychain = KeychainStore::new();
             let live = LiveProviderConfig::new(keychain, app_config_path);
             // First-paint boot seed (issue #814, ADR-0113): one direct

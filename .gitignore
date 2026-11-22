@@ -16,3 +16,7 @@ Thumbs.db
 # Tool reports (issue #96)
 jscpd-report/
 *.stackdump
+
+# Generated build-input snapshots (ADR-0152): produced per release build
+# by generator bins, never committed.
+src-tauri/snapshots/

@@ -12,6 +12,9 @@ pub mod fake;
 pub(crate) mod http;
 pub mod keychain;
 pub mod live_config;
+// `pub` (not `pub(crate)`): the release-flow generator bin rides the same
+// fetch->trim->encode pipeline from outside the crate (ADR-0152).
+pub mod model_catalog;
 pub(crate) mod output_cap;
 pub mod preflight;
 pub mod prompt;

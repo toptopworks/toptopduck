@@ -1,6 +1,26 @@
 fn main() {
     track_assets(std::path::Path::new("src/skills/assets/builtin"));
+    embed_catalog_snapshot();
     tauri_build::build()
+}
+
+/// Stage the model-catalog snapshot for `include_bytes!` (ADR-0152): the
+/// release flow's generator step (build.yml) writes
+/// `snapshots/model-catalog.gz` (the gitignored staging dir); the build
+/// script copies whatever sits there into `OUT_DIR` -- an absent file (dev
+/// builds, the CI test job) stages an EMPTY placeholder so the embedded tier
+/// is simply empty and every lookup falls to the prefix tables. The repo
+/// never carries a hand-maintained data file; the watcher directive turns a
+/// regenerated snapshot into a rebuild trigger.
+fn embed_catalog_snapshot() {
+    const SNAPSHOT_SRC: &str = "snapshots/model-catalog.gz";
+    println!("cargo:rerun-if-changed={SNAPSHOT_SRC}");
+    let bytes = std::fs::read(SNAPSHOT_SRC).unwrap_or_default();
+    let out_dir =
+        std::env::var_os("OUT_DIR").expect("cargo always provides OUT_DIR to build scripts");
+    let staged = std::path::Path::new(&out_dir).join("model-catalog.gz");
+    std::fs::write(&staged, bytes)
+        .unwrap_or_else(|e| panic!("failed to stage the catalog snapshot: {e}"));
 }
 
 /// Recursively declare rerun-if-changed for the embedded builtin-skill asset
