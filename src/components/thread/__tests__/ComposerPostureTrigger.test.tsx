@@ -465,13 +465,21 @@ describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
   it("filters by id and display name, case-insensitively", () => {
     renderTrigger({ catalog: LARGE_BUILTIN });
     const filter = screen.getByPlaceholderText(/Filter models/);
-    // Display-name half: "sonn" matches "Claude Sonnet 4.5", not its id.
-    fireEvent.change(filter, { target: { value: "sonn" } });
     const contents = screen.getAllByTestId("sub-content");
-    const rows = within(contents[0]).getAllByRole("menuitemradio");
-    expect(rows.length).toBe(1);
-    expect(rows[0].textContent).toBe("Claude Sonnet 4.5");
-    // Id half, uppercase: the match is case-insensitive on both strings.
+    // Display-name half: "Sonnet 4.5" carries the space the hyphenated id
+    // cannot, so only the display-name branch can match.
+    fireEvent.change(filter, { target: { value: "Sonnet 4.5" } });
+    expect(
+      within(contents[0]).getAllByRole("menuitemradio").map((r) => r.textContent),
+    ).toEqual(["Claude Sonnet 4.5"]);
+    // Id half, uppercase: "CLAUDE-SONNET" carries the hyphens the display
+    // name lacks, so only the id branch can match -- and the match folds
+    // case on the way in.
+    fireEvent.change(filter, { target: { value: "CLAUDE-SONNET" } });
+    expect(
+      within(contents[0]).getAllByRole("menuitemradio").map((r) => r.textContent),
+    ).toEqual(["Claude Sonnet 4.5"]);
+    // Uncataloged rows (display name defaults to the id) match either way.
     fireEvent.change(filter, { target: { value: "DEPLOY" } });
     expect(
       within(contents[0]).getAllByRole("menuitemradio").map((r) => r.textContent),
@@ -562,6 +570,69 @@ describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
       "low",
       "high",
     ]);
+  });
+
+  it("keeps printable keys inside the filter (no typeahead yank)", () => {
+    renderTrigger({ catalog: LARGE_BUILTIN });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    // A keydown that escapes the React root is one the menu content's own
+    // handler (Radix's typeahead) would see; the filter's stopPropagation
+    // must keep it inside.
+    const escaped: string[] = [];
+    const onEscape = (e: Event) => escaped.push((e as KeyboardEvent).key);
+    document.body.addEventListener("keydown", onEscape);
+    try {
+      fireEvent.keyDown(filter, { key: "g" });
+      expect(escaped).toEqual([]);
+    } finally {
+      document.body.removeEventListener("keydown", onEscape);
+    }
+  });
+
+  it("keeps focus in the filter when ArrowDown meets an empty filtered list", () => {
+    renderTrigger({ catalog: LARGE_BUILTIN });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    // The gesture presumes the input holds focus (the user just typed into
+    // it); fireEvent does not focus, so the test seats it explicitly.
+    filter.focus();
+    // React 18+ reports a handler crash via window's error channel instead
+    // of throwing through the dispatch, so the dead end's cleanliness is
+    // pinned as both "focus held" and "nothing crashed".
+    const errors: string[] = [];
+    const onError = (e: Event) => errors.push((e as ErrorEvent).message);
+    window.addEventListener("error", onError);
+    try {
+      fireEvent.change(filter, { target: { value: "zzz" } });
+      fireEvent.keyDown(filter, { key: "ArrowDown" });
+      // No row to land on: the honest dead end holds focus in the input
+      // (the empty-state line below explains why) and stays silent.
+      expect(errors).toEqual([]);
+      expect(document.activeElement).toBe(filter);
+    } finally {
+      window.removeEventListener("error", onError);
+    }
+  });
+
+  it("treats a whitespace-only query as the unfiltered list", () => {
+    renderTrigger({ catalog: LARGE_BUILTIN });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: " " } });
+    const contents = screen.getAllByTestId("sub-content");
+    expect(within(contents[0]).getAllByRole("menuitemradio").length).toBe(4);
+    expect(within(contents[0]).queryByText("No matching models")).toBeNull();
+  });
+
+  it("keeps the clearing row visible when an acp query matches nothing", () => {
+    renderTrigger();
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    const contents = screen.getAllByTestId("sub-content");
+    // The clearing row is a state readout, not a catalog entry: it survives
+    // the filter alongside the honest empty-state line.
+    expect(
+      within(contents[0]).getByRole("menuitem", { name: /Default \(recommended\)/ }),
+    ).toBeTruthy();
+    expect(within(contents[0]).getByText("No matching models")).toBeTruthy();
   });
 });
 

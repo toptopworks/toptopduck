@@ -501,8 +501,9 @@ function DimensionSub({
     <DropdownMenuSub
       onOpenChange={(open) => {
         // Every open starts unfiltered: the previous query never survives a
-        // close (Radix unmounts the content; the explicit reset keeps that
-        // true regardless of the mounting semantics).
+        // close. Load-bearing -- the query state lives on this wrapper and
+        // survives the content unmount for as long as the root menu stays
+        // open, so this reset is the only mechanism, not a backstop for one.
         if (!open) setQuery("");
       }}
     >
@@ -523,8 +524,8 @@ function DimensionSub({
         {!unavailable && (
           <>
             {searchable && (
-              // The text-input copy-in riding the menu-compact variant
-              // (DESIGN.md Inputs): h-7 + px-2 over the standard token set.
+              // The text-input copy-in riding the compact variant recorded in
+              // DESIGN.md Inputs: h-7 + px-2 over the standard token set.
               <Input
                 type="text"
                 value={query}
