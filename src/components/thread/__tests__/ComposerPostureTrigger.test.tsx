@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act } from "react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 
 import { ComposerPostureTrigger } from "../ComposerPostureTrigger";
@@ -9,6 +10,7 @@ import {
   closeAutoFocusCapture,
   openChangeCapture,
   selectPreventDefault,
+  subOpenChangeCapture,
 } from "./dropdownMenuMock";
 import type { BuiltinCatalogModel, CatalogModel } from "../../../types/runtime";
 
@@ -83,7 +85,7 @@ type TriggerOverrides = Partial<Parameters<typeof ComposerPostureTrigger>[0]>;
 function renderTrigger(overrides: TriggerOverrides = {}) {
   const onSelectModel = vi.fn();
   const onSelectThoughtLevel = vi.fn();
-  render(
+  const renderResult = render(
     <IntlProvider locale="en" messages={{}} onError={() => {}}>
       {/* Mirrors the app-wide TooltipProvider the trigger mounts under in
           production (App.tsx) -- like every other tooltip site, the trigger
@@ -108,7 +110,7 @@ function renderTrigger(overrides: TriggerOverrides = {}) {
       </TooltipProvider>
     </IntlProvider>,
   );
-  return { onSelectModel, onSelectThoughtLevel };
+  return { ...renderResult, onSelectModel, onSelectThoughtLevel };
 }
 
 beforeEach(() => {
@@ -436,6 +438,201 @@ describe("ComposerPostureTrigger built-in catalog (issue #1639)", () => {
     expect(onMenuOpen).toHaveBeenCalledTimes(1);
     openChangeCapture.handler?.(false);
     expect(onMenuOpen).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
+  // A gateway-sized list: display names diverge from ids on two rows so the
+  // label-vs-id matching halves are exercised separately.
+  const LARGE_BUILTIN: PostureCatalog = {
+    kind: "builtin",
+    models: [
+      builtinModel("claude-sonnet-4-5", ["low", "high"], "Claude Sonnet 4.5"),
+      builtinModel("gpt-5.1", ["low", "high"], "GPT-5.1"),
+      builtinModel("gpt-5.1-codex", [], "GPT-5.1 Codex"),
+      builtinModel("custom-deploy-7"),
+    ],
+    profileModel: "claude-sonnet-4-5",
+  };
+
+  it("seats the filter row on the model dimension only", () => {
+    renderTrigger({ catalog: LARGE_BUILTIN });
+    const contents = screen.getAllByTestId("sub-content");
+    expect(within(contents[0]).getByPlaceholderText(/Filter models/)).toBeTruthy();
+    expect(within(contents[1]).queryByPlaceholderText("Filter models")).toBeNull();
+  });
+
+  it("filters by id and display name, case-insensitively", () => {
+    renderTrigger({ catalog: LARGE_BUILTIN });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    const contents = screen.getAllByTestId("sub-content");
+    // Display-name half: "Sonnet 4.5" carries the space the hyphenated id
+    // cannot, so only the display-name branch can match.
+    fireEvent.change(filter, { target: { value: "Sonnet 4.5" } });
+    expect(
+      within(contents[0]).getAllByRole("menuitemradio").map((r) => r.textContent),
+    ).toEqual(["Claude Sonnet 4.5"]);
+    // Id half, uppercase: "CLAUDE-SONNET" carries the hyphens the display
+    // name lacks, so only the id branch can match -- and the match folds
+    // case on the way in.
+    fireEvent.change(filter, { target: { value: "CLAUDE-SONNET" } });
+    expect(
+      within(contents[0]).getAllByRole("menuitemradio").map((r) => r.textContent),
+    ).toEqual(["Claude Sonnet 4.5"]);
+    // Uncataloged rows (display name defaults to the id) match either way.
+    fireEvent.change(filter, { target: { value: "DEPLOY" } });
+    expect(
+      within(contents[0]).getAllByRole("menuitemradio").map((r) => r.textContent),
+    ).toEqual(["custom-deploy-7"]);
+  });
+
+  it("restores the full list when the query is cleared", () => {
+    renderTrigger({ catalog: LARGE_BUILTIN });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: "gpt" } });
+    const contents = screen.getAllByTestId("sub-content");
+    expect(within(contents[0]).getAllByRole("menuitemradio").length).toBe(2);
+    fireEvent.change(filter, { target: { value: "" } });
+    expect(within(contents[0]).getAllByRole("menuitemradio").length).toBe(4);
+  });
+
+  it("shows the honest empty state when nothing matches, keeping a synthetic row", () => {
+    // The held profile default is OUTSIDE the directory: its synthetic row
+    // is a state readout, not a catalog entry, so it survives the filter --
+    // the empty-state line speaks for the catalog alone.
+    const { onSelectModel } = renderTrigger({
+      catalog: { kind: "builtin", models: [builtinModel("custom-deploy-7")], profileModel: "claude-x" },
+    });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    expect(
+      within(screen.getAllByTestId("sub-content")[0]).getByText("No matching models"),
+    ).toBeTruthy();
+    expect(screen.getByRole("menuitemradio", { name: "claude-x (pinned default)" })).toBeTruthy();
+    expect(screen.queryByRole("menuitemradio", { name: "custom-deploy-7" })).toBeNull();
+    // The synthetic row stays selectable through the filtered view.
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "claude-x (pinned default)" }));
+    expect(onSelectModel).toHaveBeenCalledWith("claude-x");
+  });
+
+  it("seats the filter row on all three catalog families (one implementation)", () => {
+    // acp
+    const { unmount: unmountAcp } = renderTrigger();
+    expect(screen.getByPlaceholderText(/Filter models/)).toBeTruthy();
+    unmountAcp();
+    // perModel
+    const { unmount: unmountPerModel } = renderTrigger({
+      catalog: PER_MODEL_CATALOG,
+      model: "gpt-5",
+    });
+    expect(screen.getByPlaceholderText(/Filter models/)).toBeTruthy();
+    unmountPerModel();
+    // builtin
+    renderTrigger({ catalog: LARGE_BUILTIN });
+    expect(screen.getByPlaceholderText(/Filter models/)).toBeTruthy();
+  });
+
+  it("resets the query when the submenu closes", () => {
+    // Single-Sub catalog (toggle-only model hides the strength row) so the
+    // mock's single captured handler is the model dimension's own.
+    renderTrigger({
+      catalog: { kind: "builtin", models: [builtinModel("custom-deploy-7")], profileModel: null },
+    });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: "deploy" } });
+    expect((filter as HTMLInputElement).value).toBe("deploy");
+    // The captured handler runs outside fireEvent's act scope: the reset's
+    // state update batches, so the assertion rides an explicit act.
+    act(() => subOpenChangeCapture.handler?.(false));
+    expect(
+      (screen.getByPlaceholderText(/Filter models/) as HTMLInputElement).value,
+    ).toBe("");
+  });
+
+  it("moves focus into the first menu row on ArrowDown from the filter", () => {
+    // No clearing row on the built-in model dimension: the first row is the
+    // first catalog entry. The rows are roving-tabindex focusable (tabIndex
+    // -1, the real Radix shape) so the gesture can land on them.
+    renderTrigger({ catalog: LARGE_BUILTIN });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.keyDown(filter, { key: "ArrowDown" });
+    const first = document.activeElement;
+    expect(first?.getAttribute("role")).toBe("menuitemradio");
+    expect(first?.textContent).toBe("Claude Sonnet 4.5");
+  });
+
+  it("keeps the thought-level list outside the model query", () => {
+    renderTrigger({ catalog: LARGE_BUILTIN });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: "sonn" } });
+    const contents = screen.getAllByTestId("sub-content");
+    expect(within(contents[1]).getAllByRole("menuitemradio").map((r) => r.textContent)).toEqual([
+      "low",
+      "high",
+    ]);
+  });
+
+  it("keeps printable keys inside the filter (no typeahead yank)", () => {
+    renderTrigger({ catalog: LARGE_BUILTIN });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    // A keydown that escapes the React root is one the menu content's own
+    // handler (Radix's typeahead) would see; the filter's stopPropagation
+    // must keep it inside.
+    const escaped: string[] = [];
+    const onEscape = (e: Event) => escaped.push((e as KeyboardEvent).key);
+    document.body.addEventListener("keydown", onEscape);
+    try {
+      fireEvent.keyDown(filter, { key: "g" });
+      expect(escaped).toEqual([]);
+    } finally {
+      document.body.removeEventListener("keydown", onEscape);
+    }
+  });
+
+  it("keeps focus in the filter when ArrowDown meets an empty filtered list", () => {
+    renderTrigger({ catalog: LARGE_BUILTIN });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    // The gesture presumes the input holds focus (the user just typed into
+    // it); fireEvent does not focus, so the test seats it explicitly.
+    filter.focus();
+    // React 18+ reports a handler crash via window's error channel instead
+    // of throwing through the dispatch, so the dead end's cleanliness is
+    // pinned as both "focus held" and "nothing crashed".
+    const errors: string[] = [];
+    const onError = (e: Event) => errors.push((e as ErrorEvent).message);
+    window.addEventListener("error", onError);
+    try {
+      fireEvent.change(filter, { target: { value: "zzz" } });
+      fireEvent.keyDown(filter, { key: "ArrowDown" });
+      // No row to land on: the honest dead end holds focus in the input
+      // (the empty-state line below explains why) and stays silent.
+      expect(errors).toEqual([]);
+      expect(document.activeElement).toBe(filter);
+    } finally {
+      window.removeEventListener("error", onError);
+    }
+  });
+
+  it("treats a whitespace-only query as the unfiltered list", () => {
+    renderTrigger({ catalog: LARGE_BUILTIN });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: " " } });
+    const contents = screen.getAllByTestId("sub-content");
+    expect(within(contents[0]).getAllByRole("menuitemradio").length).toBe(4);
+    expect(within(contents[0]).queryByText("No matching models")).toBeNull();
+  });
+
+  it("keeps the clearing row visible when an acp query matches nothing", () => {
+    renderTrigger();
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    const contents = screen.getAllByTestId("sub-content");
+    // The clearing row is a state readout, not a catalog entry: it survives
+    // the filter alongside the honest empty-state line.
+    expect(
+      within(contents[0]).getByRole("menuitem", { name: /Default \(recommended\)/ }),
+    ).toBeTruthy();
+    expect(within(contents[0]).getByText("No matching models")).toBeTruthy();
   });
 });
 
