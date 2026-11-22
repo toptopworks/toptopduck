@@ -136,6 +136,31 @@ export interface CatalogModel {
   supported_reasoning_efforts: string[];
 }
 
+// --- Built-in posture catalog (issue #1639, ADR-0153) -----------------------
+
+// One row of the built-in runtime's posture menu: the active profile
+// endpoint's first-hand model id plus the model catalog's metadata (an
+// uncataloged id renders verbatim with no tiers). The `CatalogModel` shape
+// minus the CLI-current fields -- no CLI reports a current here; the
+// payload-level `profile_model` is the effective default's one carrier.
+// Mirrors the Rust `BuiltinCatalogModel` (snake_case serde).
+export interface BuiltinCatalogModel {
+  id: string;
+  display_name: string;
+  supported_reasoning_efforts: string[];
+}
+
+// The built-in posture menu's catalog payload. An empty `models` renders the
+// fallback menu (the held profile model's synthetic row + the clearing row)
+// -- the honest shape before the probe answers and after it fails (the probe
+// is silent by contract). `profile_model` is the effective current (the
+// active profile's model field; null when blank -- no honest current).
+// Mirrors the Rust `BuiltinPostureCatalog`.
+export interface BuiltinPostureCatalog {
+  models: BuiltinCatalogModel[];
+  profile_model: string | null;
+}
+
 // --- Adapter catalog cache (ADR-0096 D5, issue #536) ------------------------
 //
 // The app-data sidecar `adapter-catalogs.json` read back over IPC: one

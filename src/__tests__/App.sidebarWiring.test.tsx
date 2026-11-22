@@ -88,12 +88,35 @@ vi.mock("@/components/ui/dropdown-menu", () => {
   function DropdownMenuSeparator() {
     return <div role="separator" />;
   }
+  // The posture cascade's second level (issue #1639: the built-in segment
+  // renders the menu too, so App-level mounts reach these): pass-through
+  // divs -- the sidebar wiring asserts nothing inside them.
+  function DropdownMenuSub({ children }: { children: ReactNode }) {
+    return <div>{children}</div>;
+  }
+  function DropdownMenuSubTrigger({ children }: { children: ReactNode }) {
+    return <div>{children}</div>;
+  }
+  function DropdownMenuSubContent({ children }: { children: ReactNode }) {
+    return <div>{children}</div>;
+  }
+  function DropdownMenuRadioGroup({ children }: { children: ReactNode }) {
+    return <div role="group">{children}</div>;
+  }
+  function DropdownMenuRadioItem({ children }: { children: ReactNode }) {
+    return <div role="menuitemradio">{children}</div>;
+  }
   return {
     DropdownMenu,
     DropdownMenuTrigger,
     DropdownMenuContent,
     DropdownMenuItem,
     DropdownMenuSeparator,
+    DropdownMenuSub,
+    DropdownMenuSubTrigger,
+    DropdownMenuSubContent,
+    DropdownMenuRadioGroup,
+    DropdownMenuRadioItem,
   };
 });
 

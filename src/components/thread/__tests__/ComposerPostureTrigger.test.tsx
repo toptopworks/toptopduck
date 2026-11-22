@@ -5,8 +5,12 @@ import { IntlProvider } from "react-intl";
 import { ComposerPostureTrigger } from "../ComposerPostureTrigger";
 import type { PostureCatalog } from "../ComposerPostureTrigger";
 import { TooltipProvider } from "../../ui/tooltip";
-import { closeAutoFocusCapture, selectPreventDefault } from "./dropdownMenuMock";
-import type { CatalogModel } from "../../../types/runtime";
+import {
+  closeAutoFocusCapture,
+  openChangeCapture,
+  selectPreventDefault,
+} from "./dropdownMenuMock";
+import type { BuiltinCatalogModel, CatalogModel } from "../../../types/runtime";
 
 // ComposerPostureTrigger tests (ADR-0099 Decision 3, issues #574/#573): the
 // posture button + cascade menu. The label itself is computed by
@@ -48,6 +52,30 @@ const PER_MODEL_CATALOG: PostureCatalog = {
     catalogModel("gpt-5", ["low", "medium", "high"], true),
     catalogModel("gpt-5-codex", ["low"]),
   ],
+};
+
+// The built-in fixture (issue #1639): an effort-tiered cataloged model, a
+// toggle-only uncataloged one (no tiers), and the profile model as the
+// effective current.
+function builtinModel(
+  id: string,
+  tiers: string[] = [],
+  displayName = id,
+): BuiltinCatalogModel {
+  return {
+    id,
+    display_name: displayName,
+    supported_reasoning_efforts: tiers,
+  };
+}
+
+const BUILTIN_CATALOG: PostureCatalog = {
+  kind: "builtin",
+  models: [
+    builtinModel("claude-sonnet-4-5", ["low", "high"], "Claude Sonnet 4.5"),
+    builtinModel("custom-deploy-7"),
+  ],
+  profileModel: "claude-sonnet-4-5",
 };
 
 type TriggerOverrides = Partial<Parameters<typeof ComposerPostureTrigger>[0]>;
@@ -275,6 +303,105 @@ describe("ComposerPostureTrigger per-model catalog (issue #537)", () => {
     renderTrigger({ catalog: PER_MODEL_CATALOG, model: null });
     const contents = screen.getAllByTestId("sub-content");
     expect(contents[1].textContent).toBe("");
+  });
+});
+
+describe("ComposerPostureTrigger built-in catalog (issue #1639)", () => {
+  it("renders cataloged rows under their display names and the uncataloged id verbatim", () => {
+    renderTrigger({ catalog: BUILTIN_CATALOG });
+    expect(
+      screen.getByRole("menuitemradio", { name: "Claude Sonnet 4.5" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("menuitemradio", { name: "custom-deploy-7" }),
+    ).toBeTruthy();
+  });
+
+  it("selects the model id (not the display name) through onSelectModel", () => {
+    const { onSelectModel } = renderTrigger({ catalog: BUILTIN_CATALOG });
+    fireEvent.click(
+      screen.getByRole("menuitemradio", { name: "Claude Sonnet 4.5" }),
+    );
+    expect(onSelectModel).toHaveBeenCalledWith("claude-sonnet-4-5");
+  });
+
+  it("annotates the clearing row with the profile model and carries it inline when nothing is selected", () => {
+    renderTrigger({ catalog: BUILTIN_CATALOG, model: null });
+    const rows = screen.getAllByTestId("sub-trigger");
+    expect(rows[0].textContent).toContain("claude-sonnet-4-5");
+    expect(
+      screen.getByRole("menuitem", {
+        name: "Default (recommended) (claude-sonnet-4-5)",
+      }),
+    ).toBeTruthy();
+  });
+
+  it("shows the strength row for a model with effort tiers", () => {
+    // The held model (the profile default) carries discrete tiers: the
+    // Thinking row seats with its list in the CLI-declared order.
+    renderTrigger({ catalog: BUILTIN_CATALOG, model: null });
+    const rows = screen.getAllByTestId("sub-trigger");
+    expect(rows[1].textContent).toContain("Thinking");
+    const contents = screen.getAllByTestId("sub-content");
+    expect(contents[1].textContent).toContain("low");
+    expect(contents[1].textContent).toContain("high");
+  });
+
+  it("hides the strength row for a toggle-only model (no tiers, nothing held)", () => {
+    renderTrigger({ catalog: BUILTIN_CATALOG, model: "custom-deploy-7" });
+    const rows = screen.getAllByTestId("sub-trigger");
+    expect(rows.length).toBe(1);
+    expect(rows[0].textContent).toContain("Model");
+    expect(screen.queryByText("Thinking")).toBeNull();
+  });
+
+  it("keeps the strength row for a held level even when the held model offers no tiers", () => {
+    // The honest synthetic mechanism rides over the hide rule: a held
+    // level must stay visible (and clearable) even with no directory.
+    renderTrigger({
+      catalog: BUILTIN_CATALOG,
+      model: "custom-deploy-7",
+      thoughtLevel: "high",
+    });
+    const rows = screen.getAllByTestId("sub-trigger");
+    expect(rows[1].textContent).toContain("Thinking");
+    expect(
+      screen.getByRole("menuitemradio", {
+        name: "high (not offered by this runtime)",
+      }),
+    ).toBeTruthy();
+  });
+
+  it("renders the silent fallback shape when the probe answered nothing (probe pending or failed)", () => {
+    // The fallback catalog: no models, the profile model as the current.
+    // The menu is NOT an error surface -- the held model rides the
+    // synthetic row, the clearing row carries the default copy.
+    renderTrigger({
+      catalog: { kind: "builtin", models: [], profileModel: "claude-x" },
+    });
+    expect(
+      screen.getByRole("menuitemradio", {
+        name: "claude-x (not offered by this runtime)",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("menuitem", {
+        name: "Default (recommended) (claude-x)",
+      }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("status")).toBeNull();
+    // No strength row: no tiers are knowable in the fallback shape.
+    expect(screen.queryByText("Thinking")).toBeNull();
+  });
+
+  it("fires onMenuOpen when the menu opens", () => {
+    const onMenuOpen = vi.fn();
+    renderTrigger({ catalog: BUILTIN_CATALOG, onMenuOpen });
+    // The mock's captured open-change handler is the menu's open event.
+    openChangeCapture.handler?.(true);
+    expect(onMenuOpen).toHaveBeenCalledTimes(1);
+    openChangeCapture.handler?.(false);
+    expect(onMenuOpen).toHaveBeenCalledTimes(1);
   });
 });
 

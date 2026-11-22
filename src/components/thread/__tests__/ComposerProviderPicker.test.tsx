@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useEffect, type ReactElement } from "react";
 import { IntlProvider } from "react-intl";
 import {
@@ -16,6 +16,7 @@ import {
 import {
   clearLastModelPosture,
   getAdapterCatalogs,
+  getBuiltinPostureCatalog,
   getLastModelPosture,
   getSessionModelConfig,
   getSessionRuntime,
@@ -26,6 +27,7 @@ import {
   type SetPosturePersistOutcome,
 } from "../../../api";
 import { TooltipProvider } from "../../ui/tooltip";
+import { openChangeCapture } from "./dropdownMenuMock";
 import type { ModelPosture } from "../../../types/app-config";
 import type { ProviderConfig, ProfileKeyStatus } from "../../../types/provider";
 import type {
@@ -63,9 +65,18 @@ vi.mock("../../../api", async (importOriginal) => {
     getSessionRuntime: vi.fn(),
     setSessionRuntime: vi.fn(async () => {}),
     listAdapters: vi.fn(),
-    getSessionModelConfig: vi.fn(),
+    // Resolves the empty pair by default: the model-config read feeds the
+    // built-in trigger too since #1639 (its read fault renders inline), so
+    // a bare undefined-returning mock would error the query and surface a
+    // fault line in every built-in test that does not override this.
+    getSessionModelConfig: vi.fn(async () => ({
+      model: null,
+      thought_level: null,
+      cached_discovered: null,
+    })),
     setSessionPosture: vi.fn(async () => PERSIST_OK),
     getAdapterCatalogs: vi.fn(async () => ({})),
+    getBuiltinPostureCatalog: vi.fn(async () => BUILTIN_FALLBACK),
     getLastModelPosture: vi.fn(async () => EMPTY_POSTURE),
     clearLastModelPosture: vi.fn(async () => ({})),
   };
@@ -78,6 +89,15 @@ const PERSIST_OK: SetPosturePersistOutcome = {
 };
 
 const EMPTY_POSTURE = { model: null, thought_level: null };
+
+// The built-in catalog's fallback answer (issue #1639): no first-hand list
+// (probe pending or failed -- silent either way), the profile's model as the
+// effective current. The default mock return so every pre-existing test
+// renders the honest fallback shape.
+const BUILTIN_FALLBACK = {
+  models: [],
+  profile_model: "claude-sonnet-4-6",
+};
 
 // The shared ACP handshake catalog fixture (issue #527), typed against the
 // wire shape so a new required field breaks the fixture at compile time.
@@ -678,20 +698,128 @@ async function renderExternalPicker(
   await screen.findByRole("combobox", { name: /Runtime: qwen-code/ });
 }
 
-describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)", () => {
-  it("shows the active profile's model as a static label on the built-in runtime", () => {
+describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
+  it("renders the fallback menu before any probe: the held model's synthetic row + the annotated clearing row, no error", () => {
     renderPicker(pickerJsx());
-    // Static: the posture label renders, but NOT as a button (no arrow,
-    // no menu -- profile.model is configured in Settings, ADR-0099).
-    expect(screen.getByText("claude-sonnet-4-6")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
+    // The probe never ran (only the menu-open event arms it): the fallback
+    // shape is the honest catalog -- the profile model's synthetic row and
+    // the clearing row annotated with it. Silent by contract: no fault
+    // line anywhere, and zero catalog IPC.
+    expect(
+      screen.getByRole("menuitemradio", {
+        name: "claude-sonnet-4-6 (not offered by this runtime)",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("menuitem", {
+        name: "Default (recommended) (claude-sonnet-4-6)",
+      }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(getBuiltinPostureCatalog).not.toHaveBeenCalled();
+  });
+
+  it("probes lazily: zero calls before the menu opens, one on the first open, none on a re-open", async () => {
+    renderPicker(pickerJsx());
+    expect(getBuiltinPostureCatalog).not.toHaveBeenCalled();
+    // The menu-open event (the mock's captured handler) is the one arm.
+    act(() => openChangeCapture.handler?.(true));
+    await waitFor(() =>
+      expect(getBuiltinPostureCatalog).toHaveBeenCalledTimes(1),
+    );
+    // A re-open arms nothing new: the arm already matches this endpoint and
+    // the query's staleTime is Infinity -- one fetch per endpoint.
+    act(() => openChangeCapture.handler?.(true));
+    expect(getBuiltinPostureCatalog).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays zero-egress after a profile endpoint edit until the menu opens again", async () => {
+    const { rerender, queryClient } = renderPicker(pickerJsx());
+    act(() => openChangeCapture.handler?.(true));
+    await waitFor(() =>
+      expect(getBuiltinPostureCatalog).toHaveBeenCalledTimes(1),
+    );
+    // A settings edit lands as a new provider prop with a different
+    // endpoint: the stale arm (scoped to the OLD endpoint) no longer
+    // matches, so the new key must NOT fetch on a mere re-render -- same
+    // QueryClient, the new key simply has no entry and enabled stays
+    // false.
+    const edited = pickerProvider();
+    edited.profiles[0].base_url = "https://proxy.example.com";
+    rerender(
+      wrap(
+        <ComposerProviderPicker
+          sessionId="sess-1"
+          provider={edited}
+          onSwitchActive={vi.fn()}
+          onOpenSettings={vi.fn()}
+          coldStart={null}
+        />,
+        queryClient,
+      ),
+    );
+    expect(getBuiltinPostureCatalog).toHaveBeenCalledTimes(1);
+    // The next open on the NEW endpoint arms and fetches it.
+    act(() => openChangeCapture.handler?.(true));
+    await waitFor(() =>
+      expect(getBuiltinPostureCatalog).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("lists the probe's models with display names and writes the selection through the set IPC", async () => {
+    vi.mocked(getBuiltinPostureCatalog).mockResolvedValue({
+      models: [
+        {
+          id: "claude-sonnet-4-5",
+          display_name: "Claude Sonnet 4.5",
+          supported_reasoning_efforts: ["low", "high"],
+        },
+        {
+          id: "custom-deploy-7",
+          display_name: "custom-deploy-7",
+          supported_reasoning_efforts: [],
+        },
+      ],
+      profile_model: "claude-sonnet-4-5",
+    });
+    renderPicker(pickerJsx());
+    act(() => openChangeCapture.handler?.(true));
+    // The probed rows render once the query lands: the display name for
+    // the cataloged id, the id verbatim for the uncataloged one.
+    const row = await screen.findByRole("menuitemradio", {
+      name: "Claude Sonnet 4.5",
+    });
+    fireEvent.click(row);
+    // The full pair lands through the one write port (issue #603): the
+    // picked model with the untouched (null) level.
+    await waitFor(() =>
+      expect(setSessionPosture).toHaveBeenCalledWith("sess-1", {
+        model: "claude-sonnet-4-5",
+        thought_level: null,
+      }),
+    );
+  });
+});
+
+describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)", () => {
+  it("shows the active profile's model on the built-in runtime's menu button", () => {
+    renderPicker(pickerJsx());
+    // Interactive since #1639: a profile row exists, so the posture
+    // control seats the cascade menu (the fallback shape before any
+    // probe -- the held model's synthetic row + the clearing row).
+    expect(
+      screen.getByRole("button", { name: "Model: claude-sonnet-4-6" }),
+    ).toBeTruthy();
   });
 
   it("switches the label with the runtime within one dropdown visit", async () => {
     vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     renderPicker(pickerJsx());
-    // Built-in: the label is the active profile's model.
-    expect(screen.getByText("claude-sonnet-4-6")).toBeTruthy();
+    // Built-in: the label is the active profile's model (the button-name
+    // query -- the always-open menu's inline value repeats the same text).
+    expect(
+      screen.getByRole("button", { name: "Model: claude-sonnet-4-6" }),
+    ).toBeTruthy();
     await openRuntimeSelect();
     pickOption("qwen-code");
     // External with no catalog: the label switches to the CLI default and
@@ -700,10 +828,13 @@ describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)"
     expect(screen.queryByText("claude-sonnet-4-6")).toBeNull();
     // Back to built-in via the profile option (a profile pick IS the
     // built-in pick): the label returns to the profile model and the CLI
-    // default readout is gone.
+    // default readout is gone (the button-name query -- the always-open
+    // menu's inline value repeats the same text).
     await openRuntimeSelect(/Runtime: qwen-code/);
     pickOption(/Anthropic/);
-    expect(await screen.findByText("claude-sonnet-4-6")).toBeTruthy();
+    expect(
+      await screen.findByRole("button", { name: "Model: claude-sonnet-4-6" }),
+    ).toBeTruthy();
     expect(screen.queryByText("Default (recommended)")).toBeNull();
   });
 

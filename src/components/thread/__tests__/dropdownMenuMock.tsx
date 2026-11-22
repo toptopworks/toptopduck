@@ -32,9 +32,25 @@ export const selectPreventDefault = vi.fn();
 // under test's own item wrappers -- only context crosses that boundary.
 const radioGroupValueContext = createContext<string>("");
 
-const dropdownMenu = ({ children }: { children: ReactNode }) => (
-  <div data-testid="menu-root">{children}</div>
-);
+// The captured open-change handler: the menu mock records onOpenChange
+// instead of dropping it (issue #1639), so the picker suite can fire the
+// captured handler with `true` and pin the lazy-probe arm (the built-in
+// catalog fetch fires on menu OPEN, never before) without Radix's portal
+// lifecycle -- the same always-open trade as the rest of this module.
+export const openChangeCapture: {
+  handler: ((open: boolean) => void) | null;
+} = { handler: null };
+
+const dropdownMenu = ({
+  children,
+  onOpenChange,
+}: {
+  children: ReactNode;
+  onOpenChange?: (open: boolean) => void;
+}) => {
+  openChangeCapture.handler = onOpenChange ?? null;
+  return <div data-testid="menu-root">{children}</div>;
+};
 
 const dropdownMenuTrigger = ({
   children,

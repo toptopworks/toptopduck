@@ -7,6 +7,7 @@ import { fmtError } from "../../lib/error-presentation";
 import { findActiveProfile } from "../../lib/findActiveProfile";
 import {
   getAdapterCatalogs,
+  getBuiltinPostureCatalog,
   getLastModelPosture,
   getSessionModelConfig,
   getSessionRuntime,
@@ -23,7 +24,7 @@ import type {
   SessionRuntimeChoice,
 } from "../../types/runtime";
 import { RUNTIME_CHOICE_DEFAULT } from "../../types/runtime";
-import { ComposerPostureTrigger } from "./ComposerPostureTrigger";
+import { ComposerPostureTrigger, type PostureCatalog } from "./ComposerPostureTrigger";
 import {
   createSessionSelectionPort,
   type ColdStartSelectionChannel,
@@ -204,6 +205,14 @@ export function ComposerProviderPicker({
     runtimeData ?? effectiveRuntime ?? RUNTIME_CHOICE_DEFAULT;
   const isExternal = runtime.kind === "external";
   const activeAdapterId = isExternal ? runtime.data : null;
+  // The active profile row (the built-in runtime's face): resolved once
+  // here, ahead of both the catalog reads and the render-time labels
+  // below, so the early query blocks can key off it too. The model field
+  // and the zero-profile predicate ride along -- both the catalog and the
+  // label consume them.
+  const activeProfile = findActiveProfile(provider);
+  const builtInModel = activeProfile?.model ?? "";
+  const noProfiles = provider.profiles.length === 0;
 
   // Per-session external-runtime model config (ADR-0095, issue #527): the
   // model + thought-level selections + the cached discovery catalog. Same
@@ -282,6 +291,30 @@ export function ComposerProviderPicker({
       ? (cachedCatalogs[activeAdapterId] ?? null)
       : null;
 
+  // The built-in catalog's lazy probe (issue #1639, ADR-0153): armed by the
+  // posture menu's open (the trigger's onMenuOpen below) FOR THE CURRENT
+  // ENDPOINT -- the ONLY event that may fetch, so every path before an
+  // open stays zero-egress. The arm is endpoint-scoped, not a one-shot
+  // boolean: a settings edit on the profile mints a new endpoint identity,
+  // the stale arm no longer matches, and the query stays disabled until the
+  // menu opens AGAIN on the new endpoint (an armed-for-A fetch must never
+  // fire for B on a mere re-render). staleTime Infinity keeps one fetch per
+  // endpoint; the backend's in-process cache (keyed by the /v1-normalized
+  // list URL, so variant base spellings collapse server-side) is the
+  // second, server-side dedupe. Zero profiles: never enabled, no IPC.
+  const [armedEndpoint, setArmedEndpoint] = useState("");
+  const activeProfileForList = isExternal ? null : activeProfile;
+  const builtinEndpoint =
+    activeProfileForList != null
+      ? `${activeProfileForList.protocol}:${activeProfileForList.base_url}`
+      : "";
+  const { data: builtinCatalogData } = useQuery({
+    queryKey: adapterKeys.builtinPostureCatalog(builtinEndpoint),
+    queryFn: getBuiltinPostureCatalog,
+    enabled: builtinEndpoint !== "" && armedEndpoint === builtinEndpoint,
+    staleTime: Infinity,
+  });
+
   // Guards the posture set IPC (the menu is disabled while a write is in
   // flight). In-session only -- the cold-start channel is a synchronous
   // pending write.
@@ -309,34 +342,57 @@ export function ComposerProviderPicker({
       : (pendingModelPosture ?? backfillData ?? EMPTY_POSTURE);
 
   // The posture-catalog projection (ADR-0096 D6 priority chain, issues
-  // #529/#586, in posture-catalog.ts): the cascade menu's catalog, its one
-  // provenance note, and the tooltip's live payload -- derived pure from
-  // the query reads assembled above.
+  // #529/#586, in posture-catalog.ts): the cascade menu's EXTERNAL catalog,
+  // its one provenance note, and the tooltip's live payload -- derived pure
+  // from the query reads assembled above. External-only: the built-in
+  // runtime's catalog comes from the first-hand probe query above (no
+  // discovery chain, no note, no live currents -- nothing to derive).
   const {
-    catalog: postureCatalog,
+    catalog: externalCatalog,
     note: catalogNote,
     liveValue,
-  } = derivePostureCatalog({
-    isExternal,
-    activeAdapterId,
-    activeAdapter,
-    discovered,
-    probeEntry,
-    posture,
-  });
+  } = isExternal
+    ? derivePostureCatalog({
+        isExternal,
+        activeAdapterId,
+        activeAdapter,
+        discovered,
+        probeEntry,
+        posture,
+      })
+    : { catalog: null, note: null, liveValue: null };
+
+  // The built-in segment's catalog (issue #1639, ADR-0153): a profile row
+  // exists -> the menu always seats (the fallback shape before the probe
+  // answers and after it fails -- the held model's synthetic row + the
+  // clear row, silent); zero profiles -> no catalog (the static "Not
+  // configured" label). The pre-probe profileModel falls back to the
+  // local app-config read so even the never-opened menu shows the held
+  // current; the probe's own value supersedes it (same field).
+  const postureCatalog: PostureCatalog | null = isExternal
+    ? externalCatalog
+    : noProfiles
+      ? null
+      : {
+          kind: "builtin",
+          models: builtinCatalogData?.models ?? [],
+          profileModel:
+          builtinCatalogData?.profile_model ?? (builtInModel || null),
+        };
 
   // The posture read's settle gate (issue #603 review): the full-pair wire
-  // makes this cache the authority for the UNTOUCHED field of every submit,
-  // so an unsettled read must never feed one. Two windows: the first fetch
-  // (data undefined -> the DEFAULT fallback would coerce the server-held
-  // value into an explicit clear) and any refetch in flight (selectRuntime
-  // invalidates this key -> the stale pair would overwrite the freshly
-  // seeded slot). The error state is excluded: configFault replaces the
-  // control outright. Gates the trigger (the menu cannot open) AND the
-  // handlers -- a menu already open when a refetch starts still drops the
-  // gesture, since Radix items ignore the trigger's disabled.
-  const postureReadUnsettled =
-    isExternal && sessionId !== null && modelConfigFetching;
+  // makes this cache the authority for the UNTOUCHED field of every
+  // submit, so an unsettled read must never feed one. Two windows: the
+  // first fetch (data undefined -> the DEFAULT fallback would coerce the
+  // server-held value into an explicit clear) and any refetch in flight
+  // (selectRuntime invalidates this key -> the stale pair would overwrite
+  // the freshly seeded slot). The error state is excluded: configFault
+  // replaces the control outright. Gates the trigger (the menu cannot
+  // open) AND the handlers -- a menu already open when a refetch starts
+  // still drops the gesture, since Radix items ignore the trigger's
+  // disabled. Runtime-agnostic since #1639: the built-in pair rides the
+  // same query and the same full-pair wire.
+  const postureReadUnsettled = sessionId !== null && modelConfigFetching;
 
   // The write face (composer-selection-write.ts): the session adapter over
   // the set IPCs, or the App-owned cold-start channel on the bar -- one
@@ -393,19 +449,22 @@ export function ComposerProviderPicker({
   }
 
   const selectModel = (model: string | null) => {
-    // Per-model linkage (issue #537, shared by codex + claude-code): the
-    // thought level must sit in the newly selected model's supported set. A
-    // held level outside that set (including every held level once the
-    // model pick is cleared -- no model means no supported set at all) is
-    // cleared in the SAME user gesture -- since issue #603 the same wire
-    // submit, so a rejected write leaves the held level against the
-    // still-held model untouched.
-    const perModelModels =
-      postureCatalog?.kind === "perModel" ? postureCatalog.models : null;
+    // Per-model linkage (issue #537, shared by codex + claude-code; the
+    // built-in catalog since #1639): the thought level must sit in the
+    // newly selected model's supported set. A held level outside that set
+    // (including every held level once the model pick is cleared -- no
+    // model means no supported set at all) is cleared in the SAME user
+    // gesture -- since issue #603 the same wire submit, so a rejected
+    // write leaves the held level against the still-held model untouched.
+    const tieredModels =
+      postureCatalog != null &&
+      (postureCatalog.kind === "perModel" || postureCatalog.kind === "builtin")
+        ? postureCatalog.models
+        : null;
     const mustClearLevel =
-      perModelModels &&
+      tieredModels &&
       posture.thought_level != null &&
-      !supportedEffortsFor(perModelModels, model).includes(
+      !supportedEffortsFor(tieredModels, model).includes(
         posture.thought_level,
       );
     const thoughtLevel = mustClearLevel ? null : posture.thought_level;
@@ -482,13 +541,10 @@ export function ComposerProviderPicker({
     if (isExternal) void selectRuntime({ kind: "built_in" });
   }
 
-  const activeProfile = findActiveProfile(provider);
   const unnamed = intl.formatMessage({
     id: "common.profileUnnamed",
     defaultMessage: "Unnamed profile",
   });
-  const builtInModel = activeProfile?.model ?? "";
-  const noProfiles = provider.profiles.length === 0;
   const notConfigured = intl.formatMessage({
     id: "composer.providerPicker.notConfigured",
     defaultMessage: "Not configured",
@@ -498,8 +554,10 @@ export function ComposerProviderPicker({
     defaultMessage: "Default (recommended)",
   });
 
-  // The posture label (ADR-0099 Decision 3 / #573): built-in shows the
-  // active profile's model (empty -> em dash; zero profiles -> "Not
+  // The posture label (ADR-0099 Decision 3 / #573, extended by #1639):
+  // built-in shows the HELD pair first (a session-level selection is the
+  // next turn's posture, same readout form as external), falling back to
+  // the active profile's model (empty -> em dash; zero profiles -> "Not
   // configured", never a fake default); external shows the held pair
   // (either side omitted when unset -- the two dimensions are
   // independently reachable on ACP adapters, so a lone thought level has
@@ -514,7 +572,9 @@ export function ComposerProviderPicker({
   const postureLabel = !isExternal
     ? noProfiles
       ? notConfigured
-      : builtInModel || "—"
+      : heldParts.length > 0
+        ? heldParts.join(" · ")
+        : builtInModel || "—"
     : heldParts.length > 0
       ? heldParts.join(" · ")
       : defaultRecommended;
@@ -579,16 +639,13 @@ export function ComposerProviderPicker({
 
   // Honest read failure (issue #529): a rejected posture read must NOT
   // masquerade as an unselected default -- the posture trigger renders the
-  // fault inline instead of the control. Scoped to external runtimes: the
-  // built-in posture reads app-config, not these queries. In-session the
-  // source is the model-config query; on the cold-start bar it is the
-  // backfill read (the model-config query is disabled there) -- the two
-  // are mutually exclusive by their enabled guards.
-  const modelConfigFault = isExternal
-    ? sessionId === null
-      ? backfillError
-      : modelConfigError
-    : null;
+  // fault inline instead of the control. In-session BOTH runtimes read the
+  // same model-config query (the built-in pair rides it too since #1639);
+  // on the cold-start bar only the external backfill read exists (the
+  // built-in bar reads app-config, which has no failure state here) -- the
+  // two are mutually exclusive by their enabled guards.
+  const modelConfigFault =
+    sessionId === null ? (isExternal ? backfillError : null) : modelConfigError;
 
   return (
     <>
@@ -599,10 +656,11 @@ export function ComposerProviderPicker({
         label={postureLabel}
         catalog={postureCatalog}
         liveValue={liveValue}
-        model={isExternal ? posture.model : null}
-        thoughtLevel={isExternal ? posture.thought_level : null}
+        model={posture.model}
+        thoughtLevel={posture.thought_level}
         onSelectModel={(m) => void selectModel(m)}
         onSelectThoughtLevel={(l) => void selectThoughtLevel(l)}
+        onMenuOpen={() => setArmedEndpoint(builtinEndpoint)}
         configFault={modelConfigFault}
         setFault={postureSetError}
         persistFault={posturePersistFault}
