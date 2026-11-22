@@ -4409,17 +4409,26 @@ pub fn get_session_model_config(
     session_id: String,
 ) -> Result<SessionModelConfig, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
-    // The pair read takes the slot lock once: a concurrent set lands entirely
-    // before or after this read, never as a torn (old, new) mix. The runtime
-    // comes off the same read -- the scope verdict needs it (ADR-0154).
+    Ok(read_session_model_config(&handle, &live))
+}
+
+/// The read command's body (ADR-0154), split out for the execution seam:
+/// the pair read takes the slot lock once -- a concurrent set lands
+/// entirely before or after this read, never as a torn (old, new) mix --
+/// and the runtime comes off the same read, feeding the scope verdict's
+/// lazy endpoint derivation off the live config.
+fn read_session_model_config(
+    handle: &SessionHandle,
+    live: &LiveProviderConfig,
+) -> SessionModelConfig {
     let (runtime, posture) = handle.runtime_and_posture();
     let in_scope = posture_in_scope(runtime.as_ref(), &posture, || live.builtin_posture_key());
-    Ok(SessionModelConfig {
+    SessionModelConfig {
         model: posture.pair.model,
         thought_level: posture.pair.thought_level,
         cached_discovered: handle.cached_discovered(),
         in_scope,
-    })
+    }
 }
 
 /// Set the session's model + thought-level selections for the next
@@ -6429,6 +6438,46 @@ mod tests {
         assert!(!posture_in_scope(None, &unstamped, || Some(
             TEST_ENDPOINT.into()
         )));
+    }
+
+    #[test]
+    fn read_session_model_config_derives_the_scope_from_the_live_config() {
+        // The read command's own body (ADR-0154): the lazy endpoint read
+        // rides the live config, not a hand-fed closure -- the wiring the
+        // picker's display verdict depends on. A pair stamped for the
+        // ACTIVE endpoint reads back in scope with its model; a pair
+        // stamped elsewhere is held but reads out of scope, so the bar
+        // renders the unselected state while the stored pair survives.
+        let (_dir, live) = posture_live_with_profile();
+        let (_store, handle) = posture_handle();
+        handle.set_external_model_config(StampedPosture::scoped(
+            PosturePair {
+                model: Some("gateway-model".into()),
+                thought_level: Some("high".into()),
+            },
+            TEST_ENDPOINT,
+        ));
+        let read = read_session_model_config(&handle, &live);
+        assert_eq!(read.model.as_deref(), Some("gateway-model"));
+        assert!(
+            read.in_scope,
+            "the active endpoint's own pair reads in scope"
+        );
+
+        handle.set_external_model_config(StampedPosture::scoped(
+            PosturePair {
+                model: Some("other-model".into()),
+                thought_level: None,
+            },
+            "builtin:anthropic|https://other.example.test",
+        ));
+        let read = read_session_model_config(&handle, &live);
+        assert_eq!(
+            read.model.as_deref(),
+            Some("other-model"),
+            "the pair is held"
+        );
+        assert!(!read.in_scope, "another endpoint's pair reads out of scope");
     }
 
     #[test]

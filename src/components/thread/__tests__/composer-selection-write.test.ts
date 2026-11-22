@@ -106,6 +106,30 @@ describe("session selection port (ADR-0095 set-IPC orchestration)", () => {
     });
   });
 
+  it("flips a stale out-of-scope verdict on the write (ADR-0154)", async () => {
+    const queryClient = new QueryClient();
+    // A held pair stamped for another endpoint reads back out of scope;
+    // the pick that just landed is stamped with the set-time active
+    // endpoint, so the seeded verdict must be in scope -- never the
+    // stale false carried over from the pre-set read.
+    queryClient.setQueryData(sessionKeys.modelConfig("sess-1"), {
+      model: "stale-model",
+      thought_level: null,
+      cached_discovered: null,
+      in_scope: false,
+    } satisfies SessionModelConfig);
+    await sessionPort(queryClient, null).writePosture(POSTURE, {
+      clearsBackfill: false,
+      rollbackTo: POSTURE,
+    });
+    expect(queryClient.getQueryData(sessionKeys.modelConfig("sess-1"))).toEqual({
+      model: "fake-opus",
+      thought_level: "medium",
+      cached_discovered: null,
+      in_scope: true,
+    });
+  });
+
   it("invalidates the backfill entry after a successful set (single write point)", async () => {
     const queryClient = new QueryClient();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");

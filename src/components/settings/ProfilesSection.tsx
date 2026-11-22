@@ -737,11 +737,9 @@ export function ProfilesSection({
                 onSelectCustom={() =>
                   // Enter hand-fill mode: the openai-compatible protocol with
                   // a cleared base_url the user must type (the commit-time
-                  // validation enforces it). model survives -- a wrong model
-                  // is cheaper to overwrite than a typed endpoint -- and the
-                  // model unpins: a custom endpoint's list is unknown here,
-                  // and an empty model is the legal no-pinned-default state
-                  // (ADR-0154).
+                  // validation enforces it). The model unpins: a custom
+                  // endpoint's list is unknown here, and an empty model is
+                  // the legal no-pinned-default state (ADR-0154).
                   setDraft({ ...draft, protocol: "openai", base_url: "", model: null })}
                 disabled={fieldsDisabled}
                 onOpenChange={setSelectOpen}

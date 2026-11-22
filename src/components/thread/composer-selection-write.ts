@@ -95,6 +95,13 @@ export function createSessionSelectionPort(args: {
           (prev: SessionModelConfig | undefined): SessionModelConfig => ({
             ...(prev ?? MODEL_CONFIG_DEFAULT),
             ...next,
+            // ADR-0154: the post-set state is in scope by construction --
+            // the backend stamps the endpoint active at set time, and an
+            // external runtime is always true. Spreading `next` alone
+            // would carry a stale verdict forward: a held out-of-scope
+            // pair would keep the bar rendering unselected after the
+            // pick that just re-stamped it.
+            in_scope: true,
           }),
         );
         // The set lands the post-set pair in the startup backfill entry

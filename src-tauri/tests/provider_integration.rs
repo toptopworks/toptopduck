@@ -1110,6 +1110,26 @@ fn an_out_of_scope_built_in_posture_is_not_injected() {
     use toptopduck_lib::session::{PosturePair, StampedPosture};
     use toptopduck_lib::{builtin_endpoint_identity, Protocol};
     let mut server = mockito::Server::new();
+    // The strength-half trap (ADR-0154): the foreign pair carries a
+    // thought level, and a half-state injection (the pinned model riding
+    // with the out-of-scope pair's adaptive effort) must never reach the
+    // wire -- the pair contributes NEITHER half. mockito answers with the
+    // FIRST matching mock still missing hits, so this trap registers
+    // ahead of the lenient model-only mock below and claims any request
+    // pairing the effort fields (a 500 fails the turn outright); a clean
+    // out-of-scope request carries no effort fields and falls through.
+    // expect(2) only keeps the trap "missing hits" ahead of the real
+    // mock -- it is never asserted on, and a healthy run never lands a
+    // hit on it. (An expect(0) sentinel cannot do this job: a
+    // zero-expectation mock is never "missing hits", so a second,
+    // matching mock always answers instead.)
+    let _strength_trap = server
+        .mock("POST", "/v1/messages")
+        .match_body(mockito::Matcher::Regex(r#""type":"adaptive""#.into()))
+        .match_body(mockito::Matcher::Regex(r#""effort":"high""#.into()))
+        .expect(2)
+        .with_status(500)
+        .create();
     // The pinned profile model serves; a request carrying "foreign-model"
     // would miss this mock and fail the turn.
     let mock = server
