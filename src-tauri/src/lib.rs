@@ -357,8 +357,8 @@ pub fn run() {
             // process-globally. Anchoring the PATH is all setup does -- the
             // cache file itself is minted lazily by the first successful
             // background refresh (a built-in turn start is the only trigger),
-            // and an unresolved dir only means the catalog rides the
-            // embedded snapshot every launch.
+            // and an unresolved dir only anchors the cache under the
+            // temp-dir fallback, where it runs exactly the same.
             let model_catalog_cache =
                 app_data_path(app.handle(), "model-catalog.json.gz", "model catalog cache");
             provider::model_catalog::init_cache_path(model_catalog_cache);

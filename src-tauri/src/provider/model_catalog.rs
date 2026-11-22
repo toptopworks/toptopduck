@@ -203,10 +203,17 @@ fn compact_entry(model: &serde_json::Value) -> CompactEntry {
             .get("name")
             .and_then(|v| v.as_str())
             .map(str::to_string),
-        context_window: model.pointer("/limit/context").and_then(|v| v.as_u64()),
+        // Upstream writes unknown limits as 0 (the image/embedding class);
+        // a 0 output cap would stamp a guaranteed-rejected request (both
+        // wire protocols floor max_tokens at 1), so 0 reads as absent.
+        context_window: model
+            .pointer("/limit/context")
+            .and_then(|v| v.as_u64())
+            .filter(|&v| v > 0),
         output_cap: model
             .pointer("/limit/output")
             .and_then(|v| v.as_u64())
+            .filter(|&v| v > 0)
             .and_then(|v| u32::try_from(v).ok()),
         effort_tiers,
     }
@@ -427,8 +434,12 @@ pub(crate) fn ensure_fresh() {
 
 /// One silent fetch->trim->encode->write cycle. Every failure is `false`
 /// with no side effects on an existing cache file (the write is
-/// staged-then-renamed, so a half-written cache can never exist). Public
-/// because the release-flow generator bin rides the exact same pipeline.
+/// staged-then-renamed, so a half-written cache can never exist) --
+/// including a valid-JSON upstream that trims to zero entries: a healthy
+/// upstream carries five-digit entry counts, so an empty trim is a shape
+/// drift (an error page, a rename), not a catalog. Public because the
+/// release-flow generator bin rides the exact same pipeline (and inherits
+/// the gate: empty fails the release leg loudly).
 pub fn refresh_into(url: &str, path: &Path) -> bool {
     let Ok(body) = fetch_upstream(url) else {
         return false;
@@ -437,6 +448,9 @@ pub fn refresh_into(url: &str, path: &Path) -> bool {
         return false;
     };
     let catalog = trim_upstream(&value, now_secs());
+    if catalog.models.is_empty() {
+        return false;
+    }
     let Ok(bytes) = encode_catalog(&catalog) else {
         return false;
     };
@@ -535,6 +549,32 @@ mod tests {
         assert!(!catalog.models.contains_key("empty"));
         assert_eq!(catalog.models.len(), 3);
         assert_eq!(catalog.fetched_at, 1_000);
+    }
+
+    /// Upstream writes unknown limits as 0 (the image/embedding class --
+    /// a five-percent slice of the live document); a 0 that survived the
+    /// projection would stamp a max_tokens of 0 (a guaranteed per-turn
+    /// rejection, the one failure mode the clamp formula documents as
+    /// impossible), so 0 reads as absent on both fields.
+    #[test]
+    fn trim_treats_zero_limits_as_absent() {
+        let api = serde_json::json!({
+            "provider": {
+                "models": {
+                    "zero-model": {
+                        "name": "Zero Model",
+                        "limit": { "context": 0, "output": 0 }
+                    }
+                }
+            }
+        });
+        let catalog = trim_upstream(&api, 1_000);
+        let entry = catalog
+            .models
+            .get("zero-model")
+            .expect("zero-model trimmed");
+        assert_eq!(entry.context_window, None);
+        assert_eq!(entry.output_cap, None);
     }
 
     /// Duplicate ids resolve by canonical precedence: the lab's own row
@@ -741,6 +781,39 @@ mod tests {
         );
         assert!(catalog.fetched_at > 0);
         mock.assert();
+    }
+
+    /// A valid-JSON upstream that trims to zero entries is failure, not a
+    /// (vacuously successful) empty catalog: nothing is written, an
+    /// EXISTING cache survives byte-for-byte -- the same contract as
+    /// fetch/parse failures -- and the release generator fails loudly on
+    /// the same gate (ADR-0152's loud-over-empty ruling).
+    #[test]
+    fn an_empty_trim_is_failure_not_an_empty_catalog() {
+        let mut server = mockito::Server::new();
+        let empty = server
+            .mock("GET", "/api.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .expect(2)
+            .create();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("model-catalog.json.gz");
+        assert!(!refresh_into(&format!("{}/api.json", server.url()), &path));
+        assert!(!path.exists(), "an empty trim writes no file");
+        // seed a cache, then let the same empty trim hit it: it must not
+        // destroy what a real catalog already wrote
+        let seeded = encode_catalog(&trim_upstream(&upstream_fixture(), 7)).expect("encode");
+        std::fs::write(&path, &seeded).expect("seed");
+        assert!(!refresh_into(&format!("{}/api.json", server.url()), &path));
+        assert_eq!(
+            std::fs::read(&path).expect("cache survives"),
+            seeded,
+            "an empty trim never rewrites the existing cache"
+        );
+        // both fetches DID happen: the false comes from the gate, not the network
+        empty.assert();
     }
 
     /// Failures leave the disk untouched: an HTTP error and an
