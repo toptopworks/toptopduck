@@ -358,7 +358,16 @@ fn load_cache_locked(state: &mut CacheState, path: &Path) {
 
 fn cache_catalog() -> Option<Arc<CompactCatalog>> {
     let path = CACHE_PATH.get()?;
-    let mut state = cache_state();
+    cache_catalog_at(&CACHE_STATE, path)
+}
+
+/// Load-once-then-serve over an explicit state and cache path -- the seam
+/// the disk-scenario tests drive. The process-global `CACHE_PATH`
+/// anchors once per process, so a second disk scenario (a corrupt file
+/// next to a healthy one) cannot ride the real entry points; it drives
+/// this seam with its own state instead.
+fn cache_catalog_at(state: &Mutex<CacheState>, path: &Path) -> Option<Arc<CompactCatalog>> {
+    let mut state = state.lock().expect("model catalog state lock poisoned");
     load_cache_locked(&mut state, path);
     state.loaded.clone()
 }
@@ -382,6 +391,24 @@ fn refresh_decision(loaded_fetched_at: Option<u64>, last_attempt: Option<u64>, n
     !last_attempt.is_some_and(|t| now.saturating_sub(t) < CATALOG_TTL_SECS)
 }
 
+/// The decision+arming critical section the lazy trigger rides: one lock
+/// guard spans the disk load, the staleness decision, and the attempt-
+/// ledger write, so two concurrent turn starts cannot both pass the
+/// decision and each spawn a fetch (ADR-0152's one-fetch-per-window
+/// contract). Extracted over an explicit state and path -- the unit
+/// suite drives it directly, since the compiled-out live trigger below
+/// cannot pin the section as a whole.
+fn arm_refresh(state: &Mutex<CacheState>, path: &Path, now: u64) -> bool {
+    let mut state = state.lock().expect("model catalog state lock poisoned");
+    load_cache_locked(&mut state, path);
+    let loaded_fetched_at = state.loaded.as_ref().map(|catalog| catalog.fetched_at);
+    if !refresh_decision(loaded_fetched_at, state.last_attempt, now) {
+        return false;
+    }
+    state.last_attempt = Some(now);
+    true
+}
+
 /// The lazy consumption trigger (ADR-0152), called from the built-in
 /// turn's live factory -- the one call site that implies a provider
 /// profile exists. Answers immediately from the current data (the turn
@@ -394,22 +421,7 @@ pub(crate) fn ensure_fresh() {
     let Some(path) = CACHE_PATH.get().cloned() else {
         return;
     };
-    let now = now_secs();
-    // The decision and the arming share ONE lock guard: two concurrent
-    // turn starts must not both pass the staleness check and each spawn a
-    // fetch (the ADR's one-background-fetch-per-window contract).
-    let should_refresh = {
-        let mut state = cache_state();
-        load_cache_locked(&mut state, &path);
-        let loaded_fetched_at = state.loaded.as_ref().map(|catalog| catalog.fetched_at);
-        if !refresh_decision(loaded_fetched_at, state.last_attempt, now) {
-            false
-        } else {
-            state.last_attempt = Some(now);
-            true
-        }
-    };
-    if !should_refresh {
+    if !arm_refresh(&CACHE_STATE, &path, now_secs()) {
         return;
     }
     let _ = std::thread::Builder::new()
@@ -426,11 +438,19 @@ pub(crate) fn ensure_fresh() {
         });
 }
 
+/// Hermetic unit suite: the live trigger is compiled out (see the real
+/// arm's doc comment above for what that guarantees). The stub COUNTS
+/// its calls -- the read-path hermeticity pin asserts that chain lookups
+/// never route into the trigger, which a bare no-op stub could not
+/// detect.
 #[cfg(test)]
 pub(crate) fn ensure_fresh() {
-    // Hermetic unit suite: the live trigger is compiled out (see the
-    // real arm's doc comment above for what that guarantees).
+    TEST_TRIGGER_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
+
+/// The test stub's call ledger (see above).
+#[cfg(test)]
+static TEST_TRIGGER_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// One silent fetch->trim->encode->write cycle. Every failure is `false`
 /// with no side effects on an existing cache file (the write is
@@ -758,6 +778,109 @@ mod tests {
         ));
     }
 
+    /// Arming loads the disk cache BEFORE deciding: a cache a
+    /// just-finished refresh wrote to disk must read as fresh, not arm a
+    /// redundant fetch over it. (A decide-then-load order would read the
+    /// empty in-memory tier, re-fetch, and stomp the fresh disk cache.)
+    #[test]
+    fn arming_loads_the_disk_cache_before_deciding() {
+        const NOW: u64 = 10 * CATALOG_TTL_SECS;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("model-catalog.json.gz");
+        let fresh = CompactCatalog {
+            fetched_at: NOW - 100,
+            models: HashMap::new(),
+        };
+        std::fs::write(&path, encode_catalog(&fresh).expect("encode")).expect("seed");
+        let state = Mutex::new(CacheState::default());
+        assert!(
+            !arm_refresh(&state, &path, NOW),
+            "a fresh disk cache must not arm a refresh"
+        );
+        let guard = state.lock().expect("state lock");
+        assert!(
+            guard
+                .loaded
+                .as_ref()
+                .is_some_and(|catalog| catalog.fetched_at == NOW - 100),
+            "the disk tier was loaded into memory first"
+        );
+        assert!(
+            guard.last_attempt.is_none(),
+            "no ledger write on a fresh cache"
+        );
+    }
+
+    /// The attempt ledger inside the critical section: one arm silences
+    /// the rest of the TTL window regardless of outcome, then re-arms
+    /// one TTL later (the long-running self-heal).
+    #[test]
+    fn arming_silences_the_window_then_rearms_next_ttl() {
+        const NOW: u64 = 10 * CATALOG_TTL_SECS;
+        let dir = tempfile::tempdir().expect("tempdir");
+        // absent file: no cache tier, so only the ledger can say no
+        let path = dir.path().join("model-catalog.json.gz");
+        let state = Mutex::new(CacheState::default());
+        assert!(arm_refresh(&state, &path, NOW), "no cache at all -> arm");
+        assert_eq!(
+            state.lock().expect("state lock").last_attempt,
+            Some(NOW),
+            "arming stamps the ledger inside the guard"
+        );
+        assert!(
+            !arm_refresh(&state, &path, NOW + 100),
+            "a recent attempt silences the window"
+        );
+        assert!(
+            arm_refresh(&state, &path, NOW + CATALOG_TTL_SECS),
+            "the next TTL window re-arms"
+        );
+    }
+
+    /// Two concurrent turn starts arm exactly ONE refresh: the decision
+    /// and the ledger write share one lock guard, so whichever thread
+    /// enters the critical section second sees the first's stamp and
+    /// stands down. Correct code is deterministic here (the guard lock
+    /// serializes the sections). A ledger write moved outside the guard
+    /// can let both pass the decision and both arm, but this test sees
+    /// that only when the OS preempts the releasing thread inside the
+    /// nanosecond re-lock gap -- schedule-dependent, never a guaranteed
+    /// red. The ledger property's deterministic enforcement lives in
+    /// the sequential tests above: an arm is ledger-visible the moment
+    /// it returns.
+    #[test]
+    fn two_concurrent_turn_starts_arm_exactly_one_refresh() {
+        const NOW: u64 = 10 * CATALOG_TTL_SECS;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("model-catalog.json.gz");
+        let state = Arc::new(Mutex::new(CacheState::default()));
+        // Hold the guard so neither worker can enter the critical
+        // section until both are running and about to take the lock.
+        let guard = state.lock().expect("state lock");
+        let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let entered = Arc::clone(&entered);
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    arm_refresh(&state, &path, NOW)
+                })
+            })
+            .collect();
+        while entered.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            std::hint::spin_loop();
+        }
+        drop(guard);
+        let armed: usize = handles
+            .into_iter()
+            .map(|handle| usize::from(handle.join().expect("worker")))
+            .sum();
+        assert_eq!(armed, 1, "exactly one turn may arm the refresh");
+        assert_eq!(state.lock().expect("state lock").last_attempt, Some(NOW));
+    }
+
     /// A successful refresh writes a decodable cache file: same trim as
     /// the in-process path, fetched_at stamped, cache-dir created.
     #[test]
@@ -847,19 +970,106 @@ mod tests {
         garbage.assert();
     }
 
+    /// The staged-then-renamed write, driven directly: success leaves no
+    /// `.tmp` residue, a failed staged write never touches the existing
+    /// file, and a failed rename sinks the whole write -- a partial or
+    /// half-written cache can never be observed. A plain-write regression
+    /// (write straight to the target) flips the staged-failure leg to a
+    /// false success, and the assert catches the flip.
+    #[test]
+    fn atomic_write_leaves_no_residue_and_never_breaks_the_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // success: the payload lands and the staged file is gone
+        let path = dir.path().join("one.json.gz");
+        assert!(write_atomic(&path, b"payload"));
+        assert_eq!(std::fs::read(&path).expect("written"), b"payload");
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "no staged file lingers after success"
+        );
+        // staged-write failure: a directory squatting on the staged name
+        // sinks the stage step; the existing file must survive untouched
+        let path = dir.path().join("two.json.gz");
+        std::fs::write(&path, b"previous").expect("seed");
+        std::fs::create_dir(path.with_extension("tmp")).expect("block the staged name");
+        assert!(!write_atomic(&path, b"next"));
+        assert_eq!(
+            std::fs::read(&path).expect("survives"),
+            b"previous",
+            "a failed staged write never rewrites the target"
+        );
+        // rename failure: a non-empty directory on the target name sinks
+        // the rename (both platforms refuse file-over-directory)
+        let path = dir.path().join("three.json.gz");
+        std::fs::create_dir(&path).expect("dir target");
+        std::fs::write(path.join("occupant"), b"x").expect("non-empty");
+        assert!(!write_atomic(&path, b"next"));
+    }
+
     /// Chain lookups are pure reads: however many fire (the CLI channel
     /// stamps are exactly this shape), no refresh is ever attempted --
-    /// the read-path half of the CLI-only zero-egress guarantee.
+    /// the read-path half of the CLI-only zero-egress guarantee. The
+    /// stub's call ledger gives the pin teeth: routing `ensure_fresh`
+    /// into any read path shows up as a counted call, not a silent
+    /// no-op.
     #[test]
     fn lookups_never_attempt_a_refresh() {
+        let before = TEST_TRIGGER_CALLS.load(std::sync::atomic::Ordering::SeqCst);
         assert!(crate::provider::context_window::context_window("glm-4.6").is_some());
         let _ = crate::provider::output_cap::output_token_cap("gpt-4o");
         let _ = context_window("claude-3-5-sonnet");
         let _ = output_cap("deepseek-chat");
         let _ = effort_tiers("zz-nothing");
+        assert_eq!(
+            TEST_TRIGGER_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "chain lookups must never route into the lazy trigger"
+        );
         assert!(
             cache_state().last_attempt.is_none(),
             "lookups must never arm the attempt ledger"
+        );
+    }
+
+    /// A corrupt cache file on disk is skipped silently: loading never
+    /// panics, never deletes or rewrites the file, never arms the
+    /// ledger -- and the chain still answers through the snapshot and
+    /// prefix tiers. Driven through the explicit state+path seam: the
+    /// process-global `CACHE_PATH` anchors once per process (the
+    /// healthy-file scenario below claims it), so this second disk
+    /// scenario cannot ride the real entry points.
+    #[test]
+    fn a_corrupt_cache_falls_through_the_chain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("model-catalog.json.gz");
+        std::fs::write(&path, b"not a gzip stream").expect("corrupt seed");
+        let state = Mutex::new(CacheState::default());
+        assert!(
+            cache_catalog_at(&state, &path).is_none(),
+            "a corrupt file loads nothing (no panic)"
+        );
+        // a second load is equally silent: the bad file is never
+        // rewritten from the snapshot tier or deleted
+        assert!(cache_catalog_at(&state, &path).is_none());
+        assert!(path.exists(), "a corrupt cache is skipped, never deleted");
+        assert_eq!(
+            std::fs::read(&path).expect("byte-for-byte"),
+            b"not a gzip stream".to_vec()
+        );
+        assert!(
+            state.lock().expect("state lock").last_attempt.is_none(),
+            "serving the chain never arms the ledger"
+        );
+        // the rest of the chain still answers: snapshot tier first...
+        let (_, snapshot) = fixture_tiers();
+        assert_eq!(
+            tiered_context_window(None, Some(&snapshot), "ss-model"),
+            Some(3_500)
+        );
+        // ...then the prefix table
+        assert_eq!(
+            tiered_context_window(None, None, "glm-4-air"),
+            Some(128_000)
         );
     }
 
