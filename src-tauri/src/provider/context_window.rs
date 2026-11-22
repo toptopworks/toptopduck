@@ -13,11 +13,16 @@
 //! point so numerator and denominator carry the same moment. A miss is the
 //! hollow ring -- the honest degrade, never a guessed window.
 //!
-//! The table rides releases and follows models.dev values (the same source
-//! `output_cap`'s low-cap catalog cites); new families join by adding rows
-//! (purely additive). The rejected alternatives -- a per-profile manual
-//! field, a user-triggered catalog refresh, an externalized user-editable
-//! table -- are recorded in ADR-0130's Considered section.
+//! Since #1638 (ADR-0152) this table is the LAST tier of the lookup chain
+//! `model_catalog` resolves -- disk cache exact id -> embedded snapshot
+//! exact id -> this prefix table -- so [`stamp`] answers from the fresher
+//! tiers first. The table's role shrank to the fallback for ids the
+//! catalog does not carry: family aliases and custom deployment ids.
+//! Refresh cadence drops accordingly -- new rows only when a whole new
+//! FAMILY ships, not per release. The rejected alternatives -- a
+//! per-profile manual field, a user-triggered catalog refresh, an
+//! externalized user-editable table -- are recorded in ADR-0130's
+//! Considered section.
 
 use super::output_cap::hits_family;
 
@@ -165,16 +170,20 @@ pub(crate) fn context_window(model_name: &str) -> Option<u64> {
         .map(|(_, window)| *window)
 }
 
-/// Stamp the catalog's answer onto a reading as its denominator (#1290).
-/// A window the channel itself reported (the ACP occupancy snapshot's
-/// `size`) outranks the catalog -- the stamp only ever fills a windowless
-/// reading, which is structurally the only shape it sees (the built-in and
-/// CLI collection points build their snapshots windowless). `None` model
-/// (the bridged face, a stream that never reported one) leaves the
-/// snapshot hollow.
+/// Stamp the catalog's answer onto a reading as its denominator (#1290,
+/// chain-routed since #1638): the full lookup chain (`model_catalog`:
+/// disk cache -> snapshot -> this module's prefix table) answers for the
+/// serving model. A window the channel itself reported (the ACP occupancy
+/// snapshot's `size`) outranks any catalog tier -- the stamp only ever
+/// fills a windowless reading, which is structurally the only shape it
+/// sees (the built-in and CLI collection points build their snapshots
+/// windowless). `None` model (the bridged face, a stream that never
+/// reported one) leaves the snapshot hollow. Pure read: this path never
+/// triggers a catalog refresh (the CLI channels stamp on it, and they
+/// must egress nothing).
 pub(crate) fn stamp(snapshot: &mut crate::model::OccupancySnapshot, model: Option<&str>) {
     if snapshot.limit.is_none() {
-        snapshot.limit = model.and_then(context_window);
+        snapshot.limit = model.and_then(super::model_catalog::context_window);
     }
 }
 

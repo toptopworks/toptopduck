@@ -5764,6 +5764,7 @@ dependencies = [
  "chrono",
  "csv",
  "duckdb",
+ "flate2",
  "futures",
  "glob",
  "http",

@@ -118,6 +118,17 @@ name = "mcp-paginated-server"
 path = "tests/fixtures/mcp_paginated_server.rs"
 required-features = ["test-fixtures"]
 
+# Model-catalog snapshot generator (ADR-0152): the release flow's Build
+# workflow runs this before `tauri build` to stage the gitignored
+# `snapshots/model-catalog.gz` the build script embeds. NOT gated behind
+# `test-fixtures` -- it is a production release step, and it rides the
+# library's own refresh pipeline so the snapshot and the runtime cache
+# trim identically. Its only network call is the public, unauthenticated
+# models.dev endpoint.
+[[bin]]
+name = "model-catalog-snapshot"
+path = "src/bin/model_catalog_snapshot.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -168,6 +179,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 calamine = { version = "0.30", features = ["dates"] }
 # Per-sheet temp CSV writer: correct escaping for commas/quotes/newlines in cells.
 csv = "1"
+# gzip codec for the model-catalog snapshot and disk cache (ADR-0152): the
+# compact catalog rides the binary and lands on disk gzip-compressed
+# (~60KB vs ~393KB raw). Already in the tree transitively; used directly
+# so encode/decode does not hand-roll a deflate wrapper.
+flate2 = "1"
 # Body chunk type the MCP transports read through (the pump channel's
 # payload; reqwest's `Response::chunk` yields it). A transitive dep of the
 # reqwest/rustls graph, declared explicitly since the transport names it.

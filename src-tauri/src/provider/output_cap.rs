@@ -81,7 +81,7 @@ const LOW_CAP_PREFIXES: &[(&str, u32)] = &[
 /// after lowercasing the name (catalog prefixes are stored lowercase
 /// already -- the audit test holds that). `None` = no entry, fallback
 /// territory.
-fn catalog_output(model_name: &str) -> Option<u32> {
+pub(crate) fn catalog_output(model_name: &str) -> Option<u32> {
     let normalized = model_name.to_lowercase();
     LOW_CAP_PREFIXES
         .iter()
@@ -110,8 +110,10 @@ pub(crate) fn hits_family(normalized: &str, prefix: &str) -> bool {
 /// clamp stage: `entry ?? CAP`, then `min(_, CAP)`. The min is inert while
 /// the catalog holds only sub-CAP entries (the audit's invariant) -- it
 /// exists so a drifted entry can never exceed what the fallback would
-/// have sent.
-fn clamp_entry(entry: Option<u32>) -> u32 {
+/// have sent. Shared with `model_catalog`, whose exact-id tiers fold
+/// through the same clamp (the chain's formula never changes, only the
+/// entry source does).
+pub(crate) fn clamp_entry(entry: Option<u32>) -> u32 {
     entry.unwrap_or(OUTPUT_TOKEN_CAP).min(OUTPUT_TOKEN_CAP)
 }
 
@@ -123,12 +125,16 @@ static UNDER_CAP_SEEN: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// The dispatch seam's cap formula (issue #1001):
-/// `min(catalog[model] ?? OUTPUT_TOKEN_CAP, OUTPUT_TOKEN_CAP)`. Called once
-/// per turn at the live factory, keyed on the same facts that built the
-/// model handle (zero drift between the cap and the model actually
-/// serving the turn).
+/// `min(catalog[model] ?? OUTPUT_TOKEN_CAP, OUTPUT_TOKEN_CAP)`. Since
+/// #1638 (ADR-0152) the entry source is the full lookup chain
+/// (`model_catalog`: disk cache exact id -> embedded snapshot exact id ->
+/// [`catalog_output`]'s low-cap prefix table) -- the formula itself, and
+/// its asymmetric failure direction, are unchanged. Called once per turn
+/// at the live factory, keyed on the same facts that built the model
+/// handle (zero drift between the cap and the model actually serving the
+/// turn); that call site is also the catalog refresh's lazy trigger.
 pub(crate) fn output_token_cap(model_name: &str) -> u32 {
-    let cap = clamp_entry(catalog_output(model_name));
+    let cap = super::model_catalog::output_cap(model_name);
     // The under-cap observation (issue #1003, level/dedup/condition ruled
     // in #1045): the clamp maps a miss and any at/over-cap entry onto the
     // cap itself, so reading the ANSWER is behavior-equivalent to

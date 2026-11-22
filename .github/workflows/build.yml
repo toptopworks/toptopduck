@@ -69,6 +69,16 @@ jobs:
 
       - run: npm ci
 
+      # Model-catalog snapshot (ADR-0152): stage the gitignored
+      # `snapshots/model-catalog.gz` the build script embeds into the
+      # binary. Runs on every matrix leg right before the tauri build;
+      # `--release` shares the target dir with the build that follows, so
+      # this adds one extra crate, not a second full compile. A fetch
+      # failure fails the release build here -- the loud end of a pipeline
+      # whose runtime half is fully silent.
+      - name: Generate model catalog snapshot
+        run: cargo run --manifest-path src-tauri/Cargo.toml --release --bin model-catalog-snapshot -- src-tauri/snapshots/model-catalog.gz
+
       # Quality gates are NOT repeated here: the CI workflow's frontend/rust
       # jobs own them, and tauri's beforeBuildCommand (tsc --noEmit + vite
       # build) already covers type-check + bundle for the packaged app.

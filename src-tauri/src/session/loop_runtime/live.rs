@@ -107,8 +107,13 @@ fn handle_from_facts(facts: &TurnModelFacts) -> Result<ModelHandle, Termination>
 /// SAME facts that built
 /// the handle above, so both are keyed on the exact model serving the
 /// turn -- a profile switch lands handle + cap + denominator together,
-/// never apart.
+/// never apart. The turn start here is also the model catalog's lazy
+/// refresh trigger (#1638, ADR-0152): the ONE consumption point that
+/// implies a provider profile exists -- zero-profile and CLI-only setups
+/// never reach it, and the CLI channels' occupancy stamps are pure chain
+/// reads that never trigger, so those setups egress nothing.
 fn live_runtime(facts: TurnModelFacts) -> Result<LoopRuntime, Termination> {
+    crate::provider::model_catalog::ensure_fresh();
     let handle = handle_from_facts(&facts)?;
     Ok(LoopRuntime::live(
         handle,
