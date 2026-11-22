@@ -100,9 +100,12 @@ const dropdownMenuItem = ({
   onSelect?: (e: { preventDefault: () => void }) => void;
   disabled?: boolean;
 } & Record<string, unknown>) => (
+  // tabIndex -1 mirrors the real Radix item: a focusable roving row the
+  // filter row's ArrowDown can land on (issue #1645).
   <div
     role="menuitem"
     aria-disabled={disabled ?? false}
+    tabIndex={-1}
     onClick={() => {
       if (!disabled) onSelect?.({ preventDefault: selectPreventDefault });
     }}
@@ -145,6 +148,7 @@ const dropdownMenuRadioItem = ({
       role="menuitemradio"
       aria-checked={groupValue === value}
       aria-disabled={disabled ?? false}
+      tabIndex={-1}
       onClick={() => {
         if (!disabled) onSelect?.({ preventDefault: selectPreventDefault });
       }}
@@ -155,9 +159,25 @@ const dropdownMenuRadioItem = ({
   );
 };
 
-const dropdownMenuSub = ({ children }: { children: ReactNode }) => (
-  <div data-testid="menu-sub">{children}</div>
-);
+// The captured sub open-change handler: the filter row (issue #1645) resets
+// its query on submenu close, so the suite fires this captured handler with
+// `false` to pin the reset without Radix's presence lifecycle -- the same
+// captured-handler trade as openChangeCapture above. Single slot: the last
+// rendered Sub wins, so reset tests use a single-Sub catalog.
+export const subOpenChangeCapture: {
+  handler: ((open: boolean) => void) | null;
+} = { handler: null };
+
+const dropdownMenuSub = ({
+  children,
+  onOpenChange,
+}: {
+  children: ReactNode;
+  onOpenChange?: (open: boolean) => void;
+}) => {
+  subOpenChangeCapture.handler = onOpenChange ?? null;
+  return <div data-testid="menu-sub">{children}</div>;
+};
 
 const dropdownMenuSubTrigger = ({
   children,

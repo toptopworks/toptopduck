@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useState } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { ChevronDown, Info } from "lucide-react";
 
@@ -7,6 +8,7 @@ import { usePointerCloseIntent } from "../../lib/usePointerCloseIntent";
 import type { SaveError } from "../../types/session";
 import type { BuiltinCatalogModel, CatalogModel } from "../../types/runtime";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { Input } from "../ui/input";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -317,6 +319,9 @@ export function ComposerPostureTrigger({
             // without a clearing row, since "unselected" is not a
             // destination there.
             pinnedDefaultId={catalog.kind === "builtin" ? catalog.profileModel : undefined}
+            // The gateway-length lists (issue #1645) ride the filter row;
+            // the discrete, short strength list does not.
+            searchable
             ids={modelIds}
             selectedId={model}
             labelFor={labelFor}
@@ -414,6 +419,7 @@ function DimensionSub({
   unavailable = false,
   labelFor,
   pinnedDefaultId,
+  searchable = false,
 }: {
   label: ReactNode;
   displayValue: string | null;
@@ -432,7 +438,48 @@ function DimensionSub({
   // way back to the pinned model; its presence is also what drops the
   // leading clearing row (the built-in model dimension, ADR-0154).
   pinnedDefaultId?: string | null;
+  // Seats the filter row above the list (issue #1645, the model dimension
+  // only): typing filters the directory rows by id and display name. The
+  // clearing + synthetic rows stay unfiltered -- they are state readouts,
+  // not catalog entries. The query resets on submenu close.
+  searchable?: boolean;
 }) {
+  const intl = useIntl();
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLowerCase();
+  // The directory view under the current query: a row survives when either
+  // its id or its display name carries the query as a case-insensitive
+  // substring. An empty (or whitespace-only) query is the full list.
+  const filteredIds =
+    normalizedQuery === ""
+      ? ids
+      : ids.filter((id) => {
+          const rowLabel = labelFor?.(id) ?? id;
+          return (
+            id.toLowerCase().includes(normalizedQuery) ||
+            rowLabel.toLowerCase().includes(normalizedQuery)
+          );
+        });
+
+  // The filter input's key handling (issue #1645): character keys never
+  // bubble into the content's typeahead (each keystroke would otherwise
+  // yank focus to a matching row mid-word), while ArrowDown moves focus to
+  // the first focusable menu row -- the same Tab order Radix's own roving
+  // focus would enter, so the rest of the keyboard path is native.
+  const handleFilterKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      const rows = e.currentTarget.parentElement?.querySelectorAll<HTMLElement>(
+        "[role='menuitem']:not([aria-disabled='true']), [role='menuitemradio']:not([aria-disabled='true'])",
+      );
+      rows?.[0]?.focus();
+      return;
+    }
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.stopPropagation();
+    }
+  };
+
   // The synthetic row's id, derived from this row's own inputs: it exists
   // if and only if the displayed value is a non-empty id outside `ids`.
   // Selectable, so the menu stays honest about an active posture it cannot
@@ -451,7 +498,14 @@ function DimensionSub({
             ? "pinned"
             : undefined;
   return (
-    <DropdownMenuSub>
+    <DropdownMenuSub
+      onOpenChange={(open) => {
+        // Every open starts unfiltered: the previous query never survives a
+        // close (Radix unmounts the content; the explicit reset keeps that
+        // true regardless of the mounting semantics).
+        if (!open) setQuery("");
+      }}
+    >
       <DropdownMenuSubTrigger disabled={unavailable}>
         {label}
         {unavailable ? (
@@ -467,24 +521,53 @@ function DimensionSub({
       </DropdownMenuSubTrigger>
       <DropdownMenuSubContent>
         {!unavailable && (
-          // Permanently controlled ("" = nothing selected): the radio value
-          // must never fall back to an uncontrolled internal state.
-          <DropdownMenuRadioGroup value={selectedId ?? ""}>
-            {!isBuiltinModel && (
-              <ClearingItem label={clearLabel} onClear={() => onSelect(null)} />
-            )}
-            {unrepresentedId != null && (
-              <OptionItem
-                id={unrepresentedId}
-                onSelect={() => onSelect(unrepresentedId)}
-                note={syntheticNote}
-                labelFor={labelFor}
+          <>
+            {searchable && (
+              // The text-input copy-in riding the menu-compact variant
+              // (DESIGN.md Inputs): h-7 + px-2 over the standard token set.
+              <Input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={handleFilterKeyDown}
+                placeholder={intl.formatMessage({
+                  id: "composer.runtimePicker.filterModels",
+                  defaultMessage: "Filter models…",
+                })}
+                aria-label={intl.formatMessage({
+                  id: "composer.runtimePicker.filterModelsAria",
+                  defaultMessage: "Filter models",
+                })}
+                className="mb-1 h-7 px-2"
               />
             )}
-            {ids.map((id) => (
-              <OptionItem key={id} id={id} labelFor={labelFor} onSelect={() => onSelect(id)} />
-            ))}
-          </DropdownMenuRadioGroup>
+            {/* Permanently controlled ("" = nothing selected): the radio value
+                must never fall back to an uncontrolled internal state. */}
+            <DropdownMenuRadioGroup value={selectedId ?? ""}>
+              {!isBuiltinModel && (
+                <ClearingItem label={clearLabel} onClear={() => onSelect(null)} />
+              )}
+              {unrepresentedId != null && (
+                <OptionItem
+                  id={unrepresentedId}
+                  onSelect={() => onSelect(unrepresentedId)}
+                  note={syntheticNote}
+                  labelFor={labelFor}
+                />
+              )}
+              {filteredIds.map((id) => (
+                <OptionItem key={id} id={id} labelFor={labelFor} onSelect={() => onSelect(id)} />
+              ))}
+            </DropdownMenuRadioGroup>
+            {searchable && normalizedQuery !== "" && filteredIds.length === 0 && (
+              <p className="text-muted-foreground px-2 py-1.5 text-xs">
+                <FormattedMessage
+                  id="composer.runtimePicker.noModelMatch"
+                  defaultMessage="No matching models"
+                />
+              </p>
+            )}
+          </>
         )}
       </DropdownMenuSubContent>
     </DropdownMenuSub>
