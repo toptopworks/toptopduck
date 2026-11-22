@@ -391,13 +391,6 @@ fn refresh_decision(loaded_fetched_at: Option<u64>, last_attempt: Option<u64>, n
     !last_attempt.is_some_and(|t| now.saturating_sub(t) < CATALOG_TTL_SECS)
 }
 
-/// The lazy consumption trigger (ADR-0152), called from the built-in
-/// turn's live factory -- the one call site that implies a provider
-/// profile exists. Answers immediately from the current data (the turn
-/// never blocks); a detached worker does the fetching. Unit-test builds
-/// compile this to a no-op (hermetic suite -- no egress to the real
-/// endpoint); integration-test builds keep the real arm, which is inert
-/// there because nothing anchors the cache path outside the app's setup.
 /// The decision+arming critical section the lazy trigger rides: one lock
 /// guard spans the disk load, the staleness decision, and the attempt-
 /// ledger write, so two concurrent turn starts cannot both pass the
@@ -416,6 +409,13 @@ fn arm_refresh(state: &Mutex<CacheState>, path: &Path, now: u64) -> bool {
     true
 }
 
+/// The lazy consumption trigger (ADR-0152), called from the built-in
+/// turn's live factory -- the one call site that implies a provider
+/// profile exists. Answers immediately from the current data (the turn
+/// never blocks); a detached worker does the fetching. Unit-test builds
+/// compile this to a no-op (hermetic suite -- no egress to the real
+/// endpoint); integration-test builds keep the real arm, which is inert
+/// there because nothing anchors the cache path outside the app's setup.
 #[cfg(not(test))]
 pub(crate) fn ensure_fresh() {
     let Some(path) = CACHE_PATH.get().cloned() else {
@@ -841,8 +841,13 @@ mod tests {
     /// and the ledger write share one lock guard, so whichever thread
     /// enters the critical section second sees the first's stamp and
     /// stands down. Correct code is deterministic here (the guard lock
-    /// serializes the sections); a ledger write moved OUTSIDE the guard
-    /// lets both pass the decision and both arm.
+    /// serializes the sections). A ledger write moved outside the guard
+    /// can let both pass the decision and both arm, but this test sees
+    /// that only when the OS preempts the releasing thread inside the
+    /// nanosecond re-lock gap -- schedule-dependent, never a guaranteed
+    /// red. The ledger property's deterministic enforcement lives in
+    /// the sequential tests above: an arm is ledger-visible the moment
+    /// it returns.
     #[test]
     fn two_concurrent_turn_starts_arm_exactly_one_refresh() {
         const NOW: u64 = 10 * CATALOG_TTL_SECS;
@@ -969,8 +974,8 @@ mod tests {
     /// `.tmp` residue, a failed staged write never touches the existing
     /// file, and a failed rename sinks the whole write -- a partial or
     /// half-written cache can never be observed. A plain-write regression
-    /// (write straight to the target) flips the staged-failure leg green,
-    /// which is exactly what this pin detects.
+    /// (write straight to the target) flips the staged-failure leg to a
+    /// false success, and the assert catches the flip.
     #[test]
     fn atomic_write_leaves_no_residue_and_never_breaks_the_target() {
         let dir = tempfile::tempdir().expect("tempdir");
