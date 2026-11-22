@@ -1026,6 +1026,12 @@ fn anthropic_thought_level_rides_the_adaptive_shape() {
         .mock("POST", "/v1/messages")
         .match_body(mockito::Matcher::Regex(r#""type":"adaptive""#.into()))
         .match_body(mockito::Matcher::Regex(r#""effort":"high""#.into()))
+        // #1639: the pair's model half overrides the profile's facts model
+        // on the wire -- the picked id, not the StaticConfig default
+        // ("claude-sonnet-4-6"), serves the turn.
+        .match_body(mockito::Matcher::Regex(
+            r#""model":"claude-opus-4-6-posture""#.into(),
+        ))
         .expect(1)
         .with_status(200)
         .with_header("content-type", "text/event-stream")
@@ -1034,7 +1040,7 @@ fn anthropic_thought_level_rides_the_adaptive_shape() {
     let provider = anthropic_live_provider(server.url(), Some("sk-test"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     session.set_external_model_config(PosturePair {
-        model: None,
+        model: Some("claude-opus-4-6-posture".into()),
         thought_level: Some("high".into()),
     });
     let outcome = session.ask("anything");
@@ -1058,6 +1064,11 @@ fn openai_thought_level_rides_the_reasoning_effort() {
         .match_body(mockito::Matcher::Regex(
             r#""reasoning_effort":"high""#.into(),
         ))
+        // #1639: the pair's model half overrides the profile's facts model
+        // on the wire (the StaticConfig default is "gpt-4o").
+        .match_body(mockito::Matcher::Regex(
+            r#""model":"gpt-4o-mini-posture""#.into(),
+        ))
         .expect(1)
         .with_status(200)
         .with_header("content-type", "text/event-stream")
@@ -1066,7 +1077,7 @@ fn openai_thought_level_rides_the_reasoning_effort() {
     let provider = openai_live_provider(server.url(), Some("sk-test"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     session.set_external_model_config(PosturePair {
-        model: None,
+        model: Some("gpt-4o-mini-posture".into()),
         thought_level: Some("high".into()),
     });
     let outcome = session.ask("anything");

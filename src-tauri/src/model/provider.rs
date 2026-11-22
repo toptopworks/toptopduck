@@ -24,7 +24,7 @@ pub const DEFAULT_PROVIDER_MODEL: &str = "claude-sonnet-4-6";
 /// Completions, Bearer auth; covers OpenAI direct / DeepSeek / GLM / Qwen /
 /// Ollama compatible endpoints). Crosses IPC as the bare lowercase variant
 /// name (mirrors the ChartKind convention).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     #[default]

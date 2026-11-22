@@ -5,7 +5,7 @@ import { ChevronDown, Info } from "lucide-react";
 import { fmtError } from "../../lib/error-presentation";
 import { usePointerCloseIntent } from "../../lib/usePointerCloseIntent";
 import type { SaveError } from "../../types/session";
-import type { CatalogModel } from "../../types/runtime";
+import type { BuiltinCatalogModel, CatalogModel } from "../../types/runtime";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import {
   DropdownMenu,
@@ -20,26 +20,29 @@ import {
 } from "../ui/dropdown-menu";
 import { LABEL_HIDE_NARROW } from "./composer-visual";
 
-// The next-turn posture text button (ADR-0099 Decision 3, issue #574/#573): a
-// resident text control seated BEFORE the runtime trigger on the QuestionBar
-// row. Its label is the posture readout computed by the picker (built-in:
-// active profile model / "Not configured"; external: "{model} · {strength}",
-// either dimension alone, or "Default (recommended)"). The turn-end live
-// currents never touch the label (issue #586): while nothing is selected,
-// the label keeps its default copy and the tooltip carries what the last
-// turn actually ran. Without a catalog
-// (built-in,
-// or an external CLI never probed/discovered) it renders as a static
-// label with no arrow -- never a button pretending to be clickable; with a
-// catalog it opens the cascade menu (dropdown-menu Sub primitive): two
-// first-level rows (Model / Thinking) showing the current value inline, each
-// opening a second-level menuitemradio list (aria-checked carries the
+// The next-turn posture text button (ADR-0099 Decision 3, issue #574/#573):
+// a resident text control seated BEFORE the runtime trigger on the
+// QuestionBar row. Its label is the posture readout computed by the picker
+// (built-in: held pair / active profile model / "Not configured"; external:
+// "{model} · {strength}", either dimension alone, or "Default
+// (recommended)"). The turn-end live currents never touch the label (issue
+// #586): while nothing is selected, the label keeps its default copy and the
+// tooltip carries what the last turn actually ran. Without a catalog (zero
+// profiles, or an external CLI never probed/discovered) it renders as a
+// static label with no arrow -- never a button pretending to be clickable;
+// with a catalog it opens the cascade menu (dropdown-menu Sub primitive):
+// two first-level rows (Model / Thinking) showing the current value inline,
+// each opening a second-level menuitemradio list (aria-checked carries the
 // current selection, issue #584) with a leading "Default (recommended)"
 // clearing row and the honest synthetic row for a held value the catalog
-// does not offer (issue #529). Item selection keeps the menu open
-// (preventDefault) so the checked state updates and the fault lines below
-// stay visible -- the fault surfaces that rode the old popover's selector
-// body.
+// does not offer (issue #529). The built-in catalog (issue #1639) rides the
+// same form with two honest deltas: its rows render the model catalog's
+// display names, and the strength row appears only for a held model with
+// discrete effort tiers (probe pending/failed renders the fallback shape --
+// the held model's synthetic row + the clear row -- with no error surface).
+// Item selection keeps the menu open (preventDefault) so the checked state
+// updates and the fault lines below stay visible -- the fault surfaces that
+// rode the old popover's selector body.
 export type ComposerPostureTriggerProps = {
   // The posture display label, already formatted by the picker.
   label: string;
@@ -76,6 +79,10 @@ export type ComposerPostureTriggerProps = {
   // info-icon tooltip on the bar row before the trigger button; null
   // renders nothing.
   catalogNote: CatalogNote;
+  // Fires once per menu OPEN (not per render): the picker's lazy-probe arm
+  // (issue #1639) -- the only event that may trigger the built-in catalog's
+  // first-hand list fetch. Every other path stays zero-egress.
+  onMenuOpen?: () => void;
   disabled: boolean;
 };
 
@@ -83,7 +90,11 @@ export type ComposerPostureTriggerProps = {
 // "acp" is the flat handshake catalog (independent model / thought-level
 // lists + the CLI-reported currents); "perModel" is the probe cache's
 // per-model catalog, whose thought-level list is the SELECTED model's
-// supported efforts in the CLI's declared order.
+// supported efforts in the CLI's declared order; "builtin" (issue #1639,
+// ADR-0153) is the built-in runtime's first-hand endpoint list with catalog
+// metadata -- no CLI current (the profile's model field is the effective
+// default), and an empty `models` list is the honest fallback shape (probe
+// pending or failed -- silent by contract), never an error surface.
 export type PostureCatalog =
   | {
     kind: "acp";
@@ -92,7 +103,12 @@ export type PostureCatalog =
     currentModel: string | null;
     currentThoughtLevel: string | null;
   }
-  | { kind: "perModel"; models: CatalogModel[] };
+  | { kind: "perModel"; models: CatalogModel[] }
+  | {
+    kind: "builtin";
+    models: BuiltinCatalogModel[];
+    profileModel: string | null;
+  };
 
 // The catalog provenance note kind (see ComposerPostureTriggerProps):
 // which of the two honest-source explanations, if any, applies.
@@ -111,6 +127,7 @@ export function ComposerPostureTrigger({
   persistFault,
   persistSuspended,
   catalogNote,
+  onMenuOpen,
   disabled,
 }: ComposerPostureTriggerProps) {
   const intl = useIntl();
@@ -150,11 +167,11 @@ export function ComposerPostureTrigger({
     defaultMessage: "Default (recommended)",
   });
 
-  // Normalize the catalog into one directory shape (the acp / perModel
-  // dispatch happens once, not per consumer below): the model ids, the
-  // CLI-reported current per dimension, and -- perModel only -- the SELECTED
-  // model's supported efforts (null/unknown model = none; the flagged
-  // default model is the model dimension's effective current).
+  // Normalize the catalog into one directory shape (the acp / perModel /
+  // builtin dispatch happens once, not per consumer below): the model ids,
+  // the CLI-reported current per dimension, and -- perModel only -- the
+  // SELECTED model's supported efforts (null/unknown model = none; the
+  // flagged default model is the model dimension's effective current).
   let modelIds: string[];
   let currentModel: string | null;
   let levelIds: string[];
@@ -162,11 +179,31 @@ export function ComposerPostureTrigger({
   // perModel without a model pick has no honest level list (issue #537):
   // the row disables with the pick-a-model hint instead of a union list.
   let levelUnavailable = false;
+  // builtin hides the strength row outright (issue #1639) when the held
+  // model offers no discrete effort tiers and nothing is held -- unlike
+  // perModel, the built-in segment never blocks on a model pick (the
+  // profile model is always the held value).
+  let hideLevelRow = false;
+  // builtin rows render the catalog's display name (the id verbatim when
+  // uncataloged) while the selection value stays the id.
+  let labelFor: ((id: string) => string) | undefined;
   if (catalog.kind === "acp") {
     modelIds = catalog.models;
     currentModel = catalog.currentModel;
     levelIds = catalog.thoughtLevels;
     currentLevel = catalog.currentThoughtLevel;
+  } else if (catalog.kind === "builtin") {
+    modelIds = catalog.models.map((m) => m.id);
+    // The effective default: the profile's configured model (what the
+    // unselected state runs next turn); no CLI reports a current here.
+    currentModel = catalog.profileModel;
+    currentLevel = null;
+    const held = model ?? catalog.profileModel;
+    const entry = held != null ? catalog.models.find((m) => m.id === held) : undefined;
+    levelIds = entry?.supported_reasoning_efforts ?? [];
+    hideLevelRow = levelIds.length === 0 && thoughtLevel == null;
+    const byId = new Map(catalog.models.map((m) => [m.id, m.display_name]));
+    labelFor = (id) => byId.get(id) ?? id;
   } else {
     modelIds = catalog.models.map((m) => m.id);
     currentModel = catalog.models.find((m) => m.is_default)?.id ?? null;
@@ -219,7 +256,13 @@ export function ComposerPostureTrigger({
   return (
     <>
       {catalogNote === "from-probe" && <ProbeCatalogInfoIcon />}
-      <DropdownMenu>
+      <DropdownMenu
+        onOpenChange={(o) => {
+          // The lazy-probe arm (issue #1639): the menu's open is the one
+          // event that may fire the built-in catalog fetch.
+          if (o) onMenuOpen?.();
+        }}
+      >
         {liveValue != null ? (
           // The live readout's only surface (issue #586): the label keeps
           // its default copy, so the tooltip carries what the last turn
@@ -265,22 +308,25 @@ export function ComposerPostureTrigger({
             clearLabel={modelClearLabel}
             ids={modelIds}
             selectedId={model}
+            labelFor={labelFor}
             onSelect={onSelectModel}
           />
-          <DimensionSub
-            label={(
-              <FormattedMessage
-                id="composer.runtimePicker.thoughtLevelLabel"
-                defaultMessage="Thinking"
-              />
-            )}
-            displayValue={heldLevel}
-            clearLabel={levelClearLabel}
-            ids={levelIds}
-            selectedId={thoughtLevel}
-            unavailable={levelUnavailable}
-            onSelect={onSelectThoughtLevel}
-          />
+          {!hideLevelRow && (
+            <DimensionSub
+              label={(
+                <FormattedMessage
+                  id="composer.runtimePicker.thoughtLevelLabel"
+                  defaultMessage="Thinking"
+                />
+              )}
+              displayValue={heldLevel}
+              clearLabel={levelClearLabel}
+              ids={levelIds}
+              selectedId={thoughtLevel}
+              unavailable={levelUnavailable}
+              onSelect={onSelectThoughtLevel}
+            />
+          )}
           <SelectorFaultLines
             setFault={setFault}
             persistFault={persistFault}
@@ -354,6 +400,7 @@ function DimensionSub({
   selectedId,
   onSelect,
   unavailable = false,
+  labelFor,
 }: {
   label: ReactNode;
   displayValue: string | null;
@@ -362,6 +409,9 @@ function DimensionSub({
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   unavailable?: boolean;
+  // The row's display text per id (the built-in catalog's display names);
+  // absent = the id itself, the external catalogs' convention.
+  labelFor?: (id: string) => string;
 }) {
   // The synthetic row's id, derived from this row's own inputs: it exists
   // if and only if the displayed value is a non-empty id outside `ids`.
@@ -400,7 +450,7 @@ function DimensionSub({
               />
             )}
             {ids.map((id) => (
-              <OptionItem key={id} id={id} onSelect={() => onSelect(id)} />
+              <OptionItem key={id} id={id} labelFor={labelFor} onSelect={() => onSelect(id)} />
             ))}
           </DropdownMenuRadioGroup>
         )}
@@ -416,10 +466,12 @@ function OptionItem({
   id,
   onSelect,
   unrepresented = false,
+  labelFor,
 }: {
   id: string;
   onSelect: () => void;
   unrepresented?: boolean;
+  labelFor?: (id: string) => string;
 }) {
   return (
     <DropdownMenuRadioItem
@@ -436,7 +488,7 @@ function OptionItem({
           values={{ id }}
         />
       ) : (
-        id
+        (labelFor?.(id) ?? id)
       )}
     </DropdownMenuRadioItem>
   );

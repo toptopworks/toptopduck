@@ -17,8 +17,17 @@ pub mod live_config;
 pub mod model_catalog;
 pub(crate) mod output_cap;
 pub mod preflight;
+pub(crate) mod profile_models;
 pub mod prompt;
 pub mod tool_calling;
+
+/// The thought-level ids the built-in wire carries as an effort tier
+/// (issue #1639): `minimal`, `low`, `medium`, `high`. The one definition
+/// shared by the request translation and the posture menu's catalog join,
+/// so the menu never offers a tier the wire would drop.
+pub(crate) fn is_wire_effort(level: &str) -> bool {
+    matches!(level, "minimal" | "low" | "medium" | "high")
+}
 
 use crate::model::TextKind;
 use crate::provider::keychain::ProviderConfigSource;

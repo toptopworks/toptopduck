@@ -3955,7 +3955,9 @@ pub fn set_session_runtime(
 /// handle-only step. A switch opens a new segment whose posture slot starts
 /// from the TARGET adapter's backfill entry ([`segment_start_posture`] --
 /// external := the adapter's `last_model_postures` entry, absent =
-/// unselected; built-in := empty, the built-in loop consumes no posture), so
+/// unselected; built-in := empty -- model ids are runtime-namespaced and the
+/// built-in runtime keeps no backfill entry, its cold start falls back to
+/// the profile model, ADR-0153), so
 /// a stale model id held under the OLD adapter's namespace never injects
 /// into the new CLI, and a switch back to a previously used adapter
 /// recovers its held selection. The runtime choice + the seeded posture land
@@ -4265,6 +4267,27 @@ pub fn clear_last_model_posture(
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
 }
 
+/// The built-in posture menu's catalog (#1639, ADR-0153): the active
+/// profile's first-hand model list merged with the model catalog's
+/// metadata (display names, effort tiers). The posture menu's ONLY
+/// egress point -- the frontend arms it on menu open, the in-process
+/// cache absorbs every later call, and a keyless / zero-profile state
+/// answers the empty catalog without any probe. No probe outcome refuses
+/// -- a failed probe degrades to the empty list (the menu's fallback
+/// shape), never an error surface; only a panicking blocking task
+/// surfaces, as the join failure the Result carries.
+#[tauri::command]
+pub async fn get_builtin_posture_catalog(
+    live: State<'_, LiveProviderConfig>,
+) -> Result<crate::provider::profile_models::BuiltinPostureCatalog, SessionError> {
+    let live = live.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::provider::profile_models::builtin_posture_catalog(&live)
+    })
+    .await
+    .map_err(|e| SessionError::Engine(e.to_string()))
+}
+
 // --- External-runtime model + thought level (ADR-0095, issue #527) ---------
 
 /// The wire read shape for the session's external-runtime model config: the
@@ -4451,7 +4474,8 @@ fn apply_posture_set(
 /// adapter's app-config entry, so a session-level selection and the
 /// cold-start pre-selection (which reaches the set IPC right after session
 /// creation) share one writer. A built-in session has no adapter namespace
-/// to record under -- the posture is a no-op there (ADR-0095) -- so the write
+/// to record under -- the built-in pair is session-scoped with no backfill
+/// (ADR-0153; cross-session persistence is a later ticket) -- so the write
 /// is skipped, not refused. Best-effort: the session posture itself already
 /// landed and was persisted per its own verdict, so a config-write failure
 /// only costs the NEXT startup's convenience injection -- warn, never fail
@@ -5776,7 +5800,9 @@ mod tests {
         // Issue #590 AC1 (no entry) + AC2 (built-in): both seed the empty
         // posture -- unselected, the CLI's own defaults. A target adapter
         // with no entry (never chosen / cleared) clears whatever was held,
-        // and the built-in runtime (which consumes no posture) does too.
+        // and the built-in runtime does too (the namespace reset: model ids
+        // are runtime-namespaced, and the built-in cold start falls back to
+        // the profile model, ADR-0153).
         let (_dir, live) = posture_live();
         let (_store, handle) = posture_handle();
         handle.set_external_model_config(PosturePair {
@@ -5892,8 +5918,9 @@ mod tests {
 
     #[test]
     fn record_last_model_posture_skips_the_built_in_runtime() {
-        // A built-in session has no adapter to key the entry under (the
-        // posture is a no-op there, ADR-0095) -- nothing is written at all.
+        // A built-in session has no adapter to key the entry under -- the
+        // built-in pair keeps no backfill (ADR-0153) -- nothing is written
+        // at all.
         let (_dir, live) = posture_live();
         record_last_model_posture(
             &live,

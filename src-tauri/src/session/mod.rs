@@ -924,9 +924,10 @@ impl Session {
     /// closed at the persist-now point). `record_turn` re-stamps at turn end
     /// from the turn's own attribution; the values agree because the turn
     /// runs on the runtime the turn-top mirror carried. Unconditional:
-    /// `None` is the built-in runtime and stamps `BuiltIn` (a built-in
-    /// session's posture is a no-op, so the header names the runtime the
-    /// next resume continues). `pub` for the same test-seam reason as
+    /// `None` is the built-in runtime and stamps `BuiltIn` (the header names
+    /// the runtime the next resume continues on; the built-in pair itself is
+    /// session-scoped with no backfill, ADR-0153). `pub` for the same
+    /// test-seam reason as
     /// [`Self::set_external_model_config`].
     pub fn stamp_last_runtime(&mut self, runtime: Option<AdapterSpec>) {
         self.runtime_facts.last_runtime = match runtime {

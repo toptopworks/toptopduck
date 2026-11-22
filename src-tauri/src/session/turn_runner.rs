@@ -528,34 +528,42 @@ impl super::Session {
                     // couple the dispatch server to the driver's fold cadence
                     // -- a cross-thread round-trip per phase that buys spinner
                     // stability at real deadlock surface.
-                    let mut loop_outcome =
-                        match loop_runtime::turn_loop_for(Arc::clone(&self.provider)) {
-                            Err(termination) => LoopOutcome {
-                                termination,
-                                promotions: Vec::new(),
-                                trace: Vec::new(),
-                                usage: None,
-                                discovered_runtime: None,
-                                occupancy: None,
-                            },
-                            Ok(runner) => runner.run(
-                                &request,
-                                &mut deps,
-                                &mut *self.materializer,
-                                &mut mcp,
-                                inputs.cli_tools,
-                                inputs.delegations,
-                                inputs.skills,
-                                &mut invocation_channel,
-                                &mut presented_files,
-                                &read_gate,
-                                &create_gate,
-                                approval,
-                                sink,
-                                Arc::clone(&self.cancel),
-                                on_phase,
-                            ),
-                        };
+                    let mut loop_outcome = match loop_runtime::turn_loop_for(
+                        Arc::clone(&self.provider),
+                        // The posture pair's model half (#1639): the
+                        // session-level selection overrides the profile's
+                        // model for this turn -- read from the same
+                        // `runtime_facts` storage the thought-level stamp
+                        // above injects from, so both halves of the pair
+                        // land the next turn together.
+                        self.runtime_facts.model.as_deref(),
+                    ) {
+                        Err(termination) => LoopOutcome {
+                            termination,
+                            promotions: Vec::new(),
+                            trace: Vec::new(),
+                            usage: None,
+                            discovered_runtime: None,
+                            occupancy: None,
+                        },
+                        Ok(runner) => runner.run(
+                            &request,
+                            &mut deps,
+                            &mut *self.materializer,
+                            &mut mcp,
+                            inputs.cli_tools,
+                            inputs.delegations,
+                            inputs.skills,
+                            &mut invocation_channel,
+                            &mut presented_files,
+                            &read_gate,
+                            &create_gate,
+                            approval,
+                            sink,
+                            Arc::clone(&self.cancel),
+                            on_phase,
+                        ),
+                    };
                     // The MCP cancel-teardown watcher stands down through
                     // `mcp_turn_done`'s Drop at block end (issue #889) --
                     // no manual store to skip on an unwinding path.

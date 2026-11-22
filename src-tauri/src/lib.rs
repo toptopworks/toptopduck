@@ -743,6 +743,7 @@ pub fn run() {
             commands::set_session_posture,
             commands::get_last_model_posture,
             commands::clear_last_model_posture,
+            commands::get_builtin_posture_catalog,
             commands::list_skills,
             commands::delete_skill,
             commands::set_skill_enabled,
