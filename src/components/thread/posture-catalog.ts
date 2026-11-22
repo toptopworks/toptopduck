@@ -24,11 +24,13 @@ export const EMPTY_POSTURE = {
 
 // The honest default while the model-config read settles (and on the
 // cold-start bar, where there is no session to read): no selection, no
-// discovery cache. The CLI's own defaults rule the next turn.
+// discovery cache. The CLI's own defaults rule the next turn. The scope
+// verdict defaults to in scope: the empty pair injects nothing either way.
 export const MODEL_CONFIG_DEFAULT = {
   model: null,
   thought_level: null,
   cached_discovered: null,
+  in_scope: true,
 } as const satisfies SessionModelConfig;
 
 // The reads the projection consumes: the active runtime's identity + the two

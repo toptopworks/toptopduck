@@ -86,6 +86,9 @@ impl SessionHandle {
         // the turn consumes is namespaced by the runtime it runs on.
         let (external_runtime, external_posture) = self.runtime_and_posture();
         s.set_external_runtime(external_runtime);
+        // The posture lands with its endpoint scope (ADR-0154): the built-in
+        // arm's scope gate at dispatch reads the scope the pair was stamped
+        // with, off this same mirror.
         s.set_external_model_config(external_posture);
         // Issue #364 (ADR-0086) + #707: the skill + CLI assembly reads both
         // session sets under this held lock (neither can change between the
@@ -240,7 +243,7 @@ mod tests {
     use crate::provider::keychain::KeychainStore;
     use crate::session::loop_contract::DiscoveredRuntime;
     use crate::session::store::SessionStore;
-    use crate::session::PosturePair;
+    use crate::session::{PosturePair, StampedPosture};
     use crate::{Provider, ProviderError, UnwiredProvider};
 
     /// A no-op approval sink: the real one is Tauri-bound (transport side),
@@ -379,10 +382,10 @@ mod tests {
         }
         handle.set_runtime_and_posture(
             None,
-            PosturePair {
+            StampedPosture::unscoped(PosturePair {
                 model: None,
                 thought_level: Some("high".to_string()),
-            },
+            }),
         );
         let tmp = tempfile::tempdir().unwrap();
         let deps = deps_under(tmp.path());

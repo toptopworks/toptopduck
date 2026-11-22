@@ -612,27 +612,39 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     );
   });
 
-  it("renders the field error under the input and marks it aria-invalid + aria-describedby", () => {
-    // Issue #735: validation errors are field-scoped -- rendered at the field
-    // (never the pane-bottom submit surface) and wired into the input's
-    // invalid state so the offending control is visually and accessibly
-    // distinct.
+  it("an unpinned profile renders an empty input wired to the optional hint (ADR-0154)", () => {
+    // The pinned model is optional: null shows as an empty input (never the
+    // string "null"), and the input is described by the hint that explains
+    // the empty state -- no validation error face exists for the field.
     renderSettings(
       <ProviderModelField
-        profile={baseProfile}
+        profile={{ ...baseProfile, model: null }}
         onUpdate={vi.fn()}
         disabled={false}
-        error="Model is required."
       />,
     );
     const input = screen.getByRole("textbox", { name: "Model" });
-    expect(input).toHaveAttribute("aria-invalid", "true");
-    const describedBy = input.getAttribute("aria-describedby");
-    expect(describedBy).toBeTruthy();
-    expect(screen.getByText("Model is required.")).toHaveProperty(
-      "id",
-      describedBy,
+    expect(input).toHaveValue("");
+    expect(input).not.toHaveAttribute("aria-invalid");
+    const hint = screen.getByText(
+      "Optional. Leave empty for no pinned default — pick a model from the model menu before sending.",
     );
+    expect(hint).toHaveProperty("id", input.getAttribute("aria-describedby"));
+  });
+
+  it("clearing the input emits null -- the unpinned state, not an empty string (ADR-0154)", () => {
+    const onUpdate = vi.fn();
+    renderSettings(
+      <ProviderModelField profile={baseProfile} onUpdate={onUpdate} disabled={false} />,
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Model" }), {
+      target: { value: "" },
+    });
+    expect(onUpdate).toHaveBeenLastCalledWith({ model: null });
+    fireEvent.change(screen.getByRole("textbox", { name: "Model" }), {
+      target: { value: "glm-4" },
+    });
+    expect(onUpdate).toHaveBeenLastCalledWith({ model: "glm-4" });
   });
 
   it("with no probed list the panel opens to the fetch hint instead of options", async () => {

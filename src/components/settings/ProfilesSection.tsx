@@ -156,21 +156,19 @@ function sameEndpoint(a: ProviderProfile, b: ProviderProfile): boolean {
  *  which stays reserved for submit-level failures (IPC / delete / key write)
  *  that have no field to attach to. */
 type FieldError = {
-  field: "base_url" | "model";
   message: string;
 };
 
 /** Validate a profile before commit. Returns the first field error or null.
  *  base_url must be an http/https URL (a bad scheme is a config error the
  *  preflight would otherwise misreport as a network fault, issue #279).
- *  model must be non-blank after trim (issue #735: an empty model is a
- *  deterministic config error -- the turn path sends it verbatim and the
- *  endpoint answers 400 -- so the commit boundary refuses it up front). */
+ *  The model is NOT validated (ADR-0154): an empty value is the legal
+ *  unpinned state -- the turn then needs a posture selection and refuses
+ *  honestly without one, so no commit boundary needs to refuse it. */
 function validateProfile(p: ProviderProfile, intl: IntlShape): FieldError | null {
   const url = p.base_url.trim();
   if (!url) {
     return {
-      field: "base_url",
       message: intl.formatMessage({
         id: "settings.profiles.validate.baseUrlRequired",
         defaultMessage: "Base URL is required.",
@@ -181,7 +179,6 @@ function validateProfile(p: ProviderProfile, intl: IntlShape): FieldError | null
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return {
-        field: "base_url",
         message: intl.formatMessage({
           id: "settings.profiles.validate.httpOnly",
           defaultMessage: "Base URL must use http or https.",
@@ -190,19 +187,9 @@ function validateProfile(p: ProviderProfile, intl: IntlShape): FieldError | null
     }
   } catch {
     return {
-      field: "base_url",
       message: intl.formatMessage({
         id: "settings.profiles.validate.invalidUrl",
         defaultMessage: "Base URL is not a valid URL.",
-      }),
-    };
-  }
-  if (!p.model.trim()) {
-    return {
-      field: "model",
-      message: intl.formatMessage({
-        id: "settings.profiles.validate.modelRequired",
-        defaultMessage: "Model is required.",
       }),
     };
   }
@@ -750,9 +737,10 @@ export function ProfilesSection({
                 onSelectCustom={() =>
                   // Enter hand-fill mode: the openai-compatible protocol with
                   // a cleared base_url the user must type (the commit-time
-                  // validation enforces it). model survives -- a wrong model
-                  // is cheaper to overwrite than a typed endpoint.
-                  setDraft({ ...draft, protocol: "openai", base_url: "" })}
+                  // validation enforces it). The model unpins: a custom
+                  // endpoint's list is unknown here, and an empty model is
+                  // the legal no-pinned-default state (ADR-0154).
+                  setDraft({ ...draft, protocol: "openai", base_url: "", model: null })}
                 disabled={fieldsDisabled}
                 onOpenChange={setSelectOpen}
               />
@@ -768,8 +756,7 @@ export function ProfilesSection({
                 // (issue #735): the profile has no keychain entry yet, so the
                 // one-shot key is the only key a pre-create probe can reach.
                 probeKey={addMode ? draftKey : undefined}
-                baseUrlError={fieldError?.field === "base_url" ? fieldError.message : null}
-                modelError={fieldError?.field === "model" ? fieldError.message : null}
+                baseUrlError={fieldError?.message ?? null}
               />
 
               <ProviderKeyField

@@ -251,7 +251,11 @@ pub enum ProviderError {
 pub struct TurnModelFacts {
     pub protocol: crate::model::Protocol,
     pub base_url: String,
-    pub model: String,
+    /// The model the turn requests: the session's posture selection, else
+    /// the active profile's pinned default. `None` = neither (ADR-0154) --
+    /// the wiring seam refuses the turn as `NoModel` before any client is
+    /// built; no id is ever invented for an endpoint the app cannot know.
+    pub model: Option<String>,
     pub api_key: Option<String>,
 }
 
@@ -391,7 +395,7 @@ mod tests {
         let facts = TurnModelFacts {
             protocol: Protocol::Anthropic,
             base_url: "https://api.anthropic.com".into(),
-            model: "m".into(),
+            model: Some("m".into()),
             api_key: Some("sk-secret".into()),
         };
         let rendered = format!("{facts:?}");

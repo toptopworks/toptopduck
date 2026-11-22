@@ -693,7 +693,7 @@ export async function testProfile(
   profileId: string,
   protocol: Protocol,
   baseUrl: string,
-  model: string,
+  model: string | null,
   // One-shot add-mode override (issue #735, ADR-0070 calibration): the draft
   // key the add form buffers before the profile (and its keychain entry)
   // exists. Passed explicitly as null when absent so Rust's Option<String>
@@ -900,6 +900,16 @@ export async function getLastModelPosture(adapterId: string): Promise<ModelPostu
 // Returns the updated AppConfig so the caller syncs state without a re-fetch.
 export async function clearLastModelPosture(adapterId: string): Promise<AppConfig> {
   return invoke<AppConfig>("clear_last_model_posture", { adapterId });
+}
+
+// Read the built-in runtime's startup posture (ADR-0154): the model +
+// thought-level a NEW built-in session on the active endpoint starts with.
+// No arguments by design -- the backend derives the entry from the active
+// profile's endpoint, so the frontend carries no key knowledge and the read
+// can never target another endpoint's entry. Never refuses: no entry reads
+// as the empty posture (null/null).
+export async function getBuiltinLastModelPosture(): Promise<ModelPosture> {
+  return invoke<ModelPosture>("get_builtin_last_model_posture");
 }
 
 // Read the current sessions directory's resolved path string. Used for the

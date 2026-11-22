@@ -41,4 +41,7 @@ export type ExtractionStatus =
   | { state: "skipped"; reason: ExtractionSkipReason }
   | { state: "no_new_facts" }
   | { state: "extracted"; titles: string[] }
-  | { state: "failed"; detail: string };
+  | { state: "failed"; detail: string }
+  // ADR-0154: the extraction profile pins no model -- a failure with a
+  // fix-it line of its own, not a technical detail.
+  | { state: "no_model" };

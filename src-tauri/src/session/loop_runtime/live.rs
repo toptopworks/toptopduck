@@ -45,23 +45,32 @@ use super::LoopRuntime;
 /// Build the per-turn runner from an app provider object (the wiring seam's
 /// single entry). `Err` carries the turn's terminal
 /// outcome for a facts resolution that refused before any round-trip -- a
-/// keyless profile (`NotWired`) or a non-http base (`InvalidConfig`) -- with
-/// the same vocabulary the adapters surfaced; the
-/// caller lands it as a zero-round-trip `LoopOutcome`.
+/// keyless profile (`NotWired`), a non-http base (`InvalidConfig`), or a
+/// model-less profile with no posture selection (`NoModel`, ADR-0154) --
+/// with the same vocabulary the adapters surfaced; the caller lands it as
+/// a zero-round-trip `LoopOutcome`.
+///
+/// `facts` is the provider's per-turn construction facts, resolved ONCE by
+/// the caller: the built-in turn's posture gate reads the endpoint off the
+/// same facts the loop constructs from, so a second read here could compare
+/// against a different endpoint than the one that serves the turn. The
+/// `None` arm bridges a facts-less provider as-is (the scripted test fake).
 ///
 /// `posture_model` is the session-level model selection (#1639,
-/// ADR-0153): `Some` overrides the facts' profile model for the turn --
-/// the posture pair's model half rides the same per-turn construction as
-/// a profile switch, so a selection lands the next turn. The bridged
-/// face ignores it (a facts-less provider takes no model).
+/// ADR-0153), already scoped to this endpoint by the caller (ADR-0154):
+/// `Some` overrides the facts' pinned profile model for the turn -- the
+/// posture pair's model half rides the same per-turn construction as a
+/// profile switch, so a selection lands the next turn. The bridged face
+/// ignores it (a facts-less provider takes no model).
 pub(crate) fn turn_loop_for(
     provider: Arc<dyn Provider>,
+    facts: Option<TurnModelFacts>,
     posture_model: Option<&str>,
 ) -> Result<LoopRuntime, Termination> {
-    match provider.turn_model_facts() {
+    match facts {
         Some(mut facts) => {
             if let Some(model) = posture_model {
-                facts.model = model.to_string();
+                facts.model = Some(model.to_string());
             }
             live_runtime(facts)
         }
@@ -83,6 +92,11 @@ fn handle_from_facts(facts: &TurnModelFacts) -> Result<ModelHandle, Termination>
     let api_key = facts.api_key.clone().ok_or(Termination::NotWired)?;
     validate_http_base_url(&facts.base_url)
         .map_err(|e| Termination::InvalidConfig(e.to_string()))?;
+    // Then the model (ADR-0154): an unpinned profile with no session
+    // selection has nothing to request, and no id is invented for it. The
+    // refusal lands here -- before any client is built -- so a model-less
+    // facts can never reach the wire.
+    let model = facts.model.clone().ok_or(Termination::NoModel)?;
     let base = facts.base_url.trim_end_matches('/');
     let http = egress_client().map_err(termination_for_build_failure)?;
     Ok(match facts.protocol {
@@ -96,7 +110,7 @@ fn handle_from_facts(facts: &TurnModelFacts) -> Result<ModelHandle, Termination>
                 .http_client(http)
                 .build()
                 .map_err(termination_for_build_failure)?
-                .completion_model(&facts.model),
+                .completion_model(&model),
         ),
         // The app's openai face is chat-completions BYOK (custom
         // compatible endpoints), NOT the Responses API rig's default
@@ -110,7 +124,7 @@ fn handle_from_facts(facts: &TurnModelFacts) -> Result<ModelHandle, Termination>
                 .http_client(http)
                 .build()
                 .map_err(termination_for_build_failure)?
-                .completion_model(&facts.model),
+                .completion_model(&model),
         ),
     })
 }
@@ -127,13 +141,18 @@ fn handle_from_facts(facts: &TurnModelFacts) -> Result<ModelHandle, Termination>
 /// never reach it, and the CLI channels' occupancy stamps are pure chain
 /// reads that never trigger, so those setups egress nothing.
 fn live_runtime(facts: TurnModelFacts) -> Result<LoopRuntime, Termination> {
-    crate::provider::model_catalog::ensure_fresh();
+    // Gates first: a refused turn (no key / bad base / no model) must not
+    // trigger the catalog's lazy refresh below -- a refusal egresses nothing.
     let handle = handle_from_facts(&facts)?;
+    crate::provider::model_catalog::ensure_fresh();
+    // The gates above refused a model-less facts, so this is the model the
+    // handle was just built for -- re-read rather than unwrap.
+    let model = facts.model.clone().ok_or(Termination::NoModel)?;
     Ok(LoopRuntime::live(
         handle,
         facts.protocol,
-        output_cap::output_token_cap(&facts.model),
-        facts.model.clone(),
+        output_cap::output_token_cap(&model),
+        model,
     ))
 }
 
@@ -267,8 +286,8 @@ mod tests {
         let provider: Arc<dyn Provider> = Arc::new(crate::provider::UnwiredProvider);
         // Ok = the bridged branch; the live branch is the only Err source
         // and it refuses on facts this provider does not present.
-        let runtime =
-            turn_loop_for(provider, None).expect("the facts-less fork bridges, never refuses");
+        let runtime = turn_loop_for(provider, None, None)
+            .expect("the facts-less fork bridges, never refuses");
         // Issue #1001: the bridged face carries no model-keyed cap -- no
         // facts, no stamp; the request keeps its assembled cap. #1290: no
         // name either -- its occupancy readings stay hollow.
@@ -285,7 +304,7 @@ mod tests {
         let runtime = live_runtime(TurnModelFacts {
             protocol: Protocol::Anthropic,
             base_url: "https://api.anthropic.com".into(),
-            model: "glm-4.6".into(),
+            model: Some("glm-4.6".into()),
             api_key: Some("sk-test".into()),
         })
         .expect("a fully-present profile builds the live runtime");
@@ -305,7 +324,7 @@ mod tests {
         let runtime = live_runtime(TurnModelFacts {
             protocol: Protocol::Anthropic,
             base_url: "https://api.anthropic.com".into(),
-            model: "claude-3-haiku-20240307".into(),
+            model: Some("claude-3-haiku-20240307".into()),
             api_key: Some("sk-test".into()),
         })
         .expect("a fully-present profile builds the live runtime");
@@ -317,7 +336,7 @@ mod tests {
         let runtime = live_runtime(TurnModelFacts {
             protocol: Protocol::Anthropic,
             base_url: "https://api.anthropic.com".into(),
-            model: "claude-sonnet-4-6".into(),
+            model: Some("claude-sonnet-4-6".into()),
             api_key: Some("sk-test".into()),
         })
         .expect("a fully-present profile builds the live runtime");
@@ -335,7 +354,7 @@ mod tests {
         let err = live_runtime(TurnModelFacts {
             protocol: Protocol::Anthropic,
             base_url: "https://api.anthropic.com".into(),
-            model: "claude-test".into(),
+            model: Some("claude-test".into()),
             api_key: None,
         })
         .err()
@@ -352,7 +371,7 @@ mod tests {
         let err = live_runtime(TurnModelFacts {
             protocol: Protocol::Anthropic,
             base_url: "file:///etc/passwd".into(),
-            model: "m".into(),
+            model: Some("m".into()),
             api_key: Some("sk-test".into()),
         })
         .err()
@@ -363,6 +382,68 @@ mod tests {
             }
             other => panic!("expected InvalidConfig, got {other:?}"),
         }
+    }
+
+    /// ADR-0154 priority: a keyless unpinned profile still refuses as
+    /// NotWired -- the key gate runs first, so the model refusal never masks
+    /// the configure-key signal.
+    #[test]
+    fn a_keyless_unpinned_profile_refuses_as_not_wired() {
+        let err = live_runtime(TurnModelFacts {
+            protocol: Protocol::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            model: None,
+            api_key: None,
+        })
+        .err()
+        .expect("the keyless profile refuses");
+        assert!(matches!(err, Termination::NotWired), "got {err:?}");
+    }
+
+    /// The model gate (ADR-0154): a keyed profile with no pinned model and
+    /// no posture selection refuses as NoModel before any client is built --
+    /// zero round-trips, the pick-a-model signal. The scheme gate still runs
+    /// ahead of it: a bad base reports InvalidConfig with or without a model.
+    #[test]
+    fn an_unpinned_profile_refuses_as_no_model() {
+        let err = live_runtime(TurnModelFacts {
+            protocol: Protocol::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            model: None,
+            api_key: Some("sk-test".into()),
+        })
+        .err()
+        .expect("the model-less profile refuses");
+        assert!(matches!(err, Termination::NoModel), "got {err:?}");
+        let err = live_runtime(TurnModelFacts {
+            protocol: Protocol::Anthropic,
+            base_url: "file:///etc/passwd".into(),
+            model: None,
+            api_key: Some("sk-test".into()),
+        })
+        .err()
+        .expect("the non-http base refuses");
+        assert!(matches!(err, Termination::InvalidConfig(_)), "got {err:?}");
+    }
+
+    /// ADR-0154: the posture model completes an unpinned profile's facts --
+    /// the session selection IS the request model, so no pinned default is
+    /// needed for a selected turn.
+    #[test]
+    fn turn_loop_for_takes_the_posture_model_over_an_unpinned_profile() {
+        let provider: Arc<dyn Provider> = Arc::new(crate::provider::UnwiredProvider);
+        let runtime = turn_loop_for(
+            provider,
+            Some(TurnModelFacts {
+                protocol: Protocol::Anthropic,
+                base_url: "https://api.anthropic.com".into(),
+                model: None,
+                api_key: Some("sk-test".into()),
+            }),
+            Some("glm-4.6"),
+        )
+        .expect("the posture model completes the facts");
+        assert_eq!(runtime.model_name.as_deref(), Some("glm-4.6"));
     }
 }
 #[cfg(test)]

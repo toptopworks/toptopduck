@@ -48,6 +48,9 @@ export type TurnFailure =
   | { kind: "Runtime"; data: { detail: string } }
   | { kind: "Resource"; data: { detail: string } }
   | { kind: "NotWired" }
+  // ADR-0154: the active profile pins no default model and the session
+  // holds no posture selection -- refused before any request goes out.
+  | { kind: "NoModel" }
   | { kind: "InvalidConfig"; data: { detail: string } }
   | { kind: "StaleReference"; data: { reference_name: string } };
 

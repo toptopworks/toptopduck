@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use crate::app_config::{self, AppConfig, DefaultRuntime, LocalePreference, ModelPosture};
 use crate::cli_tools::config::{CliToolConfig, CliToolSource};
 use crate::mcp::config::{McpServerConfig, McpServerId};
-use crate::model::{ProfileId, Protocol};
+use crate::model::{builtin_endpoint_identity, ProfileId, Protocol};
 use crate::provider::keychain::{KeychainStore, ProviderConfigSource};
 use crate::provider::prompt::{resolve_locale_from_tag, ResponseLocale};
 
@@ -1194,6 +1194,47 @@ impl LiveProviderConfig {
             .cloned()
             .unwrap_or_default()
     }
+
+    /// The built-in runtime's backfill entry for the ACTIVE endpoint
+    /// (ADR-0154) in ONE config read: the endpoint identity key AND the
+    /// stored posture, so a caller seating the pair with its scope never
+    /// mixes two reads (a config write landing between them could pair one
+    /// endpoint's entry with another's identity). `None` with no active
+    /// profile -- no endpoint, so no entry to read. The one place the
+    /// built-in key is derived: callers never assemble it from profile
+    /// fields themselves.
+    pub(crate) fn builtin_backfill(&self) -> Option<(String, ModelPosture)> {
+        let cfg = self.load();
+        let profile = cfg.provider.active()?;
+        let key = builtin_endpoint_identity(profile.protocol, &profile.base_url);
+        let posture = cfg
+            .last_model_postures
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        Some((key, posture))
+    }
+
+    /// The built-in runtime's backfill key (ADR-0154): the ACTIVE profile's
+    /// endpoint identity, or `None` with no active profile. The scope a
+    /// built-in pair is stamped with on a set.
+    pub(crate) fn builtin_posture_key(&self) -> Option<String> {
+        self.load()
+            .provider
+            .active()
+            .map(|p| builtin_endpoint_identity(p.protocol, &p.base_url))
+    }
+
+    /// Read the built-in runtime's backfill posture (ADR-0154): the pair a
+    /// new built-in session on the active endpoint starts with. The same
+    /// lock-light honest-degrade contract as [`Self::last_model_posture`] --
+    /// no entry, or no active profile, reads as the empty posture, so this
+    /// read never distinguishes "never chosen" from "no endpoint".
+    pub fn builtin_last_model_posture(&self) -> ModelPosture {
+        self.builtin_backfill()
+            .map(|(_, posture)| posture)
+            .unwrap_or_default()
+    }
 }
 
 /// Splice the legacy pre-#53 `{base_url, model}` blob into the config
@@ -1210,7 +1251,7 @@ fn splice_legacy_endpoint(cfg: &mut AppConfig, blob: &serde_json::Value) {
     if let (Some(base_url), Some(model)) = (base_url, model) {
         let mut profile = crate::model::ProviderProfile::default_anthropic();
         profile.base_url = base_url.to_string();
-        profile.model = model.to_string();
+        profile.model = Some(model.to_string());
         cfg.provider.active_profile = Some(profile.id.clone());
         cfg.provider.profiles.push(profile);
     }
@@ -1256,8 +1297,11 @@ impl ProviderConfigSource for LiveProviderConfig {
         // exposes null endpoints instead (ADR-0098).
         self.load().provider.effective_base_url().to_string()
     }
-    fn model(&self) -> String {
-        self.load().provider.effective_model().to_string()
+    fn model(&self) -> Option<String> {
+        // The pinned default, or None when the active profile pins none
+        // (ADR-0154): the wiring seam falls back to the session's posture
+        // selection and refuses as NoModel when that is empty too.
+        self.load().provider.effective_model().map(str::to_string)
     }
     fn locale(&self) -> ResponseLocale {
         // ADR-0052: resolve the persisted preference (ADR-0038) here in Rust --
@@ -1291,9 +1335,7 @@ mod tests {
     use crate::app_config::{EngineDefaults, LocalePreference, Theme};
     use crate::cli_tools::config::CliBaselineState;
     use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
-    use crate::model::{
-        ProfileId, Protocol, ProviderProfile, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
-    };
+    use crate::model::{ProfileId, Protocol, ProviderProfile, DEFAULT_PROVIDER_BASE_URL};
     use std::collections::BTreeMap;
 
     /// A LiveProviderConfig bound to a temp-dir config path. The keychain
@@ -2105,7 +2147,7 @@ mod tests {
         splice_legacy_endpoint(&mut cfg, &blob);
         let active = cfg.provider.active().expect("active profile");
         assert_eq!(active.base_url, "https://gateway.example.test");
-        assert_eq!(active.model, "claude-fable-5");
+        assert_eq!(active.model.as_deref(), Some("claude-fable-5"));
         assert_eq!(cfg.provider.profiles.len(), 1);
     }
 
@@ -2190,12 +2232,12 @@ mod tests {
                 .active_mut()
                 .expect("seeded config has an active profile");
             active.base_url = "https://gateway.example.test".into();
-            active.model = "claude-opus-4-8".into();
+            active.model = Some("claude-opus-4-8".into());
         }
         live.store(cfg).expect("store");
 
         assert_eq!(live.base_url(), "https://gateway.example.test");
-        assert_eq!(live.model(), "claude-opus-4-8");
+        assert_eq!(live.model().as_deref(), Some("claude-opus-4-8"));
         // The key is not stored in this test keychain -> None (the trait's
         // api_key() delegates to the keychain, which has no entry in CI).
         assert!(live.api_key().is_none());
@@ -2215,7 +2257,10 @@ mod tests {
         app_config::write_at(live.path(), &cfg).expect("write");
 
         assert_eq!(live.base_url(), DEFAULT_PROVIDER_BASE_URL);
-        assert_eq!(live.model(), DEFAULT_PROVIDER_MODEL);
+        // No resolvable active profile -> no pinned model either (ADR-0154:
+        // the model read has no total fallback; the missing key refuses the
+        // turn as NotWired before any model is needed).
+        assert_eq!(live.model(), None);
         assert!(live.api_key().is_none());
     }
 
@@ -2228,7 +2273,7 @@ mod tests {
         // gate redirects to Settings before a turn can even start).
         let (_dir, live) = live();
         assert_eq!(live.base_url(), DEFAULT_PROVIDER_BASE_URL);
-        assert_eq!(live.model(), DEFAULT_PROVIDER_MODEL);
+        assert_eq!(live.model(), None);
         assert!(live.api_key().is_none());
         assert_eq!(live.protocol(), Protocol::Anthropic);
         // The has_key view short-circuits: no active profile -> no slot to
@@ -2328,14 +2373,14 @@ mod tests {
                 display_name: "Anthropic".into(),
                 protocol: Protocol::Anthropic,
                 base_url: "https://api.anthropic.example.test".into(),
-                model: "claude-sonnet-4-6".into(),
+                model: Some("claude-sonnet-4-6".into()),
             },
             ProviderProfile {
                 id: openai_id.clone(),
                 display_name: "OpenAI".into(),
                 protocol: Protocol::Openai,
                 base_url: "https://api.openai.example.test".into(),
-                model: "gpt-4o".into(),
+                model: Some("gpt-4o".into()),
             },
         ];
         cfg.provider.active_profile = Some(anthropic_id.clone());
@@ -2380,14 +2425,14 @@ mod tests {
                 display_name: "A".into(),
                 protocol: Protocol::Anthropic,
                 base_url: DEFAULT_PROVIDER_BASE_URL.into(),
-                model: DEFAULT_PROVIDER_MODEL.into(),
+                model: None,
             },
             ProviderProfile {
                 id: ProfileId("__test_list_b".into()),
                 display_name: "B".into(),
                 protocol: Protocol::Openai,
                 base_url: "https://api.deepseek.example.test".into(),
-                model: "deepseek-chat".into(),
+                model: Some("deepseek-chat".into()),
             },
         ];
         live.store(cfg).expect("store");

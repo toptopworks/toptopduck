@@ -325,15 +325,51 @@ describe("ComposerPostureTrigger built-in catalog (issue #1639)", () => {
     expect(onSelectModel).toHaveBeenCalledWith("claude-sonnet-4-5");
   });
 
-  it("annotates the clearing row with the profile model and carries it inline when nothing is selected", () => {
+  it("carries the pinned default inline when nothing is selected, with no model clearing row (ADR-0154)", () => {
     renderTrigger({ catalog: BUILTIN_CATALOG, model: null });
     const rows = screen.getAllByTestId("sub-trigger");
     expect(rows[0].textContent).toContain("claude-sonnet-4-5");
+    // The built-in runtime has no CLI default for "unselected" to mean, so
+    // the MODEL list has no clearing row -- the strength list keeps its own.
+    const contents = screen.getAllByTestId("sub-content");
+    expect(contents[0].textContent).not.toContain("Default (recommended)");
+    expect(contents[1].textContent).toContain("Default (recommended)");
+  });
+
+  it("offers a pinned default the list does not carry as its own selectable row (ADR-0154)", () => {
+    // Probe pending or failed, or a pinned id outside the first-hand list:
+    // the pinned model rides a synthetic row labelled as what it is -- never
+    // as an id the runtime fails to offer -- and selecting it is the way
+    // back to the pinned default.
+    const { onSelectModel } = renderTrigger({
+      catalog: { kind: "builtin", models: [builtinModel("custom-deploy-7")], profileModel: "claude-x" },
+    });
+    fireEvent.click(
+      screen.getByRole("menuitemradio", { name: "claude-x (pinned default)" }),
+    );
+    expect(onSelectModel).toHaveBeenCalledWith("claude-x");
+  });
+
+  it("labels a held built-in model outside the list with its bare name, never as a runtime omission (ADR-0154)", () => {
+    // The built-in runtime has no CLI to "not offer" anything: a held
+    // model missing from the (probe-less) list rides the plain row.
+    renderTrigger({
+      catalog: { kind: "builtin", models: [builtinModel("custom-deploy-7")], profileModel: null },
+      model: "claude-x",
+    });
     expect(
-      screen.getByRole("menuitem", {
-        name: "Default (recommended) (claude-sonnet-4-5)",
-      }),
+      screen.getByRole("menuitemradio", { name: "claude-x" }),
     ).toBeTruthy();
+  });
+
+  it("renders a bare model list for an unpinned profile with nothing held (ADR-0154)", () => {
+    renderTrigger({
+      catalog: { kind: "builtin", models: [builtinModel("custom-deploy-7")], profileModel: null },
+    });
+    const rows = screen.getAllByTestId("sub-trigger");
+    expect(rows[0].textContent).toBe("Model");
+    const contents = screen.getAllByTestId("sub-content");
+    expect(contents[0].textContent).toBe("custom-deploy-7");
   });
 
   it("shows the strength row for a model with effort tiers", () => {
@@ -374,21 +410,19 @@ describe("ComposerPostureTrigger built-in catalog (issue #1639)", () => {
 
   it("renders the silent fallback shape when the probe answered nothing (probe pending or failed)", () => {
     // The fallback catalog: no models, the profile model as the current.
-    // The menu is NOT an error surface -- the held model rides the
-    // synthetic row, the clearing row carries the default copy.
+    // The menu is NOT an error surface -- the pinned model rides the
+    // synthetic row; there is no clearing row to carry default copy.
     renderTrigger({
       catalog: { kind: "builtin", models: [], profileModel: "claude-x" },
     });
     expect(
       screen.getByRole("menuitemradio", {
-        name: "claude-x (not offered by this runtime)",
+        name: "claude-x (pinned default)",
       }),
     ).toBeTruthy();
-    expect(
-      screen.getByRole("menuitem", {
-        name: "Default (recommended) (claude-x)",
-      }),
-    ).toBeTruthy();
+    expect(screen.getAllByTestId("sub-content")[0].textContent).not.toContain(
+      "Default (recommended)",
+    );
     expect(screen.queryByRole("status")).toBeNull();
     // No strength row: no tiers are knowable in the fallback shape.
     expect(screen.queryByText("Thinking")).toBeNull();

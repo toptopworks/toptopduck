@@ -95,16 +95,28 @@ export function createSessionSelectionPort(args: {
           (prev: SessionModelConfig | undefined): SessionModelConfig => ({
             ...(prev ?? MODEL_CONFIG_DEFAULT),
             ...next,
+            // ADR-0154: the post-set state is in scope by construction --
+            // the backend stamps the endpoint active at set time, and an
+            // external runtime is always true. Spreading `next` alone
+            // would carry a stale verdict forward: a held out-of-scope
+            // pair would keep the bar rendering unselected after the
+            // pick that just re-stamped it.
+            in_scope: true,
           }),
         );
         // The set lands the post-set pair in the startup backfill entry
         // server-side (record_last_model_posture, the single write point).
         // Invalidate so the NEXT return to cold start refetches the
         // post-set entry (staleTime: Infinity never auto-refetches,
-        // ADR-0051).
+        // ADR-0051). A built-in set lands the active endpoint's entry
+        // (ADR-0154) -- the argument-less read's key.
         if (activeAdapterId !== null) {
           void queryClient.invalidateQueries({
             queryKey: adapterKeys.posture(activeAdapterId),
+          });
+        } else {
+          void queryClient.invalidateQueries({
+            queryKey: adapterKeys.builtinPostureFamily(),
           });
         }
         return {

@@ -301,6 +301,13 @@ impl super::Session {
                 // registry toggle gate + the tolerant file read live in the
                 // helper (a memory problem never blocks the turn).
                 let memory_rows = self.memory_index_rows();
+                // The provider's per-turn construction facts, resolved
+                // ONCE up front (ADR-0154): the posture scope gate below
+                // reads the endpoint off the same facts the loop constructs
+                // from, so the comparison can never run against a different
+                // endpoint than the one serving this turn. `None` = a
+                // facts-less provider (the scripted test fakes).
+                let facts = self.provider.turn_model_facts();
                 let mut request = turn_window::assemble_tool_turn(
                     question,
                     &self.working_set,
@@ -329,7 +336,15 @@ impl super::Session {
                 // cannot flip thinking on/off between the turn's rounds (an
                 // API-invalid interleaving). `None` leaves the request
                 // thinking-disabled, byte-identical to the status quo.
-                request.thought_level = self.runtime_facts.thought_level.clone();
+                // ADR-0154: the pair injects only while its stamped scope IS
+                // this turn's endpoint -- an out-of-scope pair (picked on
+                // another endpoint, or never stamped) injects NEITHER half,
+                // so the model and its strength always travel together.
+                let turn_posture = self
+                    .runtime_facts
+                    .stamped_posture()
+                    .scoped_to(facts.as_ref());
+                request.thought_level = turn_posture.thought_level.clone();
                 // Disjoint field borrows: `DispatchDeps` borrows
                 // `&self.admin_engine` / `&mut self.source_files` /
                 // `&mut self.working_set` / `&self.temp_path` and the loop
@@ -530,13 +545,17 @@ impl super::Session {
                     // stability at real deadlock surface.
                     let mut loop_outcome = match loop_runtime::turn_loop_for(
                         Arc::clone(&self.provider),
+                        facts,
                         // The posture pair's model half (#1639): the
                         // session-level selection overrides the profile's
                         // model for this turn -- read from the same
                         // `runtime_facts` storage the thought-level stamp
                         // above injects from, so both halves of the pair
-                        // land the next turn together.
-                        self.runtime_facts.model.as_deref(),
+                        // land the next turn together. Scoped to this
+                        // endpoint (ADR-0154): an out-of-scope pair
+                        // contributes nothing and the pinned profile model
+                        // (or the NoModel refusal) takes over.
+                        turn_posture.model.as_deref(),
                     ) {
                         Err(termination) => LoopOutcome {
                             termination,

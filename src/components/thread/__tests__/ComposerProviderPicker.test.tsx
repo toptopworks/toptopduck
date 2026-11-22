@@ -17,6 +17,7 @@ import {
   clearLastModelPosture,
   getAdapterCatalogs,
   getBuiltinPostureCatalog,
+  getBuiltinLastModelPosture,
   getLastModelPosture,
   getSessionModelConfig,
   getSessionRuntime,
@@ -74,12 +75,14 @@ vi.mock("../../../api", async (importOriginal) => {
       model: null,
       thought_level: null,
       cached_discovered: null,
+      in_scope: true,
     })),
     setSessionPosture: vi.fn(async () => PERSIST_OK),
     getAdapterCatalogs: vi.fn(async () => ({})),
     getBuiltinPostureCatalog: vi.fn(async () => BUILTIN_FALLBACK),
     getLastModelPosture: vi.fn(async () => EMPTY_POSTURE),
     clearLastModelPosture: vi.fn(async () => ({})),
+    getBuiltinLastModelPosture: vi.fn(async () => EMPTY_POSTURE),
   };
 });
 
@@ -284,6 +287,7 @@ beforeEach(() => {
     model: null,
     thought_level: null,
     cached_discovered: null,
+    in_scope: true,
   });
   vi.mocked(getAdapterCatalogs).mockResolvedValue({});
   vi.mocked(getBuiltinPostureCatalog).mockResolvedValue(BUILTIN_FALLBACK);
@@ -511,11 +515,13 @@ describe("ComposerProviderPicker runtime popover (ADR-0099)", () => {
         model: "old-namespace-model",
         thought_level: "high",
         cached_discovered: null,
+        in_scope: true,
       })
       .mockResolvedValue({
         model: "qwen-seeded-model",
         thought_level: null,
         cached_discovered: null,
+        in_scope: true,
       });
     renderPicker(pickerJsx());
     // Let the first model-config load settle before switching (a switch
@@ -680,6 +686,9 @@ async function renderExternalPicker(
     model?: string | null;
     thought_level?: string | null;
     cached_discovered?: DiscoveredRuntime | null;
+    // The backend always sends the scope verdict (ADR-0154); the fixture
+    // defaults to in scope unless a test pins the out-of-scope state.
+    in_scope?: boolean;
   } = {},
 ) {
   vi.mocked(getSessionRuntime).mockResolvedValue({
@@ -691,6 +700,7 @@ async function renderExternalPicker(
     model: modelConfig.model ?? null,
     thought_level: modelConfig.thought_level ?? null,
     cached_discovered: modelConfig.cached_discovered ?? null,
+    in_scope: modelConfig.in_scope ?? true,
   });
   renderPicker(pickerJsx(overrides));
   // The posture trigger renders once the runtime query lands.
@@ -698,24 +708,149 @@ async function renderExternalPicker(
 }
 
 describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
-  it("renders the fallback menu before any probe: the held model's synthetic row + the annotated clearing row, no error", () => {
+  it("renders the fallback menu before any probe: the pinned model's synthetic row, no clearing row, no error", () => {
     renderPicker(pickerJsx());
     // The probe never ran (only the menu-open event arms it): the fallback
-    // shape is the honest catalog -- the profile model's synthetic row and
-    // the clearing row annotated with it. Silent by contract: no fault
-    // line anywhere, and zero catalog IPC.
+    // shape is the honest catalog -- the pinned model's synthetic row. No
+    // clearing row rides the built-in MODEL list (ADR-0154). Silent by
+    // contract: no fault line anywhere, and zero catalog IPC.
     expect(
       screen.getByRole("menuitemradio", {
-        name: "claude-sonnet-4-6 (not offered by this runtime)",
+        name: "claude-sonnet-4-6 (pinned default)",
       }),
     ).toBeTruthy();
-    expect(
-      screen.getByRole("menuitem", {
-        name: "Default (recommended) (claude-sonnet-4-6)",
-      }),
-    ).toBeTruthy();
+    expect(screen.getAllByTestId("sub-content")[0].textContent).not.toContain(
+      "Default (recommended)",
+    );
     expect(screen.queryByRole("status")).toBeNull();
     expect(getBuiltinPostureCatalog).not.toHaveBeenCalled();
+  });
+
+  it("writes the pinned default as the explicit selection when its row is picked (ADR-0154)", async () => {
+    renderPicker(pickerJsx());
+    // The posture read must settle first: an unsettled read drops the
+    // gesture (the trigger stays disabled until then).
+    const trigger = await screen.findByRole("button", { name: "Model: claude-sonnet-4-6" });
+    await waitFor(() =>
+      expect((trigger as HTMLButtonElement).disabled).toBe(false),
+    );
+    fireEvent.click(
+      screen.getByRole("menuitemradio", {
+        name: "claude-sonnet-4-6 (pinned default)",
+      }),
+    );
+    // The way back to the pinned default: an explicit selection of it (the
+    // backend stamps the scope and records the endpoint's startup entry).
+    await waitFor(() =>
+      expect(setSessionPosture).toHaveBeenCalledWith("sess-1", {
+        model: "claude-sonnet-4-6",
+        thought_level: null,
+      }),
+    );
+  });
+
+  it("shows the honest no-model state for an unpinned profile with nothing held (ADR-0154)", async () => {
+    renderPicker(pickerJsx({ provider: pickerProvider("glm") }));
+    expect(
+      await screen.findByRole("button", { name: "Model: No model selected" }),
+    ).toBeTruthy();
+    expect(screen.getByText("No model selected")).toBeTruthy();
+    // Still a menu (a profile row exists): a pick is the way out. Nothing is
+    // pinned, so no synthetic row rides the (probe-less) empty list.
+    expect(screen.queryByRole("menuitemradio")).toBeNull();
+  });
+
+  it("reads an out-of-scope built-in pair as unselected -- never a model the next turn would not inject (ADR-0154)", async () => {
+    // A pair picked on another endpoint (a session whose composer was
+    // unmounted across a profile switch, or a resumed session) stays stored
+    // but injects nothing; the backend's scope verdict drives the display.
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: "foreign-model",
+      thought_level: "high",
+      cached_discovered: null,
+      in_scope: false,
+    });
+    renderPicker(pickerJsx());
+    expect(
+      await screen.findByRole("button", { name: "Model: claude-sonnet-4-6" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /foreign-model/ })).toBeNull();
+    // No reset write for a pair already out of scope at mount (the
+    // composer-mounted drift reset only fires on a change observed while
+    // mounted): the stored pair is the session's and merely sleeps.
+    expect(setSessionRuntime).not.toHaveBeenCalled();
+    expect(setSessionPosture).not.toHaveBeenCalled();
+  });
+
+  it("seeds the cold-start built-in posture from the endpoint entry through the argument-less read (ADR-0154)", async () => {
+    vi.mocked(getBuiltinLastModelPosture).mockResolvedValueOnce({
+      model: "gateway-model",
+      thought_level: "high",
+    });
+    const channel = staticColdStartChannel(null, { kind: "built_in" });
+    renderPicker(pickerJsx({ sessionId: null, coldStart: channel }));
+    expect(
+      await screen.findByRole("button", { name: "Model: gateway-model · high" }),
+    ).toBeTruthy();
+    // No arguments: the backend derives the entry from the active
+    // profile's endpoint, so the frontend carries no key knowledge.
+    expect(getBuiltinLastModelPosture).toHaveBeenCalledTimes(1);
+    expect(getLastModelPosture).not.toHaveBeenCalled();
+  });
+
+  it("reads the new endpoint's entry after an endpoint edit on the cold-start bar (ADR-0154)", async () => {
+    // The entry is an endpoint fact: the cache key carries the endpoint
+    // spelling, so an edited profile reads its own entry instead of
+    // lingering on the old endpoint's cached one.
+    vi.mocked(getBuiltinLastModelPosture).mockResolvedValueOnce({
+      model: "old-endpoint-model",
+      thought_level: null,
+    });
+    const channel = staticColdStartChannel(null, { kind: "built_in" });
+    const { rerender, queryClient } = renderPicker(
+      pickerJsx({ sessionId: null, coldStart: channel }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Model: old-endpoint-model" }),
+    ).toBeTruthy();
+    const edited = pickerProvider();
+    edited.profiles[0].base_url = "https://proxy.example.com";
+    vi.mocked(getBuiltinLastModelPosture).mockResolvedValueOnce({
+      model: "new-endpoint-model",
+      thought_level: null,
+    });
+    rerender(
+      wrap(
+        pickerJsx({ sessionId: null, coldStart: channel, provider: edited }),
+        queryClient,
+      ),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Model: new-endpoint-model" }),
+    ).toBeTruthy();
+    expect(getBuiltinLastModelPosture).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads the built-in entry only on the built-in cold-start bar", async () => {
+    // In-session the model-config query is the truth (scope verdict
+    // included); an external cold start reads the adapter's entry instead.
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: "Model: claude-sonnet-4-6" });
+    expect(getBuiltinLastModelPosture).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a failed built-in entry read on the cold-start bar as an inline status line", async () => {
+    vi.mocked(getBuiltinLastModelPosture).mockRejectedValueOnce(
+      new Error("ipc down"),
+    );
+    renderPicker(
+      pickerJsx({
+        sessionId: null,
+        coldStart: staticColdStartChannel(null, { kind: "built_in" }),
+      }),
+    );
+    expect(await screen.findByRole("status")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Model: / })).toBeNull();
   });
 
   it("probes lazily: zero calls before the menu opens, one on the first open, none on a re-open while the answer is non-empty", async () => {
@@ -846,6 +981,7 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
       model: "claude-sonnet-4-5",
       thought_level: "high",
       cached_discovered: null,
+      in_scope: true,
     });
     const { rerender, queryClient } = renderPicker(pickerJsx());
     await screen.findByRole("button", { name: /^Model: claude-sonnet-4-5/ });
@@ -889,6 +1025,7 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
       model: "claude-sonnet-4-6",
       thought_level: "high",
       cached_discovered: null,
+      in_scope: true,
     });
     vi.mocked(getBuiltinPostureCatalog).mockResolvedValue([
       {
@@ -936,7 +1073,7 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
     // the gesture too.
     fireEvent.click(
       screen.getByRole("menuitemradio", {
-        name: "claude-sonnet-4-6 (not offered by this runtime)",
+        name: "claude-sonnet-4-6 (pinned default)",
       }),
     );
     expect(setSessionPosture).not.toHaveBeenCalled();
@@ -980,9 +1117,10 @@ describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)"
     expect(screen.queryByText("Default (recommended)")).toBeNull();
   });
 
-  it("shows an em dash when the active profile has no model", () => {
+  it("shows the honest no-model state (never an em dash) when the active profile has no model", () => {
     renderPicker(pickerJsx({ provider: pickerProvider("glm") }));
-    expect(screen.getByText("—")).toBeTruthy();
+    expect(screen.getByText("No model selected")).toBeTruthy();
+    expect(screen.queryByText("—")).toBeNull();
   });
 
   it("shows Not configured on the built-in runtime with zero profiles (issue #570)", () => {
@@ -1298,6 +1436,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
       model: "gpt-5",
       thought_level: "medium",
       cached_discovered: null,
+      in_scope: true,
     });
     vi.mocked(getAdapterCatalogs).mockResolvedValue(codexProbeEntry(CODEX_MODELS));
     renderPicker(pickerJsx());
@@ -1325,6 +1464,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
       model: null,
       thought_level: "medium",
       cached_discovered: null,
+      in_scope: true,
     });
     vi.mocked(getAdapterCatalogs).mockResolvedValue(codexProbeEntry(CODEX_MODELS));
     renderPicker(pickerJsx());
@@ -1374,6 +1514,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
       model: "gpt-5",
       thought_level: "medium",
       cached_discovered: null,
+      in_scope: true,
     });
     vi.mocked(getAdapterCatalogs).mockResolvedValue(codexProbeEntry(CODEX_MODELS));
     vi.mocked(setSessionPosture).mockRejectedValueOnce(new Error("write refused"));

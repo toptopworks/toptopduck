@@ -144,6 +144,18 @@ function ExtractionStatusLine({ status }: { status: ExtractionStatus }) {
           />
         </p>
       );
+    // ADR-0154: the extraction profile pins no model. A failure face (the
+    // channel is wired, only the model is missing) carrying a fix-it line
+    // instead of a technical detail.
+    case "no_model":
+      return (
+        <p className="text-destructive m-0 text-xs" role="alert">
+          <FormattedMessage
+            id="workspace.memory.extraction.noModel"
+            defaultMessage="No model selected — pin one on the extraction profile in Settings first."
+          />
+        </p>
+      );
     case "failed":
       return (
         <p className="text-destructive m-0 text-xs" role="alert">

@@ -23,9 +23,11 @@ export interface ProviderProfile {
   // Anthropic Messages API base URL (ADR-0019: configurable baseURL; default
   // Anthropic direct, overridable to a user's own Anthropic-compatible gateway).
   base_url: string;
-  // Model id to request (ADR-0007: default Sonnet-class, pinned; the user may
-  // switch to a stronger or cheaper model).
-  model: string;
+  // The pinned default model id to request, or null = no pinned default
+  // (ADR-0154): a gateway serves a list of models and no id can be pinned
+  // for it in advance. A turn then runs on the session's selected posture,
+  // or refuses honestly when nothing is selected.
+  model: string | null;
 }
 
 // Non-secret multi-profile provider config (ADR-0064/0098): a list of named

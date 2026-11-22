@@ -19,7 +19,7 @@ use crate::guardrail::{
     is_well_formed_memory_limit, DEFAULT_MAX_RESULT_ROWS, MAX_THREADS, MEMORY_LIMIT,
 };
 use crate::mcp::config::McpServerRegistry;
-use crate::model::{ProfileId, ProviderConfig, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
+use crate::model::{ProfileId, ProviderConfig, DEFAULT_PROVIDER_BASE_URL};
 use crate::turn_window::WINDOW_TURNS;
 use crate::workingset::DEFAULT_RESULT_COUNT_CAP;
 
@@ -101,7 +101,10 @@ pub enum DefaultRuntime {
 /// = the last set cleared it; both `None` (or no entry at all) = the
 /// "default (recommended)" unselected start. Stored keyed by adapter id in
 /// [`AppConfig::last_model_postures`] -- the model id is adapter-namespaced,
-/// so entries never migrate across CLIs. Ids are NOT validated against the
+/// so entries never migrate across CLIs. The built-in runtime keeps one
+/// entry too (ADR-0154), keyed by the active endpoint's identity under the
+/// reserved `builtin:` prefix -- the same map, the same single write point.
+/// Ids are NOT validated against the
 /// live catalog at rest: a dangling entry (adapter undetected, model gone
 /// from the catalog) is KEPT and re-enables automatically once the
 /// environment returns (ADR-0100 Decision 4).
@@ -366,7 +369,9 @@ pub struct AppConfig {
     pub default_runtime: DefaultRuntime,
     /// Per-adapter last-selected model postures (ADR-0100, issue #581): the
     /// `{model, thought_level}` a new session on that adapter starts with,
-    /// keyed by adapter id. Forward-compat: a pre-#581 file has no
+    /// keyed by adapter id. The built-in runtime's entry lives in the same
+    /// map under the active endpoint's identity (ADR-0154, the reserved
+    /// `builtin:` prefix). Forward-compat: a pre-#581 file has no
     /// `last_model_postures` key, so serde(default) fills an empty map rather
     /// than rejecting the whole document. The format_version is NOT bumped —
     /// the new field is additive (same pattern as `default_runtime`).
@@ -464,9 +469,10 @@ impl AppConfig {
     /// - `provider.profiles` may stay empty (zero profiles is a legal state,
     ///   ADR-0098 -- no skeleton re-seed) and a dangling `active_profile`
     ///   nulls (no first-profile fallback);
-    /// - empty/whitespace `base_url` / `model` on the ACTIVE profile (when one
-    ///   exists) -> the canonical defaults (so the provider always has a valid
-    ///   endpoint);
+    /// - an empty/whitespace `base_url` on the ACTIVE profile (when one
+    ///   exists) -> the canonical default (so the provider always has a valid
+    ///   endpoint); a blank `model` -> `None`, the unpinned state (ADR-0154:
+    ///   no id is invented for an endpoint whose list the app cannot know);
     /// - the engine fields repaired to their domain via
     ///   [`EngineDefaults::sanitize`] (`memory_limit` reverted to the
     ///   constant when ill-formed, `threads` clamped to >= 1 -- DuckDB
@@ -514,12 +520,10 @@ impl AppConfig {
             } else {
                 base_url
             };
-            let model = active.model.trim().to_string();
-            active.model = if model.is_empty() {
-                DEFAULT_PROVIDER_MODEL.to_string()
-            } else {
-                model
-            };
+            let model = active.model.take();
+            active.model = model
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty());
         }
         self.engine.sanitize();
         self.tunables.window_turns = self.tunables.window_turns.max(1);
@@ -749,11 +753,14 @@ mod tests {
             .active_mut()
             .expect("seeded config has an active profile");
         active.base_url = "   ".into();
-        active.model = "".into();
+        active.model = Some("   ".into());
         cfg.normalize();
         let active = cfg.provider.active().expect("active profile still present");
         assert_eq!(active.base_url, DEFAULT_PROVIDER_BASE_URL);
-        assert_eq!(active.model, DEFAULT_PROVIDER_MODEL);
+        assert_eq!(
+            active.model, None,
+            "a blank model normalizes to the unpinned state, never to an invented id"
+        );
     }
 
     /// The extraction pointer's dangling-null repair (issue #1530): a named
@@ -789,11 +796,11 @@ mod tests {
             .active_mut()
             .expect("seeded config has an active profile");
         active.base_url = "  https://gateway.example.test  ".into();
-        active.model = "claude-opus-4-8".into();
+        active.model = Some("  claude-opus-4-8  ".into());
         cfg.normalize();
         let active = cfg.provider.active().expect("active profile still present");
         assert_eq!(active.base_url, "https://gateway.example.test");
-        assert_eq!(active.model, "claude-opus-4-8");
+        assert_eq!(active.model.as_deref(), Some("claude-opus-4-8"));
     }
 
     #[test]
@@ -897,8 +904,8 @@ mod tests {
             Some("https://gateway.example.test")
         );
         assert_eq!(
-            view.model.as_deref(),
-            Some(crate::model::DEFAULT_PROVIDER_MODEL)
+            view.model, None,
+            "the seeded skeleton pins no model (ADR-0154); the view shows the unpinned state"
         );
         assert!(view.has_key);
         assert!(view.keychain_fault.is_none());

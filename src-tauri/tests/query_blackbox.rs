@@ -20,7 +20,7 @@ use serde_json::json;
 use toptopduck_lib::provider::tool_calling::{
     ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse,
 };
-use toptopduck_lib::session::PosturePair;
+use toptopduck_lib::session::{PosturePair, StampedPosture};
 use toptopduck_lib::{
     ActiveResolution, ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState,
     CancelToken, DatasetPrivacy, ExportRowsError, FakeProvider, LoadOutcome, OperationKind,
@@ -729,10 +729,10 @@ fn posture_thought_level_stamps_every_built_in_round_trip_request() {
     let captured = provider.captured_tool_turns();
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
-    session.set_external_model_config(PosturePair {
+    session.set_external_model_config(StampedPosture::unscoped(PosturePair {
         model: Some("claude-opus-4-8".into()),
         thought_level: Some("high".into()),
-    });
+    }));
 
     let (name, _, _) = materialized(session.ask("带级别"));
     assert_eq!(name, "result_1");

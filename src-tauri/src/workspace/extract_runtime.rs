@@ -66,10 +66,45 @@ pub enum SkipReason {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ExtractionStatus {
     Running,
-    Skipped { reason: SkipReason },
+    Skipped {
+        reason: SkipReason,
+    },
     NoNewFacts,
-    Extracted { titles: Vec<String> },
-    Failed { detail: String },
+    Extracted {
+        titles: Vec<String>,
+    },
+    Failed {
+        detail: String,
+    },
+    /// The target profile pins no model (ADR-0154): the extraction channel
+    /// has no posture selection to fall back on, and no id is invented for
+    /// the endpoint -- a failure, not a skip, because the channel IS wired
+    /// (the profile and its key resolved) and only the model is missing.
+    /// A typed sibling of `Failed` so the panel can render a localized
+    /// fix-it line instead of a technical detail.
+    NoModel,
+}
+
+/// The extraction turn's fixed-value config (ADR-0154): the target
+/// profile's endpoint + its key + its PINNED model. An unpinned profile
+/// refuses as [`ExtractionStatus::NoModel`] here, before any provider is
+/// constructed -- the refusal precedes the client, so nothing reaches the
+/// wire.
+fn extraction_static_config(
+    profile: &crate::model::ProviderProfile,
+    key: String,
+    locale: crate::provider::prompt::ResponseLocale,
+) -> Result<StaticConfig, ExtractionStatus> {
+    let Some(model) = profile.pinned_model().map(str::to_string) else {
+        return Err(ExtractionStatus::NoModel);
+    };
+    Ok(StaticConfig {
+        key: Some(key),
+        base_url: profile.base_url.clone(),
+        model,
+        locale,
+        protocol: profile.protocol,
+    })
 }
 
 /// Run one extraction to its terminal status. Guards (fragment user block
@@ -97,40 +132,52 @@ pub(crate) fn perform_extraction(
         };
     }
     let cfg: AppConfig = live.load();
-    let Some(profile) = extract::resolve_extraction_profile(&cfg) else {
-        return Skipped {
-            reason: SkipReason::NoProvider,
-        };
+    let locale = live.locale();
+    let provider = match extraction_provider(&cfg, locale, |id| live.keychain().fetch_key_for(id)) {
+        Ok(provider) => provider,
+        Err(status) => return status,
     };
-    // A keychain READ failure is infrastructure, not configuration: the
-    // not-stored None stays a NoProvider skip, the Err lands as a Failed
-    // the panel can tell apart (issue #1530 review).
-    let key = match live.keychain().fetch_key_for(&profile.id) {
+    perform_with_provider(job, &provider, locale, &rows)
+}
+
+/// Resolve the extraction turn's provider (issue #1530; ADR-0154 for the
+/// model gate): the target profile on the chain, its key -- read through
+/// `key_read`, the keychain in production and an injected outcome in tests
+/// -- and its pinned model. No profile on the chain and no stored key are
+/// the NoProvider skip; a keychain READ failure is infrastructure, not
+/// configuration, and lands as a Failed the panel can tell apart (issue
+/// #1530 review); a keyed profile that pins no model refuses as the typed
+/// NoModel failure. Every refusal resolves BEFORE a provider exists to
+/// construct, so nothing can reach the wire.
+fn extraction_provider(
+    cfg: &AppConfig,
+    locale: crate::provider::prompt::ResponseLocale,
+    key_read: impl FnOnce(&crate::model::ProfileId) -> Result<Option<String>, String>,
+) -> Result<LiveProvider<StaticConfig>, ExtractionStatus> {
+    use ExtractionStatus::Skipped;
+    let Some(profile) = extract::resolve_extraction_profile(cfg) else {
+        return Err(Skipped {
+            reason: SkipReason::NoProvider,
+        });
+    };
+    let key = match key_read(&profile.id) {
         Ok(Some(key)) => key,
         Ok(None) => {
-            return Skipped {
+            return Err(Skipped {
                 reason: SkipReason::NoProvider,
-            };
+            });
         }
         Err(err) => {
             log::warn!(
                 target: "toptopduck::workspace_memory",
                 "keychain read for the extraction profile failed: {err}"
             );
-            return ExtractionStatus::Failed {
+            return Err(ExtractionStatus::Failed {
                 detail: format!("keychain read failed: {err}"),
-            };
+            });
         }
     };
-    let static_cfg = StaticConfig {
-        key: Some(key),
-        base_url: profile.base_url.clone(),
-        model: profile.model.clone(),
-        locale: live.locale(),
-        protocol: profile.protocol,
-    };
-    let locale = static_cfg.locale;
-    perform_with_provider(job, &LiveProvider::new(static_cfg), locale, &rows)
+    extraction_static_config(profile, key, locale).map(LiveProvider::new)
 }
 
 /// The provider-facing half of [`perform_extraction`] (the test seam: a
@@ -700,6 +747,78 @@ mod tests {
         );
     }
 
+    /// The provider resolution refuses by cause BEFORE a provider exists
+    /// to construct, with the keychain read injected: no profile on the
+    /// chain and no stored key are the NoProvider skip, a failed key read
+    /// is a Failed the panel can tell apart, and a keyed profile that pins
+    /// no model is the typed NoModel failure (ADR-0154) -- nothing reaches
+    /// the wire on any of them.
+    #[test]
+    fn extraction_provider_refuses_by_cause_before_any_provider_is_built() {
+        let locale = ResponseLocale::EnUS;
+        let no_profile = AppConfig::defaults();
+        assert_eq!(
+            extraction_provider(&no_profile, locale, |_| {
+                panic!("no profile: the key is never read")
+            })
+            .err(),
+            Some(ExtractionStatus::Skipped {
+                reason: SkipReason::NoProvider,
+            })
+        );
+        let mut profile = crate::model::ProviderProfile::default_anthropic();
+        profile.model = None;
+        let mut cfg = AppConfig::defaults();
+        cfg.provider.active_profile = Some(profile.id.clone());
+        cfg.provider.profiles.push(profile);
+        assert_eq!(
+            extraction_provider(&cfg, locale, |_| Ok(None)).err(),
+            Some(ExtractionStatus::Skipped {
+                reason: SkipReason::NoProvider,
+            }),
+            "a not-stored key stays the quiet skip"
+        );
+        assert_eq!(
+            extraction_provider(&cfg, locale, |_| Err("locked".into())).err(),
+            Some(ExtractionStatus::Failed {
+                detail: "keychain read failed: locked".into(),
+            })
+        );
+        assert_eq!(
+            extraction_provider(&cfg, locale, |_| Ok(Some("sk-test".into()))).err(),
+            Some(ExtractionStatus::NoModel),
+            "the keyed but unpinned profile refuses as NoModel"
+        );
+        cfg.provider.profiles[0].model = Some("haiku".into());
+        assert!(
+            extraction_provider(&cfg, locale, |_| Ok(Some("sk-test".into()))).is_ok(),
+            "a keyed, pinned profile builds its provider"
+        );
+    }
+
+    /// An unpinned extraction profile (ADR-0154) refuses as the typed
+    /// `NoModel` status BEFORE a config exists to build a provider from:
+    /// the channel never falls back to a global default id, and nothing can
+    /// reach the wire. A pinned profile builds its config verbatim.
+    #[test]
+    fn an_unpinned_extraction_profile_refuses_as_no_model() {
+        let mut profile = crate::model::ProviderProfile::default_anthropic();
+        assert!(
+            matches!(
+                extraction_static_config(&profile, "sk-test".into(), ResponseLocale::EnUS),
+                Err(ExtractionStatus::NoModel)
+            ),
+            "the unpinned profile refuses before any provider is built"
+        );
+        profile.model = Some("haiku".into());
+        let cfg = extraction_static_config(&profile, "sk-test".into(), ResponseLocale::EnUS)
+            .expect("a pinned profile builds its config");
+        assert_eq!(
+            cfg.model, "haiku",
+            "the pinned model rides the config verbatim"
+        );
+    }
+
     // --- the scheduler's two slots (gated executor) -------------------------
 
     /// The pending-slot contract (issue #1530): while one extraction runs,
@@ -853,6 +972,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ExtractionStatus::NoNewFacts).expect("serialize"),
             r#"{"state":"no_new_facts"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ExtractionStatus::NoModel).expect("serialize"),
+            r#"{"state":"no_model"}"#
         );
     }
 

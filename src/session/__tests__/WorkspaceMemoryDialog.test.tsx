@@ -225,6 +225,22 @@ describe("WorkspaceMemoryDialog", () => {
     expect(alert).toHaveClass("text-destructive");
   });
 
+  // ADR-0154: an unpinned extraction profile is a FAILURE with its own
+  // fix-it line (the channel is wired, only the model is missing) -- never
+  // a technical detail and never the quiet no-provider skip.
+  it("renders the no-model extraction as a destructive alert with the pin-it guidance", async () => {
+    mockedEnabled.mockResolvedValue(true);
+    mockedList.mockResolvedValue({ rows: [], usage_percent: 0, unreadable: [] });
+    mockedAutoExtraction.mockResolvedValue(true);
+    mockedExtractionStatus.mockResolvedValue({ state: "no_model" });
+    renderPanel();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "未选择模型——请先在设置页为提取用的接入档案钉选模型。",
+    );
+    expect(alert).toHaveClass("text-destructive");
+  });
+
   // The remaining panel faces (issue #1530's spec trio + the yellow band):
   // running renders the live-region status, no-new-facts renders its line,
   // and the yellow band shows from 80% (the red test above pins >=95).

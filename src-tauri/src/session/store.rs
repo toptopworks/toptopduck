@@ -48,7 +48,7 @@ use crate::approval::SharedApprovalState;
 use crate::cancel::CancelToken;
 use crate::provider::Provider;
 use crate::runtime::acp::adapter::AdapterSpec;
-use crate::session::{PosturePair, Session};
+use crate::session::{PosturePair, Session, StampedPosture};
 
 /// IPC error string carried by [`SessionError::NotFound`] -- the wording the
 /// frontend has always rendered for an unknown / closed session. Kept as a
@@ -231,7 +231,7 @@ impl Default for ClosingFlag {
 #[derive(Default)]
 struct RuntimePosture {
     runtime: Option<AdapterSpec>,
-    posture: PosturePair,
+    posture: StampedPosture,
 }
 
 /// One live session's shared handle. Cloned out of the store under a read lock
@@ -482,6 +482,19 @@ impl SessionHandle {
             .lock()
             .expect("runtime_posture lock poisoned")
             .posture
+            .pair
+            .clone()
+    }
+
+    /// The posture pair with the endpoint identity it was selected under
+    /// (ADR-0154), read under the ONE slot lock. The IPC read projects the
+    /// scope onto its `in_scope` verdict; the turn-top mirror carries the
+    /// whole value into the Session.
+    pub fn stamped_posture(&self) -> StampedPosture {
+        self.runtime_posture
+            .lock()
+            .expect("runtime_posture lock poisoned")
+            .posture
             .clone()
     }
 
@@ -498,7 +511,7 @@ impl SessionHandle {
     /// share ONE mutex slot -- a torn write between them is not a
     /// representable intermediate state (issue #530). `None` fields clear
     /// (revert to the CLI's own defaults). Lock-light.
-    pub fn set_external_model_config(&self, posture: PosturePair) {
+    pub fn set_external_model_config(&self, posture: StampedPosture) {
         self.runtime_posture
             .lock()
             .expect("runtime_posture lock poisoned")
@@ -514,7 +527,7 @@ impl SessionHandle {
     /// [`Self::set_runtime_and_posture`]: a switch can never interleave
     /// between the two reads, so the caller sees one segment's (runtime,
     /// pair), never a mix.
-    pub fn runtime_and_posture(&self) -> (Option<AdapterSpec>, PosturePair) {
+    pub fn runtime_and_posture(&self) -> (Option<AdapterSpec>, StampedPosture) {
         let slot = self
             .runtime_posture
             .lock()
@@ -526,7 +539,7 @@ impl SessionHandle {
     /// (issue #600) -- the in-session switch's single combined step
     /// (ADR-0102 Decision 3): a reader taking the same lock sees either the
     /// old (runtime, pair) or the switched one in full, never a mix.
-    pub fn set_runtime_and_posture(&self, runtime: Option<AdapterSpec>, posture: PosturePair) {
+    pub fn set_runtime_and_posture(&self, runtime: Option<AdapterSpec>, posture: StampedPosture) {
         let mut slot = self
             .runtime_posture
             .lock()
@@ -547,7 +560,7 @@ impl SessionHandle {
     pub fn set_posture_if_runtime(
         &self,
         expected: &Option<AdapterSpec>,
-        posture: PosturePair,
+        posture: StampedPosture,
     ) -> bool {
         let mut slot = self
             .runtime_posture
@@ -593,7 +606,7 @@ impl SessionHandle {
     /// [`Self::set_external_model_config`] and never touches the catalog).
     pub fn restore_runtime_model_config(
         &self,
-        posture: PosturePair,
+        posture: StampedPosture,
         cached_discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
     ) {
         self.set_external_model_config(posture);
@@ -1415,36 +1428,37 @@ mod tests {
 
         // The combined write lands both fields; every read shape sees it.
         let spec = crate::runtime::acp::adapter::gemini_cli();
-        let posture = PosturePair {
+        let posture = StampedPosture::unscoped(PosturePair {
             model: Some("fake-opus".into()),
             thought_level: Some("high".into()),
-        };
+        });
         handle.set_runtime_and_posture(Some(spec), posture.clone());
         assert_eq!(handle.runtime_choice().unwrap().id.as_str(), "gemini-cli");
-        assert_eq!(handle.external_model_config(), posture);
+        assert_eq!(handle.external_model_config(), posture.pair);
         let (runtime, pair) = handle.runtime_and_posture();
         assert_eq!(runtime.unwrap().id.as_str(), "gemini-cli");
         assert_eq!(pair, posture);
 
         // A single-field write only touches its field; the combined read
         // still returns both under the one lock.
-        handle.set_external_model_config(PosturePair::default());
+        handle.set_external_model_config(StampedPosture::default());
         let (runtime, pair) = handle.runtime_and_posture();
         assert_eq!(runtime.as_ref().unwrap().id.as_str(), "gemini-cli");
-        assert_eq!(pair, PosturePair::default());
+        assert_eq!(pair, StampedPosture::default());
+        assert_eq!(handle.stamped_posture(), StampedPosture::default());
 
         // The conditional write keys off the same slot state: it lands
         // while the runtime still matches the read, and drops after a
         // combined write changed the runtime (the set command's write-back
         // guard).
-        let pair = PosturePair {
+        let pair = StampedPosture::unscoped(PosturePair {
             model: Some("fake-sonnet".into()),
             thought_level: None,
-        };
+        });
         assert!(handle.set_posture_if_runtime(&runtime, pair.clone()));
-        assert_eq!(handle.external_model_config(), pair);
+        assert_eq!(handle.external_model_config(), pair.pair);
         let codex = crate::runtime::acp::adapter::codex();
-        handle.set_runtime_and_posture(Some(codex), PosturePair::default());
+        handle.set_runtime_and_posture(Some(codex), StampedPosture::default());
         assert!(!handle.set_posture_if_runtime(&runtime, pair));
         assert_eq!(
             handle.external_model_config(),
@@ -1474,10 +1488,10 @@ mod tests {
         assert_eq!(handle.external_model_config(), PosturePair::default());
         assert_eq!(handle.cached_discovered(), None);
 
-        handle.set_external_model_config(PosturePair {
+        handle.set_external_model_config(StampedPosture::unscoped(PosturePair {
             model: Some("fake-opus".into()),
             thought_level: Some("high".into()),
-        });
+        }));
         // The pair reader returns both fields of the same slot state.
         assert_eq!(
             handle.external_model_config(),
@@ -1505,7 +1519,7 @@ mod tests {
         assert_eq!(handle.cached_discovered(), Some(empty_catalog));
 
         // The resume restore overwrites all three in one shot.
-        handle.restore_runtime_model_config(PosturePair::default(), None);
+        handle.restore_runtime_model_config(StampedPosture::default(), None);
         assert_eq!(handle.external_model_config(), PosturePair::default());
         assert_eq!(handle.cached_discovered(), None);
     }

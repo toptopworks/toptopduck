@@ -1033,6 +1033,9 @@ impl super::Session {
             thought_level: recipe.thought_level.clone(),
             cached_discovered: recipe.cached_discovered.clone(),
             last_runtime: recipe.last_runtime.clone(),
+            // ADR-0154: the posture pair's endpoint scope restores
+            // verbatim; `None` for a pre-ADR-0154 recipe.
+            posture_endpoint: recipe.posture_endpoint.clone(),
             // ADR-0137 (issue #1381): the workspace binding restores verbatim
             // -- immutable by contract, `None` for a pre-#1381 recipe (the
             // session then lazy-mints at its next disk-need moment like a

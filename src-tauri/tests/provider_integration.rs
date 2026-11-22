@@ -687,8 +687,8 @@ impl ProviderConfigSource for FlippableConfig {
     fn base_url(&self) -> String {
         self.base_url.clone()
     }
-    fn model(&self) -> String {
-        "m".into()
+    fn model(&self) -> Option<String> {
+        Some("m".into())
     }
     fn locale(&self) -> ResponseLocale {
         ResponseLocale::EnUS
@@ -1020,7 +1020,8 @@ fn anthropic_versioned_base_url_normalizes_to_the_same_endpoint() {
 /// shape instead misses the mock and the turn dies.
 #[test]
 fn anthropic_thought_level_rides_the_adaptive_shape() {
-    use toptopduck_lib::session::PosturePair;
+    use toptopduck_lib::session::{PosturePair, StampedPosture};
+    use toptopduck_lib::{builtin_endpoint_identity, Protocol};
     let mut server = mockito::Server::new();
     let mock = server
         .mock("POST", "/v1/messages")
@@ -1039,10 +1040,15 @@ fn anthropic_thought_level_rides_the_adaptive_shape() {
         .create();
     let provider = anthropic_live_provider(server.url(), Some("sk-test"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
-    session.set_external_model_config(PosturePair {
-        model: Some("claude-opus-4-6-posture".into()),
-        thought_level: Some("high".into()),
-    });
+    // ADR-0154: a built-in pair injects only under the endpoint it was
+    // selected against -- the seam stamps the mock server's endpoint.
+    session.set_external_model_config(StampedPosture::scoped(
+        PosturePair {
+            model: Some("claude-opus-4-6-posture".into()),
+            thought_level: Some("high".into()),
+        },
+        builtin_endpoint_identity(Protocol::Anthropic, &server.url()),
+    ));
     let outcome = session.ask("anything");
     assert!(
         matches!(outcome, TurnOutcome::Textual { .. }),
@@ -1057,7 +1063,8 @@ fn anthropic_thought_level_rides_the_adaptive_shape() {
 /// a layer that drops the parameter misses the mock and the turn dies.
 #[test]
 fn openai_thought_level_rides_the_reasoning_effort() {
-    use toptopduck_lib::session::PosturePair;
+    use toptopduck_lib::session::{PosturePair, StampedPosture};
+    use toptopduck_lib::{builtin_endpoint_identity, Protocol};
     let mut server = mockito::Server::new();
     let mock = server
         .mock("POST", "/chat/completions")
@@ -1076,14 +1083,133 @@ fn openai_thought_level_rides_the_reasoning_effort() {
         .create();
     let provider = openai_live_provider(server.url(), Some("sk-test"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
-    session.set_external_model_config(PosturePair {
-        model: Some("gpt-4o-mini-posture".into()),
-        thought_level: Some("high".into()),
-    });
+    // ADR-0154: same scope stamping as the anthropic pin above.
+    session.set_external_model_config(StampedPosture::scoped(
+        PosturePair {
+            model: Some("gpt-4o-mini-posture".into()),
+            thought_level: Some("high".into()),
+        },
+        builtin_endpoint_identity(Protocol::Openai, &server.url()),
+    ));
     let outcome = session.ask("anything");
     assert!(
         matches!(outcome, TurnOutcome::Textual { .. }),
         "the effort parameter answers; a dropped parameter would have missed the mock: {outcome:?}"
     );
     mock.assert();
+}
+
+/// ADR-0154: a built-in posture pair is scoped to the endpoint it was
+/// selected against. A pair stamped for ANOTHER endpoint -- and an unstamped
+/// pair (a recipe persisted before the scope) -- injects nothing: the turn
+/// runs on the profile's pinned model (the StaticConfig default here), never
+/// the foreign id. This is the gate behind the windows no frontend drift
+/// reset covers (a session whose composer is unmounted, a resumed session).
+#[test]
+fn an_out_of_scope_built_in_posture_is_not_injected() {
+    use toptopduck_lib::session::{PosturePair, StampedPosture};
+    use toptopduck_lib::{builtin_endpoint_identity, Protocol};
+    let mut server = mockito::Server::new();
+    // The strength-half trap (ADR-0154): the foreign pair carries a
+    // thought level, and a half-state injection (the pinned model riding
+    // with the out-of-scope pair's adaptive effort) must never reach the
+    // wire -- the pair contributes NEITHER half. mockito answers with the
+    // FIRST matching mock still missing hits, so this trap registers
+    // ahead of the lenient model-only mock below and claims any request
+    // pairing the effort fields (a 500 fails the turn outright); a clean
+    // out-of-scope request carries no effort fields and falls through.
+    // expect(2) only keeps the trap "missing hits" ahead of the real
+    // mock -- it is never asserted on, and a healthy run never lands a
+    // hit on it. (An expect(0) sentinel cannot do this job: a
+    // zero-expectation mock is never "missing hits", so a second,
+    // matching mock always answers instead.)
+    let _strength_trap = server
+        .mock("POST", "/v1/messages")
+        .match_body(mockito::Matcher::Regex(r#""type":"adaptive""#.into()))
+        .match_body(mockito::Matcher::Regex(r#""effort":"high""#.into()))
+        .expect(2)
+        .with_status(500)
+        .create();
+    // The pinned profile model serves; a request carrying "foreign-model"
+    // would miss this mock and fail the turn.
+    let mock = server
+        .mock("POST", "/v1/messages")
+        .match_body(mockito::Matcher::Regex(
+            r#""model":"claude-sonnet-4-6""#.into(),
+        ))
+        .expect(2)
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(anthropic_text_body("done"))
+        .create();
+    let foreign = PosturePair {
+        model: Some("foreign-model".into()),
+        thought_level: Some("high".into()),
+    };
+    let mut scoped_elsewhere = Session::with_provider(Box::new(anthropic_live_provider(
+        server.url(),
+        Some("sk-test"),
+    )))
+    .expect("session");
+    scoped_elsewhere.set_external_model_config(StampedPosture::scoped(
+        foreign.clone(),
+        builtin_endpoint_identity(Protocol::Anthropic, "https://other-endpoint.example.test"),
+    ));
+    let outcome = scoped_elsewhere.ask("anything");
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "the out-of-scope pair injects nothing: {outcome:?}"
+    );
+    let mut unstamped = Session::with_provider(Box::new(anthropic_live_provider(
+        server.url(),
+        Some("sk-test"),
+    )))
+    .expect("session");
+    unstamped.set_external_model_config(StampedPosture::unscoped(foreign));
+    let outcome = unstamped.ask("anything");
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "the unstamped pair injects nothing: {outcome:?}"
+    );
+    mock.assert();
+}
+
+/// ADR-0154: a keyed profile that pins no model, with nothing selected,
+/// refuses as the typed NoModel failure BEFORE any client is built: the
+/// endpoint never sees a request (the sentinel expects zero), and the
+/// refusal lands as the failed-turn outcome the frontend renders by kind.
+#[test]
+fn an_unpinned_keyed_profile_refuses_as_no_model_with_zero_egress() {
+    struct Unpinned {
+        base_url: String,
+    }
+    impl ProviderConfigSource for Unpinned {
+        fn api_key(&self) -> Option<String> {
+            Some("sk-test".into())
+        }
+        fn base_url(&self) -> String {
+            self.base_url.clone()
+        }
+        fn model(&self) -> Option<String> {
+            None
+        }
+        fn locale(&self) -> ResponseLocale {
+            ResponseLocale::EnUS
+        }
+        fn protocol(&self) -> Protocol {
+            Protocol::Anthropic
+        }
+    }
+    let mut server = mockito::Server::new();
+    let sentinel = server.mock("POST", "/v1/messages").expect(0).create();
+    let mut session = Session::with_provider(Box::new(LiveProvider::new(Unpinned {
+        base_url: server.url(),
+    })))
+    .expect("session");
+    let outcome = session.ask("anything");
+    assert!(
+        matches!(outcome, TurnOutcome::Failed(TurnFailure::NoModel)),
+        "the refusal lands as the typed NoModel failure: {outcome:?}"
+    );
+    sentinel.assert();
 }
