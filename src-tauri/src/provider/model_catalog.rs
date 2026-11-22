@@ -266,6 +266,28 @@ pub(crate) fn effort_tiers(model_name: &str) -> Option<Vec<String>> {
     tiered_effort_tiers(cache.as_deref(), Some(snapshot_catalog()), model_name)
 }
 
+/// The posture menu's metadata view (#1639): one exact-id chain read
+/// (cache -> snapshot; the prefix tables carry no display names or
+/// reasoning data) serving both fields the menu consumes. `None` in a
+/// field means the catalog has no answer for it -- the consumer falls
+/// back (id verbatim for the name, no strength row for the tiers).
+pub(crate) fn catalog_metadata(model_name: &str) -> CatalogMetadata {
+    let cache = cache_catalog();
+    let entry = exact_entry(cache.as_deref(), Some(snapshot_catalog()), model_name);
+    CatalogMetadata {
+        display_name: entry.and_then(|entry| entry.display_name.clone()),
+        effort_tiers: entry.and_then(|entry| entry.effort_tiers.clone()),
+    }
+}
+
+/// The per-model metadata the posture menu consumes (#1639). A private
+/// projection over [`CompactEntry`] -- the command layer never sees the
+/// catalog schema itself.
+pub(crate) struct CatalogMetadata {
+    pub display_name: Option<String>,
+    pub effort_tiers: Option<Vec<String>>,
+}
+
 /// The pure chain over explicit tiers -- the seam the order-pinning tests
 /// drive (the wrappers above only resolve the process-global tiers).
 fn tiered_context_window(

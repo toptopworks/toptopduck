@@ -56,7 +56,7 @@ use crate::provider::http::truncate;
 /// The preflight probes carry the same header value the upstream provider
 /// construction uses, so a probe authenticates exactly like a turn would; a
 /// version bump must update both (kept in sync by this comment).
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Wall-clock ceiling on one preflight HTTP call. Tighter than the turn
 /// adapter's 120s ceiling (ADR-0021) -- a preflight is a quick reachability

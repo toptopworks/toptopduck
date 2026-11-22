@@ -48,9 +48,23 @@ use super::LoopRuntime;
 /// keyless profile (`NotWired`) or a non-http base (`InvalidConfig`) -- with
 /// the same vocabulary the adapters surfaced; the
 /// caller lands it as a zero-round-trip `LoopOutcome`.
-pub(crate) fn turn_loop_for(provider: Arc<dyn Provider>) -> Result<LoopRuntime, Termination> {
+///
+/// `posture_model` is the session-level model selection (#1639,
+/// ADR-0153): `Some` overrides the facts' profile model for the turn --
+/// the posture pair's model half rides the same per-turn construction as
+/// a profile switch, so a selection lands the next turn. The bridged
+/// face ignores it (a facts-less provider takes no model).
+pub(crate) fn turn_loop_for(
+    provider: Arc<dyn Provider>,
+    posture_model: Option<&str>,
+) -> Result<LoopRuntime, Termination> {
     match provider.turn_model_facts() {
-        Some(facts) => live_runtime(facts),
+        Some(mut facts) => {
+            if let Some(model) = posture_model {
+                facts.model = model.to_string();
+            }
+            live_runtime(facts)
+        }
         None => Ok(LoopRuntime::bridged(provider)),
     }
 }
@@ -253,7 +267,8 @@ mod tests {
         let provider: Arc<dyn Provider> = Arc::new(crate::provider::UnwiredProvider);
         // Ok = the bridged branch; the live branch is the only Err source
         // and it refuses on facts this provider does not present.
-        let runtime = turn_loop_for(provider).expect("the facts-less fork bridges, never refuses");
+        let runtime =
+            turn_loop_for(provider, None).expect("the facts-less fork bridges, never refuses");
         // Issue #1001: the bridged face carries no model-keyed cap -- no
         // facts, no stamp; the request keeps its assembled cap. #1290: no
         // name either -- its occupancy readings stay hollow.
