@@ -825,6 +825,15 @@ pub struct Recipe {
     /// the fields above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_runtime: Option<LastRuntime>,
+    /// The endpoint identity the posture pair was selected under
+    /// (ADR-0154): the scope half of the session's posture, so a resume
+    /// restores it and the built-in turn's scope gate reads the restored
+    /// value. `None` for an external runtime's pair and for recipes
+    /// persisted before the field (such a pair carries no provenance).
+    /// NOT a replay input. No format_version bump -- strictly additive with
+    /// a serde default, the `last_runtime` precedent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posture_endpoint: Option<String>,
     /// The session's discovery snapshot (ADR-0119 Decision 3, issue #983):
     /// the enabled set at session creation, immutable within the session.
     /// The metadata index lists it wholesale every turn; skills enabled
@@ -1002,6 +1011,7 @@ impl Recipe {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            posture_endpoint: None,
             workspace: None,
         })
     }
@@ -1042,6 +1052,15 @@ impl Recipe {
     /// binding reaches the next persist without a second storage to drift.
     pub fn with_workspace(mut self, workspace: Option<PathBuf>) -> Recipe {
         self.workspace = workspace;
+        self
+    }
+
+    /// Layer the posture pair's endpoint scope onto the recipe header
+    /// (ADR-0154): the same layering posture as [`Self::with_workspace`] --
+    /// the session holds the single truth (its runtime facts), and the
+    /// persister layers it at build time.
+    pub fn with_posture_endpoint(mut self, posture_endpoint: Option<String>) -> Recipe {
+        self.posture_endpoint = posture_endpoint;
         self
     }
 
@@ -1171,6 +1190,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            posture_endpoint: None,
             workspace: None,
         }
     }
@@ -1358,6 +1378,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            posture_endpoint: None,
             workspace: None,
         };
         let chain = recipe.productive_chain();
@@ -1408,6 +1429,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            posture_endpoint: None,
             workspace: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
@@ -1478,6 +1500,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            posture_endpoint: None,
             workspace: None,
         };
         let chain = recipe.productive_chain();
@@ -1624,6 +1647,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            posture_endpoint: None,
             workspace: None,
         };
         let chain = recipe.productive_chain();
@@ -2258,6 +2282,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            posture_endpoint: None,
             workspace: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
@@ -2316,6 +2341,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            posture_endpoint: None,
             workspace: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
@@ -2395,6 +2421,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            posture_endpoint: None,
             workspace: None,
         };
         let chain = recipe.productive_chain();
@@ -2486,6 +2513,29 @@ mod tests {
         // The built-in variant serializes contentless, same as the wire form.
         let v = serde_json::to_value(LastRuntime::BuiltIn).expect("serialize");
         assert_eq!(v, serde_json::json!({"kind": "built_in"}));
+    }
+
+    /// ADR-0154: the posture pair's endpoint scope rides the header like
+    /// the pair itself -- a recipe persisted before the field deserializes
+    /// with `None`, and a scoped value round-trips verbatim (the key is
+    /// absent while None, so a stored scope is unmistakable).
+    #[test]
+    fn recipe_posture_endpoint_defaults_none_and_round_trips() {
+        let mut recipe = build_recipe();
+        assert_eq!(recipe.posture_endpoint, None);
+        let unscoped = serde_json::to_value(&recipe).expect("serialize");
+        assert!(
+            unscoped.get("posture_endpoint").is_none(),
+            "an absent scope leaves no key: {unscoped}"
+        );
+        recipe.posture_endpoint = Some("builtin:anthropic|https://gateway.example.test".into());
+        let back: Recipe =
+            serde_json::from_value(serde_json::to_value(&recipe).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(
+            back.posture_endpoint,
+            Some("builtin:anthropic|https://gateway.example.test".into())
+        );
     }
 
     /// Issue #529: a recipe persisted before the adapter-id stamp carries no

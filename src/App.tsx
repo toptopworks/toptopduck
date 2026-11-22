@@ -598,6 +598,15 @@ export default function App() {
             void queryClient.invalidateQueries({
               queryKey: adapterKeys.posture(postureAdapter),
             });
+          } else if (
+            modelPosture !== null &&
+            effectivePendingRuntime.kind === "built_in"
+          ) {
+            // ADR-0154: a built-in mint-time set lands the active
+            // endpoint's startup entry.
+            void queryClient.invalidateQueries({
+              queryKey: adapterKeys.builtinPostureFamily(),
+            });
           }
         }
       });

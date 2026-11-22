@@ -867,22 +867,19 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(onCommitAppConfig).not.toHaveBeenCalled();
   });
 
-  it("an empty or whitespace model fails validation at the field instead of committing (issue #735)", async () => {
+  it("an empty model commits as the unpinned state with no field error (ADR-0154)", async () => {
     const { onCommitAppConfig } = renderView();
     fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     const model = await screen.findByLabelText("Model");
     fireEvent.change(model, { target: { value: "" } });
     fireEvent.blur(model, { relatedTarget: document.body });
-    expect(await screen.findByText("Model is required.")).toBeInTheDocument();
-    expect(model).toHaveAttribute("aria-invalid", "true");
-    expect(onCommitAppConfig).not.toHaveBeenCalled();
-    // Whitespace-only is the same state as empty: the trim lives at the
-    // validation boundary, so "   " must refuse like "" (a lost trim would
-    // pass validation and commit, flipping the not-called assertion red).
-    fireEvent.change(model, { target: { value: "   " } });
-    fireEvent.blur(model, { relatedTarget: document.body });
-    expect(await screen.findByText("Model is required.")).toBeInTheDocument();
-    expect(onCommitAppConfig).not.toHaveBeenCalled();
+    // The optional model is no longer validated: clearing it commits the
+    // profile with model null -- the honest "no pinned default" state the
+    // turn resolves through a posture selection.
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(1));
+    expect(onCommitAppConfig.mock.calls[0][0].provider.profiles[0].model).toBeNull();
+    expect(model).not.toHaveAttribute("aria-invalid");
+    expect(screen.queryByText("Model is required.")).not.toBeInTheDocument();
   });
 
   it("an open preset dropdown holds back the blur commit until the select closes", async () => {
@@ -1113,8 +1110,9 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     // The protocol radio appears only once the endpoint reads as custom.
     expect(screen.getByRole("radio", { name: /Anthropic/ })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /OpenAI/ })).toBeInTheDocument();
-    // A wrong model is cheaper to overwrite than a typed endpoint: it survives.
-    expect((screen.getByLabelText("Model") as HTMLInputElement).value).toBe("claude-sonnet");
+    // The model unpins too: a custom endpoint's model list is unknown here,
+    // and an empty model is the legal no-pinned-default state (ADR-0154).
+    expect((screen.getByLabelText("Model") as HTMLInputElement).value).toBe("");
   });
 
   it("zero profiles: empty state shows, New profile prefills defaults, Create commits 0 → 1 (issue #570)", async () => {

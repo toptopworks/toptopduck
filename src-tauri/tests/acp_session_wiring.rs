@@ -526,7 +526,7 @@ fn external_cli_tool_call_routes_through_the_gateway() {
 fn run_turn_success_arc_names_grants_and_mirrors_back() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use toptopduck_lib::session::PosturePair;
+    use toptopduck_lib::session::StampedPosture;
     use toptopduck_lib::{
         CancelToken, LiveProviderConfig, SessionStore, TurnDeps, TurnPorts, UnwiredProvider,
     };
@@ -552,7 +552,7 @@ fn run_turn_success_arc_names_grants_and_mirrors_back() {
         let mut s = handle.session_lock().expect("lock");
         s.set_workspace(ws.path().to_path_buf());
     }
-    handle.set_runtime_and_posture(Some(fake_cli_adapter()), PosturePair::default());
+    handle.set_runtime_and_posture(Some(fake_cli_adapter()), StampedPosture::default());
 
     // Entry deps: a written config (so `load()` never walks the
     // missing-config keychain path), an empty MCP snapshot, fresh roots.

@@ -7,6 +7,7 @@ import { fmtError } from "../../lib/error-presentation";
 import { findActiveProfile } from "../../lib/findActiveProfile";
 import {
   getAdapterCatalogs,
+  getBuiltinLastModelPosture,
   getBuiltinPostureCatalog,
   getLastModelPosture,
   getSessionModelConfig,
@@ -91,12 +92,16 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 // adapter's app-config backfill entry server-side -- the single write
 // point). On the cold-start bar (null sessionId) the displayed posture is
 // the caller-held pendingModelPosture seeded from the adapter's backfill
-// entry (`getLastModelPosture`); an explicit pick replaces the pending pair
-// and the first submit applies it to the minted session, the same
-// pending-runtime wiring as #572. The clear row additionally wipes the
-// backfill entry via `clearLastModelPosture` (ADR-0100 Decision 3: without
-// it, an unsubmitted clear would be re-seeded from the entry on the next
-// cold-start visit).
+// entry (`getLastModelPosture`), and on the built-in runtime from the
+// active endpoint's entry (ADR-0154, `getBuiltinLastModelPosture` -- no
+// arguments: the backend derives the entry from the active profile); an
+// explicit pick replaces the pending pair and the first submit applies it
+// to the minted session, the same pending-runtime wiring as #572. The
+// external clear row additionally wipes the adapter's backfill entry via
+// `clearLastModelPosture` (ADR-0100 Decision 3: without it, an unsubmitted
+// clear would be re-seeded from the entry on the next cold-start visit); the
+// built-in model dimension has no clear row, so its entry is never wiped
+// from here (ADR-0154).
 
 export type ComposerProviderPickerProps = {
   // The session whose runtime this picker reads / switches. Runtime selection
@@ -208,12 +213,22 @@ export function ComposerProviderPicker({
   const activeAdapterId = isExternal ? runtime.data : null;
   // The active profile row (the built-in runtime's face): resolved once
   // here, ahead of both the catalog reads and the render-time labels
-  // below, so the early query blocks can key off it too. The model field
-  // and the zero-profile predicate ride along -- both the catalog and the
-  // label consume them.
+  // below, so the early query blocks can key off it too. The pinned model
+  // field (null = unpinned, ADR-0154) and the zero-profile predicate ride
+  // along -- both the catalog and the label consume them.
   const activeProfile = findActiveProfile(provider);
-  const builtInModel = activeProfile?.model ?? "";
+  // A blank string counts as unpinned (the menu guards' convention, so a
+  // hand-edited empty value cannot blank the button).
+  const builtInModel = activeProfile?.model?.trim() || null;
   const noProfiles = provider.profiles.length === 0;
+  // The built-in endpoint's raw spelling (protocol + base_url as app-config
+  // carries them): the cache key of the endpoint-scoped reads below -- never
+  // the backend's entry key, which the backend derives alone (ADR-0154).
+  const activeProfileForList = isExternal ? null : activeProfile;
+  const builtinEndpoint =
+    activeProfileForList != null
+      ? `${activeProfileForList.protocol}:${activeProfileForList.base_url}`
+      : "";
 
   // Per-session external-runtime model config (ADR-0095, issue #527): the
   // model + thought-level selections + the cached discovery catalog. Same
@@ -262,7 +277,7 @@ export function ComposerProviderPicker({
   // truth is the model-config query above). Enabled flips true whenever the
   // bar returns to cold start / the adapter changes, so the entry refetches
   // after any in-session set updated it server-side.
-  const { data: backfillData, error: backfillError } = useQuery({
+  const { data: adapterBackfillData, error: adapterBackfillError } = useQuery({
     // Disabled-state key placeholder: with no external adapter active the
     // query never runs (enabled below), so the inert "" segment carries the
     // key -- the same always-disabled convention as the __cold_start__
@@ -272,6 +287,22 @@ export function ComposerProviderPicker({
     queryFn: () => getLastModelPosture(activeAdapterId as string),
     enabled: sessionId === null && activeAdapterId !== null,
   });
+  // The built-in runtime's startup entry (ADR-0154): the pair a NEW built-in
+  // session on the active endpoint starts with -- the cold-start bar's seed
+  // while no external adapter is active, the role the adapter entry plays
+  // above. One argument-less read: the backend derives the entry from the
+  // active profile's endpoint; the cache key carries the endpoint spelling
+  // only so an edited endpoint reads its own entry, not the old one's.
+  const { data: builtinBackfillData, error: builtinBackfillError } = useQuery({
+    queryKey: adapterKeys.builtinPosture(builtinEndpoint),
+    queryFn: getBuiltinLastModelPosture,
+    enabled: sessionId === null && !isExternal,
+  });
+  // The cold-start seed for the runtime the bar sits on: the external
+  // adapter's entry, or the built-in endpoint's. Mutually exclusive by their
+  // enabled guards.
+  const backfillData = isExternal ? adapterBackfillData : builtinBackfillData;
+  const backfillError = isExternal ? adapterBackfillError : builtinBackfillError;
 
   // Catalog priority chain (ADR-0096 D6, issue #537, ADR-0097): where the
   // posture catalog comes from, per the active runtime's stream format.
@@ -308,11 +339,6 @@ export function ComposerProviderPicker({
   // in-process cache is the second, server-side dedupe. Zero profiles:
   // never enabled, no IPC.
   const [armedEndpoint, setArmedEndpoint] = useState("");
-  const activeProfileForList = isExternal ? null : activeProfile;
-  const builtinEndpoint =
-    activeProfileForList != null
-      ? `${activeProfileForList.protocol}:${activeProfileForList.base_url}`
-      : "";
   const { data: builtinCatalogData } = useQuery({
     queryKey: adapterKeys.builtinPostureCatalog(builtinEndpoint),
     queryFn: getBuiltinPostureCatalog,
@@ -341,9 +367,18 @@ export function ComposerProviderPicker({
   // The posture the bar displays: the session's model config in-session, or
   // the cold-start pending pair seeded from the backfill entry (pending
   // first -- an explicit pick overrides the backfill, ADR-0100 Decision 1).
+  // In-session the pair counts as held only while it is IN SCOPE
+  // (ADR-0154): a built-in pair picked on another endpoint (or never
+  // stamped) is not what the next turn injects, so the bar reads it as
+  // unselected -- the same verdict the backend's turn gate reaches, never a
+  // model the next turn would not run. The cold-start seed needs no such
+  // gate: the pending pair lives under the endpoint it was picked on, and
+  // the built-in entry is read for the active endpoint by construction.
   const posture: ModelPosture =
     sessionId !== null
-      ? { model: modelConfig.model, thought_level: modelConfig.thought_level }
+      ? modelConfig.in_scope
+        ? { model: modelConfig.model, thought_level: modelConfig.thought_level }
+        : EMPTY_POSTURE
       : (pendingModelPosture ?? backfillData ?? EMPTY_POSTURE);
 
   // The posture-catalog projection (ADR-0096 D6 priority chain, issues
@@ -581,12 +616,18 @@ export function ComposerProviderPicker({
     id: "composer.postureTrigger.default",
     defaultMessage: "Default (recommended)",
   });
+  const noModelSelected = intl.formatMessage({
+    id: "composer.postureTrigger.noModel",
+    defaultMessage: "No model selected",
+  });
 
   // The posture label (ADR-0099 Decision 3 / #573, extended by #1639):
   // built-in shows the HELD pair first (a session-level selection is the
   // next turn's posture, same readout form as external), falling back to
-  // the active profile's model (empty -> em dash; zero profiles -> "Not
-  // configured", never a fake default); external shows the held pair
+  // the active profile's pinned model, then to the honest "No model
+  // selected" state (an unpinned profile with nothing held -- the next turn
+  // refuses; zero profiles -> "Not configured", never a fake default);
+  // external shows the held pair
   // (either side omitted when unset -- the two dimensions are
   // independently reachable on ACP adapters, so a lone thought level has
   // its own held form) or "Default (recommended)" when nothing is held --
@@ -602,7 +643,7 @@ export function ComposerProviderPicker({
       ? notConfigured
       : heldParts.length > 0
         ? heldParts.join(" · ")
-        : builtInModel || "—"
+        : (builtInModel ?? noModelSelected)
     : heldParts.length > 0
       ? heldParts.join(" · ")
       : defaultRecommended;
@@ -629,7 +670,12 @@ export function ComposerProviderPicker({
       id: "composer.providerPicker.tooltip",
       defaultMessage: "{provider} · {model}",
     },
-    { provider: providerName, model: builtInModel || "—" },
+    // The preview names the model the next turn runs: the in-scope held
+    // pair first, else the pinned default, else the honest empty state.
+    {
+      provider: providerName,
+      model: posture.model ?? builtInModel ?? noModelSelected,
+    },
   );
   const noKeyMark = intl.formatMessage({
     id: "composer.providerPicker.noKeyMark",
@@ -669,11 +715,11 @@ export function ComposerProviderPicker({
   // masquerade as an unselected default -- the posture trigger renders the
   // fault inline instead of the control. In-session BOTH runtimes read the
   // same model-config query (the built-in pair rides it too since #1639);
-  // on the cold-start bar only the external backfill read exists (the
-  // built-in bar reads app-config, which has no failure state here) -- the
-  // two are mutually exclusive by their enabled guards.
+  // on the cold-start bar each runtime has its own backfill read (the
+  // adapter's entry, or the built-in endpoint's since ADR-0154) -- mutually
+  // exclusive by their enabled guards.
   const modelConfigFault =
-    sessionId === null ? (isExternal ? backfillError : null) : modelConfigError;
+    sessionId === null ? backfillError : modelConfigError;
 
   return (
     <>

@@ -37,6 +37,7 @@ describe("formatTurnFailure", () => {
       ],
       [{ kind: "Resource", data: { detail: "timeout" } }, en["error.turn.resource"]],
       [{ kind: "NotWired" }, en["error.turn.notWired"]],
+      [{ kind: "NoModel" }, en["error.turn.noModel"]],
       [
         { kind: "InvalidConfig", data: { detail: "scheme `file` is not http/https" } },
         en["error.turn.invalidConfig"],
@@ -81,6 +82,7 @@ describe("turnFailureDetail", () => {
   it("returns null for the self-contained kinds", () => {
     const selfContained: TurnFailure[] = [
       { kind: "NotWired" },
+      { kind: "NoModel" },
       { kind: "StaleReference", data: { reference_name: "result_1" } },
     ];
     for (const failure of selfContained) {

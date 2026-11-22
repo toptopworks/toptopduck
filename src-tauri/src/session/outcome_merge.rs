@@ -131,6 +131,7 @@ pub(super) fn turn_outcome_from_loop(
             TurnOutcome::Cancelled(Some(CancelledReason::NoProgress))
         }
         Termination::NotWired => TurnOutcome::Failed(TurnFailure::NotWired),
+        Termination::NoModel => TurnOutcome::Failed(TurnFailure::NoModel),
         Termination::InvalidConfig(detail) => {
             TurnOutcome::Failed(TurnFailure::InvalidConfig { detail })
         }

@@ -64,6 +64,7 @@ fn turn_failure() -> Vec<TurnFailure> {
             detail: String::new(),
         },
         TurnFailure::NotWired,
+        TurnFailure::NoModel,
         TurnFailure::InvalidConfig {
             detail: String::new(),
         },

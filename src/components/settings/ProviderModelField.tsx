@@ -69,10 +69,6 @@ type ProviderModelFieldProps = {
   // threaded through ProviderEndpointFields. Omitted in edit mode, where the
   // probe reads the stored key instead.
   probeKey?: string;
-  // Field-level validation error for the model value (issue #735): rendered
-  // under the input, drives its aria-invalid + aria-describedby. Owned by
-  // ProfilesSection's validateProfile -- never the probe result.
-  error?: string | null;
 };
 
 export function ProviderModelField({
@@ -82,7 +78,6 @@ export function ProviderModelField({
   onBusyChange,
   onSelectOpenChange,
   probeKey,
-  error,
 }: ProviderModelFieldProps) {
   const intl = useIntl();
   const modelId = useId();
@@ -120,6 +115,8 @@ export function ProviderModelField({
         profile.id,
         profile.protocol,
         profile.base_url,
+        // An unpinned profile probes with no model (ADR-0154): the list path
+        // runs as usual; the backend skips the turn check it cannot ping.
         profile.model,
         probeKey,
       );
@@ -132,6 +129,13 @@ export function ProviderModelField({
     }
   }
 
+  // An emptied input IS the unpinned state (ADR-0154): null reaches the
+  // stored profile, so a cleared field never reads as dirty against its
+  // committed source on the next blur.
+  function handleModelChange(value: string) {
+    onUpdate({ model: value === "" ? null : value });
+  }
+
   function handleListOpenChange(open: boolean) {
     setListOpen(open);
     onSelectOpenChange?.(open);
@@ -139,8 +143,9 @@ export function ProviderModelField({
 
   // The panel lists the probed models only when the probe listed at least one.
   // An Ok with an empty list (the ping fallback succeeded but /models is
-  // unimplemented) leaves the panel in its hint state (ADR-0070: "list failure
-  // or not-yet-probed -> hand-typed"). The current model value is NOT merged
+  // unimplemented, or the profile pins no model and the endpoint answered 2xx
+  // without a list) leaves the panel in its hint state (ADR-0070: "list
+  // failure or not-yet-probed -> hand-typed"). The current model value is NOT merged
   // into the options: the input already holds it, so selection and typing stay
   // two independent paths to the same value.
   const okResult = testResult?.kind === "Ok" ? testResult : null;
@@ -162,12 +167,11 @@ export function ProviderModelField({
           <Input
             id={modelId}
             type="text"
-            value={profile.model}
-            onChange={(e) => onUpdate({ model: e.target.value })}
+            value={profile.model ?? ""}
+            onChange={(e) => handleModelChange(e.target.value)}
             disabled={fieldDisabled}
             spellCheck={false}
-            aria-invalid={error ? true : undefined}
-            aria-describedby={error ? `${modelId}-error` : undefined}
+            aria-describedby={`${modelId}-hint`}
           />
           {/* The list panel rides a Popover so its focus-trap/ESC/outside-click
               dismissal matches the preset select's, and so the parent's
@@ -249,11 +253,12 @@ export function ProviderModelField({
             )}
           </Button>
         </div>
-        {error && (
-          <p id={`${modelId}-error`} className="text-destructive text-sm">
-            {error}
-          </p>
-        )}
+        <p id={`${modelId}-hint`} className="text-muted-foreground text-xs">
+          <FormattedMessage
+            id="settings.profiles.model.hint"
+            defaultMessage="Optional. Leave empty for no pinned default — pick a model from the model menu before sending."
+          />
+        </p>
         {testResult && <PreflightResult outcome={testResult} />}
         {testError && <p className="text-destructive text-sm">{testError}</p>}
       </div>

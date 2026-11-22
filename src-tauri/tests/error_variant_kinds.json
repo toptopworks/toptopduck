@@ -81,6 +81,7 @@
   "TurnFailure": [
     "Execute",
     "InvalidConfig",
+    "NoModel",
     "NotWired",
     "Resource",
     "Runtime",

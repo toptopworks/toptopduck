@@ -115,6 +115,18 @@ export const adapterKeys = {
    *  cascade's clearing row via the #581 clear IPC. Not under the session
    *  prefix: the entry is process-global, like the adapter table. */
   posture: (adapterId: string) => ["adapters", "posture", adapterId] as const,
+  /** The prefix of every built-in startup-entry read (ADR-0154); the
+   *  invalidations after a built-in set ride it. */
+  builtinPostureFamily: () => ["adapters", "builtinPosture"] as const,
+  /** The built-in runtime's startup model-posture entry (ADR-0154): the
+   *  pair a NEW built-in session on the ACTIVE endpoint starts with. Read
+   *  through the argument-less IPC (the backend alone derives the entry
+   *  from the active profile); this key only tells the cache which endpoint
+   *  the cached answer was for -- the raw app-config spelling the built-in
+   *  catalog key already uses, so an endpoint edit reads the new endpoint's
+   *  entry instead of lingering on the old one. */
+  builtinPosture: (endpoint: string) =>
+    ["adapters", "builtinPosture", endpoint] as const,
   /** The built-in runtime's posture-menu catalog (issue #1639, ADR-0153):
    *  the active profile endpoint's first-hand model list. Session-agnostic
    *  and process-global like `posture`. Keyed by the endpoint identity

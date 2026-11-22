@@ -71,6 +71,7 @@ describe("session selection port (ADR-0095 set-IPC orchestration)", () => {
       model: null,
       thought_level: "high",
       cached_discovered: null,
+      in_scope: true,
     } satisfies SessionModelConfig);
     const outcome = await sessionPort(queryClient).writePosture(POSTURE, {
       clearsBackfill: false,
@@ -87,6 +88,7 @@ describe("session selection port (ADR-0095 set-IPC orchestration)", () => {
       model: "fake-opus",
       thought_level: "medium",
       cached_discovered: null,
+      in_scope: true,
     });
   });
 
@@ -100,6 +102,7 @@ describe("session selection port (ADR-0095 set-IPC orchestration)", () => {
       model: "fake-opus",
       thought_level: "medium",
       cached_discovered: null,
+      in_scope: true,
     });
   });
 
@@ -115,14 +118,19 @@ describe("session selection port (ADR-0095 set-IPC orchestration)", () => {
     });
   });
 
-  it("skips the backfill invalidation when no external adapter is active", async () => {
+  it("invalidates the built-in endpoint entry after a built-in set (ADR-0154)", async () => {
     const queryClient = new QueryClient();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     await sessionPort(queryClient, null).writePosture(POSTURE, {
       clearsBackfill: false,
       rollbackTo: POSTURE,
     });
-    expect(invalidate).not.toHaveBeenCalled();
+    // No adapter is active, so the adapter-key invalidation never fires;
+    // the built-in set lands the active endpoint's entry instead.
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: adapterKeys.builtinPostureFamily(),
+    });
   });
 
   it("carries the persist verdict through a successful set", async () => {

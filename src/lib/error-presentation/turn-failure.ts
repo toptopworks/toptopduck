@@ -40,6 +40,14 @@ export function formatTurnFailure(failure: TurnFailure, intl: IntlShape): string
         id: "error.turn.notWired",
         defaultMessage: "No LLM provider is configured",
       });
+    // ADR-0154: the same shape of guidance as NotWired -- the state is
+    // user-correctable from the composer, so the message points there.
+    case "NoModel":
+      return intl.formatMessage({
+        id: "error.turn.noModel",
+        defaultMessage:
+          "No model selected — pick one from the model menu before sending.",
+      });
     case "InvalidConfig":
       return intl.formatMessage({
         id: "error.turn.invalidConfig",
@@ -76,6 +84,7 @@ export function turnFailureDetail(failure: TurnFailure): string | null {
     case "InvalidConfig":
       return failure.data.detail;
     case "NotWired":
+    case "NoModel":
     case "StaleReference":
       return null;
     default: {

@@ -353,6 +353,9 @@ impl RecipePersister {
         // from the SAME session-level facts the runtime selections use --
         // one storage (SessionRuntimeFacts), so a lazily-minted binding
         // reaches the next persist without a second copy to drift.
+        // ADR-0154: the posture pair's endpoint scope rides the header
+        // from the same session-level facts.
+        .with_posture_endpoint(config.posture_endpoint.clone())
         .with_workspace(config.workspace.clone())
     }
 

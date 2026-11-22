@@ -36,10 +36,14 @@ import { LABEL_HIDE_NARROW } from "./composer-visual";
 // current selection, issue #584) with a leading "Default (recommended)"
 // clearing row and the honest synthetic row for a held value the catalog
 // does not offer (issue #529). The built-in catalog (issue #1639) rides the
-// same form with two honest deltas: its rows render the model catalog's
-// display names, and the strength row appears only for a held model with
+// same form with three honest deltas: its rows render the model catalog's
+// display names; the strength row appears only for a held model with
 // discrete effort tiers (probe pending/failed renders the fallback shape --
-// the held model's synthetic row + the clear row -- with no error surface).
+// the pinned model's synthetic row -- with no error surface); and the MODEL
+// dimension has no clearing row (ADR-0154) -- the built-in runtime has no CLI
+// default for "unselected" to mean, so the way back to the pinned default
+// is its own selectable row, while the strength dimension keeps its clear
+// row (there "unselected" is real: no strength is injected).
 // Item selection keeps the menu open (preventDefault) so the checked state
 // updates and the fault lines below stay visible -- the fault surfaces that
 // rode the old popover's selector body.
@@ -94,7 +98,8 @@ export type ComposerPostureTriggerProps = {
 // ADR-0153) is the built-in runtime's first-hand endpoint list with catalog
 // metadata -- no CLI current (the profile's model field is the effective
 // default), and an empty `models` list is the honest fallback shape (probe
-// pending or failed -- silent by contract), never an error surface.
+// pending or failed -- silent by contract), never an error surface. A null
+// `profileModel` is the unpinned profile (ADR-0154).
 export type PostureCatalog =
   | {
     kind: "acp";
@@ -182,7 +187,7 @@ export function ComposerPostureTrigger({
   // builtin hides the strength row outright (issue #1639) when the held
   // model offers no discrete effort tiers and nothing is held -- unlike
   // perModel, the built-in segment never blocks on a model pick (the
-  // profile model is always the held value).
+  // profile's pinned model, when one is pinned, is the held value).
   let hideLevelRow = false;
   // builtin rows render the catalog's display name (the id verbatim when
   // uncataloged) while the selection value stays the id.
@@ -194,8 +199,9 @@ export function ComposerPostureTrigger({
     currentLevel = catalog.currentThoughtLevel;
   } else if (catalog.kind === "builtin") {
     modelIds = catalog.models.map((m) => m.id);
-    // The effective default: the profile's configured model (what the
-    // unselected state runs next turn); no CLI reports a current here.
+    // The effective default: the profile's pinned model, or null for an
+    // unpinned profile (ADR-0154) -- what the unselected state runs next
+    // turn when one is pinned; no CLI reports a current here.
     currentModel = catalog.profileModel;
     currentLevel = null;
     const held = model ?? catalog.profileModel;
@@ -306,6 +312,11 @@ export function ComposerPostureTrigger({
             )}
             displayValue={heldModel}
             clearLabel={modelClearLabel}
+            // ADR-0154: naming the pinned model (null = unpinned) is also
+            // what makes this the built-in model dimension -- the one
+            // without a clearing row, since "unselected" is not a
+            // destination there.
+            pinnedDefaultId={catalog.kind === "builtin" ? catalog.profileModel : undefined}
             ids={modelIds}
             selectedId={model}
             labelFor={labelFor}
@@ -387,7 +398,8 @@ function InlineValue({ value }: { value: string | null }) {
 
 // One cascade dimension (ADR-0099 Decision 3): a first-level row (label +
 // the inline current value) opening the second-level radio list -- the
-// leading "Default (recommended)" clearing row, the honest synthetic row
+// leading "Default (recommended)" clearing row (unless `clearable` is
+// false), the honest synthetic row
 // for a held value the directory does not offer (#529), and the directory
 // itself as menuitemradio rows whose checked state the group value carries
 // (readable to screen readers, unlike the retired aria-hidden check icon,
@@ -401,6 +413,7 @@ function DimensionSub({
   onSelect,
   unavailable = false,
   labelFor,
+  pinnedDefaultId,
 }: {
   label: ReactNode;
   displayValue: string | null;
@@ -412,6 +425,13 @@ function DimensionSub({
   // The row's display text per id (the built-in catalog's display names);
   // absent = the id itself, the external catalogs' convention.
   labelFor?: (id: string) => string;
+  // The profile's pinned model id: present (a string, or null for an
+  // an unpinned profile) on the built-in catalog, absent on the external
+  // ones. The synthetic row for THAT value reads as the pinned default --
+  // never as an id the runtime fails to offer -- and selecting it is the
+  // way back to the pinned model; its presence is also what drops the
+  // leading clearing row (the built-in model dimension, ADR-0154).
+  pinnedDefaultId?: string | null;
 }) {
   // The synthetic row's id, derived from this row's own inputs: it exists
   // if and only if the displayed value is a non-empty id outside `ids`.
@@ -421,6 +441,15 @@ function DimensionSub({
     displayValue != null && displayValue !== "" && !ids.includes(displayValue)
       ? displayValue
       : null;
+  const isBuiltinModel = pinnedDefaultId !== undefined;
+  const syntheticNote: SyntheticNote | undefined =
+    unrepresentedId == null
+      ? undefined
+      : !isBuiltinModel
+          ? "runtime"
+          : unrepresentedId === pinnedDefaultId
+            ? "pinned"
+            : undefined;
   return (
     <DropdownMenuSub>
       <DropdownMenuSubTrigger disabled={unavailable}>
@@ -441,12 +470,15 @@ function DimensionSub({
           // Permanently controlled ("" = nothing selected): the radio value
           // must never fall back to an uncontrolled internal state.
           <DropdownMenuRadioGroup value={selectedId ?? ""}>
-            <ClearingItem label={clearLabel} onClear={() => onSelect(null)} />
+            {!isBuiltinModel && (
+              <ClearingItem label={clearLabel} onClear={() => onSelect(null)} />
+            )}
             {unrepresentedId != null && (
               <OptionItem
                 id={unrepresentedId}
                 onSelect={() => onSelect(unrepresentedId)}
-                unrepresented
+                note={syntheticNote}
+                labelFor={labelFor}
               />
             )}
             {ids.map((id) => (
@@ -459,20 +491,48 @@ function DimensionSub({
   );
 }
 
+// The synthetic row's annotation: "runtime" = a held value the runtime
+// does not offer (issue #529); "pinned" = the profile's pinned model
+// (ADR-0154). Absent = an ordinary catalog row.
+type SyntheticNote = "runtime" | "pinned";
+
 // One second-level option row: a menuitemradio whose checked state rides
 // the group value. Selecting keeps the menu open (preventDefault) so the
 // checked mark updates and the fault lines below stay in view.
 function OptionItem({
   id,
   onSelect,
-  unrepresented = false,
+  note,
   labelFor,
 }: {
   id: string;
   onSelect: () => void;
-  unrepresented?: boolean;
+  note?: SyntheticNote;
   labelFor?: (id: string) => string;
 }) {
+  // The row's text is decided before the JSX, one branch per annotation;
+  // an ordinary row is the display name, falling back to the id.
+  const label = labelFor?.(id) ?? id;
+  let content: ReactNode;
+  if (note === "runtime") {
+    content = (
+      <FormattedMessage
+        id="composer.runtimePicker.unrepresentedModel"
+        defaultMessage="{id} (not offered by this runtime)"
+        values={{ id }}
+      />
+    );
+  } else if (note === "pinned") {
+    content = (
+      <FormattedMessage
+        id="composer.runtimePicker.pinnedModelRow"
+        defaultMessage="{id} (pinned default)"
+        values={{ id: label }}
+      />
+    );
+  } else {
+    content = label;
+  }
   return (
     <DropdownMenuRadioItem
       value={id}
@@ -481,15 +541,7 @@ function OptionItem({
         onSelect();
       }}
     >
-      {unrepresented ? (
-        <FormattedMessage
-          id="composer.runtimePicker.unrepresentedModel"
-          defaultMessage="{id} (not offered by this runtime)"
-          values={{ id }}
-        />
-      ) : (
-        (labelFor?.(id) ?? id)
-      )}
+      {content}
     </DropdownMenuRadioItem>
   );
 }

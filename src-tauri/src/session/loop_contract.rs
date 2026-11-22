@@ -141,6 +141,11 @@ pub enum Termination {
     /// No LLM provider is wired / the key was refused (ADR-0044 permanent).
     /// Maps to `TurnOutcome::Failed(NotWired)`.
     NotWired,
+    /// No model to request (ADR-0154 permanent): the active profile pins no
+    /// default and the session holds no posture selection. The key gate
+    /// runs first, so this never masks a missing key. Maps to
+    /// `TurnOutcome::Failed(NoModel)`.
+    NoModel,
     /// The provider configuration is permanently invalid (ADR-0044, e.g. a bad
     /// base_url scheme). Maps to `TurnOutcome::Failed(InvalidConfig)`.
     InvalidConfig(String),

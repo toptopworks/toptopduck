@@ -439,6 +439,75 @@ pub struct PosturePair {
     pub thought_level: Option<String>,
 }
 
+/// A posture pair with the endpoint identity it was selected under
+/// (ADR-0154). Model ids are endpoint facts, so a built-in pair is scoped
+/// to the endpoint it was picked against: `endpoint` is `Some` for a
+/// built-in pair and `None` for an external runtime's pair (that one is
+/// adapter-namespaced by the runtime choice itself). The backend stamps the
+/// scope at the three points a pair lands -- the set command, the startup
+/// injection, the runtime switch -- reading the active profile's endpoint;
+/// the wire never carries it (the set IPC's [`PosturePair`] stays the pure
+/// pair) and the recipe header persists it as its own field.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StampedPosture {
+    pub pair: PosturePair,
+    pub endpoint: Option<String>,
+}
+
+impl StampedPosture {
+    /// A pair outside the built-in endpoint scope: an external runtime's
+    /// pair, or the empty start.
+    pub fn unscoped(pair: PosturePair) -> Self {
+        Self {
+            pair,
+            endpoint: None,
+        }
+    }
+
+    /// A built-in pair selected against `endpoint` (the identity string
+    /// [`crate::model::builtin_endpoint_identity`] derives).
+    pub fn scoped(pair: PosturePair, endpoint: impl Into<String>) -> Self {
+        Self {
+            pair,
+            endpoint: Some(endpoint.into()),
+        }
+    }
+
+    /// Whether this pair was selected under `endpoint` (ADR-0154) -- THE
+    /// scope predicate: the turn's injection gate and the IPC read's display
+    /// verdict both call it, so the two can never disagree. An unstamped
+    /// pair has no known provenance and matches nothing.
+    pub(crate) fn matches_endpoint(&self, endpoint: Option<&str>) -> bool {
+        match (self.endpoint.as_deref(), endpoint) {
+            (Some(stamped), Some(endpoint)) => stamped == endpoint,
+            _ => false,
+        }
+    }
+
+    /// The pair a built-in turn injects (ADR-0154): the held pair while its
+    /// stamped scope IS the endpoint the turn constructs against, else the
+    /// empty pair -- model AND thought level together, never one half (a
+    /// level without its model is a posture nobody selected). The stored
+    /// values are untouched: a mismatch degrades THIS turn only, and the
+    /// pair revives when the endpoint returns. A facts-less provider -- the
+    /// scripted test fakes, bridged with no endpoint -- takes the pair as
+    /// held: there is no endpoint to scope it to.
+    pub(crate) fn scoped_to(&self, facts: Option<&crate::provider::TurnModelFacts>) -> PosturePair {
+        let in_scope = match facts {
+            None => true,
+            Some(facts) => self.matches_endpoint(Some(&crate::model::builtin_endpoint_identity(
+                facts.protocol,
+                &facts.base_url,
+            ))),
+        };
+        if in_scope {
+            self.pair.clone()
+        } else {
+            PosturePair::default()
+        }
+    }
+}
+
 /// The recipe-header facts the persister layers onto every built recipe
 /// (ADR-0095, extended by ADR-0102 Decision 1): the model +
 /// thought-level selections, the discovered-catalog cache, the last
@@ -453,6 +522,11 @@ pub struct PosturePair {
 pub struct SessionRuntimeFacts {
     pub model: Option<String>,
     pub thought_level: Option<String>,
+    /// The endpoint identity the pair was selected under (ADR-0154): the
+    /// scope half of [`StampedPosture`], persisted on the recipe header so
+    /// a resume restores it. `None` for an external runtime's pair and for
+    /// recipes persisted before the field.
+    pub posture_endpoint: Option<String>,
     pub cached_discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
     pub last_runtime: Option<LastRuntime>,
     /// The session's workspace binding (ADR-0137, issue #1381): the canonical
@@ -463,6 +537,21 @@ pub struct SessionRuntimeFacts {
     /// binding persists + resumes through the same single storage as the
     /// posture facts (no second copy to drift).
     pub workspace: Option<std::path::PathBuf>,
+}
+
+impl SessionRuntimeFacts {
+    /// The posture these facts hold, WITH its endpoint scope (ADR-0154) --
+    /// the one projection off the flat storage, so no caller rebuilds the
+    /// pair and its scope field by field.
+    pub(crate) fn stamped_posture(&self) -> StampedPosture {
+        StampedPosture {
+            pair: PosturePair {
+                model: self.model.clone(),
+                thought_level: self.thought_level.clone(),
+            },
+            endpoint: self.posture_endpoint.clone(),
+        }
+    }
 }
 
 pub struct Session {
@@ -907,11 +996,14 @@ impl Session {
     /// pattern): the command layer calls this right after the runtime choice
     /// mirror, so both take effect at the same turn boundary. Writes
     /// `runtime_facts` only -- the single storage both the turn input
-    /// and the persister read (issue #530). `pub` so the IPC test seam can
-    /// toggle without the command layer.
-    pub fn set_external_model_config(&mut self, posture: PosturePair) {
-        self.runtime_facts.model = posture.model;
-        self.runtime_facts.thought_level = posture.thought_level;
+    /// and the persister read (issue #530). The pair lands WITH its endpoint
+    /// scope (ADR-0154): the built-in arm's dispatch gate reads the scope off
+    /// this same storage. `pub` so the IPC test seam can toggle without the
+    /// command layer.
+    pub fn set_external_model_config(&mut self, posture: StampedPosture) {
+        self.runtime_facts.model = posture.pair.model;
+        self.runtime_facts.thought_level = posture.pair.thought_level;
+        self.runtime_facts.posture_endpoint = posture.endpoint;
     }
 
     /// Stamp the handle-held runtime choice into the recipe-header facts as
@@ -4678,5 +4770,136 @@ mod tests {
             "stale never rewrites the origin"
         );
         assert_eq!(row.shared_entry_name.as_deref(), Some("people"));
+    }
+}
+
+#[cfg(test)]
+mod stamped_posture_tests {
+    use super::{PosturePair, StampedPosture};
+    use crate::model::{builtin_endpoint_identity, Protocol};
+    use crate::provider::TurnModelFacts;
+
+    const GATEWAY: &str = "https://gateway.example.test";
+
+    fn facts(protocol: Protocol, base_url: &str) -> TurnModelFacts {
+        TurnModelFacts {
+            protocol,
+            base_url: base_url.into(),
+            model: None,
+            api_key: Some("sk-test".into()),
+        }
+    }
+
+    fn held() -> StampedPosture {
+        StampedPosture::scoped(
+            PosturePair {
+                model: Some("gateway-model".into()),
+                thought_level: Some("high".into()),
+            },
+            builtin_endpoint_identity(Protocol::Anthropic, GATEWAY),
+        )
+    }
+
+    /// The scope gate (ADR-0154): a built-in pair injects whole while its
+    /// stamped endpoint IS the turn's endpoint -- the turn wire's own
+    /// spelling of the same endpoint matches.
+    #[test]
+    fn an_in_scope_pair_injects_whole() {
+        let pair = held().scoped_to(Some(&facts(
+            Protocol::Anthropic,
+            "https://gateway.example.test/",
+        )));
+        assert_eq!(pair.model.as_deref(), Some("gateway-model"));
+        assert_eq!(pair.thought_level.as_deref(), Some("high"));
+    }
+
+    /// The C1 residual windows (a session whose composer is unmounted, a
+    /// resumed session) ride this gate: a pair picked on ANOTHER endpoint --
+    /// or under another protocol on the same host -- injects neither half.
+    #[test]
+    fn an_out_of_scope_pair_injects_neither_half() {
+        let other_endpoint = facts(Protocol::Anthropic, "https://moved.example.test");
+        assert_eq!(
+            held().scoped_to(Some(&other_endpoint)),
+            PosturePair::default()
+        );
+        let other_protocol = facts(Protocol::Openai, GATEWAY);
+        assert_eq!(
+            held().scoped_to(Some(&other_protocol)),
+            PosturePair::default()
+        );
+    }
+
+    /// An unstamped pair has no known provenance (a recipe persisted before
+    /// the scope, or an external pair restored onto a degraded built-in
+    /// start): never in scope, even on the endpoint it happens to sit on.
+    #[test]
+    fn an_unstamped_pair_is_never_in_scope() {
+        let unstamped = StampedPosture::unscoped(PosturePair {
+            model: Some("legacy-model".into()),
+            thought_level: Some("high".into()),
+        });
+        assert_eq!(
+            unstamped.scoped_to(Some(&facts(Protocol::Anthropic, GATEWAY))),
+            PosturePair::default()
+        );
+    }
+
+    /// A facts-less provider (the scripted test fakes, bridged with no
+    /// endpoint) takes the pair as held -- nothing to scope it to.
+    #[test]
+    fn a_facts_less_turn_takes_the_pair_as_held() {
+        assert_eq!(
+            held().scoped_to(None),
+            PosturePair {
+                model: Some("gateway-model".into()),
+                thought_level: Some("high".into())
+            }
+        );
+    }
+    /// The scope rides the recipe header like the pair itself (ADR-0154):
+    /// written beside it on every persist, restored verbatim by a resume --
+    /// the storage half behind the turn gate's resume window.
+    #[test]
+    fn the_posture_scope_rides_the_recipe_header_through_resume() {
+        const SCOPE: &str = "builtin:anthropic|https://gateway.example.test";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recipe = dir.path().join("recipe.json");
+        let mut session = crate::session::Session::with_provider(Box::new(crate::UnwiredProvider))
+            .expect("session");
+        session
+            .bind_recipe(recipe.clone(), "s".into())
+            .expect("bind");
+        session.set_external_model_config(StampedPosture::scoped(
+            PosturePair {
+                model: Some("resumed-model".into()),
+                thought_level: Some("high".into()),
+            },
+            SCOPE,
+        ));
+        assert_eq!(
+            session.build_recipe().posture_endpoint.as_deref(),
+            Some(SCOPE),
+            "the persister layers the scope onto the header"
+        );
+        session.persist_if_bound();
+        drop(session);
+        let resumed = crate::session::Session::open_recipe(
+            &recipe,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(crate::UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |_| panic!("no source issues expected"),
+            |_| panic!("no active-abandoned callback expected"),
+        )
+        .expect("resume");
+        let facts = resumed.runtime_facts();
+        assert_eq!(
+            facts.posture_endpoint.as_deref(),
+            Some(SCOPE),
+            "the resume restores the scope verbatim"
+        );
+        assert_eq!(facts.model.as_deref(), Some("resumed-model"));
     }
 }

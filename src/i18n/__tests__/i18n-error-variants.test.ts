@@ -48,6 +48,7 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     Runtime: "error.turn.runtime",
     Resource: "error.turn.resource",
     NotWired: "error.turn.notWired",
+    NoModel: "error.turn.noModel",
     InvalidConfig: "error.turn.invalidConfig",
     StaleReference: "error.turn.stale",
   },

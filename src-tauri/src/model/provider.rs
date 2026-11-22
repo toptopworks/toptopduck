@@ -14,10 +14,13 @@ use serde::{Deserialize, Serialize};
 /// `baseURL`; default is Anthropic direct).
 pub const DEFAULT_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
 
-/// v1 default model (ADR-0007: Sonnet-class, version-pinned). SQL + structured
-/// JSON output at top tier with controllable cost; the user can switch to a
-/// stronger (Fable/Opus) or cheaper (Haiku) model via the config.
-pub const DEFAULT_PROVIDER_MODEL: &str = "claude-sonnet-4-6";
+/// The reserved prefix of the built-in runtime's entry in
+/// `last_model_postures` (ADR-0154): the map's other keys are external
+/// adapter ids (`gemini-cli`, `user:…`), so the built-in entry -- keyed by
+/// the endpoint its posture was selected against -- lives under a prefix no
+/// adapter table or registry can ever mint. The built-in posture pair's
+/// scope carries the same string, so the two compare verbatim.
+pub const BUILTIN_POSTURE_KEY_PREFIX: &str = "builtin:";
 
 /// The wire protocol a profile speaks (ADR-0064). Two variants: anthropic
 /// (Anthropic Messages native, `x-api-key` auth) and openai (OpenAI Chat
@@ -36,6 +39,34 @@ pub enum Protocol {
     /// the user points `base_url` at the endpoint (incl. its version path
     /// segment, e.g. `/v1`); the upstream client appends `/chat/completions`.
     Openai,
+}
+
+impl Protocol {
+    /// The wire name (the serde spelling), the first half of the built-in
+    /// endpoint identity ([`builtin_endpoint_identity`]).
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Protocol::Anthropic => "anthropic",
+            Protocol::Openai => "openai",
+        }
+    }
+}
+
+/// The built-in runtime's endpoint identity (ADR-0154): the wire protocol
+/// plus the base URL, spelling-normalized (surrounding whitespace and
+/// trailing slashes ignored -- the turn wire trims the same way, so two
+/// spellings of one endpoint share an identity). Model ids are endpoint
+/// facts, so this is the scope a built-in posture pair belongs to. THE one
+/// derivation: the backfill map's built-in key, the scope the backend stamps
+/// on a built-in pair, and the gate comparing that scope at turn time all
+/// read this function -- a second derivation would be a second opinion on
+/// "same endpoint".
+pub fn builtin_endpoint_identity(protocol: Protocol, base_url: &str) -> String {
+    format!(
+        "{BUILTIN_POSTURE_KEY_PREFIX}{}|{}",
+        protocol.as_str(),
+        base_url.trim().trim_end_matches('/')
+    )
 }
 
 /// Stable identity of a provider profile (ADR-0064, mirroring the ADR-0037
@@ -99,9 +130,14 @@ pub struct ProviderProfile {
     /// here. `#[serde(default)]` keeps older stored blobs deserializing.
     #[serde(default = "default_provider_base_url")]
     pub base_url: String,
-    /// Model id to request (ADR-0007: default Sonnet-class, pinned).
-    #[serde(default = "default_provider_model")]
-    pub model: String,
+    /// The pinned default model id to request, or `None` = no pinned default
+    /// (ADR-0154, calibrating ADR-0007's version-pinned default). A gateway
+    /// serves a list of models and no id can be pinned for it in advance, so
+    /// empty is a legal stored state: the turn then runs on the session's
+    /// selected posture, or refuses honestly when nothing is selected. An
+    /// absent key and an explicit null both read as `None`; a stored string
+    /// reads as pinned.
+    pub model: Option<String>,
 }
 
 impl ProviderProfile {
@@ -110,15 +146,29 @@ impl ProviderProfile {
     /// fresh config (zero profiles is the legal default state), but still
     /// materialized by the legacy keychain-blob migration
     /// ([`crate::provider::live_config`], issue #53) so a carried-forward
-    /// endpoint lands on the stable `key-default` slot.
+    /// endpoint lands on the stable `key-default` slot. Unpinned: the
+    /// migration splices the stored model in, and nothing else constructs
+    /// this shape.
     pub fn default_anthropic() -> Self {
         Self {
             id: ProfileId(DEFAULT_PROFILE_ID.to_string()),
             display_name: DEFAULT_PROFILE_DISPLAY_NAME.to_string(),
             protocol: Protocol::Anthropic,
             base_url: DEFAULT_PROVIDER_BASE_URL.to_string(),
-            model: DEFAULT_PROVIDER_MODEL.to_string(),
+            model: None,
         }
+    }
+
+    /// The pinned model as a turn requests it: trimmed, and `None` for a
+    /// blank value -- a hand-edited whitespace-only id is the unpinned state
+    /// too (ADR-0154), on the READ path as well as the store path (normalize
+    /// only runs on write). The one definition of "pinned"; consumers never
+    /// inspect the raw field.
+    pub fn pinned_model(&self) -> Option<&str> {
+        self.model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
     }
 }
 
@@ -126,11 +176,6 @@ impl ProviderProfile {
 /// deserialize time for older blobs and by [`ProviderProfile::default_anthropic`]).
 fn default_provider_base_url() -> String {
     DEFAULT_PROVIDER_BASE_URL.to_string()
-}
-
-/// Serde default for a profile's [`ProviderProfile::model`].
-fn default_provider_model() -> String {
-    DEFAULT_PROVIDER_MODEL.to_string()
 }
 
 /// Non-secret multi-profile provider config (ADR-0064): a list of named access
@@ -206,16 +251,14 @@ impl ProviderConfig {
             })
     }
 
-    /// The active profile's model, or the canonical default (see
-    /// [`Self::effective_base_url`]).
-    pub fn effective_model(&self) -> &str {
-        self.active().map(|p| p.model.as_str()).unwrap_or_else(|| {
-            log::warn!(
-                "no active profile (empty set or dangling pointer); falling \
-                     back to default model for this read"
-            );
-            DEFAULT_PROVIDER_MODEL
-        })
+    /// The active profile's pinned model, or `None` when the active profile
+    /// pins none or there is no active profile (ADR-0154). Unlike the
+    /// endpoint reads above there is no total fallback to borrow: with no
+    /// pinned model the turn runs on the session's posture selection, and
+    /// refuses honestly as `NoModel` when that is empty too. The missing-key
+    /// refusal (NotWired) still covers the no-active-profile arm first.
+    pub fn effective_model(&self) -> Option<&str> {
+        self.active().and_then(ProviderProfile::pinned_model)
     }
 
     /// The active profile's wire protocol, or [`Protocol::Anthropic`] when
@@ -261,7 +304,7 @@ impl ProviderConfig {
         let active = self.active();
         ProviderConfigView {
             base_url: active.map(|p| p.base_url.clone()),
-            model: active.map(|p| p.model.clone()),
+            model: active.and_then(|p| p.model.clone()),
             has_key,
             keychain_fault,
         }
@@ -282,13 +325,16 @@ impl Default for ProviderConfig {
 /// One shape for both `get_provider_config` and `set_provider_config`.
 /// ADR-0098: `base_url` / `model` are `None` when there is no active profile
 /// -- the honest empty state (no endpoint to read), not the canonical
-/// defaults pretending a value exists.
+/// defaults pretending a value exists. `model` is also `None` when the
+/// active profile pins no default model (ADR-0154): an unpinned profile is
+/// a legal state, not a missing value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderConfigView {
     /// The active profile's base URL, or `None` when no profile is active
     /// (ADR-0098 zero-profile state).
     pub base_url: Option<String>,
-    /// The active profile's model id, or `None` when no profile is active.
+    /// The active profile's pinned model id, or `None` when there is no
+    /// active profile or the active profile pins none (ADR-0154).
     pub model: Option<String>,
     /// Whether an API key is stored in the OS keychain. A boolean only (ADR-0029
     /// invariant 3: the key never crosses to the frontend). When
@@ -428,14 +474,14 @@ mod tests {
                 display_name: "Anthropic".into(),
                 protocol: Protocol::Anthropic,
                 base_url: "https://api.anthropic.example.test".into(),
-                model: "claude-sonnet-4-6".into(),
+                model: Some("claude-sonnet-4-6".into()),
             },
             ProviderProfile {
                 id: openai_id.clone(),
                 display_name: "OpenAI".into(),
                 protocol: Protocol::Openai,
                 base_url: "https://api.openai.example.test".into(),
-                model: "gpt-4o".into(),
+                model: Some("gpt-4o".into()),
             },
         ];
         cfg.active_profile = Some(anthropic_id.clone());
@@ -517,7 +563,7 @@ mod tests {
         // version gate.
         let json = r#"{"id":"p1","display_name":"P","protocol":"anthropic","base_url":"https://api.anthropic.com","model":"m","context_limit":200000}"#;
         let profile: ProviderProfile = serde_json::from_str(json).expect("legacy opens");
-        assert_eq!(profile.model, "m");
+        assert_eq!(profile.model.as_deref(), Some("m"));
     }
 
     #[test]
@@ -531,7 +577,7 @@ mod tests {
             display_name: "Gateway".into(),
             protocol: Protocol::Anthropic,
             base_url: "https://gateway.example.test".into(),
-            model: "claude-opus-4-8".into(),
+            model: Some("claude-opus-4-8".into()),
         };
         cfg.active_profile = Some(profile.id.clone());
         cfg.profiles.push(profile);
@@ -569,6 +615,81 @@ mod tests {
         assert!(
             back.active().is_some(),
             "stored id resolves post round trip"
+        );
+    }
+
+    #[test]
+    fn profile_model_is_nullable_across_serde() {
+        // ADR-0154: the pinned model is optional. An explicit null and an
+        // absent key both read as None -- no serde default invents an id --
+        // and a stored string reads as pinned. None serializes as an
+        // explicit null: the wire face the `string | null` mirror reads (a
+        // skipped key would hand the frontend undefined).
+        let profile = ProviderProfile::default_anthropic();
+        assert_eq!(profile.model, None, "the seeded skeleton pins no model");
+        let json = serde_json::to_string(&profile).expect("serialize");
+        assert!(json.contains(r#""model":null"#), "{json}");
+        let back: ProviderProfile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, profile);
+        let absent: ProviderProfile =
+            serde_json::from_str(r#"{"id":"p1","base_url":"https://x.test"}"#)
+                .expect("a profile without the model key opens");
+        assert_eq!(absent.model, None, "an absent key is the unpinned state");
+        let pinned: ProviderProfile =
+            serde_json::from_str(r#"{"id":"p1","base_url":"https://x.test","model":"m"}"#)
+                .expect("a pinned profile opens");
+        assert_eq!(pinned.model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn effective_model_reads_the_active_profiles_pin_or_none() {
+        // ADR-0154: the model read has no total fallback to borrow -- an
+        // unpinned active profile and a dangling pointer both read None, and
+        // the turn's own gates (NotWired first, then NoModel) take over.
+        let mut cfg = ProviderConfig::defaults();
+        cfg.profiles.push(ProviderProfile::default_anthropic());
+        cfg.active_profile = Some(ProfileId(DEFAULT_PROFILE_ID.into()));
+        assert_eq!(
+            cfg.effective_model(),
+            None,
+            "an unpinned active profile reads None"
+        );
+        cfg.profiles[0].model = Some("claude-opus-4-8".into());
+        assert_eq!(cfg.effective_model(), Some("claude-opus-4-8"));
+        // The read path does not normalize (only the store does), so a
+        // hand-edited blank id must still read as unpinned -- never as a
+        // model a turn could put on the wire.
+        cfg.profiles[0].model = Some("   ".into());
+        assert_eq!(cfg.effective_model(), None, "a blank id reads as unpinned");
+        cfg.active_profile = Some(ProfileId("no-such-profile".into()));
+        assert_eq!(cfg.effective_model(), None, "a dangling pointer reads None");
+    }
+
+    #[test]
+    fn builtin_endpoint_identity_joins_protocol_and_normalized_base() {
+        // ADR-0154: the identity is protocol + base URL with the turn wire's
+        // own spelling normalization -- two spellings of one endpoint share
+        // an identity, and the reserved prefix keeps the key out of the
+        // adapter-id namespace of `last_model_postures`.
+        assert_eq!(Protocol::Anthropic.as_str(), "anthropic");
+        assert_eq!(Protocol::Openai.as_str(), "openai");
+        assert_eq!(
+            builtin_endpoint_identity(Protocol::Anthropic, "https://gateway.example.test/v1/"),
+            "builtin:anthropic|https://gateway.example.test/v1"
+        );
+        assert_eq!(
+            builtin_endpoint_identity(Protocol::Anthropic, "  https://gateway.example.test/v1  "),
+            builtin_endpoint_identity(Protocol::Anthropic, "https://gateway.example.test/v1"),
+            "surrounding whitespace and trailing slashes are not identity"
+        );
+        assert_ne!(
+            builtin_endpoint_identity(Protocol::Openai, "https://gateway.example.test/v1"),
+            builtin_endpoint_identity(Protocol::Anthropic, "https://gateway.example.test/v1"),
+            "the protocol is half the identity"
+        );
+        assert!(
+            BUILTIN_POSTURE_KEY_PREFIX.ends_with(':'),
+            "the prefix must stay outside the adapter-id shapes (bare ids, `user:` ids)"
         );
     }
 }

@@ -59,7 +59,7 @@ use crate::session::loop_contract::DiscoveredRuntime;
 use crate::session::store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::session::{
     PosturePair, RenameSessionError, ResumeEvent, ResumeProgress, Session, SessionRuntimeFacts,
-    TurnDeps, TurnPorts,
+    StampedPosture, TurnDeps, TurnPorts,
 };
 use crate::skills::{
     discover_skill_sources, import_skills as import_skills_impl, ImportItem, ImportMode,
@@ -312,10 +312,12 @@ pub fn create_session(
     // recipe persists) BEFORE the initial bind -- see
     // [`apply_startup_posture`] -- so the first recipe already carries it
     // and a restart before the first turn resumes selected (ADR-0095
-    // Decision 6). No entry (never chosen / cleared) or a degraded built-in
-    // start stays unselected. Resume never lands here: it restores the
-    // session's own posture and never consults the backfill map.
-    let posture = session_posture(segment_start_posture(startup.as_ref(), live.inner()));
+    // Decision 6). No entry (never chosen / cleared) stays unselected. A
+    // degraded built-in start reads the ACTIVE endpoint's entry instead
+    // (ADR-0154), scoped to that endpoint. Resume never lands here: it
+    // restores the session's own posture and never consults the backfill
+    // map.
+    let posture = segment_start_posture(startup.as_ref(), live.inner());
     handle.set_runtime_choice(startup);
     // ADR-0089: per-session directory `{sessions_root}/{uuid}/`. The UUID
     // directory name is the stable identity; the fixed recipe filename is
@@ -2380,8 +2382,9 @@ pub fn discover_mcp_servers(
 /// (ADR-0029 -- the stored key never crosses IPC back to the frontend) and
 /// probes the caller-supplied endpoint (`protocol` + `base_url` + `model` =
 /// the frontend's current edit values, so a user who edits base_url and
-/// re-tests does not have to save first) via `GET /models` with a
-/// minimal-turn ping fallback. A failed keychain read short-circuits to
+/// re-tests does not have to save first; `model` is the pinned model or
+/// None for an unpinned profile, ADR-0154) via `GET /models` with a
+/// minimal-turn ping fallback (skipped when there is no model to ping with). A failed keychain read short-circuits to
 /// `KeychainUnavailable` before any HTTP (issue #243 -- previously swallowed
 /// into `None` and misclassified as `KeyRejected`). `key` is the optional
 /// one-shot add-mode override (issue #735, ADR-0070 calibration): the add
@@ -2402,7 +2405,7 @@ pub async fn test_profile(
     profile_id: String,
     protocol: Protocol,
     base_url: String,
-    model: String,
+    model: Option<String>,
     key: Option<String>,
 ) -> Result<ProfileTestOutcome, String> {
     let live = live.inner().clone();
@@ -2414,7 +2417,14 @@ pub async fn test_profile(
         let key_read = crate::provider::preflight::resolve_probe_key(key.as_deref(), || {
             live.key_for_profile(&id)
         });
-        crate::provider::preflight::run(key_read, protocol, &base_url, &model)
+        // An unpinned profile probes with no model (ADR-0154): the list
+        // path runs as usual; the turn check it cannot ping is skipped.
+        crate::provider::preflight::run(
+            key_read,
+            protocol,
+            &base_url,
+            model.as_deref().unwrap_or(""),
+        )
     })
     .await
     .map_err(|e| format!("test_profile task failed: {e}"))
@@ -3955,9 +3965,9 @@ pub fn set_session_runtime(
 /// handle-only step. A switch opens a new segment whose posture slot starts
 /// from the TARGET adapter's backfill entry ([`segment_start_posture`] --
 /// external := the adapter's `last_model_postures` entry, absent =
-/// unselected; built-in := empty -- model ids are runtime-namespaced and the
-/// built-in runtime keeps no backfill entry, its cold start falls back to
-/// the profile model, ADR-0153), so
+/// unselected; built-in := the active endpoint's entry under its endpoint
+/// identity, scoped to that endpoint, ADR-0154 -- model ids are
+/// runtime-namespaced AND endpoint facts), so
 /// a stale model id held under the OLD adapter's namespace never injects
 /// into the new CLI, and a switch back to a previously used adapter
 /// recovers its held selection. The runtime choice + the seeded posture land
@@ -3975,7 +3985,7 @@ fn apply_runtime_switch(
     spec: Option<AdapterSpec>,
     live: &LiveProviderConfig,
 ) {
-    let posture = session_posture(segment_start_posture(spec.as_ref(), live));
+    let posture = segment_start_posture(spec.as_ref(), live);
     handle.set_runtime_and_posture(spec, posture);
 }
 
@@ -4141,11 +4151,12 @@ fn apply_resumed_postures(
     ));
     // ADR-0095 Decision 6: restore the model config AFTER the reset batch
     // (the restored values win over any stale pre-resume state).
+    // ADR-0154: the restored pair keeps its persisted endpoint scope -- a
+    // built-in turn injects it only while that scope is the active endpoint
+    // (a pair restored onto a degraded built-in start carries no scope and
+    // stays dormant).
     handle.restore_runtime_model_config(
-        PosturePair {
-            model: runtime_facts.model,
-            thought_level: runtime_facts.thought_level,
-        },
+        runtime_facts.stamped_posture(),
         runtime_facts.cached_discovered,
     );
 }
@@ -4184,17 +4195,27 @@ pub fn set_default_runtime(
 // --- Startup model posture backfill (ADR-0100, issue #581) ------------------
 
 /// The segment-start model posture (ADR-0100 Decision 1, extended to
-/// in-session switches by ADR-0102 Decision 3, issues #581/#590): the
-/// adapter's backfill entry, or the empty posture when the start is
-/// built-in (or degraded to it) -- unselected, the CLI's own
-/// defaults. Serves both segment starts: a fresh session's creation
-/// (`create_session`) and an in-session runtime switch
-/// ([`apply_runtime_switch`]); resume restores the session's own pair and
-/// never reads this. Lock-light: one honest-degrade config read.
-fn segment_start_posture(target: Option<&AdapterSpec>, live: &LiveProviderConfig) -> ModelPosture {
+/// in-session switches by ADR-0102 Decision 3, and to the built-in runtime
+/// by ADR-0154), carrying the scope it belongs to: an external target :=
+/// the adapter's backfill entry, unscoped (the runtime choice already
+/// namespaces it); the built-in runtime (or a start degraded to it) := the
+/// ACTIVE endpoint's backfill entry, scoped to that endpoint's identity.
+/// No entry reads as the empty posture -- unselected. Serves both segment
+/// starts: a fresh session's creation (`create_session`) and an in-session
+/// runtime switch ([`apply_runtime_switch`]); resume restores the session's
+/// own pair and never reads this. Lock-light: honest-degrade config reads.
+fn segment_start_posture(
+    target: Option<&AdapterSpec>,
+    live: &LiveProviderConfig,
+) -> StampedPosture {
     match target {
-        None => ModelPosture::default(),
-        Some(spec) => live.last_model_posture(spec.id.as_str()),
+        None => match live.builtin_backfill() {
+            Some((key, entry)) => StampedPosture::scoped(session_posture(entry), key),
+            None => StampedPosture::default(),
+        },
+        Some(spec) => {
+            StampedPosture::unscoped(session_posture(live.last_model_posture(spec.id.as_str())))
+        }
     }
 }
 
@@ -4223,7 +4244,7 @@ fn session_posture(p: ModelPosture) -> PosturePair {
 /// unselected without a guard.
 fn apply_startup_posture(
     handle: &SessionHandle,
-    posture: &PosturePair,
+    posture: &StampedPosture,
 ) -> Result<(), SessionError> {
     handle.set_external_model_config(posture.clone());
     with_session_lock(handle, |s| {
@@ -4267,6 +4288,19 @@ pub fn clear_last_model_posture(
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
 }
 
+/// Read the built-in runtime's startup posture (ADR-0154): the model /
+/// thought-level a NEW built-in session on the active endpoint starts with.
+/// The cold-start composer bar seeds its pending posture from this entry.
+/// No arguments on purpose: the backend derives the entry's key from the
+/// active profile's endpoint, so the frontend carries no key knowledge and
+/// the read can never target another endpoint's entry. Lock-light
+/// honest-degrade read; no entry, or no active profile, reads as the empty
+/// posture -- this command never refuses.
+#[tauri::command]
+pub fn get_builtin_last_model_posture(live: State<'_, LiveProviderConfig>) -> ModelPosture {
+    live.builtin_last_model_posture()
+}
+
 /// The built-in posture menu's catalog (#1639, ADR-0153): the active
 /// profile's first-hand model list merged with the model catalog's
 /// metadata (display names, effort tiers). The posture menu's ONLY
@@ -4291,14 +4325,39 @@ pub async fn get_builtin_posture_catalog(
 // --- External-runtime model + thought level (ADR-0095, issue #527) ---------
 
 /// The wire read shape for the session's external-runtime model config: the
-/// two selections plus the cached discovered catalog. Mirrors the
-/// handle-held trio; serialized camelCase-free (plain snake_case field names
-/// via serde default) so the frontend type is a direct mirror.
+/// two selections plus the cached discovered catalog, and whether the held
+/// pair is in scope for the next turn. Mirrors the handle-held trio plus
+/// the scope verdict; serialized camelCase-free (plain snake_case field
+/// names via serde default) so the frontend type is a direct mirror.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionModelConfig {
     pub model: Option<String>,
     pub thought_level: Option<String>,
     pub cached_discovered: Option<DiscoveredRuntime>,
+    /// Whether the held pair injects on the next turn as displayed
+    /// (ADR-0154) -- the picker's display predicate, the same verdict the
+    /// turn's scope gate reaches: always true on an external runtime (its
+    /// pair is adapter-namespaced, not endpoint-scoped); on the built-in
+    /// runtime true only while the pair's stamped endpoint identity equals
+    /// the active profile's endpoint. False means the button must render
+    /// the unselected state, never a model the next turn would not inject.
+    pub in_scope: bool,
+}
+
+/// The scope verdict behind [`SessionModelConfig::in_scope`] (ADR-0154):
+/// [`StampedPosture::matches_endpoint`] -- the turn gate's own predicate --
+/// read against the active profile's endpoint. `active_endpoint` is read
+/// lazily: an external runtime's pair needs no endpoint at all.
+fn posture_in_scope(
+    runtime: Option<&AdapterSpec>,
+    posture: &StampedPosture,
+    active_endpoint: impl FnOnce() -> Option<String>,
+) -> bool {
+    if runtime.is_some() {
+        return true;
+    }
+    // An unstamped pair has no known provenance: never in scope.
+    posture.matches_endpoint(active_endpoint().as_deref())
 }
 
 /// The persist-now verdict a successful set command carries back (issue
@@ -4346,16 +4405,20 @@ fn persist_outcome(s: &crate::session::Session) -> SetPosturePersistOutcome {
 #[tauri::command]
 pub fn get_session_model_config(
     store: State<'_, Arc<SessionStore>>,
+    live: State<'_, LiveProviderConfig>,
     session_id: String,
 ) -> Result<SessionModelConfig, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
     // The pair read takes the slot lock once: a concurrent set lands entirely
-    // before or after this read, never as a torn (old, new) mix.
-    let posture = handle.external_model_config();
+    // before or after this read, never as a torn (old, new) mix. The runtime
+    // comes off the same read -- the scope verdict needs it (ADR-0154).
+    let (runtime, posture) = handle.runtime_and_posture();
+    let in_scope = posture_in_scope(runtime.as_ref(), &posture, || live.builtin_posture_key());
     Ok(SessionModelConfig {
-        model: posture.model,
-        thought_level: posture.thought_level,
+        model: posture.pair.model,
+        thought_level: posture.pair.thought_level,
         cached_discovered: handle.cached_discovered(),
+        in_scope,
     })
 }
 
@@ -4444,8 +4507,19 @@ fn apply_posture_set(
     // write: the pair comes whole off the wire (issue #603), unmixed with
     // the slot's held value.
     let (runtime, _) = handle.runtime_and_posture();
+    // ADR-0154: the backend stamps the scope -- never the wire. A built-in
+    // pair is scoped to the active endpoint's identity; an external
+    // runtime's pair carries none (the runtime choice namespaces it).
+    let stamped = StampedPosture {
+        pair: posture,
+        endpoint: if runtime.is_none() {
+            live.builtin_posture_key()
+        } else {
+            None
+        },
+    };
     with_session_lock(handle, |s| {
-        s.set_external_model_config(posture.clone());
+        s.set_external_model_config(stamped.clone());
         // Segment-header stamp (ADR-0102 Decision 1): same batch as the pair +
         // the persist below.
         s.stamp_last_runtime(runtime.clone());
@@ -4460,45 +4534,55 @@ fn apply_posture_set(
         // atomic read above and this write has already re-seeded the slot with
         // the target adapter's posture -- dropping the stale-namespace write
         // keeps the slot on the switch's segment (the #590 seeding semantics).
-        handle.set_posture_if_runtime(&runtime, posture.clone());
+        handle.set_posture_if_runtime(&runtime, stamped.clone());
         // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
-        // adapter's startup backfill entry (the single write point shared with
-        // the cold-start pre-selection) -- best-effort, never fails the set.
-        record_last_model_posture(live, runtime, posture);
+        // runtime's startup backfill entry (the single write point shared
+        // with the cold-start pre-selection) -- best-effort, never fails the
+        // set.
+        record_last_model_posture(live, runtime.as_ref(), &stamped);
         Ok(outcome)
     })
 }
 
-/// The single backfill write point (ADR-0100 Decision 3, issue #581): every
-/// successful posture set lands the new pair on the session's runtime
-/// adapter's app-config entry, so a session-level selection and the
-/// cold-start pre-selection (which reaches the set IPC right after session
-/// creation) share one writer. A built-in session has no adapter namespace
-/// to record under -- the built-in pair is session-scoped with no backfill
-/// (ADR-0153; cross-session persistence is a later ticket) -- so the write
-/// is skipped, not refused. Best-effort: the session posture itself already
-/// landed and was persisted per its own verdict, so a config-write failure
-/// only costs the NEXT startup's convenience injection -- warn, never fail
-/// the set.
+/// The single backfill write point (ADR-0100 Decision 3, issue #581;
+/// extended to the built-in runtime by ADR-0154): every successful posture
+/// set lands the new pair on the session's runtime's app-config entry, so a
+/// session-level selection and the cold-start pre-selection (which reaches
+/// the set IPC right after session creation) share one writer. An external
+/// runtime records under its adapter id; the built-in runtime under the
+/// active endpoint's identity -- the same key its segment start reads back,
+/// so a selection made on one endpoint starts the next session on that
+/// endpoint and no other. With no active profile a built-in pair has no
+/// endpoint to record under: skipped, not refused. Best-effort: the session
+/// posture itself already landed and was persisted per its own verdict, so
+/// a config-write failure only costs the NEXT startup's convenience
+/// injection -- warn, never fail the set.
 fn record_last_model_posture(
     live: &LiveProviderConfig,
-    runtime: Option<AdapterSpec>,
-    posture: PosturePair,
+    runtime: Option<&AdapterSpec>,
+    posture: &StampedPosture,
 ) {
-    let Some(spec) = runtime else {
-        return;
+    let key = match runtime {
+        Some(spec) => spec.id.as_str().to_string(),
+        // The built-in pair carries the endpoint it was stamped with: that
+        // scope IS the entry's key, read off the same stamp -- never a
+        // second config read that could name another endpoint. Unstamped
+        // (no active profile): no endpoint to record under.
+        None => match posture.endpoint.clone() {
+            Some(key) => key,
+            None => return,
+        },
     };
     if let Err(e) = live.set_last_model_posture(
-        spec.id.as_str(),
+        &key,
         ModelPosture {
-            model: posture.model,
-            thought_level: posture.thought_level,
+            model: posture.pair.model.clone(),
+            thought_level: posture.pair.thought_level.clone(),
         },
     ) {
         log::warn!(
             target: "toptopduck::session",
-            "failed to persist the {} model-posture backfill entry: {e}",
-            spec.id
+            "failed to persist the {key} model-posture backfill entry: {e}"
         );
     }
 }
@@ -5516,10 +5600,10 @@ mod tests {
         // A stale pre-resume external choice + model -- the batch overwrites
         // both, never merges.
         handle.set_runtime_choice(Some(crate::runtime::acp::adapter::codex()));
-        handle.set_external_model_config(PosturePair {
+        handle.set_external_model_config(StampedPosture::unscoped(PosturePair {
             model: Some("stale-model".into()),
             thought_level: None,
-        });
+        }));
 
         // Continuation (D1): the recorded detected runtime replaces the
         // stale choice; the startup default is never consulted; the restored
@@ -5589,6 +5673,52 @@ mod tests {
     }
 
     #[test]
+    fn apply_resumed_postures_restores_the_built_in_pair_without_reading_the_backfill() {
+        // ADR-0154 / ADR-0100: resume restores the session's OWN pair with
+        // its endpoint scope and never consults the backfill map -- the
+        // active endpoint's entry here names another model, and the restored
+        // pair is still the recipe's.
+        let (_dir, live) = posture_live_with_profile();
+        live.set_last_model_posture(
+            TEST_ENDPOINT,
+            ModelPosture {
+                model: Some("entry-model".into()),
+                thought_level: Some("low".into()),
+            },
+        )
+        .expect("seed the endpoint entry");
+        let (_store, handle) = posture_handle();
+        apply_resumed_postures(
+            &handle,
+            SessionRuntimeFacts {
+                last_runtime: Some(LastRuntime::BuiltIn),
+                model: Some("resumed-model".into()),
+                thought_level: Some("high".into()),
+                posture_endpoint: Some(TEST_ENDPOINT.into()),
+                ..Default::default()
+            },
+            None,
+            v1_adapters(),
+            detected_ids(&[]),
+        );
+        assert!(
+            handle.runtime_choice().is_none(),
+            "a built-in segment continues built-in"
+        );
+        assert_eq!(
+            handle.stamped_posture(),
+            StampedPosture::scoped(
+                PosturePair {
+                    model: Some("resumed-model".into()),
+                    thought_level: Some("high".into()),
+                },
+                TEST_ENDPOINT,
+            ),
+            "the session's own pair + scope come back; the endpoint entry is never read"
+        );
+    }
+
+    #[test]
     fn startup_runtime_choice_reads_the_real_config_and_degrades_unknown_ids() {
         // The command-path helper through a real config file (the two cases
         // that are PATH-independent, so the test is deterministic on any
@@ -5639,14 +5769,128 @@ mod tests {
         (dir, live)
     }
 
+    /// `posture_live()` plus one ACTIVE profile -- the endpoint the built-in
+    /// backfill keys on (ADR-0154): anthropic protocol on a fixed test base
+    /// URL, unpinned.
+    fn posture_live_with_profile() -> (tempfile::TempDir, LiveProviderConfig) {
+        let (dir, live) = posture_live();
+        let profile = crate::model::ProviderProfile {
+            id: crate::model::ProfileId("__test_builtin_endpoint".into()),
+            display_name: "Gateway".into(),
+            protocol: Protocol::Anthropic,
+            base_url: "https://gateway.example.test".into(),
+            model: None,
+        };
+        let mut cfg = AppConfig::defaults();
+        cfg.provider.active_profile = Some(profile.id.clone());
+        cfg.provider.profiles.push(profile);
+        live.store(cfg).expect("seed the active profile");
+        (dir, live)
+    }
+
+    /// The active profile's endpoint identity on the
+    /// `posture_live_with_profile` fixture: the backfill key AND the scope
+    /// of a built-in pair (ADR-0154).
+    const TEST_ENDPOINT: &str = "builtin:anthropic|https://gateway.example.test";
+
     #[test]
-    fn segment_start_posture_built_in_start_stays_unselected() {
+    fn segment_start_posture_built_in_start_reads_the_active_endpoints_entry() {
         // A built-in start (fresh install, or an external default degraded
-        // for this start) has no adapter namespace, so the segment-start
-        // posture is the empty one -- the session begins unselected (issue
-        // #581 AC3's degrade clause).
+        // for this start) reads the ACTIVE endpoint's backfill entry and
+        // carries that endpoint's identity as its scope (ADR-0154). With no
+        // active profile there is no endpoint to read: the empty posture,
+        // unscoped (issue #581 AC3's degrade clause).
         let (_dir, live) = posture_live();
-        assert_eq!(segment_start_posture(None, &live), ModelPosture::default());
+        assert_eq!(
+            segment_start_posture(None, &live),
+            StampedPosture::default(),
+            "no active profile: no endpoint, no entry, no scope"
+        );
+
+        let (_dir, live) = posture_live_with_profile();
+        // No entry yet: the empty posture, already scoped to the endpoint.
+        assert_eq!(
+            segment_start_posture(None, &live),
+            StampedPosture {
+                pair: PosturePair::default(),
+                endpoint: Some(TEST_ENDPOINT.into()),
+            }
+        );
+        // An entry on ANOTHER endpoint never leaks (per-endpoint
+        // namespacing); the active endpoint's entry injects.
+        live.set_last_model_posture(
+            "builtin:openai|https://other.example.test",
+            ModelPosture {
+                model: Some("gpt-other".into()),
+                thought_level: None,
+            },
+        )
+        .expect("seed the other endpoint");
+        live.set_last_model_posture(
+            TEST_ENDPOINT,
+            ModelPosture {
+                model: Some("gateway-model".into()),
+                thought_level: Some("high".into()),
+            },
+        )
+        .expect("seed the active endpoint");
+        assert_eq!(
+            segment_start_posture(None, &live),
+            StampedPosture {
+                pair: PosturePair {
+                    model: Some("gateway-model".into()),
+                    thought_level: Some("high".into()),
+                },
+                endpoint: Some(TEST_ENDPOINT.into()),
+            },
+            "the active endpoint's entry injects, scoped to that endpoint"
+        );
+    }
+
+    #[test]
+    fn a_same_endpoint_profile_switch_shares_the_entry_and_an_endpoint_edit_leaves_it_dangling() {
+        // The entry is keyed by ENDPOINT, not profile (ADR-0154): switching
+        // to another profile on the same endpoint reads the same entry back,
+        // and editing the endpoint leaves the old entry dangling -- kept,
+        // not cleared (the ADR-0100 Decision 4 posture) -- while the new
+        // endpoint starts unselected.
+        let (_dir, live) = posture_live_with_profile();
+        live.set_last_model_posture(
+            TEST_ENDPOINT,
+            ModelPosture {
+                model: Some("gateway-model".into()),
+                thought_level: None,
+            },
+        )
+        .expect("seed the endpoint entry");
+        {
+            let mut cfg = live.load();
+            let second = crate::model::ProfileId("__test_same_endpoint".into());
+            cfg.provider.profiles[0].id = second.clone();
+            cfg.provider.profiles[0].display_name = "Same endpoint".into();
+            cfg.provider.active_profile = Some(second);
+            live.store(cfg).expect("switch to a same-endpoint profile");
+        }
+        assert_eq!(
+            live.builtin_last_model_posture().model.as_deref(),
+            Some("gateway-model"),
+            "a same-endpoint profile switch shares the entry"
+        );
+        {
+            let mut cfg = live.load();
+            cfg.provider.profiles[0].base_url = "https://moved.example.test".into();
+            live.store(cfg).expect("edit the endpoint");
+        }
+        assert_eq!(
+            live.builtin_last_model_posture(),
+            ModelPosture::default(),
+            "the new endpoint starts unselected"
+        );
+        assert_eq!(
+            live.last_model_posture(TEST_ENDPOINT).model.as_deref(),
+            Some("gateway-model"),
+            "the old endpoint's entry is kept (dangling)"
+        );
     }
 
     #[test]
@@ -5667,16 +5911,16 @@ mod tests {
         let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         assert_eq!(
             segment_start_posture(Some(&gemini), &live),
-            ModelPosture {
+            StampedPosture::unscoped(PosturePair {
                 model: Some("gemini-2.5-pro".into()),
                 thought_level: Some("high".into()),
-            },
-            "the segment-start adapter's entry injects"
+            }),
+            "the segment-start adapter's entry injects, unscoped"
         );
         let codex = resolve_adapter("codex", v1_adapters()).expect("v1 adapter");
         assert_eq!(
             segment_start_posture(Some(&codex), &live),
-            ModelPosture::default(),
+            StampedPosture::default(),
             "a sibling adapter's entry does not leak"
         );
     }
@@ -5706,10 +5950,13 @@ mod tests {
         let (_store, handle) = posture_handle();
         apply_startup_posture(
             &handle,
-            &PosturePair {
-                model: Some("gemini-2.5-pro".into()),
-                thought_level: Some("high".into()),
-            },
+            &StampedPosture::scoped(
+                PosturePair {
+                    model: Some("gemini-2.5-pro".into()),
+                    thought_level: Some("high".into()),
+                },
+                TEST_ENDPOINT,
+            ),
         )
         .expect("apply the startup posture");
         assert_eq!(
@@ -5731,6 +5978,11 @@ mod tests {
             Some("high"),
             "the Session storage feeds the recipe"
         );
+        assert_eq!(
+            s.runtime_facts().posture_endpoint.as_deref(),
+            Some(TEST_ENDPOINT),
+            "the scope lands beside the pair (ADR-0154)"
+        );
     }
 
     #[test]
@@ -5740,7 +5992,8 @@ mod tests {
         // starts unselected without a guard (the "default (recommended)"
         // start).
         let (_store, handle) = posture_handle();
-        apply_startup_posture(&handle, &PosturePair::default()).expect("apply the empty posture");
+        apply_startup_posture(&handle, &StampedPosture::default())
+            .expect("apply the empty posture");
         assert_eq!(handle.external_model_config(), PosturePair::default());
         let s = handle.session_lock().expect("session lock");
         assert!(s.runtime_facts().model.is_none());
@@ -5765,10 +6018,10 @@ mod tests {
         )
         .expect("seed gemini-cli posture");
         let (_store, handle) = posture_handle();
-        handle.set_external_model_config(PosturePair {
+        handle.set_external_model_config(StampedPosture::unscoped(PosturePair {
             model: Some("claude-opus-4-5".into()),
             thought_level: Some("max".into()),
-        });
+        }));
         let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         apply_runtime_switch(&handle, Some(gemini.clone()), &live);
         assert_eq!(handle.runtime_choice(), Some(gemini));
@@ -5801,14 +6054,14 @@ mod tests {
         // posture -- unselected, the CLI's own defaults. A target adapter
         // with no entry (never chosen / cleared) clears whatever was held,
         // and the built-in runtime does too (the namespace reset: model ids
-        // are runtime-namespaced, and the built-in cold start falls back to
-        // the profile model, ADR-0153).
+        // are runtime-namespaced; the built-in start reads the active
+        // endpoint's entry -- empty here, no active profile, ADR-0154).
         let (_dir, live) = posture_live();
         let (_store, handle) = posture_handle();
-        handle.set_external_model_config(PosturePair {
+        handle.set_external_model_config(StampedPosture::unscoped(PosturePair {
             model: Some("gemini-2.5-pro".into()),
             thought_level: Some("high".into()),
-        });
+        }));
         let codex = resolve_adapter("codex", v1_adapters()).expect("v1 adapter");
         apply_runtime_switch(&handle, Some(codex), &live);
         assert_eq!(
@@ -5817,10 +6070,10 @@ mod tests {
             "an entry-less external target starts the segment unselected"
         );
         // Re-hold a pair, then switch to the built-in runtime: cleared again.
-        handle.set_external_model_config(PosturePair {
+        handle.set_external_model_config(StampedPosture::unscoped(PosturePair {
             model: Some("gpt-5.1-codex".into()),
             thought_level: None,
-        });
+        }));
         apply_runtime_switch(&handle, None, &live);
         assert_eq!(handle.runtime_choice(), None);
         assert_eq!(handle.external_model_config(), PosturePair::default());
@@ -5842,11 +6095,11 @@ mod tests {
         // same helper the set command calls -- the write point stays ONE).
         record_last_model_posture(
             &live,
-            Some(gemini.clone()),
-            PosturePair {
+            Some(&gemini),
+            &StampedPosture::unscoped(PosturePair {
                 model: Some("gemini-2.5-flash".into()),
                 thought_level: None,
-            },
+            }),
         );
         // Switch away (codex has no entry -> the slot clears) and back.
         apply_runtime_switch(&handle, Some(codex), &live);
@@ -5873,10 +6126,10 @@ mod tests {
         let (_store, handle) = posture_handle();
         {
             let mut s = handle.session_lock().expect("session lock");
-            s.set_external_model_config(PosturePair {
+            s.set_external_model_config(StampedPosture::unscoped(PosturePair {
                 model: Some("old-namespace-model".into()),
                 thought_level: Some("old-level".into()),
-            });
+            }));
         }
         let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         apply_runtime_switch(&handle, Some(gemini), &live);
@@ -5901,11 +6154,11 @@ mod tests {
         let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         record_last_model_posture(
             &live,
-            Some(gemini),
-            PosturePair {
+            Some(&gemini),
+            &StampedPosture::unscoped(PosturePair {
                 model: Some("gemini-2.5-pro".into()),
                 thought_level: Some("high".into()),
-            },
+            }),
         );
         assert_eq!(
             live.last_model_posture("gemini-cli"),
@@ -5917,20 +6170,50 @@ mod tests {
     }
 
     #[test]
-    fn record_last_model_posture_skips_the_built_in_runtime() {
-        // A built-in session has no adapter to key the entry under -- the
-        // built-in pair keeps no backfill (ADR-0153) -- nothing is written
-        // at all.
+    fn record_last_model_posture_lands_the_built_in_pair_under_its_stamped_endpoint() {
+        // The built-in half of the single write point (ADR-0154): a built-in
+        // pair records under the endpoint it was STAMPED with -- its scope
+        // IS the entry's key, read off the same stamp, never a second config
+        // read that could name another endpoint. An unstamped built-in pair
+        // has no endpoint to record under: nothing is written. The stamp
+        // itself comes from the active profile (the set command's test).
         let (_dir, live) = posture_live();
         record_last_model_posture(
             &live,
             None,
-            PosturePair {
+            &StampedPosture::unscoped(PosturePair {
                 model: Some("some-model".into()),
                 thought_level: None,
-            },
+            }),
         );
-        assert!(live.load().last_model_postures.is_empty());
+        assert!(
+            live.load().last_model_postures.is_empty(),
+            "unstamped: no endpoint to record under"
+        );
+
+        record_last_model_posture(
+            &live,
+            None,
+            &StampedPosture::scoped(
+                PosturePair {
+                    model: Some("some-model".into()),
+                    thought_level: Some("high".into()),
+                },
+                TEST_ENDPOINT,
+            ),
+        );
+        assert_eq!(
+            live.last_model_posture(TEST_ENDPOINT),
+            ModelPosture {
+                model: Some("some-model".into()),
+                thought_level: Some("high".into()),
+            }
+        );
+        assert_eq!(
+            live.load().last_model_postures.len(),
+            1,
+            "exactly one entry: the stamped endpoint's"
+        );
     }
 
     #[test]
@@ -5951,11 +6234,11 @@ mod tests {
         let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         record_last_model_posture(
             &live,
-            Some(gemini),
-            PosturePair {
+            Some(&gemini),
+            &StampedPosture::unscoped(PosturePair {
                 model: Some("gemini-2.5-pro".into()),
                 thought_level: Some("high".into()),
-            },
+            }),
         );
         // The failed write landed nothing: the honest-degrade read sees no
         // map at all.
@@ -5980,10 +6263,10 @@ mod tests {
         let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         handle.set_runtime_and_posture(
             Some(gemini),
-            PosturePair {
+            StampedPosture::unscoped(PosturePair {
                 model: Some("old-model".into()),
                 thought_level: Some("low".into()),
-            },
+            }),
         );
 
         apply_posture_set(
@@ -6014,6 +6297,11 @@ mod tests {
                 model: Some("gemini-2.5-flash".into()),
                 thought_level: None,
             }
+        );
+        assert_eq!(
+            handle.stamped_posture().endpoint,
+            None,
+            "an external runtime's pair carries no endpoint scope (ADR-0154)"
         );
         // The backfill entry lands under the READ runtime's namespace
         // (ADR-0100 Decision 3).
@@ -6056,13 +6344,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_posture_set_stamps_built_in_and_records_no_backfill() {
-        // The built-in half of the stamp: `None` is the built-in runtime and
-        // stamps `BuiltIn` unconditionally; a built-in session has no adapter
-        // namespace, so no backfill entry is written at all.
-        let (_dir, live) = posture_live();
+    fn apply_posture_set_stamps_built_in_scope_and_records_the_endpoint_entry() {
+        // The built-in half of the stamp (ADR-0154): `None` is the built-in
+        // runtime and stamps `BuiltIn`; the backend stamps the pair's scope
+        // from the active endpoint (never the wire) onto both the session
+        // facts and the handle slot, and the backfill entry lands under that
+        // endpoint's identity. With no active profile there is no endpoint:
+        // no scope, no entry.
+        let (_dir, live) = posture_live_with_profile();
         let (_store, handle) = posture_handle();
-
         apply_posture_set(
             &handle,
             &live,
@@ -6072,11 +6362,73 @@ mod tests {
             },
         )
         .expect("set the posture");
-
         let s = handle.session_lock().expect("session lock");
         assert_eq!(s.runtime_facts().last_runtime, Some(LastRuntime::BuiltIn));
+        assert_eq!(
+            s.runtime_facts().posture_endpoint.as_deref(),
+            Some(TEST_ENDPOINT),
+            "the session facts carry the stamped scope"
+        );
         drop(s);
+        assert_eq!(
+            handle.stamped_posture().endpoint.as_deref(),
+            Some(TEST_ENDPOINT),
+            "the handle slot carries the same scope"
+        );
+        assert_eq!(
+            live.builtin_last_model_posture(),
+            ModelPosture {
+                model: Some("some-model".into()),
+                thought_level: None,
+            }
+        );
+
+        let (_dir, live) = posture_live();
+        let (_store, handle) = posture_handle();
+        apply_posture_set(
+            &handle,
+            &live,
+            PosturePair {
+                model: Some("some-model".into()),
+                thought_level: None,
+            },
+        )
+        .expect("set the posture");
+        assert_eq!(handle.stamped_posture().endpoint, None);
         assert!(live.load().last_model_postures.is_empty());
+    }
+
+    #[test]
+    fn posture_in_scope_follows_the_runtime_and_the_stamped_endpoint() {
+        // The IPC read's verdict (ADR-0154), the picker's display predicate:
+        // an external runtime's pair is never endpoint-scoped; a built-in
+        // pair is in scope only while its stamped endpoint IS the active
+        // one; an unstamped pair (a recipe persisted before the scope, or an
+        // external pair restored onto a degraded built-in start) is never
+        // in scope.
+        let scoped = StampedPosture::scoped(PosturePair::default(), TEST_ENDPOINT);
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
+        assert!(
+            posture_in_scope(Some(&gemini), &scoped, || None),
+            "an external runtime's pair needs no endpoint"
+        );
+        assert!(posture_in_scope(None, &scoped, || Some(
+            TEST_ENDPOINT.into()
+        )));
+        assert!(!posture_in_scope(None, &scoped, || {
+            Some("builtin:anthropic|https://other.example.test".into())
+        }));
+        assert!(
+            !posture_in_scope(None, &scoped, || None),
+            "no active endpoint: nothing to match"
+        );
+        let unstamped = StampedPosture::unscoped(PosturePair {
+            model: Some("legacy-model".into()),
+            thought_level: None,
+        });
+        assert!(!posture_in_scope(None, &unstamped, || Some(
+            TEST_ENDPOINT.into()
+        )));
     }
 
     #[test]
@@ -6094,10 +6446,10 @@ mod tests {
         let codex = resolve_adapter("codex", v1_adapters()).expect("v1 adapter");
         handle.set_runtime_and_posture(
             Some(gemini),
-            PosturePair {
+            StampedPosture::unscoped(PosturePair {
                 model: Some("old-model".into()),
                 thought_level: None,
-            },
+            }),
         );
         let (read_runtime, _) = handle.runtime_and_posture();
 
@@ -6106,10 +6458,10 @@ mod tests {
         apply_runtime_switch(&handle, Some(codex.clone()), &live);
         assert!(!handle.set_posture_if_runtime(
             &read_runtime,
-            PosturePair {
+            StampedPosture::unscoped(PosturePair {
                 model: Some("gemini-2.5-flash".into()),
                 thought_level: None,
-            }
+            })
         ));
         assert_eq!(handle.runtime_choice(), Some(codex));
         assert_eq!(
@@ -6122,10 +6474,10 @@ mod tests {
         let (current, _) = handle.runtime_and_posture();
         assert!(handle.set_posture_if_runtime(
             &current,
-            PosturePair {
+            StampedPosture::unscoped(PosturePair {
                 model: Some("codex-model".into()),
                 thought_level: Some("high".into()),
-            }
+            })
         ));
         assert_eq!(
             handle.external_model_config(),

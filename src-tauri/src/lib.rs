@@ -94,15 +94,15 @@ pub use approval::{
 pub use cancel::CancelToken;
 pub use commands::StoreCommandError;
 pub use model::{
-    CancelledReason, ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry,
-    ExportIoStep, ExportRowsError, GuidanceReason, GuidanceRequest, GuidanceSheet,
-    GuidanceSheetState, LoadError, LoadOutcome, ProfileId, ProfileKeyStatus, ProfileTestOutcome,
-    Protocol, ProviderConfig, ProviderConfigView, ProviderProfile, RectifyProvenance,
-    RemoveSourceError, RenameError, RowPage, RowReadError, SessionNamedPayload, SheetGuidance,
-    SheetRectify, SkillProvenance, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor,
-    StaleReason, TextKind, ThinkingTrace, ThreadEntry, TraceEntryView, TraceRound, TurnFailure,
-    TurnOutcome, TurnPhase, TurnProgress, TurnProvenance, TurnRecord, TurnRuntime, VizSpec,
-    DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+    builtin_endpoint_identity, CancelledReason, ChartKind, ColumnSchema, DatasetDescriptor,
+    DatasetPrivacy, DeleteImpactEntry, ExportIoStep, ExportRowsError, GuidanceReason,
+    GuidanceRequest, GuidanceSheet, GuidanceSheetState, LoadError, LoadOutcome, ProfileId,
+    ProfileKeyStatus, ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView,
+    ProviderProfile, RectifyProvenance, RemoveSourceError, RenameError, RowPage, RowReadError,
+    SessionNamedPayload, SheetGuidance, SheetRectify, SkillProvenance, SourceLifecycleEvent,
+    SourceLifecycleKind, StaleAnchor, StaleReason, TextKind, ThinkingTrace, ThreadEntry,
+    TraceEntryView, TraceRound, TurnFailure, TurnOutcome, TurnPhase, TurnProgress, TurnProvenance,
+    TurnRecord, TurnRuntime, VizSpec, DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL,
 };
 pub use persistence::{
     LoadError as RecipeLoadError, MigrationError, RecipeError, RecipePath, SaveError,
@@ -743,6 +743,7 @@ pub fn run() {
             commands::set_session_posture,
             commands::get_last_model_posture,
             commands::clear_last_model_posture,
+            commands::get_builtin_last_model_posture,
             commands::get_builtin_posture_catalog,
             commands::list_skills,
             commands::delete_skill,

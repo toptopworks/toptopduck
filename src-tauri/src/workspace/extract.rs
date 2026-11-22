@@ -291,7 +291,7 @@ mod tests {
             display_name: "Cheap".into(),
             protocol: crate::model::Protocol::Anthropic,
             base_url: "https://cheap.test".into(),
-            model: "haiku".into(),
+            model: Some("haiku".into()),
         };
         cfg.provider = ProviderConfig {
             active_profile: Some(ProfileId("main".into())),
@@ -301,7 +301,7 @@ mod tests {
                     display_name: "Main".into(),
                     protocol: crate::model::Protocol::Anthropic,
                     base_url: "https://main.test".into(),
-                    model: "sonnet".into(),
+                    model: Some("sonnet".into()),
                 },
                 cheap,
             ],

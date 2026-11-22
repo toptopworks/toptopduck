@@ -101,10 +101,15 @@ export function createSessionSelectionPort(args: {
         // server-side (record_last_model_posture, the single write point).
         // Invalidate so the NEXT return to cold start refetches the
         // post-set entry (staleTime: Infinity never auto-refetches,
-        // ADR-0051).
+        // ADR-0051). A built-in set lands the active endpoint's entry
+        // (ADR-0154) -- the argument-less read's key.
         if (activeAdapterId !== null) {
           void queryClient.invalidateQueries({
             queryKey: adapterKeys.posture(activeAdapterId),
+          });
+        } else {
+          void queryClient.invalidateQueries({
+            queryKey: adapterKeys.builtinPostureFamily(),
           });
         }
         return {

@@ -99,6 +99,13 @@ export interface SessionModelConfig {
   model: string | null;
   thought_level: string | null;
   cached_discovered: DiscoveredRuntime | null;
+  // Whether the held pair injects on the next turn as displayed
+  // (ADR-0154) -- the picker's display predicate. Always true on an
+  // external runtime; on the built-in runtime true only while the pair was
+  // selected under the active profile's endpoint. False renders the
+  // unselected state: the button never shows a model the next turn would
+  // not inject.
+  in_scope: boolean;
 }
 
 // The adapter diagnostic probe's success shape (ADR-0096, issues #534/#535;
@@ -152,8 +159,9 @@ export interface BuiltinCatalogModel {
 }
 
 // The built-in posture menu's catalog payload: the merged first-hand list.
-// Endpoint-domain only. An empty list renders the fallback menu (the held
-// profile model's synthetic row + the clearing row) -- the honest shape both
+// Endpoint-domain only. An empty list renders the fallback menu (the pinned
+// model's synthetic row when one is pinned; the built-in model dimension has
+// no clearing row, ADR-0154) -- the honest shape both
 // before the probe answers and after it fails (the probe is silent by
 // contract). Mirrors the Rust `BuiltinPostureCatalog`.
 export type BuiltinPostureCatalog = BuiltinCatalogModel[];

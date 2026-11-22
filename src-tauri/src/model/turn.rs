@@ -108,6 +108,13 @@ pub enum TurnFailure {
     /// -- no provider at all. Permanent for the turn; the user must configure a
     /// key. Carries no data -- the locale message is self-contained.
     NotWired,
+    /// No model to request (ADR-0154): the active profile pins no default
+    /// model and the session holds no posture selection for its endpoint.
+    /// Permanent for the turn; the user picks a model (the composer posture
+    /// menu, or the profile's pinned default in Settings). Refused before
+    /// any client is built, so nothing reaches the wire. Carries no data --
+    /// the locale message is self-contained.
+    NoModel,
     /// The provider's configuration is permanently invalid (issue #277): a
     /// non-http/https base_url (file:, data:, scheme-less) or another
     /// configuration fault retrying cannot fix. NOT retried -- the same config
@@ -135,6 +142,7 @@ impl std::fmt::Display for TurnFailure {
             Self::Runtime { detail } => write!(f, "turn failed (external runtime): {detail}"),
             Self::Resource { detail } => write!(f, "turn aborted by resource cap: {detail}"),
             Self::NotWired => write!(f, "turn failed: no LLM provider wired"),
+            Self::NoModel => write!(f, "turn failed: no model selected"),
             Self::InvalidConfig { detail } => {
                 write!(f, "turn failed: invalid provider configuration: {detail}")
             }

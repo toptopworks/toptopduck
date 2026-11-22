@@ -469,7 +469,7 @@ mod tests {
                 .active_mut()
                 .expect("seeded config has an active profile");
             active.base_url = "https://gateway.example.test".into();
-            active.model = "claude-opus-4-8".into();
+            active.model = Some("claude-opus-4-8".into());
         }
         // Issue #84: a non-default shell pref exercises the shell field's
         // full io round-trip (a default-equal shell would pass == trivially).

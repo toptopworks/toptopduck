@@ -45,7 +45,6 @@ type ProviderEndpointFieldsProps = {
   // validateProfile: rendered at the offending field, driving its
   // aria-invalid + aria-describedby. Null when the field is clean.
   baseUrlError?: string | null;
-  modelError?: string | null;
 };
 
 export function ProviderEndpointFields({
@@ -57,7 +56,6 @@ export function ProviderEndpointFields({
   onModelSelectOpenChange,
   probeKey,
   baseUrlError,
-  modelError,
 }: ProviderEndpointFieldsProps) {
   const intl = useIntl();
   const baseUrlId = useId();
@@ -160,7 +158,6 @@ export function ProviderEndpointFields({
         onBusyChange={onBusyChange}
         onSelectOpenChange={onModelSelectOpenChange}
         probeKey={probeKey}
-        error={modelError}
       />
     </>
   );

@@ -1653,12 +1653,21 @@ fn provider_config_serializes_the_nullable_active_pointer() {
         active_profile: None,
     };
     assert_wire(&zero, r#"{"profiles":[],"active_profile":null}"#);
+    // ADR-0154: a profile's model is nullable -- the unpinned state (the
+    // seeded skeleton pins none) crosses as an explicit null, matching the
+    // `string | null` mirror; a pinned profile crosses its id verbatim.
     let seeded = ProviderConfig {
         profiles: vec![ProviderProfile::default_anthropic()],
         active_profile: Some(ProfileId("default".into())),
     };
     assert_wire(
         &seeded,
+        r#"{"profiles":[{"id":"default","display_name":"Anthropic","protocol":"anthropic","base_url":"https://api.anthropic.com","model":null}],"active_profile":"default"}"#,
+    );
+    let mut pinned = seeded.clone();
+    pinned.profiles[0].model = Some("claude-sonnet-4-6".into());
+    assert_wire(
+        &pinned,
         r#"{"profiles":[{"id":"default","display_name":"Anthropic","protocol":"anthropic","base_url":"https://api.anthropic.com","model":"claude-sonnet-4-6"}],"active_profile":"default"}"#,
     );
 }
@@ -1877,7 +1886,8 @@ fn user_adapter_row_wire_shape() {
 /// struct -- the shape `src/types/runtime.ts` mirrors. The None forms pin the
 /// "no selection / no discovery yet" honest defaults; the Some form pins the
 /// nested DiscoveredRuntime shape (snake_case fields, also the persisted
-/// recipe header shape).
+/// recipe header shape). `in_scope` (ADR-0154) rides last: whether the held
+/// pair injects on the next turn as displayed.
 #[test]
 fn session_model_config_wire_shape() {
     use toptopduck_lib::commands::SessionModelConfig;
@@ -1887,8 +1897,9 @@ fn session_model_config_wire_shape() {
             model: None,
             thought_level: None,
             cached_discovered: None,
+            in_scope: false,
         },
-        r#"{"model":null,"thought_level":null,"cached_discovered":null}"#,
+        r#"{"model":null,"thought_level":null,"cached_discovered":null,"in_scope":false}"#,
     );
     assert_wire(
         &SessionModelConfig {
@@ -1903,8 +1914,9 @@ fn session_model_config_wire_shape() {
                 thought_level_config_id: Some("reasoning_effort".into()),
                 adapter_id: Some("gemini-cli".into()),
             }),
+            in_scope: true,
         },
-        r#"{"model":"fake-opus","thought_level":"high","cached_discovered":{"models":["fake-opus","fake-sonnet"],"current_model":"fake-opus","thought_levels":["low"],"current_thought_level":null,"model_config_id":"model","thought_level_config_id":"reasoning_effort","adapter_id":"gemini-cli"}}"#,
+        r#"{"model":"fake-opus","thought_level":"high","cached_discovered":{"models":["fake-opus","fake-sonnet"],"current_model":"fake-opus","thought_levels":["low"],"current_thought_level":null,"model_config_id":"model","thought_level_config_id":"reasoning_effort","adapter_id":"gemini-cli"},"in_scope":true}"#,
     );
 }
 

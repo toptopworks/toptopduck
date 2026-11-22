@@ -153,6 +153,17 @@ pub(crate) fn probe(
         // 200-but-not-a-model-list, or a non-auth HTTP error: the endpoint may
         // still serve turns -- degrade to a minimal ping before declaring
         // incompatibility (ADR-0070 ping fallback).
+        // ADR-0154: an unpinned profile has no model to ping with, so the
+        // fallback cannot vouch for a turn (a ping with an empty model would
+        // only manufacture a 400). It then answers what the list response
+        // alone established -- the endpoint is reachable and accepted the
+        // key, any non-auth status included -- as the connected-without-a-
+        // list verdict, the class the ping's own success lands in. Whether a
+        // turn works is left to the turn: reporting Incompatible here would
+        // claim a fault the probe never observed (ADR-0070).
+        ModelsOutcome::NeedsFallback if model.trim().is_empty() => {
+            ProfileTestOutcome::Ok { models: Vec::new() }
+        }
         ModelsOutcome::NeedsFallback => match ping(protocol, base_url, model, key) {
             PingOutcome::Ok => ProfileTestOutcome::Ok { models: Vec::new() },
             PingOutcome::KeyRejected => ProfileTestOutcome::KeyRejected,
@@ -662,6 +673,39 @@ mod tests {
         // endpoint must receive Bearer on the fallback path, not the anthropic
         // x-api-key header.
         ping.assert();
+    }
+
+    /// ADR-0154: an unpinned profile has no model to ping with, so the
+    /// fallback is answered off the list response alone. A 2xx non-list body
+    /// reads as connected-without-a-list -- and NO ping fires: an unmatched
+    /// request would answer an auth status and the verdict would not be Ok.
+    #[test]
+    fn list_models_200_non_json_without_a_model_is_ok_without_a_ping() {
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_body("<html>not a models list</html>")
+            .create();
+        let outcome = probe(Some("sk-test"), Protocol::Anthropic, &server.url(), "");
+        assert_eq!(outcome, ProfileTestOutcome::Ok { models: vec![] });
+    }
+
+    /// The non-auth-status half: the endpoint answered and did not refuse
+    /// the key, which is all the list response establishes without a model
+    /// to ping -- the same connected-without-a-list verdict, never an
+    /// Incompatible the probe did not observe. Again no ping fires (an
+    /// unmatched request would answer an auth status).
+    #[test]
+    fn list_models_404_without_a_model_is_ok_without_a_ping() {
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/models")
+            .with_status(404)
+            .with_body(r#"{"error":"not found"}"#)
+            .create();
+        let outcome = probe(Some("sk-test"), Protocol::Openai, &server.url(), "   ");
+        assert_eq!(outcome, ProfileTestOutcome::Ok { models: vec![] });
     }
 
     #[test]

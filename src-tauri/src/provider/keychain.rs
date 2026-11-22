@@ -35,8 +35,10 @@ pub trait ProviderConfigSource: Send + Sync {
     /// The Anthropic-protocol endpoint base URL (ADR-0019: configurable
     /// `baseURL`, default Anthropic direct).
     fn base_url(&self) -> String;
-    /// The model id to request (ADR-0007: v1 default Sonnet-class, pinned).
-    fn model(&self) -> String;
+    /// The active profile's pinned model id, or `None` when it pins none
+    /// (ADR-0154): the turn then runs on the session's posture selection, or
+    /// refuses as `NoModel` when nothing is selected.
+    fn model(&self) -> Option<String>;
     /// The resolved response locale (ADR-0052, issue #78). Drives ONLY the
     /// locale directive appended to the system prompt -- never enters
     /// [`super::ProviderRequest`] and never crosses IPC from the frontend. The
@@ -261,8 +263,11 @@ impl ProviderConfigSource for StaticConfig {
     fn base_url(&self) -> String {
         self.base_url.clone()
     }
-    fn model(&self) -> String {
-        self.model.clone()
+    fn model(&self) -> Option<String> {
+        // The double always carries a model: the unpinned-profile refusal is
+        // the live source's state (ADR-0154), pinned at the wiring seam's
+        // facts gate, not something a fixed-value test double represents.
+        Some(self.model.clone())
     }
     fn locale(&self) -> ResponseLocale {
         self.locale
@@ -297,7 +302,7 @@ mod tests {
         };
         assert_eq!(cfg.api_key().as_deref(), Some("sk-test"));
         assert_eq!(cfg.base_url(), "https://example.test");
-        assert_eq!(cfg.model(), "claude-test");
+        assert_eq!(cfg.model().as_deref(), Some("claude-test"));
         assert_eq!(cfg.locale(), ResponseLocale::EnUS);
         assert_eq!(cfg.protocol(), Protocol::Anthropic);
     }
