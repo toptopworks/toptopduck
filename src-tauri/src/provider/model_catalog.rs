@@ -127,7 +127,10 @@ pub(crate) struct CompactEntry {
 /// alphabetically ahead of the lab (digit-prefixed ids sort first) can
 /// carry stale limits, and a stale sub-cap output row would under-cap a
 /// current model (the #1001 truncation shape). Among non-canonical rows
-/// the first sorted provider wins. Entries with no payload at all (no
+/// the first sorted provider wins. Whichever row wins is kept per-field:
+/// sibling rows for the same id only fill fields the winner lacks (a
+/// canonical row without effort tiers must not shadow a reseller row
+/// that carries them). Entries with no payload at all (no
 /// name, no limits, no effort tiers) are dropped: they can answer nothing.
 /// The snapshot and every runtime refresh share this trim, so the same
 /// upstream bytes always produce the same catalog.
@@ -160,20 +163,47 @@ pub(crate) fn trim_upstream(api: &serde_json::Value, fetched_at: u64) -> Compact
                 });
             let outranks =
                 is_canonical && !canonical_keys.contains(&key) && models.contains_key(&key);
-            if models.contains_key(&key) && !outranks {
-                continue;
-            }
-            let entry = compact_entry(model);
+            let mut entry = compact_entry(model);
             if entry == CompactEntry::default() {
                 continue;
             }
-            models.insert(key.clone(), entry);
-            if is_canonical {
-                canonical_keys.insert(key);
+            if let Some(existing) = models.get_mut(&key) {
+                if outranks {
+                    // the canonical flip keeps the lab's own values and
+                    // the gaps earlier resellers already closed
+                    fill_missing(&mut entry, existing);
+                    *existing = entry;
+                    canonical_keys.insert(key);
+                } else {
+                    fill_missing(existing, &entry);
+                }
+            } else {
+                models.insert(key.clone(), entry);
+                if is_canonical {
+                    canonical_keys.insert(key);
+                }
             }
         }
     }
     CompactCatalog { fetched_at, models }
+}
+
+/// Fill `base`'s absent fields from `donor`, one field at a time: the
+/// decided winner's values stay authoritative, sibling rows only close
+/// gaps.
+fn fill_missing(base: &mut CompactEntry, donor: &CompactEntry) {
+    if base.display_name.is_none() {
+        base.display_name = donor.display_name.clone();
+    }
+    if base.context_window.is_none() {
+        base.context_window = donor.context_window;
+    }
+    if base.output_cap.is_none() {
+        base.output_cap = donor.output_cap;
+    }
+    if base.effort_tiers.is_none() {
+        base.effort_tiers = donor.effort_tiers.clone();
+    }
 }
 
 /// Project one upstream model row onto the compact entry: `name` (display),
@@ -303,16 +333,32 @@ fn tiered_output_cap(
 /// Exact-id lookup across the two fresher tiers (cache outranks snapshot).
 /// A hit with a missing field returns the entry anyway -- the per-field
 /// `or_else` at each caller decides whether that falls through to the
-/// prefix table.
+/// prefix table. A total miss on a gateway-style composite id
+/// (`vendor/model`) retries once with the bare form: the catalog records
+/// upstream ids while aggregator gateways serve the same rows under a
+/// prefixed alias, so the exact composite entry (when one exists) always
+/// outranks the fallback.
 fn exact_entry<'a>(
     cache: Option<&'a CompactCatalog>,
     snapshot: Option<&'a CompactCatalog>,
     model_name: &str,
 ) -> Option<&'a CompactEntry> {
     let normalized = model_name.to_lowercase();
+    exact_id_hit(cache, snapshot, &normalized).or_else(|| {
+        // one segment only: `a/b/c` retries as `b/c`, never peels further
+        let (_, bare) = normalized.split_once('/')?;
+        exact_id_hit(cache, snapshot, bare)
+    })
+}
+
+fn exact_id_hit<'a>(
+    cache: Option<&'a CompactCatalog>,
+    snapshot: Option<&'a CompactCatalog>,
+    id: &str,
+) -> Option<&'a CompactEntry> {
     cache
-        .and_then(|catalog| catalog.models.get(&normalized))
-        .or_else(|| snapshot.and_then(|catalog| catalog.models.get(&normalized)))
+        .and_then(|catalog| catalog.models.get(id))
+        .or_else(|| snapshot.and_then(|catalog| catalog.models.get(id)))
 }
 
 // --- the disk cache and the lazy refresh ---------------------------------
@@ -604,8 +650,11 @@ mod tests {
     /// Duplicate ids resolve by canonical precedence: the lab's own row
     /// (`canonical_model_id` naming its provider) outranks a digit-prefixed
     /// reseller that sorts first -- a stale reseller limit must never
-    /// under-cap a current model (the #1001 truncation shape). Casing is
-    /// normalized on both sides.
+    /// under-cap a current model (the #1001 truncation shape). The
+    /// winner's own values stay authoritative per-field; gaps fill from
+    /// sibling rows (the field-level union) -- the fixture's late zeta
+    /// row is the only one carrying effort tiers for the shared id.
+    /// Casing is normalized on both sides.
     #[test]
     fn trim_prefers_the_canonical_row_over_earlier_resellers() {
         let catalog = trim_upstream(&upstream_fixture(), 0);
@@ -616,9 +665,11 @@ mod tests {
             Some(222_000),
             "not the reseller's 128K"
         );
+        assert_eq!(shared.output_cap, Some(5_000), "not zeta's 4K");
         assert_eq!(
-            shared.effort_tiers, None,
-            "the winner's own row is kept whole"
+            shared.effort_tiers,
+            Some(vec!["low".to_string(), "high".to_string()]),
+            "the winner's gaps fill from sibling rows"
         );
     }
 
@@ -638,6 +689,63 @@ mod tests {
         assert_eq!(
             catalog.models.get("dupe").unwrap().display_name.as_deref(),
             Some("A Dupe")
+        );
+    }
+
+    /// The union's other half: a NON-canonical winner (the first sorted
+    /// provider) keeps every field it already has -- later duplicate rows
+    /// only close gaps, never overwrite an already-decided value. The
+    /// winner here carries a context window alone, so every other field
+    /// demonstrably arrives from the later row.
+    #[test]
+    fn later_duplicate_rows_fill_gaps_without_overwriting_the_winner() {
+        let api = serde_json::json!({
+            "aaa-reseller": { "models": { "dupe": {
+                "limit": { "context": 111_000 }
+            }}},
+            "zzz-reseller": { "models": { "dupe": {
+                "name": "Z Dupe", "limit": { "context": 222_000, "output": 5_000 },
+                "reasoning_options": [ { "type": "effort", "values": ["low", "high"] } ]
+            }}}
+        });
+        let catalog = trim_upstream(&api, 0);
+        let dupe = catalog.models.get("dupe").expect("dupe trimmed");
+        assert_eq!(dupe.context_window, Some(111_000), "winner values stay");
+        assert_eq!(
+            dupe.display_name.as_deref(),
+            Some("Z Dupe"),
+            "the gap fills"
+        );
+        assert_eq!(dupe.output_cap, Some(5_000), "the gap fills");
+        assert_eq!(
+            dupe.effort_tiers,
+            Some(vec!["low".to_string(), "high".to_string()]),
+            "the winner's gap fills from the later row"
+        );
+    }
+
+    /// A canonical flip keeps the lab's own values AND the gaps the
+    /// earlier reseller already closed: the reseller's output cap must
+    /// survive a canonical row that carries no limit of its own.
+    #[test]
+    fn canonical_flip_preserves_gaps_the_reseller_already_closed() {
+        let api = serde_json::json!({
+            "aaa-reseller": { "models": { "flip": {
+                "name": "Reseller Flip", "limit": { "output": 4_000 }
+            }}},
+            "zzz-labs": { "models": { "flip": {
+                "name": "Zeta Flip", "limit": { "context": 222_000 },
+                "canonical_model_id": "zzz-labs/flip"
+            }}}
+        });
+        let catalog = trim_upstream(&api, 0);
+        let flip = catalog.models.get("flip").expect("flip trimmed");
+        assert_eq!(flip.display_name.as_deref(), Some("Zeta Flip"));
+        assert_eq!(flip.context_window, Some(222_000));
+        assert_eq!(
+            flip.output_cap,
+            Some(4_000),
+            "the reseller's closed gap survives the canonical flip"
         );
     }
 
@@ -714,6 +822,50 @@ mod tests {
         // a total miss stays hollow
         assert_eq!(
             tiered_context_window(tiers.0, tiers.1, "doubao-1.5-pro"),
+            None
+        );
+    }
+
+    /// Gateway-style composite ids (`vendor/model`) retry once with the
+    /// bare form when both tiers miss the exact composite: the catalog
+    /// records upstream ids, aggregator gateways serve the same rows
+    /// under a prefixed alias. The exact composite entry outranks its
+    /// own bare fallback, and the strip peels one segment only (no
+    /// recursive peeling through stacked prefixes).
+    #[test]
+    fn composite_ids_fall_back_to_the_bare_form_across_the_chain() {
+        let (cache, snapshot) = fixture_tiers();
+        let tiers = (Some(&cache), Some(&snapshot));
+        // cache tier through the bare form, casing normalized as one id
+        assert_eq!(
+            tiered_context_window(tiers.0, tiers.1, "VENDOR/ZZ-Model"),
+            Some(1_000)
+        );
+        // snapshot tier through the bare form
+        assert_eq!(
+            tiered_context_window(tiers.0, tiers.1, "vendor/ss-model"),
+            Some(3_500)
+        );
+        assert_eq!(
+            tiered_output_cap(tiers.0, tiers.1, "vendor/zz-model"),
+            4_000
+        );
+        // an exact composite entry answers as itself, never as its bare form
+        let mut composite = cache.clone();
+        composite.models.insert(
+            "vendor/zz-model".to_string(),
+            CompactEntry {
+                context_window: Some(7_000),
+                ..CompactEntry::default()
+            },
+        );
+        assert_eq!(
+            tiered_context_window(Some(&composite), Some(&snapshot), "vendor/zz-model"),
+            Some(7_000)
+        );
+        // one segment only: a stacked prefix does not peel down to the id
+        assert_eq!(
+            tiered_context_window(tiers.0, tiers.1, "gw/vendor/zz-model"),
             None
         );
     }
@@ -1104,5 +1256,15 @@ mod tests {
         // a sibling id of the fixture entry stays on the prefix/hollow path
         // (exact-id only, no family spill)
         assert_eq!(context_window("zz-fixture-model-air"), None);
+        // a gateway-style composite id resolves through the same chain;
+        // the menu's display name and effort tiers ride identical
+        // lookups (the honest no-answer shape stays None on a real miss)
+        assert_eq!(context_window("vendor/zz-fixture-model"), Some(123_456));
+        let metadata = catalog_metadata("vendor/zz-fixture-model");
+        assert_eq!(metadata.display_name.as_deref(), Some("ZZ Fixture"));
+        assert_eq!(
+            metadata.effort_tiers,
+            Some(vec!["low".to_string(), "high".to_string()])
+        );
     }
 }
