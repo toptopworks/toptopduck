@@ -13,14 +13,13 @@ import { cn } from "@/lib/utils";
 
 // The hook class is the fold's selector / test anchor. A literal union of the
 // folds that exist (the turn-level process fold, the per-round thinking fold,
-// the per-round steps fold, the live sealed-round fold, the delegation
-// sub-trace fold, the antecedents lineage fold) so a typo'd class fails at
-// the call site, not as a selector miss.
+// the per-round steps fold, the delegation sub-trace fold, the antecedents
+// lineage fold) so a typo'd class fails at the call site, not as a selector
+// miss.
 export type FoldHookClass =
   | "thinking-toggle"
   | "trace-toggle"
   | "process-toggle"
-  | "round-toggle"
   | "subtrace-toggle"
   | "antecedents-toggle";
 

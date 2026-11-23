@@ -768,7 +768,6 @@
   "thread.trace.op.network": "网络",
   "thread.trace.op.read": "读",
   "thread.trace.op.write": "写",
-  "thread.trace.roundCompleted": "执行完成 · {count, plural, other {# 次调用}}",
   "thread.trace.stepCompleted": "轨迹",
   "thread.trace.toolCount": "{tool} ×{count}",
   "thread.trace.delegationBatch": "{total} 个中 {done} 个完成，{running} 个运行中",

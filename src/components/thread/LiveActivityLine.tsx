@@ -13,11 +13,12 @@
 // most once per window (calls flashing a fresh verb each read as flicker
 // -- the user ruling) and the face holds one window past the last call,
 // so short calls stay readable and the line never blinks inside a burst.
-// The line's fold holds the rounds after the last prose section (the
-// reveal line, liveRoundRevealed): their completed calls ride the head's
-// count, their thinking + calls sit in the expand face, the running call
-// is absorbed by the head. Sealed rounds -- everything the last prose
-// section covers -- land as fold lines in the exchange, NOT here.
+// The line's fold holds the CURRENT round only (#1656's narrowing of the
+// #1606 domain): the turn tail -- its completed calls ride the head's
+// count, its thinking + calls sit in the expand face, the running call
+// is absorbed by the head. Every earlier round seals as its own
+// settle-isomorphic block in the exchange, NOT here; prose no longer
+// partitions the two.
 // With nothing behind the fold -- no thinking, no settled or running row
 // in the line's rounds (a lone pending card does not count: the card
 // renders at the tail, outside the fold) -- the line is a plain status
@@ -34,7 +35,6 @@ import { WaitElapsedSuffix } from "./WaitElapsedSuffix";
 import { isRoundTripWait, isSettledRow } from "../../session/useTurnFlow";
 import type { ApprovalResponse, FileAttachment, OperationKind } from "../../types/approval";
 import type { LiveTurn } from "../../session/useTurnFlow";
-import { liveRoundRevealed } from "./turn-visual";
 
 // The head's activity verb: the progressive face of the operation kind (the
 // `thread.trace.op.*` noun family). Exhaustiveness guard mirrors the Rust
@@ -97,14 +97,14 @@ export function LiveActivityLine({
     onExpandedChange(expanded);
   }, [expanded, onExpandedChange]);
   const allRows = liveTurn.rounds.flatMap((round) => round.rows);
-  // The line's rounds: everything after the last prose section (the
-  // reveal line). The head's count reads THESE rows only -- the revealed
-  // rounds' calls live as visible rows at their sections and are never
-  // re-reported by the line; the expand face renders these rounds.
-  const lineRounds = liveTurn.rounds.filter(
-    (_, i) => !liveRoundRevealed(liveTurn.rounds, i),
-  );
-  const lineRows = lineRounds.flatMap((round) => round.rows);
+  // The line's round: the CURRENT round only -- the turn tail (#1656's
+  // narrowing of the #1606 domain). Every earlier round seals as its own
+  // settle-isomorphic block in the exchange, so the head's count reads
+  // the tail round's rows and the expand face renders it alone. The tail
+  // stays the line's through the round-trip wait -- the settle swap is
+  // what retires the line, so the domain needs no other boundary.
+  const tailRound = liveTurn.rounds.at(-1);
+  const lineRows = tailRound?.rows ?? [];
   const completedCount = lineRows.filter(isSettledRow).length;
   const running = allRows.find((row) => row.running);
   // The gate hold (an approval-channel row the gateway has not completed):
@@ -175,11 +175,14 @@ export function LiveActivityLine({
   // Expandable only when something sits behind the fold (the user ruling:
   // a line with nothing to show on expand is a plain status line -- no
   // hover, no click): any round's thinking, or any settled/running row.
-  const canExpand = lineRounds.some(
-    (round) =>
-      round.thinking !== undefined ||
-      round.rows.some((row) => isSettledRow(row) || row.running),
-  );
+  const canExpand =
+    tailRound !== undefined &&
+    (tailRound.thinking !== undefined ||
+      tailRound.rows.some((row) => isSettledRow(row) || row.running));
+  // The expand face's rows: the settled + running members of the tail
+  // round (the running call unfurls in place; thinking rides its own
+  // fold inside the face).
+  const faceRows = lineRows.filter((row) => isSettledRow(row) || row.running);
   // The head's face content, shared by both postures (the fold toggle and
   // the plain status line): the breathing dot + the shimmer sweeping the
   // phase face and the elapsed figure together (the running visual lives
@@ -242,32 +245,30 @@ export function LiveActivityLine({
           {face}
         </div>
       )}
-      {expanded &&
-        // The fold's face: the line's rounds (after the last prose
-        // section) -- per round, the thinking fold then its call rows on
-        // the shared left-rail list (the settled face's chrome); the
-        // running call unfurls in its round. Revealed rounds never render
-        // here -- they live at their sections.
-        lineRounds.map((round, i) => {
-          const rows = round.rows.filter((row) => isSettledRow(row) || row.running);
-          return (
-            <div key={i + 1} className="trace-round max-w-full">
-              {round.thinking !== undefined && <ThinkingFold thinking={round.thinking} />}
-              {rows.length > 0 && (
-                <TraceList>
-                  {rows.map((row) => (
-                    <LiveRow
-                      key={row.key}
-                      row={row}
-                      onRespond={onRespond}
-                      onLoadAttachments={onLoadAttachments}
-                    />
-                  ))}
-                </TraceList>
-              )}
-            </div>
-          );
-        })}
+      {expanded && tailRound !== undefined && (
+        // The fold's face: the CURRENT round only (#1656's narrowing --
+        // every earlier round seals as its own block in the exchange
+        // above, never here). The thinking fold first, then the settled +
+        // running rows on the shared left-rail list (the settled face's
+        // chrome); the running call unfurls in place.
+        <div className="trace-round max-w-full">
+          {tailRound.thinking !== undefined && (
+            <ThinkingFold thinking={tailRound.thinking} />
+          )}
+          {faceRows.length > 0 && (
+            <TraceList>
+              {faceRows.map((row) => (
+                <LiveRow
+                  key={row.key}
+                  row={row}
+                  onRespond={onRespond}
+                  onLoadAttachments={onLoadAttachments}
+                />
+              ))}
+            </TraceList>
+          )}
+        </div>
+      )}
     </>
   );
 }
