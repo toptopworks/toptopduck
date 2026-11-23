@@ -20,7 +20,9 @@
 //!   corrupt cache is silently skipped, never deleted).
 //!
 //! The lookup chain is **cache exact id -> snapshot exact id -> prefix
-//! table -> hollow/fallback**; the prefix tables keep their role for
+//! table -> hollow/fallback**, with a total miss on a gateway-style
+//! composite id (`vendor/model`) retried once as its bare form through
+//! both catalog tiers; the prefix tables keep their role for
 //! uncataloged aliases and custom deployment ids, refreshed only when a
 //! whole new family ships. Ids are matched lowercased on both sides
 //! (upstream ids carry casing like `MiniMax-M2`).
@@ -104,7 +106,10 @@ pub(crate) struct CompactCatalog {
 
 /// One model's catalog payload. An entry with `None` in a field falls
 /// through that field to the next tier (the 1.4% of upstream rows without
-/// `limit.context` still get the prefix table's family answer).
+/// `limit.context` still get the prefix table's family answer). Adding a
+/// field touches three spots that neither the compiler nor tests force:
+/// the `compact_entry` projection, `fill_missing`'s union, and the
+/// default-equality drop in `trim_upstream`.
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CompactEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,8 +274,9 @@ pub(crate) fn encode_catalog(catalog: &CompactCatalog) -> Result<Vec<u8>, std::i
 // --- the lookup chain ----------------------------------------------------
 
 /// Resolve the occupancy-ring denominator through the full chain: cache
-/// exact id -> snapshot exact id -> the static prefix table (which keeps
-/// the family-boundary semantics for uncataloged aliases and deployment
+/// exact id -> snapshot exact id (a composite id retried as its bare
+/// form on a total miss) -> the static prefix table (which keeps the
+/// family-boundary semantics for uncataloged aliases and deployment
 /// ids). `None` stays the hollow ring.
 pub(crate) fn context_window(model_name: &str) -> Option<u64> {
     let cache = cache_catalog();
@@ -278,9 +284,10 @@ pub(crate) fn context_window(model_name: &str) -> Option<u64> {
 }
 
 /// Resolve the turn output cap through the full chain, folded through the
-/// output-cap formula (`entry ?? CAP`, then `min(_, CAP)`): an exact-id hit
-/// with an output limit, else the low-cap prefix table, else the global
-/// cap. An exact entry at/over the cap clamps to it, keeping the formula's
+/// output-cap formula (`entry ?? CAP`, then `min(_, CAP)`): an exact-id
+/// hit with an output limit (a composite id retried as its bare form on
+/// a total miss), else the low-cap prefix table, else the global cap. An
+/// exact entry at/over the cap clamps to it, keeping the formula's
 /// asymmetric failure direction.
 pub(crate) fn output_cap(model_name: &str) -> u32 {
     let cache = cache_catalog();
@@ -726,7 +733,7 @@ mod tests {
 
     /// A canonical flip keeps the lab's own values AND the gaps the
     /// earlier reseller already closed: the reseller's output cap must
-    /// survive a canonical row that carries no limit of its own.
+    /// survive a canonical row that carries no output cap of its own.
     #[test]
     fn canonical_flip_preserves_gaps_the_reseller_already_closed() {
         let api = serde_json::json!({
