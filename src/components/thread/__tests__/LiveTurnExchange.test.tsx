@@ -926,6 +926,91 @@ describe("LiveTurnExchange sealed round settle form (#1656)", () => {
     fireEvent.click(container.querySelector("button.process-toggle")!);
     expect(screen.getByText("SELECT 2")).toBeInTheDocument();
   });
+
+  it("keeps a sealed round's fold posture across stream updates (the rerender survival)", () => {
+    // The block comment pins prose-non-remount across the tail->sealed
+    // transition as load-bearing, and the fold state rides the same
+    // instance: expand a sealed fold, append a stream round, and the
+    // posture must survive -- a refactor that remounts the blocks (a key
+    // switch, a conditional wrapper) would collapse the user's open fold
+    // on every stream block with the suite green.
+    const onActivityExpandedChange = vi.fn();
+    const turn = liveTurnWith(undefined);
+    turn.step = 3;
+    turn.rounds = [
+      { rows: [settledRow({ key: "call-0", name: "explore", summary: "SELECT 1" })] },
+      { rows: [settledRow({ key: "call-1", name: "fetch", summary: "GET /x" })] },
+      { rows: [settledRow({ key: "call-2", name: "describe", summary: "SELECT 2" })] },
+    ];
+    const view = renderExchange(turn, onActivityExpandedChange);
+    fireEvent.click(view.container.querySelectorAll("button.trace-toggle")[0]!);
+    expect(view.container.querySelectorAll("button.trace-toggle")[0]).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.getByText("SELECT 1")).toBeInTheDocument();
+    // The stream appends a round (the state layer's shape: rounds grow,
+    // the seal index moves with them); the tail round stays the line's.
+    const grown = liveTurnWith(undefined);
+    grown.step = 4;
+    grown.rounds = [
+      ...turn.rounds,
+      { rows: [settledRow({ key: "call-3", name: "python", summary: "SELECT 3" })] },
+    ];
+    view.rerender(exchangeEl(grown, onActivityExpandedChange));
+    const folds = view.container.querySelectorAll("button.trace-toggle");
+    expect(folds).toHaveLength(3);
+    // The open fold survived the rerender on the same instance.
+    expect(folds[0]).toHaveAttribute("aria-expanded", "true");
+    expect(folds[1]).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("SELECT 1")).toBeInTheDocument();
+    // The new tail rides the line, not a block.
+    expect(screen.queryByText("SELECT 3")).not.toBeInTheDocument();
+  });
+
+  it("keeps an early round carrying an unsettled row unsealed; its members go dark (the honest degrade)", () => {
+    // The guard half's backstop shape: a state-layer path that opens the
+    // successor while an early round still holds an unsettled row must
+    // not seal around it -- the fold head would report the settled subset
+    // with unwarranted confidence. The unsealed early round has no live
+    // surface (the line owns the tail alone), so its members go dark
+    // until the settle swap reclaims them. No current producer reaches
+    // the shape (deny completions land inside their round by channel
+    // ordering; abandon ends the turn) -- this pin makes the degrade
+    // conscious should the state layer ever get there.
+    const turn = liveTurnWith(undefined);
+    turn.step = 2;
+    turn.rounds = [
+      {
+        rows: [
+          settledRow({ key: "call-0", name: "explore", summary: "SELECT 1" }),
+          {
+            key: "call-1",
+            name: "fetch",
+            server: null,
+            operationKind: "network",
+            summary: "GET /y",
+            approval: null,
+            running: true,
+            success: null,
+            resultExcerpt: "",
+          },
+        ],
+      },
+      { rows: [settledRow({ key: "call-2", name: "describe", summary: "SELECT 2" })] },
+    ];
+    const { container } = renderExchange(turn);
+    // Not sealed: no block fold for the early round.
+    expect(container.querySelectorAll("button.trace-toggle")).toHaveLength(0);
+    // Its settled member renders on no surface (the line reads the tail
+    // round alone).
+    expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
+    // The tail round rides the line normally (the dark round's running
+    // row still paints the tool face -- allRows spans the turn).
+    expect(container.querySelector("button.process-toggle")).toHaveTextContent(
+      "正在联网 · 已完成 1 次调用",
+    );
+  });
 });
 
 // The turn clock's host (issue #1264's ruling re-hosted by #1612): the

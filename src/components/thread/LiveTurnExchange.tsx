@@ -33,12 +33,11 @@ import { LiveRow } from "./TraceView";
 import { LiveActivityLine } from "./LiveActivityLine";
 import { TraceList } from "./TraceList";
 import { RoundBody } from "./RoundBody";
-import { foldLabel } from "./turn-visual";
+import { foldLabel, type DatasetLabel } from "./turn-visual";
 import { isSettledRow } from "../../session/useTurnFlow";
 import { TurnExchangeFrame } from "./TurnExchangeFrame";
 import type { LiveRound, LiveTurn } from "../../session/useTurnFlow";
 import type { ApprovalResponse, FileAttachment } from "../../types/approval";
-import { type DatasetLabel } from "./turn-visual";
 
 // One live round's block, both postures in one component type (#1656): the
 // thinking fold + connective prose ride the SAME RoundBody the settled
@@ -135,8 +134,10 @@ export function LiveTurnExchange({
   // when the turn opens its successor (the tail is the current round, the
   // line's domain); a pending or deny-held card keeps its own round the
   // tail -- the gate hold cannot outlive the round it gates (the provider
-  // cannot dispatch past an unresolved approval), so the index alone is
-  // the whole criterion. The activity line's faces stay gated by the
+  // cannot dispatch past an unresolved approval) -- the index half
+  // already excludes every such round, so the settled-rows guard at the
+  // call site below is the regression backstop, not a second custody
+  // rule. The activity line's faces stay gated by the
   // shared wait predicate (see isRoundTripWait for the honest-liveness
   // reasoning: which arms carry the motion, and why the prose arm
   // requires the tail to BE the current round) -- the thinking phase
@@ -175,8 +176,13 @@ export function LiveTurnExchange({
         // #1656 criterion: before the tail (the index half -- sequential
         // rounds make this the normal case) AND fully settled rows (the
         // guard half -- a round that somehow still carries an unsettled
-        // row stays unsealed, degrading to the line's current-round
-        // custody instead of dropping the row from every surface).
+        // row stays unsealed rather than sealing around it: for the tail
+        // that keeps the rows in the line's custody, for an earlier round
+        // the block goes dark until the settle swap reclaims them.
+        // Unreachable today -- a deny completion lands inside its round's
+        // lifetime by channel ordering, an abandoned call ends the turn
+        // (#1267) -- but the seal never claims a round it cannot show in
+        // full).
         <LiveRoundBlock
           key={i}
           round={round}

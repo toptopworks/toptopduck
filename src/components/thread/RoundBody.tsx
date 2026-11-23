@@ -1,11 +1,13 @@
 // The swap-stable round skeleton (ADR-0103 live isomorphism, issues
-// #610/#620): the settled TraceRoundBlock and the live exchange's prose
-// sections mount the SAME wrapper + connective prose, so the settle swap
-// does not move them. The settled round's other members ride this module
-// too (the thinking fold below) or the `children` slot (the step fold +
-// subtrace); the live side mounts it prose-only (ADR-0151 -- the live
-// calls and thinking live in the activity line and the sealed fold lines,
-// not in per-round blocks). The max-w-full cap
+// #610/#620): the settled TraceRoundBlock and the live exchange's
+// per-round blocks mount the SAME wrapper + connective prose, so the
+// settle swap does not move them. The settled round's other members ride
+// this module too (the thinking fold below) or the `children` slot (the
+// step fold + subtrace); the live side mounts the same members through
+// the same slots (#1656) -- the tail round prose-only (its calls and
+// thinking are the activity line's domain until the round seals), the
+// sealed rounds with the thinking fold and the step fold exactly as the
+// settled side. The max-w-full cap
 // is unconditional: a non-stretched flex item (the stream's items-start)
 // sizes its width by fit-content, which floors at min-content -- a nowrap
 // summary then stretches the round past the card instead of truncating, and
