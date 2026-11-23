@@ -1583,21 +1583,26 @@ describe("Thread", () => {
       );
       // The verb face paints only after the dwell (a 600ms minimum hold --
       // the user ruling against face flashing), so wait it out on the
-      // real clock.
+      // real clock. The count reads the CURRENT round only (#1656): the
+      // finished round sealed above the line, its call no longer reports.
       const head = await waitFor(() => {
         const el = container.querySelector("button.process-toggle");
-        expect(el).toHaveTextContent("正在写入 · 已完成 1 次调用");
+        expect(el).toHaveTextContent("正在写入 · 已完成 0 次调用");
         return el;
       });
-      // The prose renders always-expanded; the thinking is NOT a rail line
-      // any more -- it lives behind the activity line's expand face (the
-      // single rotating line ruling, issue #1606).
+      // The finished round seals as its settle-isomorphic block (#1656):
+      // the prose stays expanded, the thinking + the completed call ride
+      // their per-round fold lines (heads visible, bodies folded).
       expect(screen.getByText("先看一眼数据。")).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "思考" })).not.toBeInTheDocument();
+      expect(screen.getByText("思考 · 0.9s")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "轨迹 · explore ×1" })).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
       expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
-      // Nothing unfurled: the completed row hides behind the head and the
-      // running call is absorbed too (the runner's motion keeps the wait
-      // status off).
+      // Nothing unfurled: the completed row hides behind the sealed fold
+      // and the running call is absorbed too (the runner's motion keeps
+      // the wait status off).
       expect(screen.queryByText("explore")).not.toBeInTheDocument();
       expect(screen.queryByText("materialize")).not.toBeInTheDocument();
       expect(screen.queryByText("思考中…")).not.toBeInTheDocument();

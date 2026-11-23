@@ -7,8 +7,9 @@
 // riding LiveTurn arrives late -- when it lands is useTurnFlow's contract,
 // pinned in its own tests) and its presence + the staged badge names once
 // they land (the adapter hand-offs -- the frame pins only the given-prop
-// faces), plus the streaming prose postures (ADR-0120) and the trailing
-// thinking-status postures (issue #1167).
+// faces), plus the streaming prose postures (ADR-0120), the trailing
+// thinking-status postures (issue #1167), and the per-round sealed blocks
+// (#1656 -- the settle-isomorphic form every finished round lands in).
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
@@ -366,8 +367,10 @@ describe("LiveTurnExchange trailing wait status (the #1606 bare face)", () => {
 // folded head (the tool face answers a call at once, the verb repaints
 // at most once per window, the face holds one window past the last
 // call), the streaming tail steps it aside (the prose + caret carry the
-// liveness), and expanding shows the rounds after the last prose
-// section (their thinking folds + flat call rows). With nothing behind
+// liveness), and expanding shows the CURRENT round's thinking fold +
+// flat call rows (#1656: the line's domain is the turn tail -- every
+// earlier round seals as its own settle-isomorphic block in the
+// exchange). With nothing behind
 // the fold the line is a plain status line (no hover, no click). The
 // head reads the rows' kind and count ONLY -- never the streaming
 // summary (the anti-flicker contract); the pending approval card stays
@@ -646,7 +649,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     expect(screen.getByText("等待审批")).toBeInTheDocument();
   });
 
-  it("seals each prose-bounded segment into ONE aggregate fold line; the count stays in the activity line", () => {
+  it("seals each finished round as its own settle-isomorphic block; the line reads the tail only", () => {
     const onActivityExpandedChange = vi.fn();
     const turn = liveTurnWith(undefined);
     turn.step = 4;
@@ -672,54 +675,59 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       },
     ];
     const { container } = renderExchange(turn, onActivityExpandedChange);
-    // The stretch between the two prose sections (r0 + the call-only r1)
-    // lands as ONE aggregate fold line between them -- never a block per
-    // round.
-    const roundToggles = container.querySelectorAll("button.round-toggle");
-    expect(roundToggles).toHaveLength(1);
-    expect(roundToggles[0]?.textContent).toBe("执行完成 · 2 次调用");
-    // The prose renders above and below the fold; the folded thinking +
-    // rows stay hidden until it opens.
+    // Every round before the tail is sealed (#1656): three settle-form fold
+    // heads -- one per round, never an aggregate line.
+    const roundToggles = container.querySelectorAll("button.trace-toggle");
+    expect(roundToggles).toHaveLength(3);
+    expect(roundToggles[0]?.textContent).toBe("轨迹 · explorer ×1");
+    expect(roundToggles[1]?.textContent).toBe("轨迹 · fetch ×1");
+    expect(roundToggles[2]?.textContent).toBe("轨迹 · python ×1");
+    // The thinking folds ride the same blocks at their settle position,
+    // heads visible while collapsed (the two-lines-per-round posture).
+    expect(screen.getByText("思考 · 1.2s")).toBeInTheDocument();
+    expect(screen.getByText("思考 · 0.3s")).toBeInTheDocument();
+    // The prose rides its own round above the fold lines.
     expect(screen.getByText("先看一眼。")).toBeInTheDocument();
     expect(screen.getByText("数据已就绪。")).toBeInTheDocument();
-    expect(screen.queryByText("思考 · 1.2s")).not.toBeInTheDocument();
+    // Folded by default: no row content dumps out (the height governance).
     expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
     expect(screen.queryByText("GET /x")).not.toBeInTheDocument();
-    // The last prose's segment (r2 + the tail) is NOT sealed: its rows
-    // stay in the activity line's fold.
     expect(screen.queryByText("SELECT 3")).not.toBeInTheDocument();
-    expect(screen.queryByText("SELECT 4")).not.toBeInTheDocument();
-    // The head's count reads the line's rounds ONLY.
+    // The head's count reads the TAIL round only (#1656's narrowing): one
+    // settled call there -- the sealed rounds' calls no longer report.
     const head = container.querySelector("button.process-toggle");
-    expect(head).toHaveTextContent("正在写入 · 已完成 2 次调用");
-    // Open the sealed segment: every round's thinking fold + call rows in
-    // settle order; the count stays in the activity line.
+    expect(head).toHaveTextContent("正在写入 · 已完成 1 次调用");
+    // Open the first sealed round: its call lands on the shared left-rail
+    // list; the other rounds stay folded.
     fireEvent.click(roundToggles[0]!);
-    expect(screen.getByText("思考 · 1.2s")).toBeInTheDocument();
     expect(screen.getByText("SELECT 1")).toBeInTheDocument();
-    expect(screen.getByText("GET /x")).toBeInTheDocument();
+    expect(screen.queryByText("GET /x")).not.toBeInTheDocument();
     expect(screen.queryByText("SELECT 3")).not.toBeInTheDocument();
     expect(onActivityExpandedChange).not.toHaveBeenCalledWith(true);
   });
 
-  it("keeps everything in the line without any prose section (the pre-prose posture)", () => {
+  it("seals leading rounds even under no prose (the pre-prose posture)", () => {
     const turn = liveTurnWith(undefined);
     turn.rounds = [
       { rows: [settledRow({ key: "call-0", summary: "SELECT 1" })] },
-      { rows: [settledRow({ key: "call-1", summary: "SELECT 2" })] },
+      { rows: [settledRow({ key: "call-1", name: "describe", summary: "SELECT 2" })] },
       { rows: [settledRow({ key: "call-2", summary: "SELECT 3", running: true, success: null })] },
     ];
     const { container } = renderExchange(turn);
-    // No prose section anywhere: nothing reveals -- the whole history
-    // rides the line (the pre-prose posture), the count reads the line's
-    // two settled calls.
+    // No prose section anywhere: the two finished rounds still seal as their
+    // own fold lines (#1656), the current round alone rides the line.
+    const roundToggles = container.querySelectorAll("button.trace-toggle");
+    expect(roundToggles).toHaveLength(2);
+    expect(roundToggles[0]?.textContent).toBe("轨迹 · explore ×1");
+    expect(roundToggles[1]?.textContent).toBe("轨迹 · describe ×1");
+    // The line reads the current round only: the running call reports zero
+    // completed -- the sealed calls sit behind their own folds.
     expect(container.querySelector("button.process-toggle")).toHaveTextContent(
-      "正在读取 · 已完成 2 次调用",
+      "正在读取 · 已完成 0 次调用",
     );
     expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
-    fireEvent.click(container.querySelector("button.process-toggle")!);
+    fireEvent.click(roundToggles[0]!);
     expect(screen.getByText("SELECT 1")).toBeInTheDocument();
-    expect(screen.getByText("SELECT 3")).toBeInTheDocument();
   });
 
   it("keeps a resolved-deny row visible at the tail until its completion lands", () => {
@@ -799,11 +807,11 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     expect(container.querySelectorAll(".trace-row")).toHaveLength(2);
   });
 
-  it("seals a leading call-only head segment under no prose (issue #1236)", () => {
+  it("seals a leading call-only round above the following prose (issue #1236)", () => {
     // Rows may lead the slot arrays -- a turn can open with calls before
-    // any prose lands. The head segment is prose-less; a later prose
-    // section seals it into the same aggregate fold line, landing at its
-    // own top position.
+    // any prose lands. The call-only round seals as its own fold line at
+    // its own top position (#1656); the prose round after it seals as the
+    // prose-only block it is.
     const turn = liveTurnWith(undefined);
     turn.step = 3;
     turn.rounds = [
@@ -812,23 +820,111 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       { rows: [settledRow({ key: "call-1", summary: "SELECT 2" })] },
     ];
     const { container } = renderExchange(turn);
-    const roundToggles = container.querySelectorAll("button.round-toggle");
+    const roundToggles = container.querySelectorAll("button.trace-toggle");
     expect(roundToggles).toHaveLength(1);
-    expect(roundToggles[0]?.textContent).toBe("执行完成 · 1 次调用");
-    // The fold sits ABOVE the prose section (its own segment's position).
+    expect(roundToggles[0]?.textContent).toBe("轨迹 · explore ×1");
+    // The fold sits ABOVE the prose section (its own round's position).
     const prose = screen.getByText("先看一眼。");
     expect(
       roundToggles[0]!.compareDocumentPosition(prose) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    // Open it: the head segment's call row lands on the shared left-rail
-    // list (the settled face's chrome); the line keeps the rounds after
-    // the prose (the count reads the one call there).
+    // Open it: the call row lands on the shared left-rail list; the line
+    // keeps the current round (the count reads the one call there).
     fireEvent.click(roundToggles[0]!);
     expect(screen.getByText("SELECT 1")).toBeInTheDocument();
-    expect(container.querySelector(".round-toggle + ul.trace-list")).not.toBeNull();
+    expect(container.querySelector(".trace-toggle + ul.trace-list")).not.toBeNull();
     fireEvent.click(container.querySelector("button.process-toggle")!);
     expect(screen.getByText("SELECT 2")).toBeInTheDocument();
     expect(screen.getByText("SELECT 2").closest("ul")).toHaveClass("trace-list");
+  });
+});
+
+// The sealed round's settle isomorphism (#1656): a finished round lands as
+// the SAME per-round form the settled trace mounts -- the thinking fold
+// ("Thinking · {sec}s"), the connective prose, the step fold whose head
+// speaks the shared per-tool counts -- so the settle swap moves nothing.
+describe("LiveTurnExchange sealed round settle form (#1656)", () => {
+  it("seals a prose-less round as the thinking + trace two-line form", () => {
+    // A call-only round with thinking: exactly the settle round's shape --
+    // two fold lines carrying the settle heads verbatim, nothing unfurled.
+    const turn = liveTurnWith(undefined);
+    turn.step = 2;
+    turn.rounds = [
+      {
+        thinking: { duration_ms: 1500, text: "推理" },
+        rows: [settledRow({ key: "call-0", name: "explore", summary: "SELECT 1" })],
+      },
+      { text: "正文正在流出。", rows: [] },
+    ];
+    const { container } = renderExchange(turn);
+    expect(screen.getByText("思考 · 1.5s")).toBeInTheDocument();
+    const fold = container.querySelector("button.trace-toggle");
+    expect(fold?.textContent).toBe("轨迹 · explore ×1");
+    expect(fold).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
+    // The prose rides the tail round above the line.
+    expect(screen.getByText("正文正在流出。")).toBeInTheDocument();
+  });
+
+  it("keeps the current round's thinking in the line alone (single custody)", () => {
+    // Thinking lands on a round while it is still the tail (mid-round, the
+    // state layer keys it by step): the block above the line must not
+    // double it -- the current round's thinking is the expand face's
+    // (ADR-0151 Decision 5); custody transfers to the block only at the
+    // seal.
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [
+      {
+        thinking: { duration_ms: 700, text: "推理中" },
+        text: "边想边说。",
+        rows: [],
+      },
+    ];
+    const { container } = renderExchange(turn);
+    expect(screen.queryByText("思考 · 0.7s")).not.toBeInTheDocument();
+    // The line's expand face carries it.
+    fireEvent.click(container.querySelector("button.process-toggle")!);
+    expect(screen.getByText("思考 · 0.7s")).toBeInTheDocument();
+  });
+
+  it("keeps a gate-held current round unsealed; earlier rounds still seal", () => {
+    // The pending card lives in the current round: the round stays the
+    // line's, the tool face holds (ADR-0083 flow face), and only the
+    // earlier round seals (#1656).
+    const turn = liveTurnWith(undefined);
+    turn.step = 2;
+    turn.rounds = [
+      { rows: [settledRow({ key: "call-0", name: "explore", summary: "SELECT 1" })] },
+      {
+        rows: [
+          settledRow({ key: "call-1", name: "describe", summary: "SELECT 2" }),
+          {
+            key: "req-1",
+            name: "fetch",
+            server: "acme",
+            operationKind: "network",
+            summary: "GET /x",
+            approval: { requestId: "req-1", response: null },
+            running: false,
+            success: null,
+            resultExcerpt: "",
+          },
+        ],
+      },
+    ];
+    const { container } = renderExchange(turn);
+    // One sealed block (the earlier round); the current round's settled
+    // call stays in the line's fold, beside the pending card.
+    expect(container.querySelectorAll("button.trace-toggle")).toHaveLength(1);
+    expect(container.querySelector("button.process-toggle")).toHaveTextContent(
+      "正在联网 · 已完成 1 次调用",
+    );
+    expect(container.querySelector(".approval-card")).not.toBeNull();
+    // The current round's rows sit behind the line's fold, not a block fold.
+    expect(screen.queryByText("SELECT 2")).not.toBeInTheDocument();
+    fireEvent.click(container.querySelector("button.process-toggle")!);
+    expect(screen.getByText("SELECT 2")).toBeInTheDocument();
   });
 });
 

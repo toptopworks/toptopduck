@@ -13,11 +13,12 @@
 // most once per window (calls flashing a fresh verb each read as flicker
 // -- the user ruling) and the face holds one window past the last call,
 // so short calls stay readable and the line never blinks inside a burst.
-// The line's fold holds the rounds after the last prose section (the
-// reveal line, liveRoundRevealed): their completed calls ride the head's
-// count, their thinking + calls sit in the expand face, the running call
-// is absorbed by the head. Sealed rounds -- everything the last prose
-// section covers -- land as fold lines in the exchange, NOT here.
+// The line's fold holds the CURRENT round only (#1656's narrowing of the
+// #1606 domain): the turn tail -- its completed calls ride the head's
+// count, its thinking + calls sit in the expand face, the running call
+// is absorbed by the head. Every earlier round seals as its own
+// settle-isomorphic block in the exchange, NOT here; prose no longer
+// partitions the two.
 // With nothing behind the fold -- no thinking, no settled or running row
 // in the line's rounds (a lone pending card does not count: the card
 // renders at the tail, outside the fold) -- the line is a plain status
@@ -34,7 +35,6 @@ import { WaitElapsedSuffix } from "./WaitElapsedSuffix";
 import { isRoundTripWait, isSettledRow } from "../../session/useTurnFlow";
 import type { ApprovalResponse, FileAttachment, OperationKind } from "../../types/approval";
 import type { LiveTurn } from "../../session/useTurnFlow";
-import { liveRoundRevealed } from "./turn-visual";
 
 // The head's activity verb: the progressive face of the operation kind (the
 // `thread.trace.op.*` noun family). Exhaustiveness guard mirrors the Rust
@@ -97,13 +97,13 @@ export function LiveActivityLine({
     onExpandedChange(expanded);
   }, [expanded, onExpandedChange]);
   const allRows = liveTurn.rounds.flatMap((round) => round.rows);
-  // The line's rounds: everything after the last prose section (the
-  // reveal line). The head's count reads THESE rows only -- the revealed
-  // rounds' calls live as visible rows at their sections and are never
-  // re-reported by the line; the expand face renders these rounds.
-  const lineRounds = liveTurn.rounds.filter(
-    (_, i) => !liveRoundRevealed(liveTurn.rounds, i),
-  );
+  // The line's rounds: the CURRENT round only -- the turn tail (#1656's
+  // narrowing of the #1606 domain). Every earlier round seals as its own
+  // settle-isomorphic block in the exchange, so the head's count reads
+  // the tail round's rows and the expand face renders it alone. The tail
+  // stays the line's through the round-trip wait -- the settle swap is
+  // what retires the line, so the domain needs no other boundary.
+  const lineRounds = liveTurn.rounds.slice(-1);
   const lineRows = lineRounds.flatMap((round) => round.rows);
   const completedCount = lineRows.filter(isSettledRow).length;
   const running = allRows.find((row) => row.running);

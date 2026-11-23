@@ -520,19 +520,35 @@ export function runtimeMarkerName(runtime: TurnRuntime | undefined): RuntimeMark
   return { adapterId, persistedName: displayName };
 }
 
-// ADR-0151's live reveal line: a round is revealed in place once a later
-// prose section exists -- the next prose seals every round before it, so
-// its thinking fold + call rows land at their settle position. The rounds
-// after the last prose section stay in the activity line's fold (its
-// count and its expand face); a turn with no prose section at all reveals
-// nothing -- the whole history rides the line (the pre-prose posture).
-// "A prose section exists" reads text !== undefined, which is sound only
-// because every Rust producer normalizes empty prose away (tool_calling's
-// Some("") filter, the codex and claude stream adapters' empty-text
-// guards) -- a defined text is always non-empty on the wire.
-export function liveRoundRevealed(
-  rounds: ReadonlyArray<{ text?: string }>,
-  i: number,
-): boolean {
-  return rounds.slice(i + 1).some((round) => round.text !== undefined);
+// The step fold's head label (issue #1604, recalibrated on the device):
+// a trace prefix over per-tool call counts -- "Trace · explore ×3
+// · describe ×1". The counts stay bare of a completion word -- the tool
+// name is still the call's identity, and the operation category alone
+// collapsed to noise on a single-category round (a data-exploration turn
+// of all reads read as an undifferentiated 读 ×N). Order is first
+// appearance -- the trace is append-only within a round, so re-renders
+// never reshuffle it, and tool names are untranslated data, so locale
+// switches cannot either. The category stays on the row's OperationBadge.
+// Shared by the settled step fold and the live exchange's sealed round
+// blocks (#1656): the live fold head and the settled one are the same
+// string, so the settle swap moves nothing.
+export function foldLabel(intl: IntlShape, calls: ReadonlyArray<{ name: string }>): string {
+  // A Map keeps its insertion order, which over an append-only trace is
+  // the first-appearance order above.
+  const counts = new Map<string, number>();
+  for (const call of calls) {
+    counts.set(call.name, (counts.get(call.name) ?? 0) + 1);
+  }
+  return [
+    intl.formatMessage({
+      id: "thread.trace.stepCompleted",
+      defaultMessage: "Trace",
+    }),
+    ...Array.from(counts, ([tool, count]) =>
+      intl.formatMessage(
+        { id: "thread.trace.toolCount", defaultMessage: "{tool} ×{count}" },
+        { tool, count },
+      ),
+    ),
+  ].join(" · ");
 }
