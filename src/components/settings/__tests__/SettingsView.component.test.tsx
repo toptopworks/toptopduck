@@ -870,7 +870,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("an empty model commits as the unpinned state with no field error (ADR-0154)", async () => {
     const { onCommitAppConfig } = renderView();
     fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
-    const model = await screen.findByLabelText("Model");
+    const model = await screen.findByLabelText("Model (optional)");
     fireEvent.change(model, { target: { value: "" } });
     fireEvent.blur(model, { relatedTarget: document.body });
     // The optional model is no longer validated: clearing it commits the
@@ -990,10 +990,10 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     });
     fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     // The profile has no keychain entry yet, so the probe's only reachable
-    // key is the buffered draft -- threaded through ProfilesSection ->
-    // ProviderEndpointFields -> ProviderModelField and passed RAW (trim
-    // normalization is Rust-side, resolve_probe_key). Edit mode's undefined
-    // fifth argument is pinned one hop down in ProviderFields.test.tsx.
+    // key is the buffered draft -- passed by ProfilesSection straight into
+    // ProviderModelField, RAW (trim normalization is Rust-side,
+    // resolve_probe_key). Edit mode's undefined fifth argument is pinned one
+    // hop down in ProviderFields.test.tsx.
     await waitFor(() =>
       expect(vi.mocked(testProfile)).toHaveBeenCalledWith(
         expect.any(String),
@@ -1112,7 +1112,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(screen.getByRole("radio", { name: /OpenAI/ })).toBeInTheDocument();
     // The model unpins too: a custom endpoint's model list is unknown here,
     // and an empty model is the legal no-pinned-default state (ADR-0154).
-    expect((screen.getByLabelText("Model") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Model (optional)") as HTMLInputElement).value).toBe("");
   });
 
   it("zero profiles: empty state shows, New profile prefills defaults, Create commits 0 → 1 (issue #570)", async () => {
@@ -1134,7 +1134,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
       ((await screen.findByLabelText("Base URL")) as HTMLInputElement).value,
     ).toBe("https://api.anthropic.com");
     expect(
-      ((screen.getByLabelText("Model")) as HTMLInputElement).value,
+      ((screen.getByLabelText("Model (optional)")) as HTMLInputElement).value,
     ).toBe("claude-sonnet-4-6");
     fireEvent.click(screen.getByRole("button", { name: "Create profile" }));
     await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());

@@ -5,19 +5,16 @@ import type { Protocol, ProviderProfile } from "../../types/provider";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
-import { ProviderModelField } from "./ProviderModelField";
 import { SettingsRow } from "./settings-chrome";
 
 // Endpoint fields for a profile (issue #235, ADR-0071 Consequences): the
 // protocol RadioGroup (shown only when the endpoint is Custom -- a named preset
-// implies its protocol) + base URL + the model field, each rendered as one
-// settings-card row (the shared SettingsRow chrome every settings form rides).
-// Extracted from ProfilesSection so the composer popover (#3) and cold-start
-// guide (#5) can reuse the same endpoint form. The model field is the
-// ProviderModelField atom (issue #236, ADR-0070): a hand-typed input that
-// upgrades to a list-models dropdown after a "Test connection" probe, with the
-// six-state classification rendered inline. This component boundary IS the swap
-// point #235 reserved.
+// implies its protocol) + base URL, each rendered as one settings-card row
+// (the shared SettingsRow chrome every settings form rides). Extracted from
+// ProfilesSection so the composer popover (#3) and cold-start guide (#5) can
+// reuse the same endpoint form. The model field is the ProviderModelField atom
+// (issue #236, ADR-0070); its caller mounts it directly so the key row can sit
+// between the endpoint and the model (the probe needs the key, issue #1654).
 
 type ProviderEndpointFieldsProps = {
   profile: ProviderProfile;
@@ -28,19 +25,6 @@ type ProviderEndpointFieldsProps = {
   // select communicates it instead).
   showProtocolRadio: boolean;
   disabled: boolean;
-  // Mirrored down to ProviderModelField so ESC / Back / Cancel are blocked
-  // while a Test connection IPC is in flight (the returned classification must
-  // not land on an unmounted node). Optional: the field renders without it but
-  // loses the close guard.
-  onBusyChange?: (busy: boolean) => void;
-  // Mirrors the model list panel's open state upward (the preset select
-  // reports its own); see ProviderPresetField.onOpenChange for the
-  // commit-on-blur rationale.
-  onModelSelectOpenChange?: (open: boolean) => void;
-  // One-shot probe key (issue #735): threaded to ProviderModelField. The add
-  // form passes its buffered draft key (the profile has no keychain entry
-  // yet); edit mode omits it (store-then-test unchanged).
-  probeKey?: string;
   // Field-level validation errors (issue #735), owned by ProfilesSection's
   // validateProfile: rendered at the offending field, driving its
   // aria-invalid + aria-describedby. Null when the field is clean.
@@ -52,9 +36,6 @@ export function ProviderEndpointFields({
   onUpdate,
   showProtocolRadio,
   disabled,
-  onBusyChange,
-  onModelSelectOpenChange,
-  probeKey,
   baseUrlError,
 }: ProviderEndpointFieldsProps) {
   const intl = useIntl();
@@ -150,15 +131,6 @@ export function ProviderEndpointFields({
           )}
         </div>
       </SettingsRow>
-
-      <ProviderModelField
-        profile={profile}
-        onUpdate={onUpdate}
-        disabled={disabled}
-        onBusyChange={onBusyChange}
-        onSelectOpenChange={onModelSelectOpenChange}
-        probeKey={probeKey}
-      />
     </>
   );
 }
