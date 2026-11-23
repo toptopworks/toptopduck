@@ -716,7 +716,7 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
     // contract: no fault line anywhere, and zero catalog IPC.
     expect(
       screen.getByRole("menuitemradio", {
-        name: "claude-sonnet-4-6 (pinned default)",
+        name: "claude-sonnet-4-6",
       }),
     ).toBeTruthy();
     expect(screen.getAllByTestId("sub-content")[0].textContent).not.toContain(
@@ -736,7 +736,7 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
     );
     fireEvent.click(
       screen.getByRole("menuitemradio", {
-        name: "claude-sonnet-4-6 (pinned default)",
+        name: "claude-sonnet-4-6",
       }),
     );
     // The way back to the pinned default: an explicit selection of it (the
@@ -865,11 +865,25 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
     expect(getBuiltinPostureCatalog).not.toHaveBeenCalled();
     // The menu-open event (the mock's captured handler) is the one arm.
     act(() => openChangeCapture.handler?.(true));
-    await screen.findByRole("menuitemradio", { name: "Claude Sonnet 4.5" });
+    await screen.findByRole("menuitemradio", { name: "claude-sonnet-4-5" });
     // A re-open arms nothing new: the arm already matches this endpoint and
     // the query's staleTime is Infinity -- one fetch per endpoint.
     act(() => openChangeCapture.handler?.(true));
     expect(getBuiltinPostureCatalog).toHaveBeenCalledTimes(1);
+  });
+
+  it("seats the disabled placeholder rows while the probe is in flight (issue #1648)", async () => {
+    // A never-settling probe: the in-flight window renders the placeholder
+    // in both dimension lists instead of the settle-and-pop; the strength
+    // row stays seated too. The settle-and-replace face is pinned by the
+    // lazily-probing test above; this test pins only the in-flight face.
+    vi.mocked(getBuiltinPostureCatalog).mockImplementation(
+      () => new Promise(() => {}),
+    );
+    renderPicker(pickerJsx());
+    act(() => openChangeCapture.handler?.(true));
+    expect(await screen.findAllByText("Fetching model list…")).toHaveLength(2);
+    expect(screen.getAllByTestId("sub-trigger")).toHaveLength(2);
   });
 
   it("re-asks on every open that follows an empty answer: a failed probe stays retryable (ADR-0153)", async () => {
@@ -934,7 +948,7 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
     );
   });
 
-  it("lists the probe's models with display names and writes the selection through the set IPC", async () => {
+  it("lists the probe's models under bare ids and writes the selection through the set IPC", async () => {
     vi.mocked(getBuiltinPostureCatalog).mockResolvedValue([
       {
         id: "claude-sonnet-4-5",
@@ -949,10 +963,11 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
     ]);
     renderPicker(pickerJsx());
     act(() => openChangeCapture.handler?.(true));
-    // The probed rows render once the query lands: the display name for
-    // the cataloged id, the id verbatim for the uncataloged one.
+    // The probed rows render once the query lands, under bare ids
+    // (issue #1648): both the cataloged and the uncataloged model list the
+    // id verbatim.
     const row = await screen.findByRole("menuitemradio", {
-      name: "Claude Sonnet 4.5",
+      name: "claude-sonnet-4-5",
     });
     fireEvent.click(row);
     // The full pair lands through the one write port (issue #603): the
@@ -1037,7 +1052,7 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
     renderPicker(pickerJsx());
     act(() => openChangeCapture.handler?.(true));
     const row = await screen.findByRole("menuitemradio", {
-      name: "Claude Sonnet 4.5",
+      name: "claude-sonnet-4-5",
     });
     fireEvent.click(row);
     // The held "high" is outside the picked model's set, so the linkage
@@ -1073,7 +1088,7 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
     // the gesture too.
     fireEvent.click(
       screen.getByRole("menuitemradio", {
-        name: "claude-sonnet-4-6 (pinned default)",
+        name: "claude-sonnet-4-6",
       }),
     );
     expect(setSessionPosture).not.toHaveBeenCalled();
@@ -1088,6 +1103,23 @@ describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)"
     // probe -- the held model's synthetic row + the clearing row).
     expect(
       screen.getByRole("button", { name: "Model: claude-sonnet-4-6" }),
+    ).toBeTruthy();
+  });
+
+  it("names the pinned model beside a lone held strength on the built-in runtime (issue #1648)", async () => {
+    // An unselected model runs the pinned profile model next turn
+    // (ADR-0154): the button reads "{pinned} · {strength}", never the
+    // bare strength alone -- the bare strength hid what the turn would
+    // actually run.
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: "high",
+      cached_discovered: null,
+      in_scope: true,
+    });
+    renderPicker(pickerJsx());
+    expect(
+      await screen.findByRole("button", { name: "Model: claude-sonnet-4-6 · high" }),
     ).toBeTruthy();
   });
 
@@ -1159,16 +1191,38 @@ describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)"
     expect(screen.queryByText(/\(last turn\)/)).toBeNull();
   });
 
-  it("places no check on any catalog item while nothing is selected", async () => {
+  it("checks the CLI current's rows while nothing is selected (issue #1648)", async () => {
     await renderExternalPicker({}, { cached_discovered: CATALOG });
-    // Neither dimension auto-selects its CLI-reported current: no radio row
-    // carries aria-checked (the clearing rows are plain menuitems with no
-    // checked state at all).
+    // The checkmark names the HELD value -- the CLI current the next turn
+    // would actually run -- per dimension (the clearing rows stay plain
+    // menuitems with no checked state at all).
     const items = screen.getAllByRole("menuitemradio");
     expect(items.length).toBeGreaterThan(0);
-    for (const item of items) {
-      expect(item.getAttribute("aria-checked")).not.toBe("true");
-    }
+    const checked = items.filter((item) => item.getAttribute("aria-checked") === "true");
+    expect(checked.map((item) => item.textContent)).toEqual([
+      "fake-opus",
+      "medium",
+    ]);
+  });
+
+  it("reads a hand-edited blank model as unselected on the menu, matching the button", async () => {
+    // The blank-is-unset convention normalized once at the posture
+    // assembly (issue #1648 review): an in-scope "" in the session file
+    // must give the menu the same held reading the button's label guards
+    // already reach -- the CLI current, checkmarked, not an empty inline
+    // value with no mark.
+    await renderExternalPicker({}, { model: "", cached_discovered: CATALOG });
+    // The button: the blank counts as unset, so the label stays the CLI
+    // unselected copy.
+    expect(
+      screen.getByRole("button", { name: "Model: Default (recommended)" }),
+    ).toBeTruthy();
+    // The menu: the held value is the CLI current with its checkmark lit.
+    const modelRow = screen.getByRole("menuitemradio", { name: "fake-opus" });
+    expect(modelRow.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getAllByTestId("sub-trigger")[0].textContent).toContain(
+      "fake-opus",
+    );
   });
 
   it("shows the held pair when a posture is selected", async () => {
@@ -1301,16 +1355,18 @@ describe("ComposerProviderPicker posture label live rendering (issue #586)", () 
     expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
   });
 
-  it("keeps the menu unselected in the live state (no auto-check)", async () => {
+  it("keeps the menu's held checkmarks in the live state (label-only fact)", async () => {
     // The live rendering is a label-only fact: the cascade menu's check
-    // positions stay untouched (nothing is selected), same as the
-    // Default (recommended) state.
+    // positions stay on the HELD rows (the CLI currents -- issue #1648),
+    // same as the Default (recommended) state.
     await renderExternalPicker({}, { cached_discovered: STAMPED_CATALOG });
     const items = screen.getAllByRole("menuitemradio");
     expect(items.length).toBeGreaterThan(0);
-    for (const item of items) {
-      expect(item.getAttribute("aria-checked")).not.toBe("true");
-    }
+    const checked = items.filter((item) => item.getAttribute("aria-checked") === "true");
+    expect(checked.map((item) => item.textContent)).toEqual([
+      "fake-opus",
+      "medium",
+    ]);
   });
 
   it("cold start keeps Default (recommended) even when the probe cache carries currents", async () => {

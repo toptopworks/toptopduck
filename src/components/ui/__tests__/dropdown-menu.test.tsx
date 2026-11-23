@@ -67,6 +67,19 @@ describe("ui dropdown-menu real-Radix smoke (issue #592)", () => {
     ).toBe("false");
   });
 
+  it("marks the checked row with the right-edge check glyph (issue #1648)", async () => {
+    // The selected shape shared with the select dropdown (issue #1648): the
+    // check glyph alone rides the right lane the padding reserves -- no
+    // left dot on any row.
+    renderRadioMenu({ value: "b" });
+    await openMenu();
+    const checked = screen.getByRole("menuitemradio", { name: "Beta" });
+    const indicator = checked.querySelector("span.absolute.right-2");
+    expect(indicator).toBeTruthy();
+    expect(indicator!.querySelector("svg.lucide-check")).toBeTruthy();
+    expect(checked.querySelector("svg.lucide-circle")).toBeNull();
+  });
+
   it("keeps the menu open when the item's onSelect calls preventDefault", async () => {
     const onSelect = vi.fn((e: Event) => e.preventDefault());
     renderRadioMenu({ value: "a", onSelect });

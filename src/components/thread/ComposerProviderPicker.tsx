@@ -339,7 +339,10 @@ export function ComposerProviderPicker({
   // in-process cache is the second, server-side dedupe. Zero profiles:
   // never enabled, no IPC.
   const [armedEndpoint, setArmedEndpoint] = useState("");
-  const { data: builtinCatalogData } = useQuery({
+  const {
+    data: builtinCatalogData,
+    isFetching: builtinCatalogLoading,
+  } = useQuery({
     queryKey: adapterKeys.builtinPostureCatalog(builtinEndpoint),
     queryFn: getBuiltinPostureCatalog,
     enabled: builtinEndpoint !== "" && armedEndpoint === builtinEndpoint,
@@ -377,7 +380,14 @@ export function ComposerProviderPicker({
   const posture: ModelPosture =
     sessionId !== null
       ? modelConfig.in_scope
-        ? { model: modelConfig.model, thought_level: modelConfig.thought_level }
+        ? // The blank-is-unset convention normalized once at the boundary
+          // (issue #1648 review): a hand-edited "" in the session file must
+          // read as unselected on the menu -- the same verdict the button's
+          // label-side guards already reach.
+          {
+            model: modelConfig.model || null,
+            thought_level: modelConfig.thought_level || null,
+          }
         : EMPTY_POSTURE
       : (pendingModelPosture ?? backfillData ?? EMPTY_POSTURE);
 
@@ -403,8 +413,9 @@ export function ComposerProviderPicker({
 
   // The built-in segment's catalog (issue #1639, ADR-0153): a profile row
   // exists -> the menu always seats (the fallback shape before the probe
-  // answers and after it fails -- the held model's synthetic row + the
-  // clear row, silent); zero profiles -> no catalog (the static "Not
+  // answers and after it fails -- the held model's bare-name synthetic
+  // row, silent; the way back to the pinned model is its own selectable
+  // row, ADR-0154); zero profiles -> no catalog (the static "Not
   // configured" label). The payload is endpoint-domain only: the effective
   // current is the active profile's model, read live from app-config (a
   // probe-time copy would go stale beside it after a model edit or a
@@ -417,6 +428,10 @@ export function ComposerProviderPicker({
           kind: "builtin",
           models: builtinCatalogData ?? [],
           profileModel: builtInModel || null,
+          // The probe's in-flight window (issue #1648): the menu seats
+          // placeholder rows instead of the settle-and-pop. The disabled
+          // query (never armed / zero profiles) reads as not-loading.
+          loading: builtinCatalogLoading,
         };
 
   // The posture read's settle gate (issue #603 review): the full-pair wire
@@ -638,12 +653,22 @@ export function ComposerProviderPicker({
   // empty-string field counts as unset, matching the menu guards'
   // convention, so a hand-edited blank cannot blank the button.
   const heldParts = heldPostureParts(posture);
+  // The built-in button always names the model half: an unselected model
+  // runs the pinned profile model next turn (ADR-0154), so a lone held
+  // strength reads "{pinned} · {strength}" -- the bare strength alone
+  // hid what the turn would actually run (issue #1648 feedback). The
+  // external form keeps its own held pair (the CLI default is real there,
+  // ADR-0100 D1: a lone thought level is its own honest form).
+  const builtInParts = heldPostureParts({
+    model: posture.model || builtInModel,
+    thought_level: posture.thought_level,
+  });
   const postureLabel = !isExternal
     ? noProfiles
       ? notConfigured
-      : heldParts.length > 0
-        ? heldParts.join(" · ")
-        : (builtInModel ?? noModelSelected)
+      : builtInParts.length > 0
+        ? builtInParts.join(" · ")
+        : noModelSelected
     : heldParts.length > 0
       ? heldParts.join(" · ")
       : defaultRecommended;

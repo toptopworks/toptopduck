@@ -163,7 +163,9 @@ const dropdownMenuRadioItem = ({
 // its query on submenu close, so the suite fires this captured handler with
 // `false` to pin the reset without Radix's presence lifecycle -- the same
 // captured-handler trade as openChangeCapture above. Single slot: the last
-// rendered Sub wins, so reset tests use a single-Sub catalog.
+// rendered Sub wins; with the strength row now permanent (issue #1648) both
+// Subs always render, so a reset test must re-render its target Sub last
+// (the typing step does this) before firing the slot.
 export const subOpenChangeCapture: {
   handler: ((open: boolean) => void) | null;
 } = { handler: null };
@@ -191,8 +193,14 @@ const dropdownMenuSubTrigger = ({
   </div>
 );
 
-const dropdownMenuSubContent = ({ children }: { children: ReactNode }) => (
-  <div data-testid="sub-content">{children}</div>
+const dropdownMenuSubContent = ({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) => (
+  <div data-testid="sub-content" className={className}>{children}</div>
 );
 
 export const dropdownMenuMockModule = {

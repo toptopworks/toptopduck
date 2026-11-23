@@ -294,35 +294,57 @@ describe("ComposerPostureTrigger per-model catalog (issue #537)", () => {
     expect(levelContent.textContent).not.toContain("high");
   });
 
-  it("disables the Thinking row with the pick-a-model hint when no model is held", () => {
+  it("drives the Thinking row from the held model -- the CLI current -- when nothing is selected (issue #1648)", () => {
+    // The held chain is selection ?? CLI current: the default model's own
+    // efforts seat the strength list without an explicit pick, so the
+    // default and an explicit pick of the same id configure strength alike
+    // (the #537 disable-while-unselected rule is retired).
     renderTrigger({ catalog: PER_MODEL_CATALOG, model: null });
+    const rows = screen.getAllByTestId("sub-trigger");
+    expect(rows[1].getAttribute("aria-disabled")).toBe("false");
+    const contents = screen.getAllByTestId("sub-content");
+    expect(contents[1].textContent).toContain("low");
+    expect(contents[1].textContent).toContain("medium");
+    expect(contents[1].textContent).toContain("high");
+  });
+
+  it("keeps the Thinking row enabled with an empty list for an explicit pick outside the directory", () => {
+    // An explicit not-offered id is still a held id: the pick-a-model hint
+    // is reserved for the no-held-id case (an empty directory), so the
+    // enabled row seats the held level's own synthetic row if one exists.
+    renderTrigger({ catalog: PER_MODEL_CATALOG, model: "claude-x" });
+    const rows = screen.getAllByTestId("sub-trigger");
+    expect(rows[1].getAttribute("aria-disabled")).toBe("false");
+    expect(rows[1].textContent).not.toContain("Pick a model first.");
+  });
+
+  it("disables the Thinking row only when the held model is not in the directory", () => {
+    // Empty directory: no current is knowable, so the held value is null
+    // and the pick-a-model hint stays honest.
+    renderTrigger({ catalog: { kind: "perModel", models: [] }, model: null });
     const rows = screen.getAllByTestId("sub-trigger");
     expect(rows[1].getAttribute("aria-disabled")).toBe("true");
     expect(rows[1].textContent).toContain("Pick a model first.");
-  });
-
-  it("offers no level rows while the Thinking row is unavailable", () => {
-    renderTrigger({ catalog: PER_MODEL_CATALOG, model: null });
     const contents = screen.getAllByTestId("sub-content");
     expect(contents[1].textContent).toBe("");
   });
 });
 
 describe("ComposerPostureTrigger built-in catalog (issue #1639)", () => {
-  it("renders cataloged rows under their display names and the uncataloged id verbatim", () => {
+  it("renders cataloged rows under their bare ids, uncataloged alike (issue #1648)", () => {
     renderTrigger({ catalog: BUILTIN_CATALOG });
     expect(
-      screen.getByRole("menuitemradio", { name: "Claude Sonnet 4.5" }),
+      screen.getByRole("menuitemradio", { name: "claude-sonnet-4-5" }),
     ).toBeTruthy();
     expect(
       screen.getByRole("menuitemradio", { name: "custom-deploy-7" }),
     ).toBeTruthy();
   });
 
-  it("selects the model id (not the display name) through onSelectModel", () => {
+  it("selects the model id through onSelectModel", () => {
     const { onSelectModel } = renderTrigger({ catalog: BUILTIN_CATALOG });
     fireEvent.click(
-      screen.getByRole("menuitemradio", { name: "Claude Sonnet 4.5" }),
+      screen.getByRole("menuitemradio", { name: "claude-sonnet-4-5" }),
     );
     expect(onSelectModel).toHaveBeenCalledWith("claude-sonnet-4-5");
   });
@@ -347,7 +369,7 @@ describe("ComposerPostureTrigger built-in catalog (issue #1639)", () => {
       catalog: { kind: "builtin", models: [builtinModel("custom-deploy-7")], profileModel: "claude-x" },
     });
     fireEvent.click(
-      screen.getByRole("menuitemradio", { name: "claude-x (pinned default)" }),
+      screen.getByRole("menuitemradio", { name: "claude-x" }),
     );
     expect(onSelectModel).toHaveBeenCalledWith("claude-x");
   });
@@ -370,6 +392,10 @@ describe("ComposerPostureTrigger built-in catalog (issue #1639)", () => {
     });
     const rows = screen.getAllByTestId("sub-trigger");
     expect(rows[0].textContent).toBe("Model");
+    // The strength row keeps its seat, disabled with the no-levels hint
+    // (an unpinned profile with nothing held has no tiers to offer).
+    expect(rows.length).toBe(2);
+    expect(rows[1].getAttribute("aria-disabled")).toBe("true");
     const contents = screen.getAllByTestId("sub-content");
     expect(contents[0].textContent).toBe("custom-deploy-7");
   });
@@ -385,12 +411,16 @@ describe("ComposerPostureTrigger built-in catalog (issue #1639)", () => {
     expect(contents[1].textContent).toContain("high");
   });
 
-  it("hides the strength row for a toggle-only model (no tiers, nothing held)", () => {
+  it("disables the strength row with the no-levels hint for a toggle-only model (issue #1648)", () => {
+    // The strength row is a permanent seat: a held model with no discrete
+    // tiers reads as the disabled hint, never a vanished row (the old hide
+    // flickered after the probe placeholder had seated the row).
     renderTrigger({ catalog: BUILTIN_CATALOG, model: "custom-deploy-7" });
     const rows = screen.getAllByTestId("sub-trigger");
-    expect(rows.length).toBe(1);
-    expect(rows[0].textContent).toContain("Model");
-    expect(screen.queryByText("Thinking")).toBeNull();
+    expect(rows.length).toBe(2);
+    expect(rows[1].textContent).toContain("Thinking");
+    expect(rows[1].getAttribute("aria-disabled")).toBe("true");
+    expect(rows[1].textContent).toContain("No thinking levels");
   });
 
   it("keeps the strength row for a held level even when the held model offers no tiers", () => {
@@ -419,15 +449,18 @@ describe("ComposerPostureTrigger built-in catalog (issue #1639)", () => {
     });
     expect(
       screen.getByRole("menuitemradio", {
-        name: "claude-x (pinned default)",
+        name: "claude-x",
       }),
     ).toBeTruthy();
     expect(screen.getAllByTestId("sub-content")[0].textContent).not.toContain(
       "Default (recommended)",
     );
     expect(screen.queryByRole("status")).toBeNull();
-    // No strength row: no tiers are knowable in the fallback shape.
-    expect(screen.queryByText("Thinking")).toBeNull();
+    // The strength row keeps its seat: the no-levels hint answers instead
+    // of the row vanishing in the settled fallback shape.
+    const rows = screen.getAllByTestId("sub-trigger");
+    expect(rows.length).toBe(2);
+    expect(rows[1].getAttribute("aria-disabled")).toBe("true");
   });
 
   it("fires onMenuOpen when the menu opens", () => {
@@ -441,9 +474,80 @@ describe("ComposerPostureTrigger built-in catalog (issue #1639)", () => {
   });
 });
 
+describe("ComposerPostureTrigger held-state checkmarks (issue #1648)", () => {
+  it("checks the CLI current's row when nothing is selected (acp)", () => {
+    renderTrigger({ model: null });
+    const pro = screen.getByRole("menuitemradio", { name: "gemini-2.5-pro" });
+    expect(pro.getAttribute("aria-checked")).toBe("true");
+    const flash = screen.getByRole("menuitemradio", { name: "gemini-2.5-flash" });
+    expect(flash.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("checks the pinned default's row when nothing is selected (builtin)", () => {
+    renderTrigger({ catalog: BUILTIN_CATALOG, model: null });
+    const pinned = screen.getByRole("menuitemradio", { name: "claude-sonnet-4-5" });
+    expect(pinned.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("checks the pinned synthetic row when the pinned id is outside the directory (builtin)", () => {
+    renderTrigger({
+      catalog: { kind: "builtin", models: [builtinModel("custom-deploy-7")], profileModel: "claude-x" },
+    });
+    expect(
+      screen.getByRole("menuitemradio", { name: "claude-x" })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+  });
+
+  it("checks no row for an unpinned profile with nothing selected (builtin, honest empty)", () => {
+    renderTrigger({
+      catalog: { kind: "builtin", models: [builtinModel("custom-deploy-7")], profileModel: null },
+    });
+    within(screen.getAllByTestId("sub-content")[0])
+      .getAllByRole("menuitemradio")
+      .forEach((row) => expect(row.getAttribute("aria-checked")).toBe("false"));
+  });
+
+  it("checks the strength current's row when nothing is selected (acp)", () => {
+    renderTrigger({
+      catalog: { ...ACP_CATALOG, currentThoughtLevel: "low" },
+      thoughtLevel: null,
+    });
+    const low = within(screen.getAllByTestId("sub-content")[1])
+      .getByRole("menuitemradio", { name: "low" });
+    expect(low.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("checks a held strength outside the catalog on its synthetic row (acp)", () => {
+    renderTrigger({
+      catalog: { ...ACP_CATALOG, thoughtLevels: ["low"], currentThoughtLevel: "ultra" },
+      thoughtLevel: null,
+    });
+    expect(
+      within(screen.getAllByTestId("sub-content")[1])
+        .getByRole("menuitemradio", { name: "ultra (not offered by this runtime)" })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+  });
+
+  it("carries the full name in the row title for truncated long ids (issue #1648)", () => {
+    renderTrigger({ catalog: BUILTIN_CATALOG });
+    const row = screen.getByRole("menuitemradio", { name: "claude-sonnet-4-5" });
+    expect(row.getAttribute("title")).toBe("claude-sonnet-4-5");
+  });
+
+  it("pins the submenu width class on both dimensions (issue #1648)", () => {
+    renderTrigger({ catalog: BUILTIN_CATALOG });
+    const contents = screen.getAllByTestId("sub-content");
+    expect(contents[0].className).toContain("w-72");
+    expect(contents[1].className).toContain("w-72");
+  });
+});
+
 describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
-  // A gateway-sized list: display names diverge from ids on two rows so the
-  // label-vs-id matching halves are exercised separately.
+  // A gateway-sized list: display names diverge from ids on two rows, so
+  // the retired name-matching half stays pinned as a negative (only the id
+  // half filters, issue #1648).
   const LARGE_BUILTIN: PostureCatalog = {
     kind: "builtin",
     models: [
@@ -462,24 +566,20 @@ describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
     expect(within(contents[1]).queryByPlaceholderText("Filter models")).toBeNull();
   });
 
-  it("filters by id and display name, case-insensitively", () => {
+  it("filters by id only, case-insensitively (issue #1648)", () => {
     renderTrigger({ catalog: LARGE_BUILTIN });
     const filter = screen.getByPlaceholderText(/Filter models/);
     const contents = screen.getAllByTestId("sub-content");
-    // Display-name half: "Sonnet 4.5" carries the space the hyphenated id
-    // cannot, so only the display-name branch can match.
+    // The display name no longer rides the rows: a space-carrying name
+    // matches nothing (the honest empty state answers), while the id half
+    // still folds case on the way in.
     fireEvent.change(filter, { target: { value: "Sonnet 4.5" } });
-    expect(
-      within(contents[0]).getAllByRole("menuitemradio").map((r) => r.textContent),
-    ).toEqual(["Claude Sonnet 4.5"]);
-    // Id half, uppercase: "CLAUDE-SONNET" carries the hyphens the display
-    // name lacks, so only the id branch can match -- and the match folds
-    // case on the way in.
+    expect(within(contents[0]).queryAllByRole("menuitemradio")).toEqual([]);
+    expect(within(contents[0]).getByText("No matching models")).toBeTruthy();
     fireEvent.change(filter, { target: { value: "CLAUDE-SONNET" } });
     expect(
       within(contents[0]).getAllByRole("menuitemradio").map((r) => r.textContent),
-    ).toEqual(["Claude Sonnet 4.5"]);
-    // Uncataloged rows (display name defaults to the id) match either way.
+    ).toEqual(["claude-sonnet-4-5"]);
     fireEvent.change(filter, { target: { value: "DEPLOY" } });
     expect(
       within(contents[0]).getAllByRole("menuitemradio").map((r) => r.textContent),
@@ -508,10 +608,10 @@ describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
     expect(
       within(screen.getAllByTestId("sub-content")[0]).getByText("No matching models"),
     ).toBeTruthy();
-    expect(screen.getByRole("menuitemradio", { name: "claude-x (pinned default)" })).toBeTruthy();
+    expect(screen.getByRole("menuitemradio", { name: "claude-x" })).toBeTruthy();
     expect(screen.queryByRole("menuitemradio", { name: "custom-deploy-7" })).toBeNull();
     // The synthetic row stays selectable through the filtered view.
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "claude-x (pinned default)" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "claude-x" }));
     expect(onSelectModel).toHaveBeenCalledWith("claude-x");
   });
 
@@ -533,8 +633,10 @@ describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
   });
 
   it("resets the query when the submenu closes", () => {
-    // Single-Sub catalog (toggle-only model hides the strength row) so the
-    // mock's single captured handler is the model dimension's own.
+    // The strength row is permanent (issue #1648), so both Subs always
+    // render and the mock's single capture slot holds the last-rendered
+    // Sub's handler; the typing step re-renders the model Sub last, which
+    // re-anchors the slot to the model dimension before it is fired.
     renderTrigger({
       catalog: { kind: "builtin", models: [builtinModel("custom-deploy-7")], profileModel: null },
     });
@@ -558,7 +660,7 @@ describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
     fireEvent.keyDown(filter, { key: "ArrowDown" });
     const first = document.activeElement;
     expect(first?.getAttribute("role")).toBe("menuitemradio");
-    expect(first?.textContent).toBe("Claude Sonnet 4.5");
+    expect(first?.textContent).toBe("claude-sonnet-4-5");
   });
 
   it("keeps the thought-level list outside the model query", () => {
@@ -636,6 +738,96 @@ describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
   });
 });
 
+describe("ComposerPostureTrigger probe-pending placeholder (issue #1648)", () => {
+  it("renders the loading placeholder in both dimensions while the probe is in flight", () => {
+    renderTrigger({
+      catalog: { kind: "builtin", models: [], profileModel: "claude-x", loading: true },
+    });
+    // Both dimension lists seat the disabled placeholder row; the pinned
+    // synthetic row stays selectable beside it.
+    expect(screen.getAllByText("Fetching model list…").length).toBe(2);
+    expect(
+      screen.getByRole("menuitemradio", { name: "claude-x" }),
+    ).toBeTruthy();
+  });
+
+  it("seats the strength row while loading even with no knowable tiers", () => {
+    renderTrigger({
+      catalog: { kind: "builtin", models: [], profileModel: "claude-x", loading: true },
+    });
+    const rows = screen.getAllByTestId("sub-trigger");
+    expect(rows.length).toBe(2);
+    expect(rows[1].textContent).toContain("Thinking");
+  });
+
+  it("keeps the fallback shape silent once loading is over", () => {
+    // loading=false (the default): the settled/failed shape keeps its
+    // contract -- no placeholder, no error surface; the strength row keeps
+    // its seat with the disabled no-levels hint.
+    renderTrigger({
+      catalog: { kind: "builtin", models: [], profileModel: "claude-x" },
+    });
+    expect(screen.queryByText("Fetching model list…")).toBeNull();
+    const rows = screen.getAllByTestId("sub-trigger");
+    expect(rows.length).toBe(2);
+    expect(rows[1].getAttribute("aria-disabled")).toBe("true");
+  });
+  it("shows no directory rows and no empty state while loading a non-empty directory", () => {
+    // The background-re-probe shape (issue #1648 review): a re-ask keeps
+    // the previous rows in the query cache, and neither the stale rows nor
+    // a "no match" verdict may seat beside the placeholder -- the wait is
+    // the only thing the list says.
+    renderTrigger({
+      catalog: {
+        kind: "builtin",
+        models: [builtinModel("m-1", ["low"]), builtinModel("m-2")],
+        profileModel: null,
+        loading: true,
+      },
+    });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    const contents = screen.getAllByTestId("sub-content");
+    expect(screen.getAllByText("Fetching model list…").length).toBeGreaterThan(0);
+    expect(within(contents[0]).queryAllByRole("menuitemradio")).toEqual([]);
+    expect(within(contents[0]).queryByText("No matching models")).toBeNull();
+  });
+
+  it("withholds a matching directory's rows beside the placeholder too", () => {
+    // The guard's discriminating half: a query that MATCHES the cached rows
+    // must still seat nothing but the placeholder while the probe is in
+    // flight -- the stale rows may not ride along even when the filter
+    // would keep them (issue #1648 review).
+    renderTrigger({
+      catalog: {
+        kind: "builtin",
+        models: [builtinModel("m-1", ["low"]), builtinModel("m-2")],
+        profileModel: null,
+        loading: true,
+      },
+    });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: "m-" } });
+    const contents = screen.getAllByTestId("sub-content");
+    expect(within(contents[0]).queryAllByRole("menuitemradio")).toEqual([]);
+    expect(within(contents[0]).queryByText("No matching models")).toBeNull();
+  });
+
+  it("keeps a settled empty directory from reading as a filter miss", () => {
+    // The probe answered empty (the silent fallback): with a leftover
+    // query there are no rows and no "No matching models" either -- an
+    // empty directory is not a filter miss (issue #1648 review).
+    renderTrigger({
+      catalog: { kind: "builtin", models: [], profileModel: null },
+    });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    const contents = screen.getAllByTestId("sub-content");
+    expect(within(contents[0]).queryAllByRole("menuitemradio")).toEqual([]);
+    expect(within(contents[0]).queryByText("No matching models")).toBeNull();
+  });
+});
+
 describe("ComposerPostureTrigger honest fault surfaces (issue #529)", () => {
   it("renders the stale note inline with no probe icon", () => {
     renderTrigger({ catalogNote: "stale-runtime" });
@@ -706,13 +898,14 @@ describe("ComposerPostureTrigger live readout tooltip (issue #586)", () => {
   });
 
   it("keeps the cascade menu intact in the live state (still unselected)", () => {
-    // The tooltip is a display-layer mark: the menu's check positions and
-    // clearing rows are exactly the unselected state's.
+    // The tooltip is a display-layer mark: the menu's rows and clearing
+    // rows are exactly the unselected state's. The checkmark names the
+    // HELD value (issue #1648) -- the CLI current the live tooltip also
+    // names -- so the current's row is the checked one.
     renderTrigger({ liveValue: "gemini-2.5-pro" });
     const items = screen.getAllByRole("menuitemradio");
     expect(items.length).toBeGreaterThan(0);
-    for (const item of items) {
-      expect(item.getAttribute("aria-checked")).not.toBe("true");
-    }
+    const checked = items.filter((item) => item.getAttribute("aria-checked") === "true");
+    expect(checked.map((item) => item.textContent)).toEqual(["gemini-2.5-pro"]);
   });
 });
