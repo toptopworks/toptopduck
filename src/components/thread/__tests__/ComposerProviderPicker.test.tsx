@@ -963,8 +963,9 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
     ]);
     renderPicker(pickerJsx());
     act(() => openChangeCapture.handler?.(true));
-    // The probed rows render once the query lands: the display name for
-    // the cataloged id, the id verbatim for the uncataloged one.
+    // The probed rows render once the query lands, under bare ids
+    // (issue #1648): both the cataloged and the uncataloged model list the
+    // id verbatim.
     const row = await screen.findByRole("menuitemradio", {
       name: "claude-sonnet-4-5",
     });
@@ -1202,6 +1203,26 @@ describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)"
       "fake-opus",
       "medium",
     ]);
+  });
+
+  it("reads a hand-edited blank model as unselected on the menu, matching the button", async () => {
+    // The blank-is-unset convention normalized once at the posture
+    // assembly (issue #1648 review): an in-scope "" in the session file
+    // must give the menu the same held reading the button's label guards
+    // already reach -- the CLI current, checkmarked, not an empty inline
+    // value with no mark.
+    await renderExternalPicker({}, { model: "", cached_discovered: CATALOG });
+    // The button: the blank counts as unset, so the label stays the CLI
+    // unselected copy.
+    expect(
+      screen.getByRole("button", { name: "Model: Default (recommended)" }),
+    ).toBeTruthy();
+    // The menu: the held value is the CLI current with its checkmark lit.
+    const modelRow = screen.getByRole("menuitemradio", { name: "fake-opus" });
+    expect(modelRow.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getAllByTestId("sub-trigger")[0].textContent).toContain(
+      "fake-opus",
+    );
   });
 
   it("shows the held pair when a posture is selected", async () => {

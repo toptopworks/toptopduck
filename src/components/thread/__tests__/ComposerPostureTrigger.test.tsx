@@ -545,8 +545,9 @@ describe("ComposerPostureTrigger held-state checkmarks (issue #1648)", () => {
 });
 
 describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
-  // A gateway-sized list: display names diverge from ids on two rows so the
-  // label-vs-id matching halves are exercised separately.
+  // A gateway-sized list: display names diverge from ids on two rows, so
+  // the retired name-matching half stays pinned as a negative (only the id
+  // half filters, issue #1648).
   const LARGE_BUILTIN: PostureCatalog = {
     kind: "builtin",
     models: [
@@ -632,8 +633,10 @@ describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
   });
 
   it("resets the query when the submenu closes", () => {
-    // Single-Sub catalog (toggle-only model hides the strength row) so the
-    // mock's single captured handler is the model dimension's own.
+    // The strength row is permanent (issue #1648), so both Subs always
+    // render and the mock's single capture slot holds the last-rendered
+    // Sub's handler; the typing step re-renders the model Sub last, which
+    // re-anchors the slot to the model dimension before it is fired.
     renderTrigger({
       catalog: { kind: "builtin", models: [builtinModel("custom-deploy-7")], profileModel: null },
     });
@@ -768,6 +771,60 @@ describe("ComposerPostureTrigger probe-pending placeholder (issue #1648)", () =>
     const rows = screen.getAllByTestId("sub-trigger");
     expect(rows.length).toBe(2);
     expect(rows[1].getAttribute("aria-disabled")).toBe("true");
+  });
+  it("shows no directory rows and no empty state while loading a non-empty directory", () => {
+    // The background-re-probe shape (issue #1648 review): a re-ask keeps
+    // the previous rows in the query cache, and neither the stale rows nor
+    // a "no match" verdict may seat beside the placeholder -- the wait is
+    // the only thing the list says.
+    renderTrigger({
+      catalog: {
+        kind: "builtin",
+        models: [builtinModel("m-1", ["low"]), builtinModel("m-2")],
+        profileModel: null,
+        loading: true,
+      },
+    });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    const contents = screen.getAllByTestId("sub-content");
+    expect(screen.getAllByText("Fetching model list…").length).toBeGreaterThan(0);
+    expect(within(contents[0]).queryAllByRole("menuitemradio")).toEqual([]);
+    expect(within(contents[0]).queryByText("No matching models")).toBeNull();
+  });
+
+  it("withholds a matching directory's rows beside the placeholder too", () => {
+    // The guard's discriminating half: a query that MATCHES the cached rows
+    // must still seat nothing but the placeholder while the probe is in
+    // flight -- the stale rows may not ride along even when the filter
+    // would keep them (issue #1648 review).
+    renderTrigger({
+      catalog: {
+        kind: "builtin",
+        models: [builtinModel("m-1", ["low"]), builtinModel("m-2")],
+        profileModel: null,
+        loading: true,
+      },
+    });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: "m-" } });
+    const contents = screen.getAllByTestId("sub-content");
+    expect(within(contents[0]).queryAllByRole("menuitemradio")).toEqual([]);
+    expect(within(contents[0]).queryByText("No matching models")).toBeNull();
+  });
+
+  it("keeps a settled empty directory from reading as a filter miss", () => {
+    // The probe answered empty (the silent fallback): with a leftover
+    // query there are no rows and no "No matching models" either -- an
+    // empty directory is not a filter miss (issue #1648 review).
+    renderTrigger({
+      catalog: { kind: "builtin", models: [], profileModel: null },
+    });
+    const filter = screen.getByPlaceholderText(/Filter models/);
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    const contents = screen.getAllByTestId("sub-content");
+    expect(within(contents[0]).queryAllByRole("menuitemradio")).toEqual([]);
+    expect(within(contents[0]).queryByText("No matching models")).toBeNull();
   });
 });
 

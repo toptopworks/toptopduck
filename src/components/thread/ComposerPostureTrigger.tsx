@@ -330,11 +330,6 @@ export function ComposerPostureTrigger({
             )}
             displayValue={heldModel}
             clearLabel={modelClearLabel}
-            // ADR-0154: naming the pinned model (null = unpinned) is also
-            // what makes this the built-in model dimension -- the one
-            // without a clearing row, since "unselected" is not a
-            // destination there.
-            pinnedDefaultId={catalog.kind === "builtin" ? catalog.profileModel : undefined}
             // The gateway-length lists (issue #1645) ride the filter row;
             // the discrete, short strength list does not.
             searchable
@@ -342,6 +337,7 @@ export function ComposerPostureTrigger({
             selectedId={model}
             loading={builtinLoading}
             onSelect={onSelectModel}
+            isBuiltinModelDimension={catalog.kind === "builtin"}
           />
           {/* The strength row is a permanent seat (issue #1648 feedback):
               unavailable (a held model with no discrete tiers, nothing
@@ -446,7 +442,7 @@ function DimensionSub({
   unavailable = false,
   unavailableMessage,
   loading = false,
-  pinnedDefaultId,
+  isBuiltinModelDimension,
   searchable = false,
 }: {
   label: ReactNode;
@@ -466,13 +462,15 @@ function DimensionSub({
   // hiding -- an honest wait replaces the settle-and-pop. External catalogs
   // never load (cache-fed), absent = false.
   loading?: boolean;
-  // The profile's pinned model id: present (a string, or null for an
-  // an unpinned profile) on the built-in catalog, absent on the external
-  // ones. Its presence is what drops the leading clearing row (the
-  // built-in model dimension, ADR-0154) and keeps a held id outside the
-  // list on the bare-name synthetic row instead of the runtime-omission
-  // warning -- the built-in runtime has no CLI to "not offer" anything.
-  pinnedDefaultId?: string | null;
+  // True on the built-in model dimension, absent on the external ones
+  // (ADR-0154). The flag is what drops the leading clearing row and keeps a
+  // held id outside the list on the bare-name synthetic row instead of the
+  // runtime-omission warning -- the built-in runtime has no CLI to "not
+  // offer" anything. Only the model dimension rides it: the built-in
+  // strength dimension stays external-shaped, so a held level the tier list
+  // no longer carries still earns the "(not offered by this runtime)"
+  // warning (intentional, test-pinned).
+  isBuiltinModelDimension?: boolean;
   // Seats the filter row above the list (issue #1645, the model dimension
   // only): typing filters the directory rows by id. The clearing +
   // synthetic rows stay unfiltered -- they are state readouts, not catalog
@@ -490,6 +488,17 @@ function DimensionSub({
     normalizedQuery === ""
       ? ids
       : ids.filter((id) => id.toLowerCase().includes(normalizedQuery));
+  // The empty state's gates (issue #1648 review): not while the probe is in
+  // flight (the placeholder owns the wait -- "no match" over an unloaded
+  // list is a false statement), and only when the directory itself has rows
+  // to filter (an empty directory is the probe's settled fallback, not a
+  // filter miss -- the silence keeps a failed probe from reading as one).
+  const showNoMatch =
+    searchable &&
+    !loading &&
+    normalizedQuery !== "" &&
+    ids.length > 0 &&
+    filteredIds.length === 0;
 
   // The filter input's key handling (issue #1645): character keys never
   // bubble into the content's typeahead (each keystroke would otherwise
@@ -518,13 +527,13 @@ function DimensionSub({
     displayValue != null && displayValue !== "" && !ids.includes(displayValue)
       ? displayValue
       : null;
-  const isBuiltinModel = pinnedDefaultId !== undefined;
+  const isBuiltinModel = isBuiltinModelDimension ?? false;
   // The "pinned" annotation retired (issue #1648 feedback): the held
   // checkmark already names the row the next turn runs, and where the
   // value came from (a pick vs the profile's pin) is not a distinction
   // the mark carries either. Only the runtime omission keeps its note --
   // selecting an id the endpoint no longer serves deserves the warning.
-  const syntheticNote: SyntheticNote | undefined =
+  const syntheticNote =
     unrepresentedId == null || isBuiltinModel ? undefined : "runtime";
   return (
     <DropdownMenuSub
@@ -614,7 +623,7 @@ function DimensionSub({
                   <OptionItem key={id} id={id} onSelect={() => onSelect(id)} />
                 ))}
             </DropdownMenuRadioGroup>
-            {searchable && normalizedQuery !== "" && filteredIds.length === 0 && (
+            {showNoMatch && (
               <p className="text-muted-foreground px-2 py-1.5 text-xs">
                 <FormattedMessage
                   id="composer.runtimePicker.noModelMatch"
@@ -629,15 +638,12 @@ function DimensionSub({
   );
 }
 
-// The synthetic row's annotation: "runtime" = a held value the runtime
-// does not offer (issue #529). Absent = an ordinary catalog row (a
-// built-in held id outside the list rides the bare name too -- the
-// pinned-default note retired, issue #1648 feedback).
-type SyntheticNote = "runtime";
-
 // One second-level option row: a menuitemradio whose checked state rides
 // the group value. Selecting keeps the menu open (preventDefault) so the
-// checked mark updates and the fault lines below stay in view.
+// checked mark updates and the fault lines below stay in view. The note,
+// when present, is the runtime-omission warning (issue #529): absent on an
+// ordinary catalog row, and a built-in held id outside the list rides the
+// bare name too -- the pinned-default note retired (issue #1648 feedback).
 function OptionItem({
   id,
   onSelect,
@@ -645,7 +651,7 @@ function OptionItem({
 }: {
   id: string;
   onSelect: () => void;
-  note?: SyntheticNote;
+  note?: "runtime";
 }) {
   // Rows render the bare id (issue #1648): the one name form across the
   // menu, the button readout, and the settings field. The only annotation
