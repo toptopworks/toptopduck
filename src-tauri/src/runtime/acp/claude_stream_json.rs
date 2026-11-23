@@ -82,10 +82,11 @@ pub(crate) enum ClaudeEvent {
     /// actually runs (honest rendering, ADR-0097 Decision 5).
     SystemInit { model: Option<String> },
     /// Assistant thinking-block content (issue #612): one merged event per
-    /// frame -- thinking rides the complete `assistant` frame whole
-    /// (`thinking_delta` stream events are tolerated, not mapped).
+    /// frame -- thinking rides the complete `assistant` frame whole.
     /// Accumulates into the current round's thinking stream, frozen at the
-    /// batch boundary or turn end.
+    /// batch boundary or turn end. A frame trailing its
+    /// [`Self::ThinkingStreamDelta`]s deduplicates at the pump (the #561
+    /// prose discipline, issue #1658).
     ThinkingBlock { text: String },
     /// Assistant text content -- accumulated across the turn.
     AssistantText { text: String },
@@ -104,6 +105,13 @@ pub(crate) enum ClaudeEvent {
     /// the same content trails its deltas; the pump's `streamed_prose`
     /// guard deduplicates it.
     StreamDelta { text: String },
+    /// A partial-message thinking delta (`stream_event`
+    /// `content_block_delta`/`thinking_delta`, issue #1658): streams the
+    /// round's thinking the moment it is generated -- the ThinkingDelta
+    /// channel's claude-direct source. The complete frame's
+    /// [`Self::ThinkingBlock`] for the same content trails its deltas;
+    /// the pump's `streamed_thinking` guard deduplicates it.
+    ThinkingStreamDelta { text: String },
     /// The terminal frame. `subtype` is the CLI's own stop classification;
     /// `is_error` marks a failed turn; `text` is the final message (empty
     /// when the CLI gave none).
@@ -281,31 +289,37 @@ fn parse_message_blocks(value: &Value, assistant: bool) -> Vec<ClaudeEvent> {
 }
 
 /// Extract a `stream_event` partial-message delta: only
-/// `content_block_delta` events with a `text_delta` payload carry text;
-/// every other stream-event shape (content_block_start/stop, message
-/// deltas, ...) contributes nothing.
+/// `content_block_delta` events with a `text_delta` or `thinking_delta`
+/// payload carry text (issue #1658 mapped the thinking kind); every other
+/// stream-event shape (content_block_start/stop, message deltas, ...)
+/// contributes nothing.
 fn parse_stream_event(value: &Value) -> Vec<ClaudeEvent> {
     let event = value.get("event").and_then(|v| v.as_object());
     let Some(event) = event else {
         return Vec::new();
     };
-    let is_text_delta = event.get("type").and_then(|v| v.as_str()) == Some("content_block_delta")
-        && event
-            .get("delta")
-            .and_then(|d| d.get("type"))
-            .and_then(|v| v.as_str())
-            == Some("text_delta");
-    if !is_text_delta {
+    if event.get("type").and_then(|v| v.as_str()) != Some("content_block_delta") {
         return Vec::new();
     }
-    let text = event
-        .get("delta")
-        .and_then(|d| d.get("text"))
+    let Some(delta) = event.get("delta") else {
+        return Vec::new();
+    };
+    // The payload field rides the delta kind: `text` for text_delta
+    // (#561), `thinking` for thinking_delta (#1658).
+    let (field, thinking) = match delta.get("type").and_then(|v| v.as_str()) {
+        Some("text_delta") => ("text", false),
+        Some("thinking_delta") => ("thinking", true),
+        _ => return Vec::new(),
+    };
+    let text = delta
+        .get(field)
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
     if text.is_empty() {
         Vec::new()
+    } else if thinking {
+        vec![ClaudeEvent::ThinkingStreamDelta { text }]
     } else {
         vec![ClaudeEvent::StreamDelta { text }]
     }
@@ -515,6 +529,8 @@ pub(super) fn run_claude_stream_json(
             .collect(),
         streamed_prose: false,
         streamed_text: String::new(),
+        streamed_thinking: false,
+        streamed_thinking_text: String::new(),
         usage: crate::model::TokenUsage::default(),
         result_usage: None,
         last_roundtrip_usage: None,
@@ -729,6 +745,16 @@ struct ClaudePump {
     /// -- the dropped frame text stays answerable in logs (#886's
     /// doctrine), the push semantics never change.
     streamed_text: String,
+    /// Whether thinking deltas streamed since the last complete
+    /// `assistant` frame -- the thinking twin of [`Self::streamed_prose`]
+    /// (issue #1658): a delta-covered frame's `ThinkingBlock` must not
+    /// re-append onto the accumulation the deltas already fed. Resets with
+    /// the frame it skips and at every window boundary (issue #1228).
+    streamed_thinking: bool,
+    /// The concatenation of the current message's thinking deltas,
+    /// mirroring [`Self::streamed_thinking`]: the skip-side comparison for
+    /// a delta-covered thinking block.
+    streamed_thinking_text: String,
     /// The assistant frames' usage sum (ADR-0129, issue #1270): each frame
     /// reports its own round-trip, collected per frame. `result_usage`
     /// holds the terminal frame's turn-total fallback -- adopted only when
@@ -753,6 +779,8 @@ impl ClaudePump {
     fn open_window(&mut self) {
         self.streamed_prose = false;
         self.streamed_text.clear();
+        self.streamed_thinking = false;
+        self.streamed_thinking_text.clear();
     }
 
     /// The turn's usage (ADR-0129, issue #1270): the assistant frames'
@@ -805,7 +833,24 @@ impl ClaudePump {
                 None
             }
             ClaudeEvent::ThinkingBlock { text } => {
-                self.tracker.push_thought(&text, on_phase);
+                // A delta-covered block skips (issue #1658's #561 twin):
+                // with partial messages enabled the CLI emits both the
+                // thinking deltas AND the complete frame's block for one
+                // message -- the accumulation the deltas already fed must
+                // not double. A mismatch is upstream drift (warned, the
+                // prose arm's doctrine); the deltas win.
+                let streamed = std::mem::take(&mut self.streamed_thinking);
+                let deltas = std::mem::take(&mut self.streamed_thinking_text);
+                if !streamed {
+                    self.tracker.push_thought(&text, on_phase);
+                } else if text != deltas {
+                    log::warn!(
+                        target: "toptopduck::acp",
+                        "claude delta-covered thinking block differs from its \
+                         streamed deltas; block text dropped: {text:?}, \
+                         streamed: {deltas:?}"
+                    );
+                }
                 None
             }
             // Complete prose and partial text deltas share the dual track
@@ -817,6 +862,15 @@ impl ClaudePump {
                 self.streamed_prose = true;
                 self.streamed_text.push_str(&text);
                 self.tracker.push_prose(&text, on_phase);
+                None
+            }
+            ClaudeEvent::ThinkingStreamDelta { text } => {
+                // Issue #1658: the thinking twin of StreamDelta -- latch the
+                // dedupe guard, mirror the accumulation, fire the live
+                // ThinkingDelta.
+                self.streamed_thinking = true;
+                self.streamed_thinking_text.push_str(&text);
+                self.tracker.push_thought_delta(&text, on_phase);
                 None
             }
             ClaudeEvent::AssistantText { text } => {
@@ -1276,6 +1330,43 @@ mod tests {
         }
     }
 
+    /// Issue #1658: a partial-message thinking delta maps to a
+    /// ThinkingStreamDelta (the `thinking` payload field, not `text`) --
+    /// previously tolerated-and-ignored, now the ThinkingDelta channel's
+    /// claude-direct source.
+    #[test]
+    fn parse_stream_event_thinking_delta() {
+        let v = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "reasoning"}
+            }
+        });
+        assert_eq!(
+            parse_events(&v),
+            vec![ClaudeEvent::ThinkingStreamDelta {
+                text: "reasoning".into()
+            }]
+        );
+    }
+
+    /// Issue #1658: a thinking delta with an empty payload contributes
+    /// nothing -- the emission sites gate on payload.
+    #[test]
+    fn parse_stream_event_empty_thinking_delta_is_dropped() {
+        let v = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": ""}
+            }
+        });
+        assert!(parse_events(&v).is_empty());
+    }
+
     // --- parse_events: result ---------------------------------------------------
 
     /// A successful result frame carries the terminal text -- and, per
@@ -1650,6 +1741,8 @@ mod tests {
             gateway_prefixes: vec!["mcp__toptopduck-gateway__".to_string()],
             streamed_prose: false,
             streamed_text: String::new(),
+            streamed_thinking: false,
+            streamed_thinking_text: String::new(),
             usage: crate::model::TokenUsage::default(),
             result_usage: None,
             last_roundtrip_usage: None,
@@ -1779,6 +1872,94 @@ mod tests {
             })
             .collect();
         assert_eq!(deltas, vec!["the ".to_string(), "answer".to_string()]);
+    }
+
+    /// Issue #1658's #561 twin: thinking deltas stream first and the
+    /// complete frame's `ThinkingBlock` trails -- the block must not
+    /// re-append, the settle's thinking carries the streamed text exactly
+    /// once, and the batch seal's freeze closes the delta stream with a
+    /// `ThinkingCompleted` carrying the full block.
+    #[test]
+    fn streamed_thinking_deltas_dedupe_the_trailing_block() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        for chunk in ["plan ", "hard"] {
+            pump.fold(
+                ClaudeEvent::ThinkingStreamDelta { text: chunk.into() },
+                &mut |p| phases.push(p),
+            );
+        }
+        pump.fold(
+            ClaudeEvent::ThinkingBlock {
+                text: "plan hard".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        // The batch seal freezes the round's thinking (ThinkingCompleted)
+        // before the call's Started event.
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "tu_1".into(),
+                name: "explore".into(),
+                input: json!({}),
+            },
+            &mut |p| phases.push(p),
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("done".into()));
+        let thinking = rounds[0]
+            .thinking
+            .as_ref()
+            .expect("the streamed thinking freezes");
+        assert_eq!(thinking.text, "plan hard", "the block did not re-append");
+        let deltas: Vec<String> = phases
+            .iter()
+            .filter_map(|p| match p {
+                TurnPhase::ThinkingDelta { delta } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["plan ".to_string(), "hard".to_string()]);
+        assert!(
+            phases.iter().any(|p| matches!(
+                p,
+                TurnPhase::ThinkingCompleted { text, .. } if text == "plan hard"
+            )),
+            "the freeze closes the stream with the full block: {phases:?}"
+        );
+    }
+
+    /// Issue #1658's honest degrade: a whole-block thinking frame with NO
+    /// preceding deltas pushes as before -- no ThinkingDelta ever fires,
+    /// the block reaches the turn-end freeze alone (the pre-#1658
+    /// behavior).
+    #[test]
+    fn whole_block_thinking_still_pushes_without_deltas() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ThinkingBlock {
+                text: "reasoned".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        // The turn-end freeze (the runner's closing sequence).
+        pump.tracker
+            .freeze_trailing_thinking(&mut |p| phases.push(p));
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("done".into()));
+        assert_eq!(
+            rounds[0].thinking.as_ref().expect("the block lands").text,
+            "reasoned"
+        );
+        assert!(
+            !phases
+                .into_iter()
+                .any(|p| matches!(p, TurnPhase::ThinkingDelta { .. })),
+            "no fabricated delta on the whole-block path"
+        );
     }
 
     /// The dedupe guard resets with the frame it skips: a delta-streamed

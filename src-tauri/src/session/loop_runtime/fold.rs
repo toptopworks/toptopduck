@@ -396,8 +396,24 @@ impl EventFold {
                 }
             }
             StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
+                // Issue #1658: the reasoning fragment streams live the
+                // moment it arrives -- the thinking counterpart of the
+                // `TextDelta` arm above -- while `reasoning_deltas` keeps
+                // accumulating toward the freeze (committed blocks still
+                // supersede their deltas). The emission rides the same
+                // shared cap boundary (`push_capped_emit`, issue #1171):
+                // once the track latches the marker, the crossing chunk's
+                // delta is followed by one final marker delta and later
+                // chunks emit nothing.
                 self.open_call(phases);
-                push_capped(&mut self.reasoning_deltas, reasoning);
+                push_capped_emit(&mut self.reasoning_deltas, reasoning, &mut |delta| {
+                    emit_phase(
+                        phases,
+                        TurnPhase::ThinkingDelta {
+                            delta: delta.to_string(),
+                        },
+                    );
+                });
             }
             StreamedAssistantContent::ToolCallDelta { .. } => {
                 // Argument fragments carry no trace payload; a delta-level
@@ -1044,6 +1060,78 @@ mod tests {
             "the post-cap delta drops"
         );
         assert!(thinking.text.ends_with(TRUNCATION_MARKER));
+    }
+
+    /// Issue #1658: each reasoning delta forwards as a `ThinkingDelta` the
+    /// moment it arrives (pure increment), between the turn-opening
+    /// `Thinking` wait and the close's `ThinkingCompleted` freeze -- the
+    /// freeze's full block supersedes the streamed fragments.
+    #[test]
+    fn reasoning_deltas_forward_as_thinking_deltas() {
+        let channel = Arc::new(CompletionChannel::new());
+        let (seen, sink) = recording_sink();
+        let mut fold = EventFold::new(None);
+        fold.event(&reasoning_delta_item("think "), &channel, &sink);
+        fold.event(&reasoning_delta_item("hard"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.finish();
+        let seen = seen.lock().unwrap();
+        let deltas = seen
+            .iter()
+            .filter_map(|p| match p {
+                TurnPhase::ThinkingDelta { delta } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            deltas,
+            vec!["think ", "hard"],
+            "each fragment fires: {seen:?}"
+        );
+        assert!(
+            matches!(seen.first(), Some(TurnPhase::Thinking { attempt: 1 })),
+            "the delta rides after the round-trip wait: {seen:?}"
+        );
+        assert!(
+            matches!(
+                seen.last(),
+                Some(TurnPhase::ThinkingCompleted { text, .. }) if text == "think hard"
+            ),
+            "the freeze closes the stream with the full block: {seen:?}"
+        );
+    }
+
+    /// Issue #1658's cap discipline on the live rail (the #1171 marker
+    /// semantics the prose track already applies): the crossing chunk's
+    /// delta is followed by ONE final marker delta, and post-cap chunks
+    /// emit nothing -- the live thinking stays byte-identical to the
+    /// freeze's capped block.
+    #[test]
+    fn reasoning_delta_emission_stops_past_the_cap() {
+        let channel = Arc::new(CompletionChannel::new());
+        let (seen, sink) = recording_sink();
+        let mut fold = EventFold::new(None);
+        fold.event(
+            &reasoning_delta_item(&"d".repeat(ACCUM_MAX_BYTES)),
+            &channel,
+            &sink,
+        );
+        fold.event(&reasoning_delta_item("more"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.finish();
+        let seen = seen.lock().unwrap();
+        let deltas = seen
+            .iter()
+            .filter_map(|p| match p {
+                TurnPhase::ThinkingDelta { delta } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            deltas,
+            vec!["d".repeat(ACCUM_MAX_BYTES), TRUNCATION_MARKER.to_string()],
+            "the crossing chunk emits, the marker follows, the post-cap chunk is silent: {seen:?}"
+        );
     }
 
     /// The `FinalResponse` convergence obligation holds for uncapped turns

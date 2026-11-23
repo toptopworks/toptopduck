@@ -189,6 +189,13 @@ export type LiveRoundRow = Omit<LiveTraceRow, "step">;
  *  settled calls, so the settle projection is a pure per-row mapping. */
 export interface LiveRound {
   thinking?: ThinkingTrace;
+  /** The round's live thinking stream (issue #1658): undefined until the
+   *  round's first ThinkingDelta lands, then defined and append-only until
+   *  the freeze -- `thinking` (the ThinkingCompleted block) supersedes it
+   *  at the seal, so every reader prefers the frozen block and falls back
+   *  to the stream. Never enters the settle projection (the frozen block
+   *  is the trace's thinking fact). */
+  thinkingText?: string;
   /** The round's connective prose: undefined until the round's first
    *  TextDelta lands, then defined and append-only for the round's
    *  remaining life (ADR-0126) -- the trailing status gate reads undefined
@@ -273,6 +280,23 @@ export function isRoundTripWait(turn: Pick<LiveTurn, "rounds" | "step">): boolea
     tail.text !== undefined &&
     tail.rows.length === 0;
   return !rowInProgress && !proseStreaming;
+}
+
+/** The thinking head's excerpt (issue #1658): the LAST COMPLETE line's
+ *  text -- paragraph-level progression, so the head repaints only when a
+ *  line closes, never per delta (the #1619 flicker doctrine). The final
+ *  stretch (no closing newline yet) is still growing and never surfaces;
+ *  empty lines skip. "" while nothing has closed -- the honest degrade a
+ *  whole-block or source-less runtime keeps (the head words alone).
+ *  Lives here beside the LiveRound shape it reads from, exported for the
+ *  activity line (the react-refresh rule keeps components alone in their
+ *  file). */
+export function thinkingHeadExcerpt(text: string): string {
+  const complete = text.split("\n").slice(0, -1);
+  for (let i = complete.length - 1; i >= 0; i--) {
+    if (complete[i].trim() !== "") return complete[i];
+  }
+  return "";
 }
 
 /** Merge the two live channels into one ordered row list (pure -- unit-tested
@@ -391,7 +415,12 @@ function liveApprovalResponse(
 export function buildLiveRounds(
   live: Pick<
     LiveState,
-    "calls" | "step" | "roundTexts" | "roundThinkings" | "delegations"
+    | "calls"
+    | "step"
+    | "roundTexts"
+    | "roundThinkingTexts"
+    | "roundThinkings"
+    | "delegations"
   >,
   approvals: ReadonlyArray<ApprovalEntry>,
 ): LiveRound[] {
@@ -428,10 +457,12 @@ export function buildLiveRounds(
   const lastStep = Math.max(
     rows.reduce((m, r) => Math.max(m, r.step), 0),
     live.roundTexts.length,
+    live.roundThinkingTexts.length,
     live.roundThinkings.length,
   );
   return Array.from({ length: lastStep }, (_, i) => ({
     thinking: live.roundThinkings[i] ?? undefined,
+    thinkingText: live.roundThinkingTexts[i] ?? undefined,
     text: live.roundTexts[i] ?? undefined,
     // The step is deliberately NOT carried onto the row: once grouped, the
     // array position is the round, and a stray step on the row would be a
@@ -703,6 +734,12 @@ interface LiveState extends RoundFold {
   /** Per-round connective prose (index = step-1, null when none), from the
    *  TextDelta stream (ADR-0126; fragments appended in arrival order). */
   roundTexts: Array<string | null>;
+  /** Per-round live thinking text (index = step-1, null when none), from
+   *  the ThinkingDelta stream (issue #1658; fragments appended in arrival
+   *  order, superseded per round by the ThinkingCompleted set-semantics
+   *  slot in the fold). Main-fold only -- the Rust sink filters the
+   *  thinking deltas out of delegation sub-events. */
+  roundThinkingTexts: Array<string | null>;
   /** The turn's live delegation buffers (ADR-0135), keyed by the
    *  delegation's call id. Survives phase evolution (applyPhase spreads
    *  the previous state); dies with the live turn at settle -- the
@@ -854,11 +891,12 @@ function applyRoundFold(fold: RoundFold, phase: TurnPhase): RoundFold {
       ],
     };
   }
-  if ("TextDelta" in phase || "DelegationSubEvent" in phase) {
-    // Router-owned variants (applyPhase owns both): a delta never enters a
-    // fold -- main prose or nothing, per ADR-0135's sink-side filter -- and
-    // the wrapper unwraps before routing. Unreachable here by contract;
-    // the pass-through keeps the type honest.
+  if ("TextDelta" in phase || "ThinkingDelta" in phase || "DelegationSubEvent" in phase) {
+    // Router-owned variants (applyPhase owns all three): a delta never
+    // enters a fold -- main prose/thinking or nothing, per ADR-0135's
+    // sink-side filter -- and the wrapper unwraps before routing.
+    // Unreachable here by contract; the pass-through keeps the type
+    // honest.
     return fold;
   }
   // A variant this fold does not know (a future one) folds nowhere --
@@ -940,6 +978,20 @@ function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null 
     const step = live.step ?? 1;
     const roundTexts = appendRoundText(live.roundTexts, step, phase.TextDelta.delta);
     return { ...live, roundTexts };
+  }
+  if ("ThinkingDelta" in phase) {
+    // Issue #1658: one streamed thinking fragment, APPENDED to the current
+    // round's live thinking stream -- the TextDelta arm's thinking twin
+    // (same ordering premise, same sink-side delegation filter). The
+    // freeze's ThinkingCompleted later overwrites the per-round slot the
+    // fold keeps, so the append-only stream is display-only.
+    const step = live.step ?? 1;
+    const roundThinkingTexts = appendRoundText(
+      live.roundThinkingTexts,
+      step,
+      phase.ThinkingDelta.delta,
+    );
+    return { ...live, roundThinkingTexts };
   }
   if ("ToolCallStarted" in phase) {
     // ADR-0135 Decisions 2/3: a started phase carrying the task's full
@@ -1152,6 +1204,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         step: null,
         calls: [],
         roundTexts: [],
+        roundThinkingTexts: [],
         roundThinkings: [],
         delegations: {},
       });

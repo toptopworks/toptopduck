@@ -9,6 +9,7 @@
 import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { FoldToggle } from "./FoldToggle";
+import { THINKING_TEXT_CLASS } from "./thinkingTextStyles";
 import type { ThinkingTrace } from "../../types/thread";
 
 export function ThinkingFold({ thinking }: { thinking: ThinkingTrace }) {
@@ -30,7 +31,7 @@ export function ThinkingFold({ thinking }: { thinking: ThinkingTrace }) {
           tech. */}
       {expanded && (
         <p
-          className="round-thinking m-0 mt-0.5 ml-5 rounded-md bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto"
+          className={THINKING_TEXT_CLASS}
           tabIndex={0}
           role="region"
           aria-label={intl.formatMessage({

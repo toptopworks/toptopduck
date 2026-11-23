@@ -433,8 +433,9 @@ fn failure_text_with_orphans(base: &str, promoted: &[String]) -> String {
 /// The delegation's tagged sink (ADR-0135 Decision 1): wraps the turn's
 /// phase sink so every phase the sub-agent's fold produces rides as a
 /// [`TurnPhase::DelegationSubEvent`] carrying the delegation's id, except
-/// `TextDelta` -- filtered at this single convergence point (the round
-/// prose goes live only through the settle's sub_rounds). The dispatch
+/// the delta variants -- `TextDelta` and `ThinkingDelta` (issue #1658),
+/// filtered at this single convergence point (the round prose and thinking
+/// go live only through the settle's sub_rounds). The dispatch
 /// server reuses this shape for a sub-agent's tool-call phases (issue
 /// #1359: the request carries the delegation id; the per-request forward
 /// wraps here). The gate path is untouched: approval cards keep their own
@@ -443,7 +444,10 @@ pub(super) fn tagged_delegation_sink(phases: &PhaseSink, delegation_id: &str) ->
     let phases = Arc::clone(phases);
     let delegation_id = delegation_id.to_string();
     Arc::new(Mutex::new(move |phase: TurnPhase| {
-        if matches!(phase, TurnPhase::TextDelta { .. }) {
+        if matches!(
+            phase,
+            TurnPhase::TextDelta { .. } | TurnPhase::ThinkingDelta { .. }
+        ) {
             return;
         }
         emit_phase(
@@ -843,8 +847,9 @@ mod tests {
 
     /// ADR-0135 Decision 1: the tagged sink forwards every non-delta phase
     /// wrapped as a DelegationSubEvent carrying the delegation's id, and
-    /// drops TextDelta at the sink (the single convergence point) -- the
-    /// round prose goes live only through the settle's sub_rounds.
+    /// drops the delta variants (TextDelta, ThinkingDelta -- issue #1658)
+    /// at the sink (the single convergence point) -- the round prose and
+    /// thinking go live only through the settle's sub_rounds.
     #[test]
     fn tagged_sink_forwards_tagged_and_filters_text_deltas() {
         let seen: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
@@ -859,6 +864,9 @@ mod tests {
             TurnPhase::Thinking { attempt: 1 },
             TurnPhase::TextDelta {
                 delta: "dropped".into(),
+            },
+            TurnPhase::ThinkingDelta {
+                delta: "dropped too".into(),
             },
             TurnPhase::ThinkingCompleted {
                 duration_ms: 10,
@@ -876,7 +884,7 @@ mod tests {
             emit_phase(&tagged, phase);
         }
         let seen = seen.lock().expect("recording sink poisoned");
-        assert_eq!(seen.len(), 3, "the delta never rides: {seen:?}");
+        assert_eq!(seen.len(), 3, "the deltas never ride: {seen:?}");
         let inner_phases: Vec<&TurnPhase> = seen
             .iter()
             .map(|phase| match phase {
@@ -886,7 +894,10 @@ mod tests {
                 } => {
                     assert_eq!(delegation_id, "gateway-1");
                     assert!(
-                        !matches!(phase.as_ref(), TurnPhase::TextDelta { .. }),
+                        !matches!(
+                            phase.as_ref(),
+                            TurnPhase::TextDelta { .. } | TurnPhase::ThinkingDelta { .. }
+                        ),
                         "no delta crosses the sink"
                     );
                     phase.as_ref()
