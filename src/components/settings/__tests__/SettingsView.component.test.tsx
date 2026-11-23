@@ -985,9 +985,16 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     const { onCommitAppConfig } = renderView();
     fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
     fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
-    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
+    const keyInput = screen.getByPlaceholderText("sk-ant-api03-…");
+    fireEvent.change(keyInput, {
       target: { value: " sk-add-probe " },
     });
+    // Row order follows the dependency (issue #1654): the key row renders
+    // before the model row, so a top-down add reads base URL -> key -> model.
+    const modelInput = screen.getByLabelText("Model (optional)");
+    expect(
+      keyInput.compareDocumentPosition(modelInput) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     // The profile has no keychain entry yet, so the probe's only reachable
     // key is the buffered draft -- passed by ProfilesSection straight into

@@ -10,11 +10,10 @@ import { SettingsRow } from "./settings-chrome";
 // Endpoint fields for a profile (issue #235, ADR-0071 Consequences): the
 // protocol RadioGroup (shown only when the endpoint is Custom -- a named preset
 // implies its protocol) + base URL, each rendered as one settings-card row
-// (the shared SettingsRow chrome every settings form rides). Extracted from
-// ProfilesSection so the composer popover (#3) and cold-start guide (#5) can
-// reuse the same endpoint form. The model field is the ProviderModelField atom
-// (issue #236, ADR-0070); its caller mounts it directly so the key row can sit
-// between the endpoint and the model (the probe needs the key, issue #1654).
+// (the shared SettingsRow chrome every settings form rides). The model field
+// is the ProviderModelField atom (issue #236, ADR-0070); its caller mounts it
+// directly so the key row can sit between the endpoint and the model (the
+// probe needs the key, issue #1654).
 
 type ProviderEndpointFieldsProps = {
   profile: ProviderProfile;

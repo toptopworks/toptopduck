@@ -249,7 +249,7 @@ describe("ProviderEndpointFields (issue #235)", () => {
   it("renders baseUrlError under the base URL input with aria-invalid + aria-describedby (issue #735)", () => {
     // Field-scoped validation surface: the error renders at the offending
     // field row (never the pane-bottom submit surface) and the input carries
-    // the invalid state + description link. Mirror of the model-field test.
+    // the invalid state + description link.
     renderSettings(
       <ProviderEndpointFields
         profile={baseProfile}
