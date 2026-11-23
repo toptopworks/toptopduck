@@ -241,15 +241,15 @@ describe("ProviderEndpointFields (issue #235)", () => {
     expect(
       screen.queryByRole("radio", { name: /Anthropic \(Messages API/ }),
     ).not.toBeInTheDocument();
-    // base URL + model inputs stay present regardless.
+    // base URL input stays present regardless (the model field mounts from
+    // ProfilesSection, not this component -- issue #1654).
     expect(screen.getByLabelText("Base URL")).toBeInTheDocument();
-    expect(screen.getByLabelText("Model")).toBeInTheDocument();
   });
 
   it("renders baseUrlError under the base URL input with aria-invalid + aria-describedby (issue #735)", () => {
     // Field-scoped validation surface: the error renders at the offending
     // field row (never the pane-bottom submit surface) and the input carries
-    // the invalid state + description link. Mirror of the model-field test.
+    // the invalid state + description link.
     renderSettings(
       <ProviderEndpointFields
         profile={baseProfile}
@@ -269,7 +269,7 @@ describe("ProviderEndpointFields (issue #235)", () => {
     );
   });
 
-  it("edits to base URL / model / protocol call onUpdate with the matching patch", () => {
+  it("edits to base URL / protocol call onUpdate with the matching patch", () => {
     const onUpdate = vi.fn();
     renderSettings(
       <ProviderEndpointFields
@@ -283,10 +283,6 @@ describe("ProviderEndpointFields (issue #235)", () => {
       target: { value: "https://gw.example/v1" },
     });
     expect(onUpdate).toHaveBeenLastCalledWith({ base_url: "https://gw.example/v1" });
-    fireEvent.change(screen.getByLabelText("Model"), {
-      target: { value: "gpt-4o" },
-    });
-    expect(onUpdate).toHaveBeenLastCalledWith({ model: "gpt-4o" });
     fireEvent.click(
       screen.getByRole("radio", { name: /OpenAI \(Chat Completions/ }),
     );
@@ -548,7 +544,7 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     renderSettings(
       <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />,
     );
-    expect(screen.getByLabelText("Model")).toBeInTheDocument();
+    expect(screen.getByLabelText("Model (optional)")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Test connection" }),
     ).toBeInTheDocument();
@@ -580,7 +576,7 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     );
     // The hand-typed textbox NEVER leaves (issue #735) -- the probe result
     // feeds the side list panel instead of replacing the input.
-    expect(screen.getByRole("textbox", { name: "Model" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Model (optional)" })).toBeInTheDocument();
     expect(screen.getByText(/2 models available/)).toBeInTheDocument();
     // Opening the panel now lists the probed models.
     fireEvent.click(screen.getByRole("button", { name: "Select model from list" }));
@@ -612,10 +608,10 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     );
   });
 
-  it("an unpinned profile renders an empty input wired to the optional hint (ADR-0154)", () => {
+  it("an unpinned profile renders an empty input with no invalid face (ADR-0154)", () => {
     // The pinned model is optional: null shows as an empty input (never the
-    // string "null"), and the input is described by the hint that explains
-    // the empty state -- no validation error face exists for the field.
+    // string "null"). No hint paragraph and no validation error face exists
+    // for the field -- optionality reads off the label itself (issue #1654).
     renderSettings(
       <ProviderModelField
         profile={{ ...baseProfile, model: null }}
@@ -623,13 +619,10 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
         disabled={false}
       />,
     );
-    const input = screen.getByRole("textbox", { name: "Model" });
+    const input = screen.getByRole("textbox", { name: "Model (optional)" });
     expect(input).toHaveValue("");
     expect(input).not.toHaveAttribute("aria-invalid");
-    const hint = screen.getByText(
-      "Optional. Leave empty for no pinned default — pick a model from the model menu before sending.",
-    );
-    expect(hint).toHaveProperty("id", input.getAttribute("aria-describedby"));
+    expect(input).not.toHaveAttribute("aria-describedby");
   });
 
   it("clearing the input emits null -- the unpinned state, not an empty string (ADR-0154)", () => {
@@ -637,11 +630,11 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     renderSettings(
       <ProviderModelField profile={baseProfile} onUpdate={onUpdate} disabled={false} />,
     );
-    fireEvent.change(screen.getByRole("textbox", { name: "Model" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Model (optional)" }), {
       target: { value: "" },
     });
     expect(onUpdate).toHaveBeenLastCalledWith({ model: null });
-    fireEvent.change(screen.getByRole("textbox", { name: "Model" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Model (optional)" }), {
       target: { value: "glm-4" },
     });
     expect(onUpdate).toHaveBeenLastCalledWith({ model: "glm-4" });
@@ -662,7 +655,7 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     await screen.findByText(/endpoint responds/);
-    expect(screen.getByLabelText("Model")).toBeInTheDocument();
+    expect(screen.getByLabelText("Model (optional)")).toBeInTheDocument();
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
   });
 
@@ -787,7 +780,7 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     fireEvent.click(view.getByRole("button", { name: "Select model from list" }));
     expect(await view.findByText(/No model list yet/)).toBeInTheDocument();
     // The input itself keeps the (endpoint-orthogonal) hand-typed value.
-    expect(view.getByLabelText("Model")).toBeInTheDocument();
+    expect(view.getByLabelText("Model (optional)")).toBeInTheDocument();
   });
 
   it("editing protocol clears the probed list (the panel falls back to the fetch hint)", async () => {
@@ -818,7 +811,7 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     expect(view.queryByText(/1 model available/)).not.toBeInTheDocument();
     fireEvent.click(view.getByRole("button", { name: "Select model from list" }));
     expect(await view.findByText(/No model list yet/)).toBeInTheDocument();
-    expect(view.getByLabelText("Model")).toBeInTheDocument();
+    expect(view.getByLabelText("Model (optional)")).toBeInTheDocument();
   });
 
   it("editing the model value does NOT clear the probe result (the list is a function of the endpoint, not the model)", async () => {

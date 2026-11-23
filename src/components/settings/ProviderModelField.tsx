@@ -18,13 +18,13 @@ import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { SettingsRow } from "./settings-chrome";
 
 // Model field + connection preflight atom (issue #236, ADR-0070; combobox
-// shape issue #735). Lifts the model input OUT of ProviderEndpointFields so
-// this atom owns the ADR-0070 preflight surface: a "Test connection" button
-// that fires the test_profile IPC (Rust probes the endpoint), classifies the
-// result into ADR-0044's six states, and feeds the listed models to a
+// shape issue #735). Owns the ADR-0070 preflight surface: a "Test connection"
+// button that fires the test_profile IPC (Rust probes the endpoint), classifies
+// the result into ADR-0044's six states, and feeds the listed models to a
 // dropdown when the probe succeeds. The model list is held IN-MEMORY here
 // only -- it never enters app-config (ADR-0038 stores preferences, not probe
-// snapshots).
+// snapshots). Mounted directly by ProfilesSection after the key row -- the
+// probe needs a key, so the form order follows the dependency (issue #1654).
 //
 // SHAPE (issue #735): an editable combobox -- the input is ALWAYS the
 // hand-typed value surface, and the probe list is a side dropdown panel
@@ -66,8 +66,8 @@ type ProviderModelFieldProps = {
   // (the panel sits OUTSIDE the edit form's DOM subtree).
   onSelectOpenChange?: (open: boolean) => void;
   // One-shot probe key (issue #735): the add form's buffered draft key,
-  // threaded through ProviderEndpointFields. Omitted in edit mode, where the
-  // probe reads the stored key instead.
+  // passed by ProfilesSection (which mounts this field directly). Omitted in
+  // edit mode, where the probe reads the stored key instead.
   probeKey?: string;
 };
 
@@ -158,7 +158,14 @@ export function ProviderModelField({
       dense
       title={(
         <Label htmlFor={modelId} className="text-muted-foreground">
-          <FormattedMessage id="common.model" defaultMessage="Model" />
+          {/* Own title key, not the shared common.model: the profiles form
+              marks the field optional in the label itself (issue #1654) --
+              the empty value is the legal unpinned state (ADR-0154), and the
+              composer model menu is where an unpinned turn picks a model. */}
+          <FormattedMessage
+            id="settings.profiles.model.title"
+            defaultMessage="Model (optional)"
+          />
         </Label>
       )}
     >
@@ -171,7 +178,6 @@ export function ProviderModelField({
             onChange={(e) => handleModelChange(e.target.value)}
             disabled={fieldDisabled}
             spellCheck={false}
-            aria-describedby={`${modelId}-hint`}
           />
           {/* The list panel rides a Popover so its focus-trap/ESC/outside-click
               dismissal matches the preset select's, and so the parent's
@@ -253,12 +259,6 @@ export function ProviderModelField({
             )}
           </Button>
         </div>
-        <p id={`${modelId}-hint`} className="text-muted-foreground text-xs">
-          <FormattedMessage
-            id="settings.profiles.model.hint"
-            defaultMessage="Optional. Leave empty for no pinned default — pick a model from the model menu before sending."
-          />
-        </p>
         {testResult && <PreflightResult outcome={testResult} />}
         {testError && <p className="text-destructive text-sm">{testError}</p>}
       </div>

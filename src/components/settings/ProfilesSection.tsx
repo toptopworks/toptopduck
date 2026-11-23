@@ -43,6 +43,7 @@ import {
 } from "./settings-chrome";
 import { ProviderEndpointFields } from "./ProviderEndpointFields";
 import { ProviderKeyField } from "./ProviderKeyField";
+import { ProviderModelField } from "./ProviderModelField";
 import { ProviderPresetField } from "./ProviderPresetField";
 import { PRESET_CUSTOM, derivePresetId, findPreset } from "./provider-presets";
 
@@ -750,12 +751,6 @@ export function ProfilesSection({
                 onUpdate={(patch) => setDraft({ ...draft, ...patch })}
                 showProtocolRadio={derivedPreset === PRESET_CUSTOM}
                 disabled={fieldsDisabled}
-                onBusyChange={reportTestBusy}
-                onModelSelectOpenChange={setSelectOpen}
-                // Add mode carries the buffered draft key into the probe
-                // (issue #735): the profile has no keychain entry yet, so the
-                // one-shot key is the only key a pre-create probe can reach.
-                probeKey={addMode ? draftKey : undefined}
                 baseUrlError={fieldError?.message ?? null}
               />
 
@@ -781,6 +776,21 @@ export function ProfilesSection({
                 draftMode={
                   addMode ? { value: draftKey, onChange: setDraftKey } : undefined
                 }
+              />
+
+              {/* The model field mounts AFTER the key row: the "Test
+                  connection" probe needs a key to succeed, so the form order
+                  follows the dependency (issue #1654). Add mode carries the
+                  buffered draft key into the probe (issue #735): the profile
+                  has no keychain entry yet, so the one-shot key is the only
+                  key a pre-create probe can reach. */}
+              <ProviderModelField
+                profile={draft}
+                onUpdate={(patch) => setDraft({ ...draft, ...patch })}
+                disabled={fieldsDisabled}
+                onBusyChange={reportTestBusy}
+                onSelectOpenChange={setSelectOpen}
+                probeKey={addMode ? draftKey : undefined}
               />
 
               {/* Action bar: destructive left, contextual primary right. Add
