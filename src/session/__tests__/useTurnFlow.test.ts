@@ -590,6 +590,28 @@ describe("useTurnFlow", () => {
       });
     });
 
+    it("routes each round's ThinkingDelta to its own round slot (issue #1658)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, { ThinkingDelta: { delta: "第一轮思考。" } });
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      emitProgress(SID, { ThinkingDelta: { delta: "第二轮思考。" } });
+      // Positional round membership: each round's stream stays in its own
+      // slot -- a later round's delta must never land in round 1's text.
+      expect(result.current.liveTurn?.rounds).toEqual([
+        { thinkingText: "第一轮思考。", rows: [] },
+        { thinkingText: "第二轮思考。", rows: [] },
+      ]);
+    });
+
     it("keeps the round's thinking on the live state (issues #608/#610)", async () => {
       const { deps } = setup();
       vi.mocked(askQuestion).mockImplementation(

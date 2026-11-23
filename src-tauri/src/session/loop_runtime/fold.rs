@@ -521,6 +521,21 @@ impl EventFold {
     /// blocks supersede their deltas. `None` when the turn streamed no
     /// readable reasoning.
     fn finalize_thinking(&mut self) {
+        if !self.reasoning_committed.is_empty()
+            && !self.reasoning_deltas.is_empty()
+            && self.reasoning_committed != self.reasoning_deltas
+        {
+            // Upstream drift, the claude pump's twin tie-break doctrine
+            // (#886: the choice stays answerable in logs): the committed
+            // block wins and the divergent delta tail drops -- both texts
+            // land in the log.
+            log::warn!(
+                target: "toptopduck::session",
+                "committed reasoning differs from its streamed deltas; delta tail dropped: {:?}, committed: {:?}",
+                self.reasoning_deltas,
+                self.reasoning_committed
+            );
+        }
         let thinking_text = if !self.reasoning_committed.is_empty() {
             self.reasoning_committed.clone()
         } else {

@@ -19,8 +19,8 @@
 //! tolerated mid-stream, a measured property, not defensiveness), `assistant`
 //! (message content blocks: `text` + `tool_use`), `user` (`tool_result`
 //! blocks), `stream_event` (partial-message deltas, requested via
-//! `--include-partial-messages` -- the live prose stream; the trailing
-//! complete `assistant` frame deduplicates against them), `result`
+//! `--include-partial-messages` -- the live prose/thinking delta stream;
+//! the trailing complete `assistant` frame deduplicates against them), `result`
 //! (terminal). Control-plane frames (`control_request` / `control_response`)
 //! belong to the probe surface but are tolerated here too.
 //!
@@ -1190,8 +1190,8 @@ mod tests {
 
     /// An assistant frame's thinking block is captured as a
     /// `ThinkingBlock` event (issue #612) -- the round's reasoning text,
-    /// emitted whole (thinking rides complete frames; `thinking_delta`
-    /// events are tolerated, not mapped).
+    /// emitted whole (the complete frame dedupes against its preceding
+    /// `ThinkingStreamDelta`s).
     #[test]
     fn parse_assistant_thinking_block_captured() {
         let v = json!({
@@ -1960,6 +1960,93 @@ mod tests {
                 .any(|p| matches!(p, TurnPhase::ThinkingDelta { .. })),
             "no fabricated delta on the whole-block path"
         );
+    }
+
+    /// The thinking dedupe guard resets with the frame it skips (issue
+    /// #1658): a delta-streamed message deduplicates, and the NEXT
+    /// complete thinking frame arriving without a streamed run (the
+    /// whole-block shape) still pushes -- the guard covers one frame,
+    /// never the rest of the turn.
+    #[test]
+    fn the_thinking_dedupe_guard_resets_with_each_complete_frame() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ThinkingStreamDelta { text: "a".into() },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(ClaudeEvent::ThinkingBlock { text: "a".into() }, &mut |p| {
+            phases.push(p)
+        });
+        pump.fold(ClaudeEvent::ThinkingBlock { text: "b".into() }, &mut |p| {
+            phases.push(p)
+        });
+        // The turn-end freeze (the runner's closing sequence).
+        pump.tracker
+            .freeze_trailing_thinking(&mut |p| phases.push(p));
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("done".into()));
+        assert_eq!(
+            rounds[0].thinking.as_ref().expect("both texts land").text,
+            "ab",
+            "the post-reset whole block still pushes onto the streamed text"
+        );
+        let deltas: Vec<String> = phases
+            .into_iter()
+            .filter_map(|p| match p {
+                TurnPhase::ThinkingDelta { delta } => Some(delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec!["a".to_string()],
+            "the streamed chunk alone rides the delta channel"
+        );
+    }
+
+    /// A delta-covered thinking frame whose text differs from its
+    /// streamed deltas still skips -- the streamed text stands and the
+    /// frame text drops with a warn (issue #1658, the prose arm's
+    /// doctrine): the comparison is a diagnostic face, never a second
+    /// push path.
+    #[test]
+    fn a_mismatched_thinking_block_still_skips() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ThinkingStreamDelta { text: "a".into() },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ThinkingBlock {
+                text: "different".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.tracker
+            .freeze_trailing_thinking(&mut |p| phases.push(p));
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("done".into()));
+        assert_eq!(
+            rounds[0]
+                .thinking
+                .as_ref()
+                .expect("the stream freezes")
+                .text,
+            "a",
+            "the deltas win over the mismatched frame"
+        );
+        let deltas: Vec<String> = phases
+            .into_iter()
+            .filter_map(|p| match p {
+                TurnPhase::ThinkingDelta { delta } => Some(delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["a".to_string()]);
     }
 
     /// The dedupe guard resets with the frame it skips: a delta-streamed

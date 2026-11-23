@@ -583,7 +583,7 @@ function outcomeCarriesBody(outcome: TurnOutcome | undefined): boolean {
  *  with the ToolCallCompleted payload, so the optimistic trace equals the
  *  backend's recorded rounds. */
 export function liveRoundsToTrace(
-  rounds: ReadonlyArray<LiveRound>,
+  rounds: ReadonlyArray<Pick<LiveRound, "rows" | "text" | "thinking">>,
   outcome?: TurnOutcome,
 ): TraceRound[] {
   const trace: TraceRound[] = [];

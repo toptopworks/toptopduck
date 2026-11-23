@@ -695,8 +695,9 @@ pub enum TurnPhase {
     /// [`ThinkingCompleted`], which then overwrites the streamed text with
     /// the full block (idempotent settle). An empty fragment emits nothing
     /// (the emission sites gate on payload). Only source-bearing arms fire
-    /// it (the built-in loop's reasoning deltas and the ACP thought
-    /// chunks); the codex and gateway-external paths stay whole-block
+    /// it (the built-in loop's reasoning deltas, the ACP thought chunks,
+    /// and the claude-direct `thinking_delta` stream); the codex and
+    /// gateway-external paths stay whole-block
     /// (honest degrade). Like `TextDelta`, filtered at the delegation
     /// sink -- the sub-agent's thinking rides the settle's `sub_rounds`.
     ThinkingDelta { delta: String },

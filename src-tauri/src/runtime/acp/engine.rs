@@ -2088,6 +2088,31 @@ mod tests {
         assert_eq!(pump.occupancy, None);
     }
 
+    /// The ACP thought chunk streams (issue #1658): the AgentThoughtChunk
+    /// dispatch fires its ThinkingDelta alone -- the round-opening Thinking
+    /// wait rides the round's own opening event, and the claude-direct
+    /// tests drive the tracker through ClaudeEvent, never through this
+    /// arm, so the one path real ACP agents take gets its own fold_update
+    /// pin.
+    #[test]
+    fn agent_thought_chunk_streams_its_thinking_delta() {
+        let mut pump = fold_pump();
+        let mut phases = Vec::new();
+        pump.fold_update(
+            &SessionUpdate::AgentThoughtChunk {
+                message_id: None,
+                content: ContentBlock::text("frag"),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(
+            phases.len(),
+            1,
+            "the chunk rides the delta channel alone: {phases:?}"
+        );
+        assert!(matches!(&phases[0], TurnPhase::ThinkingDelta { delta } if delta == "frag"));
+    }
+
     #[test]
     fn fold_silences_a_gateway_renamed_call_live() {
         let mut pump = fold_pump();
