@@ -35,13 +35,17 @@ import { LABEL_HIDE_NARROW } from "./composer-visual";
 // with a catalog it opens the cascade menu (dropdown-menu Sub primitive):
 // two first-level rows (Model / Thinking) showing the current value inline,
 // each opening a second-level menuitemradio list (aria-checked carries the
-// current selection, issue #584) with a leading "Default (recommended)"
+// held value -- the next turn's actual model/strength -- issue #584 as
+// re-anchored by #1648) with a leading "Default (recommended)"
 // clearing row and the honest synthetic row for a held value the catalog
-// does not offer (issue #529). The built-in catalog (issue #1639) rides the
-// same form with three honest deltas: its rows render the model catalog's
-// display names; the strength row appears only for a held model with
-// discrete effort tiers (probe pending/failed renders the fallback shape --
-// the pinned model's synthetic row -- with no error surface); and the MODEL
+// does not offer (issue #529). All rows render bare ids -- the one name
+// form across the menu, the button, and the settings page (issue #1648).
+// The built-in catalog (issue #1639) rides the
+// same form with three honest deltas: the probe's in-flight window renders
+// a disabled placeholder row in both dimension lists (issue #1648); the
+// strength row is a permanent seat whose unavailable state (a held model
+// with no discrete tiers, nothing held) reads as a disabled hint instead
+// of a vanished row (issue #1648 feedback); and the MODEL
 // dimension has no clearing row (ADR-0154) -- the built-in runtime has no CLI
 // default for "unselected" to mean, so the way back to the pinned default
 // is its own selectable row, while the strength dimension keeps its clear
@@ -115,6 +119,11 @@ export type PostureCatalog =
     kind: "builtin";
     models: BuiltinCatalogModel[];
     profileModel: string | null;
+    // True while the lazy probe (issue #1639) is in flight: both dimension
+    // lists seat a disabled placeholder row instead of the settled shape
+    // (issue #1648) -- an honest wait instead of rows/strength appearing
+    // from nothing. Failure stays silent: false renders the fallback shape.
+    loading?: boolean;
   };
 
 // The catalog provenance note kind (see ComposerPostureTriggerProps):
@@ -183,17 +192,14 @@ export function ComposerPostureTrigger({
   let currentModel: string | null;
   let levelIds: string[];
   let currentLevel: string | null;
-  // perModel without a model pick has no honest level list (issue #537):
-  // the row disables with the pick-a-model hint instead of a union list.
+  // The strength row is a permanent seat on every family (issue #1648
+  // feedback, retiring #1639's hide): the probe's in-flight window renders
+  // the placeholder, a tiered held model renders its list, and a held model
+  // without discrete tiers renders the disabled no-levels hint -- hiding
+  // the row after the placeholder had shown it was the flicker this fixes.
+  // A held level (explicit selection) never reads unavailable: the row
+  // stays live for its synthetic row (issue #529).
   let levelUnavailable = false;
-  // builtin hides the strength row outright (issue #1639) when the held
-  // model offers no discrete effort tiers and nothing is held -- unlike
-  // perModel, the built-in segment never blocks on a model pick (the
-  // profile's pinned model, when one is pinned, is the held value).
-  let hideLevelRow = false;
-  // builtin rows render the catalog's display name (the id verbatim when
-  // uncataloged) while the selection value stays the id.
-  let labelFor: ((id: string) => string) | undefined;
   if (catalog.kind === "acp") {
     modelIds = catalog.models;
     currentModel = catalog.currentModel;
@@ -209,17 +215,25 @@ export function ComposerPostureTrigger({
     const held = model ?? catalog.profileModel;
     const entry = held != null ? catalog.models.find((m) => m.id === held) : undefined;
     levelIds = entry?.supported_reasoning_efforts ?? [];
-    hideLevelRow = levelIds.length === 0 && thoughtLevel == null;
-    const byId = new Map(catalog.models.map((m) => [m.id, m.display_name]));
-    labelFor = (id) => byId.get(id) ?? id;
+    levelUnavailable =
+      !catalog.loading && levelIds.length === 0 && thoughtLevel == null;
   } else {
     modelIds = catalog.models.map((m) => m.id);
     currentModel = catalog.models.find((m) => m.is_default)?.id ?? null;
-    const selected =
-      model != null ? (catalog.models.find((m) => m.id === model) ?? null) : null;
-    levelIds = selected?.supported_reasoning_efforts ?? [];
-    currentLevel = selected?.default_reasoning_effort ?? null;
-    levelUnavailable = model == null;
+    // The strength list rides the held model (issue #1648, retiring #537's
+    // disable-while-unselected): the CLI current IS the held value when
+    // nothing is picked, so its efforts seat the list -- the default and an
+    // explicit pick of the same id configure strength alike. Unavailable
+    // only when no held id exists (an empty directory): an explicit pick
+    // outside the directory keeps the row enabled with an empty list, where
+    // the held level's own synthetic row (if any) carries the state.
+    const held = model ?? currentModel;
+    const heldEntry = held != null
+      ? (catalog.models.find((m) => m.id === held) ?? null)
+      : null;
+    levelIds = heldEntry?.supported_reasoning_efforts ?? [];
+    currentLevel = heldEntry?.default_reasoning_effort ?? null;
+    levelUnavailable = held == null;
   }
 
   // The held value per dimension: the explicit selection, else the
@@ -229,6 +243,8 @@ export function ComposerPostureTrigger({
   // inside DimensionSub from the same value.
   const heldModel = model ?? currentModel;
   const heldLevel = thoughtLevel ?? currentLevel;
+  // The built-in probe's in-flight flag, shared by both dimension calls.
+  const builtinLoading = catalog.kind === "builtin" ? catalog.loading : undefined;
 
   // The clearing row at the top of each second-level list: "Default
   // (recommended)" -- annotated with the CLI's reported current so the user
@@ -324,25 +340,36 @@ export function ComposerPostureTrigger({
             searchable
             ids={modelIds}
             selectedId={model}
-            labelFor={labelFor}
+            loading={builtinLoading}
             onSelect={onSelectModel}
           />
-          {!hideLevelRow && (
-            <DimensionSub
-              label={(
+          {/* The strength row is a permanent seat (issue #1648 feedback):
+              unavailable (a held model with no discrete tiers, nothing
+              held) renders the disabled hint instead of the row vanishing
+              -- the probe placeholder seating it then hiding it flickered. */}
+          <DimensionSub
+            label={(
+              <FormattedMessage
+                id="composer.runtimePicker.thoughtLevelLabel"
+                defaultMessage="Thinking"
+              />
+            )}
+            displayValue={heldLevel}
+            clearLabel={levelClearLabel}
+            ids={levelIds}
+            selectedId={thoughtLevel}
+            unavailable={levelUnavailable}
+            unavailableMessage={
+              catalog.kind === "builtin" ? (
                 <FormattedMessage
-                  id="composer.runtimePicker.thoughtLevelLabel"
-                  defaultMessage="Thinking"
+                  id="composer.runtimePicker.noLevelsForModel"
+                  defaultMessage="No thinking levels"
                 />
-              )}
-              displayValue={heldLevel}
-              clearLabel={levelClearLabel}
-              ids={levelIds}
-              selectedId={thoughtLevel}
-              unavailable={levelUnavailable}
-              onSelect={onSelectThoughtLevel}
-            />
-          )}
+              ) : undefined
+            }
+            loading={builtinLoading}
+            onSelect={onSelectThoughtLevel}
+          />
           <SelectorFaultLines
             setFault={setFault}
             persistFault={persistFault}
@@ -417,7 +444,8 @@ function DimensionSub({
   selectedId,
   onSelect,
   unavailable = false,
-  labelFor,
+  unavailableMessage,
+  loading = false,
   pinnedDefaultId,
   searchable = false,
 }: {
@@ -428,38 +456,40 @@ function DimensionSub({
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   unavailable?: boolean;
-  // The row's display text per id (the built-in catalog's display names);
-  // absent = the id itself, the external catalogs' convention.
-  labelFor?: (id: string) => string;
+  // The hint text when unavailable, right-aligned in the trigger row: the
+  // built-in no-tiers case says "no levels for this model" where the
+  // external empty-directory case says "pick a model first" (issue #1648
+  // feedback).
+  unavailableMessage?: ReactNode;
+  // The built-in probe's in-flight window (issue #1648): the list seats a
+  // disabled placeholder row and the strength row stays seated instead of
+  // hiding -- an honest wait replaces the settle-and-pop. External catalogs
+  // never load (cache-fed), absent = false.
+  loading?: boolean;
   // The profile's pinned model id: present (a string, or null for an
   // an unpinned profile) on the built-in catalog, absent on the external
-  // ones. The synthetic row for THAT value reads as the pinned default --
-  // never as an id the runtime fails to offer -- and selecting it is the
-  // way back to the pinned model; its presence is also what drops the
-  // leading clearing row (the built-in model dimension, ADR-0154).
+  // ones. Its presence is what drops the leading clearing row (the
+  // built-in model dimension, ADR-0154) and keeps a held id outside the
+  // list on the bare-name synthetic row instead of the runtime-omission
+  // warning -- the built-in runtime has no CLI to "not offer" anything.
   pinnedDefaultId?: string | null;
   // Seats the filter row above the list (issue #1645, the model dimension
-  // only): typing filters the directory rows by id and display name. The
-  // clearing + synthetic rows stay unfiltered -- they are state readouts,
-  // not catalog entries. The query resets on submenu close.
+  // only): typing filters the directory rows by id. The clearing +
+  // synthetic rows stay unfiltered -- they are state readouts, not catalog
+  // entries. The query resets on submenu close.
   searchable?: boolean;
 }) {
   const intl = useIntl();
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLowerCase();
-  // The directory view under the current query: a row survives when either
-  // its id or its display name carries the query as a case-insensitive
-  // substring. An empty (or whitespace-only) query is the full list.
+  // The directory view under the current query: a row survives when its id
+  // carries the query as a case-insensitive substring (issue #1648 retired
+  // the display-name half with the names themselves). An empty (or
+  // whitespace-only) query is the full list.
   const filteredIds =
     normalizedQuery === ""
       ? ids
-      : ids.filter((id) => {
-          const rowLabel = labelFor?.(id) ?? id;
-          return (
-            id.toLowerCase().includes(normalizedQuery) ||
-            rowLabel.toLowerCase().includes(normalizedQuery)
-          );
-        });
+      : ids.filter((id) => id.toLowerCase().includes(normalizedQuery));
 
   // The filter input's key handling (issue #1645): character keys never
   // bubble into the content's typeahead (each keystroke would otherwise
@@ -489,14 +519,13 @@ function DimensionSub({
       ? displayValue
       : null;
   const isBuiltinModel = pinnedDefaultId !== undefined;
+  // The "pinned" annotation retired (issue #1648 feedback): the held
+  // checkmark already names the row the next turn runs, and where the
+  // value came from (a pick vs the profile's pin) is not a distinction
+  // the mark carries either. Only the runtime omission keeps its note --
+  // selecting an id the endpoint no longer serves deserves the warning.
   const syntheticNote: SyntheticNote | undefined =
-    unrepresentedId == null
-      ? undefined
-      : !isBuiltinModel
-          ? "runtime"
-          : unrepresentedId === pinnedDefaultId
-            ? "pinned"
-            : undefined;
+    unrepresentedId == null || isBuiltinModel ? undefined : "runtime";
   return (
     <DropdownMenuSub
       onOpenChange={(open) => {
@@ -511,16 +540,22 @@ function DimensionSub({
         {label}
         {unavailable ? (
           <span className="text-muted-foreground min-w-0 flex-1 truncate text-right text-xs">
-            <FormattedMessage
-              id="composer.runtimePicker.pickModelFirst"
-              defaultMessage="Pick a model first."
-            />
+            {unavailableMessage ?? (
+              <FormattedMessage
+                id="composer.runtimePicker.pickModelFirst"
+                defaultMessage="Pick a model first."
+              />
+            )}
           </span>
         ) : (
           <InlineValue value={displayValue} />
         )}
       </DropdownMenuSubTrigger>
-      <DropdownMenuSubContent>
+      {/* Width pinned on both dimensions (issue #1648): a content-sized
+          submenu lets long ids stretch it wide enough for the popper's
+          collision avoidance to flip it to the trigger's far side -- a
+          constant width holds the cascade geometry stable instead. */}
+      <DropdownMenuSubContent className="w-72">
         {!unavailable && (
           <>
             {searchable && (
@@ -543,22 +578,41 @@ function DimensionSub({
               />
             )}
             {/* Permanently controlled ("" = nothing selected): the radio value
-                must never fall back to an uncontrolled internal state. */}
-            <DropdownMenuRadioGroup value={selectedId ?? ""}>
+                must never fall back to an uncontrolled internal state. The
+                held value is the fallback (issue #1648): the checkmark names
+                the row the NEXT turn would actually run -- the same source
+                the button and the first-level annotation read -- instead of
+                vanishing whenever nothing was explicitly picked. */}
+            <DropdownMenuRadioGroup value={selectedId ?? displayValue ?? ""}>
               {!isBuiltinModel && (
                 <ClearingItem label={clearLabel} onClear={() => onSelect(null)} />
+              )}
+              {loading && (
+                // The probe's in-flight placeholder (issue #1648): a disabled
+                // row that says the wait out loud, INSTEAD of the rows --
+                // a background re-probe (empty-answer re-ask, endpoint
+                // switch) must not seat stale rows beside "fetching".
+                // Failure keeps the settled silence (#1639).
+                <DropdownMenuItem disabled>
+                  <span className="min-w-0 truncate">
+                    <FormattedMessage
+                      id="composer.runtimePicker.catalogLoading"
+                      defaultMessage="Fetching model list…"
+                    />
+                  </span>
+                </DropdownMenuItem>
               )}
               {unrepresentedId != null && (
                 <OptionItem
                   id={unrepresentedId}
                   onSelect={() => onSelect(unrepresentedId)}
                   note={syntheticNote}
-                  labelFor={labelFor}
                 />
               )}
-              {filteredIds.map((id) => (
-                <OptionItem key={id} id={id} labelFor={labelFor} onSelect={() => onSelect(id)} />
-              ))}
+              {!loading &&
+                filteredIds.map((id) => (
+                  <OptionItem key={id} id={id} onSelect={() => onSelect(id)} />
+                ))}
             </DropdownMenuRadioGroup>
             {searchable && normalizedQuery !== "" && filteredIds.length === 0 && (
               <p className="text-muted-foreground px-2 py-1.5 text-xs">
@@ -576,9 +630,10 @@ function DimensionSub({
 }
 
 // The synthetic row's annotation: "runtime" = a held value the runtime
-// does not offer (issue #529); "pinned" = the profile's pinned model
-// (ADR-0154). Absent = an ordinary catalog row.
-type SyntheticNote = "runtime" | "pinned";
+// does not offer (issue #529). Absent = an ordinary catalog row (a
+// built-in held id outside the list rides the bare name too -- the
+// pinned-default note retired, issue #1648 feedback).
+type SyntheticNote = "runtime";
 
 // One second-level option row: a menuitemradio whose checked state rides
 // the group value. Selecting keeps the menu open (preventDefault) so the
@@ -587,45 +642,34 @@ function OptionItem({
   id,
   onSelect,
   note,
-  labelFor,
 }: {
   id: string;
   onSelect: () => void;
   note?: SyntheticNote;
-  labelFor?: (id: string) => string;
 }) {
-  // The row's text is decided before the JSX, one branch per annotation;
-  // an ordinary row is the display name, falling back to the id.
-  const label = labelFor?.(id) ?? id;
-  let content: ReactNode;
-  if (note === "runtime") {
-    content = (
+  // Rows render the bare id (issue #1648): the one name form across the
+  // menu, the button readout, and the settings field. The only annotation
+  // left is the runtime-omission warning.
+  const content: ReactNode =
+    note === "runtime" ? (
       <FormattedMessage
         id="composer.runtimePicker.unrepresentedModel"
         defaultMessage="{id} (not offered by this runtime)"
         values={{ id }}
       />
+    ) : (
+      id
     );
-  } else if (note === "pinned") {
-    content = (
-      <FormattedMessage
-        id="composer.runtimePicker.pinnedModelRow"
-        defaultMessage="{id} (pinned default)"
-        values={{ id: label }}
-      />
-    );
-  } else {
-    content = label;
-  }
   return (
     <DropdownMenuRadioItem
       value={id}
+      title={id}
       onSelect={(e) => {
         e.preventDefault();
         onSelect();
       }}
     >
-      {content}
+      <span className="min-w-0 truncate">{content}</span>
     </DropdownMenuRadioItem>
   );
 }
@@ -642,12 +686,13 @@ function ClearingItem({
 }) {
   return (
     <DropdownMenuItem
+      title={label}
       onSelect={(e) => {
         e.preventDefault();
         onClear();
       }}
     >
-      {label}
+      <span className="min-w-0 truncate">{label}</span>
     </DropdownMenuItem>
   );
 }

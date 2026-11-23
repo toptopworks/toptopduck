@@ -339,7 +339,10 @@ export function ComposerProviderPicker({
   // in-process cache is the second, server-side dedupe. Zero profiles:
   // never enabled, no IPC.
   const [armedEndpoint, setArmedEndpoint] = useState("");
-  const { data: builtinCatalogData } = useQuery({
+  const {
+    data: builtinCatalogData,
+    isFetching: builtinCatalogLoading,
+  } = useQuery({
     queryKey: adapterKeys.builtinPostureCatalog(builtinEndpoint),
     queryFn: getBuiltinPostureCatalog,
     enabled: builtinEndpoint !== "" && armedEndpoint === builtinEndpoint,
@@ -417,6 +420,10 @@ export function ComposerProviderPicker({
           kind: "builtin",
           models: builtinCatalogData ?? [],
           profileModel: builtInModel || null,
+          // The probe's in-flight window (issue #1648): the menu seats
+          // placeholder rows instead of the settle-and-pop. The disabled
+          // query (never armed / zero profiles) reads as not-loading.
+          loading: builtinCatalogLoading,
         };
 
   // The posture read's settle gate (issue #603 review): the full-pair wire
@@ -638,12 +645,22 @@ export function ComposerProviderPicker({
   // empty-string field counts as unset, matching the menu guards'
   // convention, so a hand-edited blank cannot blank the button.
   const heldParts = heldPostureParts(posture);
+  // The built-in button always names the model half: an unselected model
+  // runs the pinned profile model next turn (ADR-0154), so a lone held
+  // strength reads "{pinned} · {strength}" -- the bare strength alone
+  // hid what the turn would actually run (issue #1648 feedback). The
+  // external form keeps its own held pair (the CLI default is real there,
+  // ADR-0100 D1: a lone thought level is its own honest form).
+  const builtInParts = [
+    posture.model || builtInModel,
+    posture.thought_level,
+  ].filter((part) => part != null && part !== "");
   const postureLabel = !isExternal
     ? noProfiles
       ? notConfigured
-      : heldParts.length > 0
-        ? heldParts.join(" · ")
-        : (builtInModel ?? noModelSelected)
+      : builtInParts.length > 0
+        ? builtInParts.join(" · ")
+        : noModelSelected
     : heldParts.length > 0
       ? heldParts.join(" · ")
       : defaultRecommended;

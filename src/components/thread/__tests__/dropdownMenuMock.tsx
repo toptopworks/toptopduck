@@ -191,8 +191,14 @@ const dropdownMenuSubTrigger = ({
   </div>
 );
 
-const dropdownMenuSubContent = ({ children }: { children: ReactNode }) => (
-  <div data-testid="sub-content">{children}</div>
+const dropdownMenuSubContent = ({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) => (
+  <div data-testid="sub-content" className={className}>{children}</div>
 );
 
 export const dropdownMenuMockModule = {
