@@ -1090,6 +1090,18 @@
   background: currentColor;
   animation: activity-live-dot 2.4s ease-in-out infinite;
 }
+/* The thinking head's excerpt (issue #1658): the streamed thinking's
+   latest complete line -- one line, trailing off at the right edge (a
+   fade, never a hard clip), capped so a long line cannot crowd out the
+   elapsed figure riding the face tail. */
+.thinking-head-excerpt {
+  display: inline-block;
+  max-width: min(26rem, 60vw);
+  vertical-align: bottom;
+  overflow: hidden;
+  white-space: nowrap;
+  mask-image: linear-gradient(90deg, black 82%, transparent);
+}
 @media (prefers-reduced-motion: reduce) {
   .activity-shimmer {
     animation: none;

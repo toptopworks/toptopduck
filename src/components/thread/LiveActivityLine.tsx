@@ -29,10 +29,11 @@ import { useEffect, useState } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { FoldToggle } from "./FoldToggle";
 import { ThinkingFold } from "./ThinkingFold";
+import { THINKING_TEXT_CLASS } from "./thinkingTextStyles";
 import { LiveRow } from "./TraceView";
 import { TraceList } from "./TraceList";
 import { WaitElapsedSuffix } from "./WaitElapsedSuffix";
-import { isRoundTripWait, isSettledRow } from "../../session/useTurnFlow";
+import { isRoundTripWait, isSettledRow, thinkingHeadExcerpt } from "../../session/useTurnFlow";
 import type { ApprovalResponse, FileAttachment, OperationKind } from "../../types/approval";
 import type { LiveTurn } from "../../session/useTurnFlow";
 
@@ -172,12 +173,24 @@ export function LiveActivityLine({
   // duplicate signal; the running face + the turn clock do not reproduce
   // it, and the clock must stay continuous across the whole turn.
   const streaming = !waiting && toolKind === undefined && faceKind === undefined;
+  // The thinking head's excerpt (issue #1658): only in the thinking face
+  // -- the tool and prose-streaming faces keep their own words, and a
+  // round-trip wait without a source-bearing runtime keeps the plain head
+  // (thinkingText undefined, excerpt "" -- honest degrade). Read off the
+  // tail round's live thinking stream; the frozen block (thinking) takes
+  // the head back at the seal (its excerpt would be stale-mid-round).
+  const thinkingExcerpt =
+    waiting && tailRound?.thinking === undefined
+      ? thinkingHeadExcerpt(tailRound?.thinkingText ?? "")
+      : "";
   // Expandable only when something sits behind the fold (the user ruling:
   // a line with nothing to show on expand is a plain status line -- no
-  // hover, no click): any round's thinking, or any settled/running row.
+  // hover, no click): the tail round's thinking (frozen or streaming,
+  // issue #1658), or any settled/running row.
   const canExpand =
     tailRound !== undefined &&
     (tailRound.thinking !== undefined ||
+      tailRound.thinkingText !== undefined ||
       tailRound.rows.some((row) => isSettledRow(row) || row.running));
   // The expand face's rows: the settled + running members of the tail
   // round (the running call unfurls in place; thinking rides its own
@@ -212,6 +225,20 @@ export function LiveActivityLine({
           </>
         ) : streaming ? (
           <FormattedMessage id="thread.live.running" defaultMessage="Running…" />
+        ) : thinkingExcerpt !== "" ? (
+          <>
+            {liveTurn.step !== null && liveTurn.step > 1 ? (
+              <FormattedMessage
+                id="thread.live.thinkingStepLead"
+                defaultMessage="Thinking (step {step})"
+                values={{ step: liveTurn.step }}
+              />
+            ) : (
+              <FormattedMessage id="thread.live.thinkingLead" defaultMessage="Thinking" />
+            )}
+            {" · "}
+            <span className="thinking-head-excerpt">{thinkingExcerpt}</span>
+          </>
         ) : liveTurn.step !== null && liveTurn.step > 1 ? (
           <FormattedMessage
             id="thread.live.thinkingStep"
@@ -252,8 +279,28 @@ export function LiveActivityLine({
         // running rows on the shared left-rail list (the settled face's
         // chrome); the running call unfurls in place.
         <div className="trace-round max-w-full">
-          {tailRound.thinking !== undefined && (
+          {tailRound.thinking !== undefined ? (
             <ThinkingFold thinking={tailRound.thinking} />
+          ) : (
+            tailRound.thinkingText !== undefined && (
+              // The round's streaming thinking (issue #1658): the same
+              // muted, scroll-capped block the ThinkingFold's expanded
+              // body renders -- unfolded by design (the user expanded the
+              // face to watch the stream), replaced by the ThinkingFold at
+              // the freeze (custody: the stream's home is the activity
+              // line, the frozen block's the settle).
+              <p
+                className={THINKING_TEXT_CLASS}
+                tabIndex={0}
+                role="region"
+                aria-label={intl.formatMessage({
+                  id: "thread.trace.thinkingAria",
+                  defaultMessage: "Agent thinking",
+                })}
+              >
+                {tailRound.thinkingText}
+              </p>
+            )
           )}
           {faceRows.length > 0 && (
             <TraceList>

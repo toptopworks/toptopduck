@@ -469,6 +469,62 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
   });
 
+  it("streams the thinking head's excerpt and expands the streamed text (issue #1658)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [{ thinkingText: "第一段推理完毕\n第二段正在生成", rows: [] }];
+    const { container } = renderExchange(turn);
+    // A streaming-only round is expandable on its own (the canExpand
+    // admission): the fold toggle carries the head, not the plain status
+    // line.
+    const head = container.querySelector("button.process-toggle");
+    expect(head).not.toBeNull();
+    expect(head).toHaveAttribute("aria-expanded", "false");
+    // The head appends the latest completed line after the lead word --
+    // the growing stretch stays out (paragraph-level progression).
+    expect(container.querySelector(".thinking-head-excerpt")).toHaveTextContent(
+      "第一段推理完毕",
+    );
+    expect(head).toHaveTextContent("思考中 · 第一段推理完毕");
+    // Expand: the full streamed text rides the muted region the frozen
+    // ThinkingFold's body shares (custody: the stream's home is the line).
+    fireEvent.click(head!);
+    const region = screen.getByRole("region", { name: "智能体思考" });
+    expect(region).toHaveTextContent("第一段推理完毕");
+    expect(region).toHaveTextContent("第二段正在生成");
+  });
+
+  it("takes the head back at the freeze and expands the ThinkingFold (issue #1658)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.step = 2;
+    // Post-freeze coexistence: the block landed, the streamed text stays
+    // display-only underneath -- the head must not read it back.
+    turn.rounds = [
+      {
+        thinkingText: "第一段推理完毕\n第二段正在生成",
+        thinking: { duration_ms: 900, text: "冻结后的整段推理。" },
+        rows: [],
+      },
+    ];
+    const { container } = renderExchange(turn);
+    const head = container.querySelector("button.process-toggle");
+    expect(head).not.toBeNull();
+    expect(head).toHaveTextContent("思考中（第 2 步）…");
+    // The excerpt span is gone: the frozen block owns the head (the
+    // custody swap at the seal).
+    expect(container.querySelector(".thinking-head-excerpt")).toBeNull();
+    // Expand: the ThinkingFold (not the streamed region) carries the
+    // round's thinking -- the fold's own toggle opens the frozen text.
+    fireEvent.click(head!);
+    expect(screen.queryByRole("region", { name: "智能体思考" })).toBeNull();
+    const fold = container.querySelector("button.thinking-toggle");
+    expect(fold).not.toBeNull();
+    fireEvent.click(fold!);
+    expect(screen.getByRole("region", { name: "智能体思考" })).toHaveTextContent(
+      "冻结后的整段推理。",
+    );
+  });
+
   it("keeps the line on the streaming tail with the running face and the clock", () => {
     const turn = liveTurnWith(undefined);
     turn.askedAt = Date.now() - 46_000;

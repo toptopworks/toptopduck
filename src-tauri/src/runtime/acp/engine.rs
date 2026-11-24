@@ -1078,6 +1078,27 @@ impl RoundTracker {
         push_capped(&mut round.thinking_buf, text);
     }
 
+    /// A streamed thought chunk (issue #1658): the same accumulation and
+    /// duration clock as [`Self::push_thought`], plus the live
+    /// `ThinkingDelta` emission riding the track's cap boundary
+    /// (`push_capped_emit`, the `push_prose` discipline): once the track
+    /// latches the truncation marker, the crossing chunk's delta is
+    /// followed by one final marker delta and later chunks emit nothing --
+    /// the live thinking stays byte-identical to the freeze's block. The
+    /// whole-block faces keep `push_thought` / [`Self::push_thought_pinned`]
+    /// (no fabricated deltas -- honest degrade).
+    pub(super) fn push_thought_delta(&mut self, text: &str, on_phase: &mut impl FnMut(TurnPhase)) {
+        let round = self.open_round(on_phase);
+        if round.thinking_since.is_none() {
+            round.thinking_since = Some(Instant::now());
+        }
+        push_capped_emit(&mut round.thinking_buf, text, &mut |delta| {
+            on_phase(TurnPhase::ThinkingDelta {
+                delta: delta.to_string(),
+            });
+        });
+    }
+
     /// A reasoning chunk grows the current round's thinking stream WITHOUT
     /// starting the duration clock: the codex path's completed whole-block
     /// arrival carries no measurable window, so
@@ -1232,8 +1253,11 @@ impl Pump {
                 }
             }
             SessionUpdate::AgentThoughtChunk { content, .. } => {
+                // A streamed thought chunk (issue #1658): grows the round's
+                // thinking stream AND fires its ThinkingDelta -- the live
+                // thinking counterpart of AgentMessageChunk's prose path.
                 if let Some(text) = content.as_text() {
-                    self.tracker.push_thought(text, on_phase);
+                    self.tracker.push_thought_delta(text, on_phase);
                 }
             }
             SessionUpdate::ToolCall {
@@ -2062,6 +2086,31 @@ mod tests {
             &mut |_| {},
         );
         assert_eq!(pump.occupancy, None);
+    }
+
+    /// The ACP thought chunk streams (issue #1658): the AgentThoughtChunk
+    /// dispatch fires its ThinkingDelta alone -- the round-opening Thinking
+    /// wait rides the round's own opening event, and the claude-direct
+    /// tests drive the tracker through ClaudeEvent, never through this
+    /// arm, so the one path real ACP agents take gets its own fold_update
+    /// pin.
+    #[test]
+    fn agent_thought_chunk_streams_its_thinking_delta() {
+        let mut pump = fold_pump();
+        let mut phases = Vec::new();
+        pump.fold_update(
+            &SessionUpdate::AgentThoughtChunk {
+                message_id: None,
+                content: ContentBlock::text("frag"),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(
+            phases.len(),
+            1,
+            "the chunk rides the delta channel alone: {phases:?}"
+        );
+        assert!(matches!(&phases[0], TurnPhase::ThinkingDelta { delta } if delta == "frag"));
     }
 
     #[test]

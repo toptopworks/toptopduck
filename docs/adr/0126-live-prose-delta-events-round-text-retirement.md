@@ -10,7 +10,7 @@
 
 4. **settle 投影按 outcome 分叉，镜像后端 settle 语义。** 携带终端文本的 outcome（Textual/Materialized 的 body）下，尾轮 call-less round 的 prose 不进 optimistic `TurnRecord.trace`——正文随 outcome 渲染，镜像后端 settle 对 Text 终止的清理（清空且空轮弹除）；Cancelled/Failed 保留尾轮 prose——四路径的权威 trace 记录未 seal 的半截正文（issue #628 的诊断价值裁决；rig fold 经 issue #1165 统一），投影与之对齐以防 turn-end refresh 后文本二次变化。live 半截正文在 settle 换脸时保留，refresh 落同一 round。
 
-5. **thinking/reasoning 不做 delta；cancel 未 seal prose 落权威 trace（issue #1165 统一）。** thinking/reasoning 不做 delta（`ThinkingCompleted` 维持一次性到达，真实诉求另裁）；cancel 时的未 seal prose 落权威 trace，四路径一致：rig fold 在 batch 未确认时把该轮正文随尾轮 thinking 一起 park，取消与 hook 重试终局落权威 trace；终端轮正文随 outcome（`FinalResponse` 处剥离 park 正文，镜像外部 settle 的 Text 终止清理）。
+5. **thinking/reasoning 的 delta 纯增量直通，封印全量覆盖；cancel 未 seal prose 落权威 trace（issue #1165 统一）。** `ThinkingDelta` 与正文 delta 同构：纯增量、隐式归属当前轮、同一条累积 cap 边界（跨界追发截断标记 delta、超帽停发）；封印 `ThinkingCompleted` 全量覆盖（幂等）。有源臂（rig fold 的 reasoning delta / ACP thought chunk / claude 直连 thinking_delta wire 事件）逐块转发，codex 与网关外部路径维持整块（诚实缺省）；delegation sink 过滤该 delta（子代理思考随 settle 的 sub_rounds）。cancel 时的未 seal prose 落权威 trace，四路径一致：rig fold 在 batch 未确认时把该轮正文随尾轮 thinking 一起 park，取消与 hook 重试终局落权威 trace；终端轮正文随 outcome（`FinalResponse` 处剥离 park 正文，镜像外部 settle 的 Text 终止清理）。
 
 ## Context
 
@@ -29,7 +29,7 @@
 - **后端时间窗攒批**：窗口状态机须进后端（turn 结束 flush、cancel flush、窗口残留各成坑，路径数即倍数），直通为零状态单点；频率封顶可在消费侧以更小代价达成同等效果。**否决**。
 - **`TextDelta` 带显式 step 定位**：同步 sink 加单通道 FIFO 下漂移面不存在，同语义的 `RoundText` 无漂移先例；定位字段解决的是此处没有的重放/重连问题。**否决**。
 - **`RoundText` 保留为 batch seal 对账快照**：seal 全文与前端 delta 累积的逐字节一致成为新不变量义务；其纠偏目标（单帧丢失）在进程存活时不存在，webview 重载时 seal 事件同样全丢（liveTurn 整体重置、refresh 收敛）。**否决**。
-- **thinking/reasoning delta 同期交付**：折叠态的增量展示策略是独立 UX 决策面，混入则协议票胀为协议加 UX 票；协议可后补纯加法。**否决（v1）**——压力真实再扩。
+- **thinking/reasoning delta 同期交付**：折叠态的增量展示策略是独立 UX 决策面，混入则协议票胀为协议加 UX 票；协议可后补纯加法。**否决已撤回**——压力真实后已扩：thinking delta 以纯增量直通（Decision 5）。
 - **cancel 未 seal prose 落权威 trace**：durable 语义变更，超出正文流式呈现的目标面，其取舍独立裁决。**否决（v1）**。
 
 ## Consequences

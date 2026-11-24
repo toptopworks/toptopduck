@@ -686,6 +686,21 @@ pub enum TurnPhase {
     /// terminal answer, streaming live for the first time. An empty
     /// fragment emits nothing (the emission sites gate on payload).
     TextDelta { delta: String },
+    /// One streamed thinking delta (issue #1658): a fragment of the
+    /// round's reasoning text, fired the moment it arrives off the runtime
+    /// stream -- the thinking counterpart of [`TextDelta`] (same pure
+    /// increment, no merging). Belongs to the CURRENT round (its `Thinking`
+    /// wait has already arrived, so `live.step` is known); the round's
+    /// seal is the batch's first `ToolCallStarted` or the freeze's
+    /// [`ThinkingCompleted`], which then overwrites the streamed text with
+    /// the full block (idempotent settle). An empty fragment emits nothing
+    /// (the emission sites gate on payload). Only source-bearing arms fire
+    /// it (the built-in loop's reasoning deltas, the ACP thought chunks,
+    /// and the claude-direct `thinking_delta` stream); the codex and
+    /// gateway-external paths stay whole-block
+    /// (honest degrade). Like `TextDelta`, filtered at the delegation
+    /// sink -- the sub-agent's thinking rides the settle's `sub_rounds`.
+    ThinkingDelta { delta: String },
     /// One round's thinking block completed (ADR-0103, issue #608): its
     /// duration and raw reasoning text, the live counterpart of
     /// [`ThinkingTrace`]. Fired after the round's `Thinking` wait and its
@@ -699,9 +714,9 @@ pub enum TurnPhase {
     /// forwards it wrapped with the owning delegation's call id (Decision 2),
     /// so the frontend routes it into that delegation's live buffer --
     /// same-name parallel delegations included, which no name+order pairing
-    /// could separate. Only the four non-delta variants ever ride here:
-    /// `TextDelta` is filtered at the sink (the round prose goes live only
-    /// through the settle's `sub_rounds`).
+    /// could separate. Only the non-delta variants ever ride here:
+    /// `TextDelta` and `ThinkingDelta` are filtered at the sink (the round
+    /// prose and thinking go live only through the settle's `sub_rounds`).
     DelegationSubEvent {
         delegation_id: String,
         phase: Box<TurnPhase>,
@@ -742,4 +757,23 @@ pub struct SessionNamedPayload {
 /// channel and the two emission families interleave on the same live rail.
 pub trait TurnPhaseSink: Send + Sync {
     fn emit(&self, phase: TurnPhase);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #1658: the delta variant rides the externally-tagged wire form
+    /// flat (`{"ThinkingDelta":{"delta":"…"}}`), the ADR-0126 `TextDelta`
+    /// discipline -- a serde round-trip pins the IPC contract.
+    #[test]
+    fn thinking_delta_round_trips_through_serde() {
+        let phase = TurnPhase::ThinkingDelta {
+            delta: "frag".into(),
+        };
+        let v = serde_json::to_value(&phase).expect("serialize");
+        assert_eq!(v, serde_json::json!({"ThinkingDelta": {"delta": "frag"}}));
+        let back: TurnPhase = serde_json::from_value(v).expect("deserialize");
+        assert_eq!(back, phase);
+    }
 }

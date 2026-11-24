@@ -562,6 +562,56 @@ describe("useTurnFlow", () => {
       expect(result.current.liveTurn?.rounds[1]?.rows[0]?.key).toBe("call-0");
     });
 
+    it("appends ThinkingDelta fragments to the current round's live thinking stream (issue #1658)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, { ThinkingDelta: { delta: "先想 " } });
+      emitProgress(SID, { ThinkingDelta: { delta: "再想" } });
+      expect(result.current.liveTurn?.rounds).toEqual([
+        { thinkingText: "先想 再想", rows: [] },
+      ]);
+      // The freeze overwrites the stream (idempotent settle): the
+      // ThinkingCompleted block supersedes the append-only text on the
+      // same round.
+      emitProgress(SID, {
+        ThinkingCompleted: { duration_ms: 5, text: "先想 再想，完成。" },
+      });
+      expect(result.current.liveTurn?.rounds[0]).toMatchObject({
+        thinking: { duration_ms: 5, text: "先想 再想，完成。" },
+        thinkingText: "先想 再想",
+      });
+    });
+
+    it("routes each round's ThinkingDelta to its own round slot (issue #1658)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, { ThinkingDelta: { delta: "第一轮思考。" } });
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      emitProgress(SID, { ThinkingDelta: { delta: "第二轮思考。" } });
+      // Positional round membership: each round's stream stays in its own
+      // slot -- a later round's delta must never land in round 1's text.
+      expect(result.current.liveTurn?.rounds).toEqual([
+        { thinkingText: "第一轮思考。", rows: [] },
+        { thinkingText: "第二轮思考。", rows: [] },
+      ]);
+    });
+
     it("keeps the round's thinking on the live state (issues #608/#610)", async () => {
       const { deps } = setup();
       vi.mocked(askQuestion).mockImplementation(
@@ -1454,7 +1504,7 @@ describe("useTurnFlow", () => {
       });
       const trace = liveRoundsToTrace(
         buildLiveRounds(
-          { step: 1, calls: [failed], roundTexts: [], roundThinkings: [], delegations: {} },
+          { step: 1, calls: [failed], roundTexts: [], roundThinkingTexts: [], roundThinkings: [], delegations: {} },
           [],
         ),
       );
@@ -1464,7 +1514,7 @@ describe("useTurnFlow", () => {
       const plain = call({ success: false, resultExcerpt: "boom" });
       const plainTrace = liveRoundsToTrace(
         buildLiveRounds(
-          { step: 1, calls: [plain], roundTexts: [], roundThinkings: [], delegations: {} },
+          { step: 1, calls: [plain], roundTexts: [], roundThinkingTexts: [], roundThinkings: [], delegations: {} },
           [],
         ),
       );
@@ -1487,7 +1537,7 @@ describe("useTurnFlow", () => {
       });
       const trace = liveRoundsToTrace(
         buildLiveRounds(
-          { step: 1, calls: [wrote], roundTexts: [], roundThinkings: [], delegations: {} },
+          { step: 1, calls: [wrote], roundTexts: [], roundThinkingTexts: [], roundThinkings: [], delegations: {} },
           [],
         ),
       );
@@ -1499,7 +1549,7 @@ describe("useTurnFlow", () => {
       const plain = call({ success: true, resultExcerpt: "" });
       const plainTrace = liveRoundsToTrace(
         buildLiveRounds(
-          { step: 1, calls: [plain], roundTexts: [], roundThinkings: [], delegations: {} },
+          { step: 1, calls: [plain], roundTexts: [], roundThinkingTexts: [], roundThinkings: [], delegations: {} },
           [],
         ),
       );
@@ -1534,6 +1584,7 @@ describe("useTurnFlow", () => {
           step: 1,
           calls: [agent],
           roundTexts: [],
+          roundThinkingTexts: [],
           roundThinkings: [],
           delegations: {
             d1: { task: "fix the widget", fold: { step: 1, calls: [wrote], roundThinkings: [] } },
@@ -1564,7 +1615,7 @@ describe("useTurnFlow", () => {
       });
       const trace = liveRoundsToTrace(
         buildLiveRounds(
-          { step: 1, calls: [cut], roundTexts: [], roundThinkings: [], delegations: {} },
+          { step: 1, calls: [cut], roundTexts: [], roundThinkingTexts: [], roundThinkings: [], delegations: {} },
           [],
         ),
       );
@@ -1572,7 +1623,7 @@ describe("useTurnFlow", () => {
       const plain = call({ summary: "SELECT 1" });
       const plainTrace = liveRoundsToTrace(
         buildLiveRounds(
-          { step: 1, calls: [plain], roundTexts: [], roundThinkings: [], delegations: {} },
+          { step: 1, calls: [plain], roundTexts: [], roundThinkingTexts: [], roundThinkings: [], delegations: {} },
           [],
         ),
       );
@@ -1601,6 +1652,7 @@ describe("useTurnFlow", () => {
           step: 1,
           calls: [agent],
           roundTexts: [],
+          roundThinkingTexts: [],
           roundThinkings: [],
           delegations: {
             d1: { task: "fix the widget", fold: { step: 1, calls: [cut], roundThinkings: [] } },
@@ -1619,7 +1671,7 @@ describe("useTurnFlow", () => {
       // padding to absent members -- round 1's round carries neither prose
       // nor thinking, not null placeholders.
       const rounds = buildLiveRounds(
-        { step: 2, calls: [], roundTexts: [null, "第二轮散文。"], roundThinkings: [null, null], delegations: {} },
+        { step: 2, calls: [], roundTexts: [null, "第二轮散文。"], roundThinkingTexts: [null, null], roundThinkings: [null, null], delegations: {} },
         [],
       );
       expect(rounds).toHaveLength(2);
@@ -1671,6 +1723,7 @@ describe("useTurnFlow", () => {
             }),
           ],
           roundTexts: ["先看一眼数据。"],
+          roundThinkingTexts: [],
           roundThinkings: [],
         },
         [],

@@ -245,6 +245,12 @@ export type TurnPhase =
   // thinking block (ADR-0103 issue #608, duration + raw text), fired only
   // when the runtime exposes a thinking data source.
   | { TextDelta: { delta: string } }
+  // One streamed thinking delta (issue #1658): a pure increment of the
+  // round's reasoning text, the thinking counterpart of TextDelta --
+  // appended to the current round's live thinking stream; the round's
+  // ThinkingCompleted then overwrites it with the full block (idempotent
+  // settle). Only source-bearing runtimes fire it.
+  | { ThinkingDelta: { delta: string } }
   // Wraps the trace's own ThinkingTrace verbatim (the same reuse
   // ToolCallCompleted makes of TraceEntry): the live state stores the block
   // as-is and the round's fold renders it unchanged.
@@ -252,8 +258,9 @@ export type TurnPhase =
   // ADR-0135: one forwarded sub-event of a running delegation -- the inner
   // phase the sub-agent's fold produced, tagged with the owning
   // delegation's call id so the frontend routes it into that delegation's
-  // live buffer (same-name parallels included). Only the four non-delta
-  // variants ever ride here; TextDelta is filtered at the Rust sink.
+  // live buffer (same-name parallels included). Only the non-delta
+  // variants ever ride here; TextDelta and ThinkingDelta are filtered at
+  // the Rust sink.
   | { DelegationSubEvent: { delegation_id: string; phase: TurnPhase } };
 
 // A `turn-progress` side-channel event addressed by sessionId (ADR-0059,
