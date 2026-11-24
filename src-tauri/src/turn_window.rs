@@ -133,7 +133,8 @@ pub fn assemble_tool_turn(
 ///
 /// Mirrors [`assemble_tool_turn`]'s windowing -- the SAME history rendering --
 /// but emits ACP content blocks instead of a [`ToolTurnRequest`], and the
-/// leading block carries ONLY locale directive + schema context (no capability
+/// leading block carries ONLY locale directive + inter-round narration
+/// directive (issue #1667) + schema context (no capability
 /// boundary prompt: ADR-0086 Consequence -- the external CLI brings its own
 /// persona and our boundary is enforced at the tool / gateway surface). The
 /// M-contract (`result_N` naming) rides the gateway tool descriptions, not
@@ -165,7 +166,8 @@ pub fn assemble_acp_turn(
         shared,
     );
     let mut blocks = Vec::with_capacity(request.history.len() * 2 + 3);
-    // Leading context block (locale + schema only, ADR-0086).
+    // Leading context block (locale + narration directive + schema, the
+    // narration per issue #1667).
     blocks.push(ContentBlock::text(build_acp_context_block(
         &request, locale,
     )));
@@ -1280,7 +1282,8 @@ mod tests {
 
     #[test]
     fn assemble_acp_turn_leading_block_has_no_capability_boundary() {
-        // ADR-0086: the leading context block carries locale + schema ONLY.
+        // ADR-0086: the leading context block carries locale + narration
+        // directive (issue #1667) + schema ONLY.
         // The capability boundary landmarks (IN-SCOPE / OUT-SCOPE / refuse)
         // must be absent so they do not compete with the CLI's own persona.
         let (ws, history) = source_plus_turns(1);
