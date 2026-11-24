@@ -743,8 +743,9 @@ impl super::Session {
             (ENV_TOKEN.to_string(), handle.token.clone()),
         ]);
         let mcp_server = McpServer::stdio_bridge(GATEWAY_SERVER_NAME, bin_path, Vec::new(), env);
-        // 4. Assemble the prompt blocks (leading context: locale + schema;
-        //    skill block before question; M-contract via gateway tool table).
+        // 4. Assemble the prompt blocks (leading context: locale + narration
+        //    directive + schema; skill block before question; M-contract via
+        //    gateway tool table).
         let shared_cards = self.shared_cards();
         let prompt_blocks = turn_window::assemble_acp_turn(
             question,
