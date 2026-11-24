@@ -1524,7 +1524,7 @@ describe("Thread", () => {
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
       expect(screen.getByText("统计一下")).toBeInTheDocument();
-      expect(screen.getByText("思考中…")).toBeInTheDocument();
+      expect(screen.getByText("思考中")).toBeInTheDocument();
       // The bubble is the settled chat form's own component (#610): the full
       // question + the ask stamp + copy, mounted before any progress event.
       const bubble = container.querySelector(".user-bubble");
@@ -1548,7 +1548,7 @@ describe("Thread", () => {
       renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
-      expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
+      expect(screen.getByText("思考中（第 2 步）")).toBeInTheDocument();
     });
 
     it("streams round prose, the thinking fold and rows grouped by round", async () => {
@@ -1587,7 +1587,7 @@ describe("Thread", () => {
       // finished round sealed above the line, its call no longer reports.
       const head = await waitFor(() => {
         const el = container.querySelector("button.process-toggle");
-        expect(el).toHaveTextContent("正在写入 · 已完成 0 次调用");
+        expect(el).toHaveTextContent("写入 · SELECT 2");
         return el;
       });
       // The finished round seals as its settle-isomorphic block (#1656):
@@ -1605,8 +1605,8 @@ describe("Thread", () => {
       // the wait status off).
       expect(screen.queryByText("explore")).not.toBeInTheDocument();
       expect(screen.queryByText("materialize")).not.toBeInTheDocument();
-      expect(screen.queryByText("思考中…")).not.toBeInTheDocument();
-      expect(screen.queryByText("思考中（第 2 步）…")).not.toBeInTheDocument();
+      expect(screen.queryByText("思考中")).not.toBeInTheDocument();
+      expect(screen.queryByText("思考中（第 2 步）")).not.toBeInTheDocument();
     });
 
     it("renders rounds whose rows lead the slot arrays (a round with rows but no prose)", async () => {
@@ -1647,7 +1647,7 @@ describe("Thread", () => {
       // it out on the real clock.
       const head = await waitFor(() => {
         const el = container.querySelector("button.process-toggle");
-        expect(el).toHaveTextContent("正在写入 · 已完成 0 次调用");
+        expect(el).toHaveTextContent("写入 · SELECT 3");
         return el;
       });
       expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
@@ -1671,7 +1671,7 @@ describe("Thread", () => {
       renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
-      expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
+      expect(screen.getByText("思考中（第 2 步）")).toBeInTheDocument();
     });
 
     it("renders a pending approval card whose three buttons answer by request id", () => {
@@ -1712,7 +1712,7 @@ describe("Thread", () => {
       // call is the imminent activity) -- the thinking face must be off
       // (a predicate regression to `running` alone would claim 思考中
       // while the card waits).
-      expect(screen.queryByText("思考中…")).not.toBeInTheDocument();
+      expect(screen.queryByText("思考中")).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
       expect(onRespondApproval).toHaveBeenCalledWith("req-1", "allow_once");
       fireEvent.click(screen.getByRole("button", { name: "始终允许" }));
@@ -1807,7 +1807,7 @@ describe("Thread", () => {
       // running the face has already rotated back to the thinking phase
       // (the count waits behind the fold).
       const head = container.querySelector("button.process-toggle");
-      expect(head).toHaveTextContent("思考中…");
+      expect(head).toHaveTextContent("思考中");
       expect(screen.queryByText("已拒绝")).not.toBeInTheDocument();
       // Expand: the badge names the answer on the flat row, the denial
       // excerpt rides beneath it -- no buttons remain.
@@ -1943,7 +1943,7 @@ describe("Thread", () => {
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
       // The drained calls rotate the line back to the thinking face.
-      fireEvent.click(screen.getByRole("button", { name: "思考中…" }));
+      fireEvent.click(screen.getByRole("button", { name: /思考中/ }));
       // The settle swap in one commit (the hook's batch shape).
       rerender(threadTree({ entries: [turnEntry(record)], liveTurn: null }));
       // The process fold lands open -- no second click (issue #1282's
@@ -1992,7 +1992,7 @@ describe("Thread", () => {
       const { rerender } = renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
-      const head = screen.getByRole("button", { name: "思考中…" });
+      const head = screen.getByRole("button", { name: /思考中/ });
       fireEvent.click(head); // open
       fireEvent.click(head); // re-close before the settle
       rerender(threadTree({ entries: [turnEntry(record)], liveTurn: null }));
@@ -2038,7 +2038,7 @@ describe("Thread", () => {
       const { rerender } = renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={turnOne} />,
       );
-      fireEvent.click(screen.getByRole("button", { name: "思考中…" }));
+      fireEvent.click(screen.getByRole("button", { name: /思考中/ }));
       // A progress event re-renders under a NEW liveTurn identity but the
       // SAME submit stamp -- the posture survives (the identity must not
       // be the reset edge).

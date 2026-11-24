@@ -1,31 +1,35 @@
 // The live activity line (issue #1606, ADR-0151; clock re-host #1612): the
-// turn's ONE rotating activity face. Folded, it reads the current phase --
-// the thinking period ("Thinking (step n)…", the retired trailing status
-// line's duty merged in), the running call ("{verb} · N completed", the
-// breathing dot riding the head), or the prose-streaming window ("Running…" --
-// the #1612 narrowing of ADR-0151's step-aside ruling: what let the line
-// yield was the THINKING face doubling the prose signal; the running face
-// beside the caret does not reproduce it, and the turn clock must never
-// leave the exchange). The elapsed figure ("· 12s") rides the face tail in
-// every posture -- the turn clock's only host since the composer wait slot
-// retired (#1264's ruling re-hosted). The tool face answers a call at
-// once; its verb switches at
-// most once per window (calls flashing a fresh verb each read as flicker
-// -- the user ruling) and the face holds one window past the last call,
-// so short calls stay readable and the line never blinks inside a burst.
-// The line's fold holds the CURRENT round only (#1656's narrowing of the
-// #1606 domain): the turn tail -- its completed calls ride the head's
-// count, its thinking + calls sit in the expand face, the running call
-// is absorbed by the head. Every earlier round seals as its own
-// settle-isomorphic block in the exchange, NOT here; prose no longer
-// partitions the two.
+// turn's activity face in TWO rows (issue #1661). The ACTIVITY row sits
+// above -- the current activity on its own line: the running call's verb +
+// its summary, the thinking stream's latest completed line (right-edge
+// fade), or -- between calls -- the turn's most recent completed call (the
+// linger, holding the row steady through gaps and round boundaries);
+// hidden while expanded (the expand face owns both signals at full width),
+// absent only when nothing reports -- no call, no excerpt, no completed
+// call to linger on (the prose-streaming caret is its own liveness). The
+// STATUS row sits below -- the phase verb ("Thinking (step n)" /
+// "Running (step n)", rotating honestly with the phase) + the elapsed
+// figure, whose only host this row has been since the composer wait slot
+// retired (#1264's ruling re-hosted). The split is structural: the excerpt
+// clips and fades itself (self-painted), and a descendant's overflow/mask
+// cannot clip the ancestor shimmer's background-clip:text glyph painting --
+// sharing the status row put the excerpt's tail under the elapsed figure
+// (the overlap #1661 retires). The phase timing machinery (the tool verb's
+// entry-immediate / switch-throttled / hold-past-last-call windows) paces
+// the ACTIVITY row; the status row reads only the phase, so it can never
+// blink inside a burst. The line's fold holds the CURRENT round only
+// (#1656's narrowing of the #1606 domain): the turn tail -- its completed
+// calls feed the activity row's linger, its thinking + calls sit in the
+// expand face, the running call is absorbed by the activity row. Every
+// earlier round seals as its own settle-isomorphic block in the exchange,
+// NOT here; prose no longer partitions the two.
 // With nothing behind the fold -- no thinking, no settled or running row
 // in the line's rounds (a lone pending card does not count: the card
 // renders at the tail, outside the fold) -- the line is a plain status
 // line: no hover, no click (the user ruling). The expand posture seeds
 // the settled turn-level process fold across the swap.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { FoldToggle } from "./FoldToggle";
 import { ThinkingFold } from "./ThinkingFold";
@@ -100,13 +104,12 @@ export function LiveActivityLine({
   const allRows = liveTurn.rounds.flatMap((round) => round.rows);
   // The line's round: the CURRENT round only -- the turn tail (#1656's
   // narrowing of the #1606 domain). Every earlier round seals as its own
-  // settle-isomorphic block in the exchange, so the head's count reads
+  // settle-isomorphic block in the exchange, so the head's activity reads
   // the tail round's rows and the expand face renders it alone. The tail
   // stays the line's through the round-trip wait -- the settle swap is
   // what retires the line, so the domain needs no other boundary.
   const tailRound = liveTurn.rounds.at(-1);
   const lineRows = tailRound?.rows ?? [];
-  const completedCount = lineRows.filter(isSettledRow).length;
   const running = allRows.find((row) => row.running);
   // The gate hold (an approval-channel row the gateway has not completed):
   // the activity line KEEPS the tool face while a pending card waits (the
@@ -126,6 +129,22 @@ export function LiveActivityLine({
   const toolKind: OperationKind | undefined =
     running?.operationKind ?? (gateHold ? heldRow?.operationKind : undefined);
   const waiting = isRoundTripWait(liveTurn);
+  // The activity row's subject: the running call, a gate-held call, or --
+  // between calls -- the turn's most recent completed call. While a call
+  // runs or a gate holds, the subject stays on THAT row: an empty summary
+  // renders the verb alone, never the previous call's summary under this
+  // call's verb. The linger claims the row only between calls, keeping it
+  // steady through the gaps AND across round boundaries (a round
+  // completion seals the finished rounds above the line; the row holds
+  // instead of blinking away, and a call's summary still shows through
+  // the gap that follows it). The summary arrives whole with the call's
+  // start event and shows from the moment the call runs -- no per-delta
+  // churn, no completion-event wait.
+  const lastSettled = [...allRows].reverse().find(isSettledRow);
+  const activeRow = running ?? (gateHold ? heldRow : undefined);
+  const subject = [activeRow, activeRow === undefined ? lastSettled : undefined].find(
+    (row) => row !== undefined && row.summary !== "",
+  );
   // The tool face's presence and verb, one piece of state: faceKind is the
   // verb while the face shows the tool side, undefined while the thinking
   // face or nothing owns the line. Three device-calibrated timings, one
@@ -173,12 +192,12 @@ export function LiveActivityLine({
   // duplicate signal; the running face + the turn clock do not reproduce
   // it, and the clock must stay continuous across the whole turn.
   const streaming = !waiting && toolKind === undefined && faceKind === undefined;
-  // The thinking head's excerpt (issue #1658): only in the thinking face
-  // -- the tool and prose-streaming faces keep their own words, and a
-  // round-trip wait without a source-bearing runtime keeps the plain head
-  // (thinkingText undefined, excerpt "" -- honest degrade). Read off the
-  // tail round's live thinking stream; the frozen block (thinking) takes
-  // the head back at the seal (its excerpt would be stale-mid-round).
+  // The thinking head's excerpt (issue #1658, re-housed #1661): only on the
+  // activity row's thinking phase -- the tool phase keeps its own words, and
+  // a round-trip wait without a source-bearing runtime keeps the status
+  // words alone (thinkingText undefined, excerpt "" -- honest degrade). Read
+  // off the tail round's live thinking stream; the frozen block (thinking)
+  // takes the excerpt back at the seal (its excerpt would be stale-mid-round).
   const thinkingExcerpt =
     waiting && tailRound?.thinking === undefined
       ? thinkingHeadExcerpt(tailRound?.thinkingText ?? "")
@@ -196,57 +215,110 @@ export function LiveActivityLine({
   // round (the running call unfurls in place; thinking rides its own
   // fold inside the face).
   const faceRows = lineRows.filter((row) => isSettledRow(row) || row.running);
-  // The head's face content, shared by both postures (the fold toggle and
-  // the plain status line): the breathing dot + the shimmer sweeping the
-  // phase face and the elapsed figure together (the running visual lives
-  // in styles.css's .activity-live-dot / .activity-shimmer, one shared
-  // 2.4s period). The verb reads
-  // the damped faceKind; the count reads the live rows -- a brief call
-  // ticks the count without repainting the verb. The figure sits at ONE
-  // tail position in every posture and phase: the ask stamp derives the
-  // elapsed seconds, so the clock never resets across a face rotation or
-  // a posture flip (the #1612 re-host of the #1264 turn clock).
+  // The phase read: the damped faceKind names the running phase (its GRACE
+  // window keeps the phase steady across burst gaps); the prose-streaming
+  // window runs too; the round-trip wait thinks. Honest rotation -- the
+  // status row never says "Thinking" while a call runs.
+  const runningPhase = faceKind !== undefined || streaming;
+  // The activity row (issue #1661): the current activity ABOVE the status
+  // row, full-bleed on the line. Fixed anatomy -- a stable label, a
+  // separator, then the content: while the kind holds, the label never
+  // repaints; only the content after it moves. The tool phase labels with
+  // the damped verb and shows the CURRENT call's summary -- gate hold
+  // previews the held call the same way; a summary-less call shows the
+  // verb alone (never the previous call's summary under this call's verb).
+  // Between calls the row lingers on the turn's most recent completed
+  // call, and a call's summary -- which lands whole with its start event,
+  // showing from the moment the call runs -- still shows through the gaps
+  // that follow it. The thinking phase labels with the settled thinking
+  // fold's own word so the live row and its settle shape read as the same
+  // line, and streams the latest completed paragraph. Everything rides ONE
+  // self-painted span -- gradient, clip, and fade must own the element
+  // they paint (a descendant's overflow/mask cannot clip the ancestor
+  // shimmer's glyph painting), and one span keeps the label inside the
+  // opaque zone with the fade at the row's true right edge. Hidden while
+  // expanded (the expand face owns both signals at full width); absent
+  // only when nothing reports (no face, no linger, no excerpt -- the
+  // prose caret is its own liveness). The tool-form row STAYS announced --
+  // verb + summary is low-frequency state (what ran / is running), not
+  // decoration; only the thinking row is aria-hidden: per-line churn is
+  // decoration riding the status row's own announcement (the
+  // WaitElapsedSuffix doctrine), never a stream of its own.
+  let activityRow: ReactNode = null;
+  if (!expanded) {
+    const subjectSummary = subject?.summary ?? "";
+    if (faceKind !== undefined) {
+      activityRow = (
+        <div className="activity-preview-row flex items-center text-xs text-muted-foreground">
+          <span
+            className={
+              subjectSummary !== ""
+                ? "activity-shimmer thinking-head-excerpt"
+                : "activity-shimmer"
+            }
+          >
+            {liveVerbLabel(intl, faceKind)}
+            {subjectSummary !== "" && <>{" · "}{subjectSummary}</>}
+          </span>
+        </div>
+      );
+    } else if (thinkingExcerpt !== "") {
+      activityRow = (
+        <div
+          aria-hidden="true"
+          className="activity-preview-row flex items-center text-xs text-muted-foreground"
+        >
+          <span className="activity-shimmer thinking-head-excerpt">
+            <FormattedMessage id="thread.live.thinkingLabel" defaultMessage="Thinking" />
+            {" · "}
+            {thinkingExcerpt}
+          </span>
+        </div>
+      );
+    } else if (subject !== undefined) {
+      activityRow = (
+        <div className="activity-preview-row flex items-center text-xs text-muted-foreground">
+          <span className="activity-shimmer thinking-head-excerpt">
+            {liveVerbLabel(intl, subject.operationKind)}
+            {" · "}
+            {subject.summary}
+          </span>
+        </div>
+      );
+    }
+  }
+  // The status row's face content, shared by both postures (the fold toggle
+  // and the plain status line): the breathing dot + the shimmer sweeping the
+  // phase verb and the elapsed figure together (the running visual lives in
+  // styles.css's .activity-live-dot / .activity-shimmer, one shared 2.4s
+  // period). The verb reads ONLY the phase -- the count lives on the
+  // activity row, so a brief call ticks there without repainting this row.
+  // The figure sits at ONE tail position in every posture and phase: the
+  // ask stamp derives the elapsed seconds, so the clock never resets across
+  // a face rotation or a posture flip (the #1612 re-host of the #1264 turn
+  // clock).
   const face = (
     <>
       <span aria-hidden="true" className="activity-live-dot shrink-0" />
       <span className="activity-shimmer">
-        {faceKind !== undefined ? (
-          <>
-            {liveVerbLabel(intl, faceKind)}
-            {" · "}
-            {intl.formatMessage(
-              {
-                id: "thread.trace.liveCount",
-                defaultMessage:
-                  "{count, plural, one {# call completed} other {# calls completed}}",
-              },
-              { count: completedCount },
-            )}
-          </>
-        ) : streaming ? (
-          <FormattedMessage id="thread.live.running" defaultMessage="Running…" />
-        ) : thinkingExcerpt !== "" ? (
-          <>
-            {liveTurn.step !== null && liveTurn.step > 1 ? (
-              <FormattedMessage
-                id="thread.live.thinkingStepLead"
-                defaultMessage="Thinking (step {step})"
-                values={{ step: liveTurn.step }}
-              />
-            ) : (
-              <FormattedMessage id="thread.live.thinkingLead" defaultMessage="Thinking" />
-            )}
-            {" · "}
-            <span className="thinking-head-excerpt">{thinkingExcerpt}</span>
-          </>
+        {runningPhase ? (
+          liveTurn.step !== null && liveTurn.step > 1 ? (
+            <FormattedMessage
+              id="thread.live.runningStepLead"
+              defaultMessage="Running (step {step})"
+              values={{ step: liveTurn.step }}
+            />
+          ) : (
+            <FormattedMessage id="thread.live.runningLead" defaultMessage="Running" />
+          )
         ) : liveTurn.step !== null && liveTurn.step > 1 ? (
           <FormattedMessage
-            id="thread.live.thinkingStep"
-            defaultMessage="Thinking (step {step})…"
+            id="thread.live.thinkingStepLead"
+            defaultMessage="Thinking (step {step})"
             values={{ step: liveTurn.step }}
           />
         ) : (
-          <FormattedMessage id="common.thinking" defaultMessage="Thinking…" />
+          <FormattedMessage id="thread.live.thinkingLead" defaultMessage="Thinking" />
         )}
         <WaitElapsedSuffix startedAt={liveTurn.askedAt} pausedSince={liveTurn.pausedSince} />
       </span>
@@ -261,6 +333,7 @@ export function LiveActivityLine({
           onToggle={() => setExpanded((v) => !v)}
           className="mt-2"
           chevronSide="right"
+          above={activityRow}
         >
           {face}
         </FoldToggle>
@@ -268,8 +341,9 @@ export function LiveActivityLine({
         // The plain status face: the same layout minus the fold chrome --
         // no chevron, no hover, no click, nothing to expand (the user
         // ruling). The hook class stays as the test anchor.
-        <div className="process-toggle mt-2 flex items-center gap-1 text-sm text-muted-foreground">
-          {face}
+        <div className="process-toggle mt-2 flex flex-col items-stretch gap-0.5 text-sm text-muted-foreground">
+          {activityRow}
+          <div className="flex items-center gap-1">{face}</div>
         </div>
       )}
       {expanded && tailRound !== undefined && (

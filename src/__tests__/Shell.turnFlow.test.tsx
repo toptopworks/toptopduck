@@ -97,7 +97,7 @@ describe("App turn-progress feedback (issue #82 / ADR-0059)", () => {
     // face -- the ONE wait surface since #1612 retired the bar's phase
     // mirror (the composer carries no wait feedback of its own).
     const line = () => document.querySelector(".process-toggle") as HTMLElement;
-    await waitFor(() => expect(within(line()).getByText("思考中…")).toBeInTheDocument());
+    await waitFor(() => expect(within(line()).getByText("思考中")).toBeInTheDocument());
 
     // A tool-call event for a DIFFERENT session is filtered out (ADR-0056):
     // the face stays on the wait -- no verb face, no row folds.
@@ -111,7 +111,7 @@ describe("App turn-progress feedback (issue #82 / ADR-0059)", () => {
         },
       },
     });
-    expect(within(line()).getByText("思考中…")).toBeInTheDocument();
+    expect(within(line()).getByText("思考中")).toBeInTheDocument();
 
     // The same event for THIS session folds a running row: the face
     // rotates onto the tool verb (entry is immediate, the anti-dead-line
@@ -127,7 +127,7 @@ describe("App turn-progress feedback (issue #82 / ADR-0059)", () => {
       },
     });
     await waitFor(() =>
-      expect(within(line()).getByText(/正在读取/)).toBeInTheDocument(),
+      expect(within(line()).getByText(/读取 · SELECT 1/)).toBeInTheDocument(),
     );
 
     // The settle folds the live turn away: the line leaves with it.
