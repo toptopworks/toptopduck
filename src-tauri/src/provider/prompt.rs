@@ -243,9 +243,6 @@ pub fn render_skill_block(skills: &[SkillPromptFragment]) -> String {
 pub fn build_acp_context_block(request: &ProviderRequest, locale: ResponseLocale) -> String {
     let mut out = String::new();
     out.push_str(response_locale_directive(locale));
-    // Issue #1667: the same shared const the built-in face renders -- a
-    // discourse rule, not a capability boundary, so the ADR-0086 posture
-    // (external runtime keeps its own persona) is untouched.
     out.push_str(INTER_ROUND_NARRATION_DIRECTIVE);
     out.push_str(&render_schema_context(request));
     out.trim_start().to_owned()
@@ -348,7 +345,13 @@ OUT-OF-SCOPE（DuckDB 原生不支持）：预测与 forecasting / 时序建模�
 /// NOT a capability boundary -- it may ride the ACP leading block beside the
 /// locale directive (its own discourse-layer precedent) without touching the
 /// ADR-0086 boundary posture.
-pub(crate) const INTER_ROUND_NARRATION_DIRECTIVE: &str = "\n\n【轮间叙述】\n每当你要开始一批新意图的工具调用时，先向用户写一句第一人称意图句，说明这批调用要做什么、为什么。同一批内的连续调用与失败自纠重试不再重写；意图句只写一句话，不写成段落；终局答复轮不适用本节。叙述语言跟随「回复语言」。";
+///
+/// The delegated sub-agent's preamble
+/// ([`crate::agents::delegation::subagent_preamble`]) deliberately does NOT
+/// carry this directive: its audience is the main agent, its rounds land as
+/// the ADR-0117 nested sub-trace, and the delegation call itself is a
+/// main-batch tool call the main loop narrates (issue #1667).
+const INTER_ROUND_NARRATION_DIRECTIVE: &str = "\n\n【轮间叙述】\n每当你要开始一批新意图的工具调用时，先向用户写一句第一人称意图句，说明这批调用要做什么、为什么。同一批内的连续调用与失败自纠重试不再重写；意图句只写一句话，不写成段落；终局答复轮不适用本节。叙述语言跟随「回复语言」。";
 
 /// Assemble the full system prompt (ADR-0052 + ADR-0086, calibrated by
 /// ADR-0110 / issue #700 and ADR-0119 / issue #983; memory block by issue
@@ -368,7 +371,8 @@ pub(crate) const INTER_ROUND_NARRATION_DIRECTIVE: &str = "\n\n【轮间叙述】
 /// Centralized so the assembly order has one source of truth and the locale
 /// directive can never be silently dropped by a call site. An empty
 /// snapshot renders an empty disclosure and adds nothing, so the no-skills
-/// assembly shape (base + locale + schema) is preserved.
+/// assembly shape (base + narration directive + locale + schema) is
+/// preserved.
 pub fn build_tool_system_prompt(
     request: &ProviderRequest,
     locale: ResponseLocale,
@@ -376,9 +380,6 @@ pub fn build_tool_system_prompt(
     memory: &[crate::persistence::memory::MemoryIndexRow],
 ) -> String {
     let mut out = String::from(TOOL_CALLING_PROMPT);
-    // Issue #1667: the inter-round narration directive closes the base
-    // prompt's own sections (a standing behavioral contract, ahead of the
-    // per-session indexes below) -- shared const with the ACP face.
     out.push_str(INTER_ROUND_NARRATION_DIRECTIVE);
     let disclosure = render_skill_disclosure(skills);
     out.push_str(&disclosure);
@@ -829,6 +830,17 @@ mod tests {
             prompt.contains("终局答复轮不适用"),
             "the final-answer turn is exempt"
         );
+        let base_tail = prompt.find("【样本数据不可信】").unwrap();
+        let narration_pos = prompt.find("【轮间叙述】").unwrap();
+        let locale_pos = prompt.find("【回复语言】").unwrap();
+        assert!(
+            base_tail < narration_pos,
+            "narration closes the base prompt's own sections"
+        );
+        assert!(
+            narration_pos < locale_pos,
+            "narration rides ahead of the per-session indexes"
+        );
     }
 
     #[test]
@@ -1215,7 +1227,7 @@ mod tests {
         // codex, all spawned through this single construction point) renders
         // the narration directive after the locale section (whose
         // 【回复语言】 the narration language follows) and before the schema
-        // context -- this face is where live-machine narration is sparsest.
+        // context -- this face carries the slimmest standing prompt.
         let req = request(vec![ds("people", r#""people".data"#)], Some("people"));
         let block = build_acp_context_block(&req, ResponseLocale::ZhCN);
         let locale_pos = block.find("【回复语言】").unwrap();

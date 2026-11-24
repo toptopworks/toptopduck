@@ -65,8 +65,9 @@ pub fn assemble(
 
 /// Assemble the tool-calling request for one agent turn (ADR-0081, issue #318;
 /// ADR-0086, issue #364): the tool-use system prompt (capability boundary +
-/// the skill metadata index + locale directive + the windowed schema
-/// context), the windowed conversation as user/assistant message turns
+/// the inter-round narration directive + the skill metadata index + locale
+/// directive + the windowed schema context), the windowed conversation as
+/// user/assistant message turns
 /// closed by the asking question, and the built-in tool table. Pure over
 /// the same state as [`assemble`] -- the single-SQL payload is built first
 /// and reused as the schema-context source, so the two paths can never
