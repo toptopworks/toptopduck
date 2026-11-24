@@ -42,12 +42,16 @@ export function FoldToggle({
    *  callers pass "mt-0": the block-flow mt-0.5 breathing gap is what knocks
    *  the toggle off the text inside a flex items-center summary line. */
   className?: string;
-  /** Which end the chevron rides. "right" trails the label and pushes to the
-   *  row's far edge (ml-auto), the accordion posture -- the turn-level fold
-   *  heads (the settled process fold and the live activity line, one chrome
-   *  so the settle swap moves nothing structurally; the sanctioned tier
-   *  split does step the head's size 13px to body-md across the swap) read
-   *  status left, affordance right. */
+  /** Which end the chevron rides. "right" trails the label (ml-auto), the
+   *  affordance-right posture -- the turn-level fold heads (the settled
+   *  process fold and the live activity line, one chrome so the settle swap
+   *  moves nothing structurally; the sanctioned tier split does step the
+   *  head's size 13px to body-md across the swap) read status left,
+   *  affordance right. The fold row hugs its content (self-start), so the
+   *  auto margin never gains slack: a head stretched wider by its `above`
+   *  slot (the live activity line's full-bleed activity row) keeps the
+   *  chevron beside the status text instead of throwing it at the
+   *  container's far edge. */
   chevronSide?: "left" | "right";
   /** An activity row rendered ABOVE the fold row, inside the button (the
    *  live activity line's preview row, issue #1661): a full-width flex row
@@ -72,8 +76,13 @@ export function FoldToggle({
       )}
     />
   );
+  // The row hugs its content (self-start against the button's
+  // items-stretch column): fit-content callers render identically, and a
+  // button stretched wider by the `above` slot cannot hand the slack to
+  // the chevron's ml-auto -- the affordance stays beside the label
+  // (issue #1669).
   const row = (
-    <div className="flex items-center gap-1">
+    <div className="flex items-center gap-1 self-start">
       {chevronSide === "left" && chevron}
       {children}
       {chevronSide === "right" && chevron}
