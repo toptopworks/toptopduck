@@ -53,9 +53,9 @@ export function FoldToggle({
    *  preflight resets margin, padding, and font but not the alignment), so
    *  a short label there reads as an indent that grows as the content
    *  shrinks -- flex items are immune, plain blocks are not. Absent keeps
-   *  every existing caller byte-identical -- the row wrapper replaces the
-   *  button's own flex, so a single-child button lays out exactly as
-   *  before. */
+   *  every existing caller laying out identically -- the row wrapper
+   *  replaces the button's own flex, so a single-child button renders
+   *  exactly as before. */
   above?: ReactNode;
 }) {
   const chevron = (

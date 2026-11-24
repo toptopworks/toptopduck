@@ -372,8 +372,9 @@ describe("LiveTurnExchange trailing wait status (the #1606 bare face)", () => {
 // earlier round seals as its own settle-isomorphic block in the
 // exchange). With nothing behind
 // the fold the line is a plain status line (no hover, no click). The
-// head reads the rows' kind and count ONLY -- never the streaming
-// summary (the anti-flicker contract); the pending approval card stays
+// activity row reads the CURRENT call's summary (whole with the call's
+// start event); the status row reads the phase ONLY -- never the summary
+// (the anti-flicker contract); the pending approval card stays
 // out at the turn tail, always visible (ADR-0083).
 describe("LiveTurnExchange live activity line (issue #1606)", () => {
   // One round mid-flight: the first call completed, the second running.
@@ -403,6 +404,9 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     expect(head).toHaveAttribute("aria-expanded", "false");
     expect(head).toHaveTextContent("读取 · SELECT 2");
     expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
+    // The count's retirement is pinned negatively: no completed-count
+    // phrase can return to the head unnoticed.
+    expect(head?.textContent).not.toContain("已完成");
     // The sweep half of the pair is pinned too: flattening the face back to
     // bare text must red here, not silently retire the liveness (DESIGN.md's
     // Indicators entry carries the sweep as the liveness carrier).
@@ -592,8 +596,9 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     expect(before.container.querySelector("button.process-toggle")?.textContent).toContain(
       "读取 · SELECT 2",
     );
-    // An args delta lands: the summary rides onto the row at once -- the
-    // content is per-completion state, one row, one direction, the fade
+    // A longer summary lands between renders (the summary arrives whole
+    // with the call's start event; a later event can replace it): it
+    // rides onto the row at once -- one row, one direction, the fade
     // closing it; the pin is that the growth never flips the phase face.
     const streamed = midCallTurn();
     streamed.rounds[0]!.rows[1] = {
@@ -606,6 +611,13 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       "SELECT 2 with a far longer streaming args summary riding the delta",
     );
     expect(after).toContain("执行中 ·");
+    // The status row never hosts the summary -- the overlap #1661 retires.
+    // The figure's whitespace-pre span lives on the status shimmer alone,
+    // so its closest shimmer ancestor is that row's span.
+    const statusSpan = before.container
+      .querySelector("button.process-toggle .whitespace-pre")
+      ?.closest(".activity-shimmer");
+    expect(statusSpan?.textContent).not.toContain("SELECT 2");
   });
 
   it("holds the tool face one window past the last call, then reads the wait", () => {
@@ -672,6 +684,67 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     );
   });
 
+  it("shows the verb alone while the running call's summary is empty (never the previous call's summary under this verb)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.step = 2;
+    turn.rounds = [
+      { rows: [settledRow({ key: "call-0", summary: "SELECT 1" })] },
+      {
+        rows: [
+          {
+            ...settledRow({
+              key: "call-1",
+              name: "describe",
+              operationKind: "network",
+              summary: "",
+            }),
+            running: true,
+            success: null,
+          },
+        ],
+      },
+    ];
+    const { container } = renderExchange(turn);
+    // While a call runs, the subject stays on THAT call: an empty summary
+    // renders the verb alone -- the previous call's summary must not
+    // speak under this call's verb (the compound misreport).
+    const row = container.querySelector(".activity-preview-row");
+    expect(row?.textContent).toBe("联网");
+    expect(row?.querySelector(".thinking-head-excerpt")).toBeNull();
+    expect(container.querySelector("button.process-toggle")).toHaveTextContent(
+      "执行中（第 2 步）",
+    );
+  });
+
+  it("previews the held call as the verb alone when its summary is empty (the linger never speaks for it)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.rounds = [
+      {
+        rows: [
+          settledRow({ key: "call-0", summary: "SELECT 1" }),
+          {
+            key: "req-1",
+            name: "fetch",
+            server: "acme",
+            operationKind: "network",
+            summary: "",
+            approval: { requestId: "req-1", response: null },
+            running: false,
+            success: null,
+            resultExcerpt: "",
+          },
+        ],
+      },
+    ];
+    const { container } = renderExchange(turn);
+    // The gate hold previews the held call the same way: empty summary,
+    // verb alone -- the settled call's summary must not ride under the
+    // held call's verb.
+    const row = container.querySelector(".activity-preview-row");
+    expect(row?.textContent).toBe("联网");
+    expect(row?.querySelector(".thinking-head-excerpt")).toBeNull();
+  });
+
   it("holds the tool face through the streaming window's grace, then reads the streaming running face", () => {
     vi.useFakeTimers();
     try {
@@ -703,6 +776,11 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       // the running face + the clock keep the line alive beside the prose.
       expect(view.container.querySelector(".process-toggle")?.textContent).toContain(
         "执行中（第 2 步）",
+      );
+      // The steady state: the linger survives past the grace -- the row
+      // does not retire with the face that carried it in.
+      expect(view.container.querySelector(".activity-preview-row")).toHaveTextContent(
+        "读取 · SELECT 1",
       );
     } finally {
       vi.useRealTimers();

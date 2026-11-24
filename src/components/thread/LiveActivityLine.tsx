@@ -1,10 +1,12 @@
 // The live activity line (issue #1606, ADR-0151; clock re-host #1612): the
 // turn's activity face in TWO rows (issue #1661). The ACTIVITY row sits
 // above -- the current activity on its own line: the running call's verb +
-// completed count, or the thinking stream's latest completed line (right-
-// edge fade); hidden while expanded (the expand face owns both signals at
-// full width), absent when neither exists (the prose-streaming caret is its
-// own liveness; a source-less wait keeps the status words alone). The
+// its summary, the thinking stream's latest completed line (right-edge
+// fade), or -- between calls -- the turn's most recent completed call (the
+// linger, holding the row steady through gaps and round boundaries);
+// hidden while expanded (the expand face owns both signals at full width),
+// absent only when nothing reports -- no call, no excerpt, no completed
+// call to linger on (the prose-streaming caret is its own liveness). The
 // STATUS row sits below -- the phase verb ("Thinking (step n)" /
 // "Running (step n)", rotating honestly with the phase) + the elapsed
 // figure, whose only host this row has been since the composer wait slot
@@ -17,7 +19,7 @@
 // the ACTIVITY row; the status row reads only the phase, so it can never
 // blink inside a burst. The line's fold holds the CURRENT round only
 // (#1656's narrowing of the #1606 domain): the turn tail -- its completed
-// calls ride the activity row's count, its thinking + calls sit in the
+// calls feed the activity row's linger, its thinking + calls sit in the
 // expand face, the running call is absorbed by the activity row. Every
 // earlier round seals as its own settle-isomorphic block in the exchange,
 // NOT here; prose no longer partitions the two.
@@ -128,16 +130,19 @@ export function LiveActivityLine({
     running?.operationKind ?? (gateHold ? heldRow?.operationKind : undefined);
   const waiting = isRoundTripWait(liveTurn);
   // The activity row's subject: the running call, a gate-held call, or --
-  // between calls -- the turn's most recent completed call. The linger
-  // keeps the row reporting the last activity through the gaps AND across
-  // round boundaries (a round completion seals the finished rounds above
-  // the line; the row holds steady anyway, instead of blinking away until
-  // the new round's first call completes -- and a fast call's summary,
-  // which lands with the completion event rather than while it runs,
-  // still shows). First non-empty summary wins; a summary-less running
-  // call falls through to the linger.
+  // between calls -- the turn's most recent completed call. While a call
+  // runs or a gate holds, the subject stays on THAT row: an empty summary
+  // renders the verb alone, never the previous call's summary under this
+  // call's verb. The linger claims the row only between calls, keeping it
+  // steady through the gaps AND across round boundaries (a round
+  // completion seals the finished rounds above the line; the row holds
+  // instead of blinking away, and a call's summary still shows through
+  // the gap that follows it). The summary arrives whole with the call's
+  // start event and shows from the moment the call runs -- no per-delta
+  // churn, no completion-event wait.
   const lastSettled = [...allRows].reverse().find(isSettledRow);
-  const subject = [running, heldRow, lastSettled].find(
+  const activeRow = running ?? (gateHold ? heldRow : undefined);
+  const subject = [activeRow, activeRow === undefined ? lastSettled : undefined].find(
     (row) => row !== undefined && row.summary !== "",
   );
   // The tool face's presence and verb, one piece of state: faceKind is the
@@ -220,11 +225,12 @@ export function LiveActivityLine({
   // separator, then the content: while the kind holds, the label never
   // repaints; only the content after it moves. The tool phase labels with
   // the damped verb and shows the CURRENT call's summary -- gate hold
-  // previews the held call the same way; a summary-less call falls through
-  // to the linger (the row keeps reporting the tail round's last completed
-  // call, so the row holds steady through the gaps and a fast call's
-  // summary -- which lands with the completion event, never while it runs
-  // -- still shows). The thinking phase labels with the settled thinking
+  // previews the held call the same way; a summary-less call shows the
+  // verb alone (never the previous call's summary under this call's verb).
+  // Between calls the row lingers on the turn's most recent completed
+  // call, and a call's summary -- which lands whole with its start event,
+  // showing from the moment the call runs -- still shows through the gaps
+  // that follow it. The thinking phase labels with the settled thinking
   // fold's own word so the live row and its settle shape read as the same
   // line, and streams the latest completed paragraph. Everything rides ONE
   // self-painted span -- gradient, clip, and fade must own the element
@@ -327,7 +333,7 @@ export function LiveActivityLine({
           onToggle={() => setExpanded((v) => !v)}
           className="mt-2"
           chevronSide="right"
-          above={activityRow ?? undefined}
+          above={activityRow}
         >
           {face}
         </FoldToggle>
