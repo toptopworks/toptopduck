@@ -116,6 +116,42 @@ function stubScrollGeometry(region: HTMLElement, scrollHeight: number, clientHei
   return () => scrollTop;
 }
 
+// The expand-time pin runs inside the click, before any instance-level
+// stub can exist (the region only mounts on expand): this variant hands
+// the geometry to the element prototype so the effect's first run already
+// clamps through it. Returns the restore for the original descriptors
+// (#1669).
+function stubScrollGeometryOnPrototype(scrollHeight: number, clientHeight: number) {
+  const proto = HTMLParagraphElement.prototype;
+  const saved = ["scrollHeight", "clientHeight", "scrollTop"].map((key) => [
+    key,
+    Object.getOwnPropertyDescriptor(proto, key),
+  ] as const);
+  let scrollTop = 0;
+  Object.defineProperty(proto, "scrollHeight", {
+    value: scrollHeight,
+    configurable: true,
+  });
+  Object.defineProperty(proto, "clientHeight", {
+    value: clientHeight,
+    configurable: true,
+  });
+  Object.defineProperty(proto, "scrollTop", {
+    get: () => scrollTop,
+    set: (v: number) => {
+      scrollTop = Math.min(v, scrollHeight - clientHeight);
+    },
+    configurable: true,
+  });
+  return () => {
+    for (const [key, desc] of saved) {
+      if (desc) Object.defineProperty(proto, key, desc);
+      else Reflect.deleteProperty(proto, key);
+    }
+    scrollTop = 0;
+  };
+}
+
 describe("LiveTurnExchange runtime attribution marker (issue #818)", () => {
   it("renders no marker before the ask-time read lands (runtime absent)", () => {
     const { container } = renderExchange(liveTurnWith(undefined));
@@ -558,6 +594,25 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     ];
     view.rerender(exchangeEl(grown));
     expect(scrollTop()).toBe(400 - 192);
+  });
+
+  it("pins to the tail at expand time itself, before any append (#1669)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [{ thinkingText: "第一段推理完毕\n第二段正在生成", rows: [] }];
+    const view = renderExchange(turn);
+    // The region only mounts on expand, so the expand-time pin (the
+    // `expanded` half of the effect deps) fires inside the click: the
+    // prototype-level geometry is what the effect's first run clamps
+    // through -- an instance stub is always installed too late.
+    const restore = stubScrollGeometryOnPrototype(400, 192);
+    try {
+      fireEvent.click(view.container.querySelector("button.process-toggle")!);
+      const region = screen.getByRole("region", { name: "智能体思考" });
+      expect(region.scrollTop).toBe(400 - 192);
+    } finally {
+      restore();
+    }
   });
 
   it("releases the stream pin while the reader scrolls up and re-arms at the tail (#1669)", () => {

@@ -47,11 +47,7 @@ export function FoldToggle({
    *  process fold and the live activity line, one chrome so the settle swap
    *  moves nothing structurally; the sanctioned tier split does step the
    *  head's size 13px to body-md across the swap) read status left,
-   *  affordance right. The fold row hugs its content (self-start), so the
-   *  auto margin never gains slack: a head stretched wider by its `above`
-   *  slot (the live activity line's full-bleed activity row) keeps the
-   *  chevron beside the status text instead of throwing it at the
-   *  container's far edge. */
+   *  affordance right. */
   chevronSide?: "left" | "right";
   /** An activity row rendered ABOVE the fold row, inside the button (the
    *  live activity line's preview row, issue #1661): a full-width flex row

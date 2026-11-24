@@ -120,8 +120,8 @@ export function LiveActivityLine({
   const lineRows = tailRound?.rows ?? [];
   // The streaming thinking block's scroll follower (issue #1669): deltas
   // append into a max-h-48 overflow-y-auto region, so once the stream
-  // outgrows the cap
-  // the scrollbar sits at the top while the text grows below the fold.
+  // outgrows the cap the scrollbar sits at the top while the text grows
+  // below the fold.
   // The follower re-pins the viewport to the tail after every append --
   // armed at the element's mount and whenever the region reads "at the
   // tail", released the moment the reader scrolls up (the pin never fights
