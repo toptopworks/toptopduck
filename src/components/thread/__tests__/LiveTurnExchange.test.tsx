@@ -422,6 +422,10 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     // over the fold chrome's gap-0.5): the pin keeps the widened pair
     // spacing from collapsing back to the chrome default.
     expect(head).toHaveClass("gap-1.5");
+    // The tier pin guards the retier itself: the head rides the 13px
+    // chrome tier, and falling back to the chrome default or the old
+    // 12px body must red here, not silently revert.
+    expect(head).toHaveClass("text-[13px]");
     // The settled row's summary stays folded; the running call's summary is
     // the activity row's own payload now (#1661) -- it rides the label's
     // span, so the row's text carries it.
@@ -594,6 +598,9 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     // host. The face names the run, never 思考 over growing text.
     const line = container.querySelector(".process-toggle");
     expect(line).toHaveClass("max-w-full");
+    // The plain posture carries the same widened pair as the fold posture:
+    // the pin keeps the gap from collapsing back to the chrome default here.
+    expect(line).toHaveClass("gap-1.5");
     expect(line?.textContent).toContain("执行中");
     expect(line?.textContent).toContain("· 46秒");
     expect(line?.querySelector(".activity-live-dot")).not.toBeNull();
