@@ -4,4 +4,4 @@
 // the two faces cannot drift.
 
 export const THINKING_TEXT_CLASS =
-  "round-thinking m-0 mt-0.5 ml-5 rounded-md bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto";
+  "round-thinking m-0 mt-0.5 ml-5 rounded-md bg-muted p-2 text-[13px] text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto";

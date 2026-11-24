@@ -82,10 +82,14 @@ function LiveRoundBlock({
     >
       {sealed && settled.length > 0 && (
         <>
+          {/* The sealed round's trace fold rides the 13px head tier (the
+              trace family's one chrome -- live and settled must stay
+              isomorphic or the settle swap moves the head). */}
           <FoldToggle
             hookClass="trace-toggle"
             expanded={expanded}
             onToggle={() => setExpanded((v) => !v)}
+            className="text-[13px]"
           >
             {foldLabel(intl, settled)}
           </FoldToggle>

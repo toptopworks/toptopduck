@@ -1104,6 +1104,11 @@
    own. */
 .thinking-head-excerpt {
   display: inline-block;
+  /* min-width: 0 -- the span is the activity row's flex item, and a flex
+     item's automatic minimum is its min-content size (the nowrap text's
+     full width); min beats max-width, so without the floor the span
+     overruns the row and paints past the fade (jsdom-invisible). */
+  min-width: 0;
   max-width: 100%;
   overflow: hidden;
   white-space: nowrap;

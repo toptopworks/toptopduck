@@ -143,6 +143,7 @@ export function TraceStepFold({
         hookClass="trace-toggle"
         expanded={stepsExpanded}
         onToggle={() => setStepsExpanded((v) => !v)}
+        className="text-[13px]"
       >
         {foldLabel(intl, calls)}
       </FoldToggle>
@@ -218,7 +219,7 @@ export function TraceRow({
                 <span onClick={(e) => e.stopPropagation()}>
                   <FoldToggle
                     hookClass="subtrace-toggle"
-                    className="mt-0"
+                    className="mt-0 text-[13px]"
                     expanded={subOpen}
                     onToggle={() => setSubOpen((v) => !v)}
                   >

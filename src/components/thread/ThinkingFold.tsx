@@ -18,7 +18,16 @@ export function ThinkingFold({ thinking }: { thinking: ThinkingTrace }) {
   const toggle = () => setExpanded((e) => !e);
   return (
     <>
-      <FoldToggle hookClass="thinking-toggle" expanded={expanded} onToggle={toggle}>
+      {/* The head steps one tier below the body (13px, body-sm): the fold
+          head reads as chrome beside its 14px prose, not as a second body
+          line. Same tier as the trace fold heads, so the fold family reads
+          as one chrome. */}
+      <FoldToggle
+        hookClass="thinking-toggle"
+        expanded={expanded}
+        onToggle={toggle}
+        className="text-[13px]"
+      >
         <FormattedMessage
           id="thread.trace.thinkingToggle"
           defaultMessage="Thinking · {sec}s"

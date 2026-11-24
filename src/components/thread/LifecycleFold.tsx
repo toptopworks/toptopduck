@@ -123,7 +123,7 @@ export function LifecycleFold({
         // The marker line's only interactive control, so it carries the full
         // state set (DESIGN.md: focus rings are teal {colors.primary} at 2px
         // outline-offset; hover brightens, matching FoldToggle).
-        "flex w-full items-center gap-1.5 m-0 py-0.5 text-sm text-muted-foreground hover:text-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
+        "flex w-full items-center gap-1.5 m-0 py-0.5 text-[13px] text-muted-foreground hover:text-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
       )}
       aria-expanded={expanded}
       onClick={onToggle}
@@ -205,7 +205,7 @@ export function LifecycleFoldMembers({
     <li
       ref={rowRef}
       data-run-continue={continueConnector ? "true" : undefined}
-      className="lifecycle-fold-members m-0 py-0.5 pl-[22px] flex flex-wrap gap-x-2 gap-y-0.5 text-sm text-muted-foreground"
+      className="lifecycle-fold-members m-0 py-0.5 pl-[22px] flex flex-wrap gap-x-2 gap-y-0.5 text-[13px] text-muted-foreground"
     >
       {members.map((m) =>
         m === null ? null : (

@@ -255,7 +255,7 @@ export function LiveActivityLine({
     const subjectSummary = subject?.summary ?? "";
     if (faceKind !== undefined) {
       activityRow = (
-        <div className="activity-preview-row flex items-center text-xs text-muted-foreground">
+        <div className="activity-preview-row flex items-center text-[13px] text-muted-foreground">
           <span
             className={
               subjectSummary !== ""
@@ -272,7 +272,7 @@ export function LiveActivityLine({
       activityRow = (
         <div
           aria-hidden="true"
-          className="activity-preview-row flex items-center text-xs text-muted-foreground"
+          className="activity-preview-row flex items-center text-[13px] text-muted-foreground"
         >
           <span className="activity-shimmer thinking-head-excerpt">
             <FormattedMessage id="thread.live.thinkingLabel" defaultMessage="Thinking" />
@@ -283,7 +283,7 @@ export function LiveActivityLine({
       );
     } else if (subject !== undefined && !streaming) {
       activityRow = (
-        <div className="activity-preview-row flex items-center text-xs text-muted-foreground">
+        <div className="activity-preview-row flex items-center text-[13px] text-muted-foreground">
           <span className="activity-shimmer thinking-head-excerpt">
             {liveVerbLabel(intl, subject.operationKind)}
             {" · "}
@@ -337,7 +337,7 @@ export function LiveActivityLine({
           hookClass="process-toggle"
           expanded={expanded}
           onToggle={() => setExpanded((v) => !v)}
-          className="mt-2"
+          className="mt-2 max-w-full gap-1.5 text-[13px]"
           chevronSide="right"
           above={activityRow}
         >
@@ -346,8 +346,19 @@ export function LiveActivityLine({
       ) : (
         // The plain status face: the same layout minus the fold chrome --
         // no chevron, no hover, no click, nothing to expand (the user
-        // ruling). The hook class stays as the test anchor.
-        <div className="process-toggle mt-2 flex flex-col items-stretch gap-0.5 text-sm text-muted-foreground">
+        // ruling). The hook class stays as the test anchor. Both postures
+        // carry max-w-full: the exchange stream is items-start, so a
+        // fit-content head sizes by the nowrap excerpt's max-content and
+        // overruns the rail into the overflow-x crop (the tail-card pin's
+        // same family, #826/#872) -- the clamp lets a long summary's
+        // self-clip and fade engage at the rail's true right edge instead.
+        // Both postures also widen the row gap past the fold chrome's
+        // default and step the whole line down to the 13px tier: the head
+        // hosts only the activity row and the status row, so the root's
+        // text-[13px] retiers the status face, and the activity row's own
+        // branches carry the same class -- the line reads as one 13px
+        // chrome pair beside the 14px prose, never a second body line.
+        <div className="process-toggle mt-2 max-w-full flex flex-col items-stretch gap-1.5 text-[13px] text-muted-foreground">
           {activityRow}
           <div className="flex items-center gap-1">{face}</div>
         </div>

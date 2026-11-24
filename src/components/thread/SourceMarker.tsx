@@ -111,7 +111,7 @@ export function SourceMarker({
     <p
       className={cn(
         "source-lifecycle flex items-center gap-1.5 m-0 py-0.5",
-        "text-sm text-muted-foreground",
+        "text-[13px] text-muted-foreground",
         // Hook class kept for kind-targeted selectors/tests (.source-lifecycle.added etc.).
         event.kind.toLowerCase(),
         // Jump-select highlight (ADR-0047 chip-trace, issue #721): the row
