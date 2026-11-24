@@ -3,10 +3,12 @@
 // above -- the current activity on its own line: the running call's verb +
 // its summary, the thinking stream's latest completed line (right-edge
 // fade), or -- between calls -- the turn's most recent completed call (the
-// linger, holding the row steady through gaps and round boundaries);
-// hidden while expanded (the expand face owns both signals at full width),
-// absent only when nothing reports -- no call, no excerpt, no completed
-// call to linger on (the prose-streaming caret is its own liveness). The
+// linger, holding the row steady through gaps and round boundaries, yet
+// yielding while prose streams -- the caret is the streaming's own
+// liveness, and a present-tense verb over prose + caret claims a call that
+// is not running, #1663); hidden while expanded (the expand face owns both
+// signals at full width), absent when prose streams or nothing reports --
+// no call, no excerpt, no completed call to linger on. The
 // STATUS row sits below -- the phase verb ("Thinking (step n)" /
 // "Running (step n)", rotating honestly with the phase) + the elapsed
 // figure, whose only host this row has been since the composer wait slot
@@ -230,16 +232,20 @@ export function LiveActivityLine({
   // Between calls the row lingers on the turn's most recent completed
   // call, and a call's summary -- which lands whole with its start event,
   // showing from the moment the call runs -- still shows through the gaps
-  // that follow it. The thinking phase labels with the settled thinking
-  // fold's own word so the live row and its settle shape read as the same
-  // line, and streams the latest completed paragraph. Everything rides ONE
+  // that follow it; the streaming window is not one of those gaps (the
+  // row yields to the caret there, #1663). The thinking phase labels with
+  // the settled thinking fold's own word so the live row and its settle
+  // shape read as the same line, and streams the latest completed
+  // paragraph. Everything rides ONE
   // self-painted span -- gradient, clip, and fade must own the element
   // they paint (a descendant's overflow/mask cannot clip the ancestor
   // shimmer's glyph painting), and one span keeps the label inside the
   // opaque zone with the fade at the row's true right edge. Hidden while
   // expanded (the expand face owns both signals at full width); absent
-  // only when nothing reports (no face, no linger, no excerpt -- the
-  // prose caret is its own liveness). The tool-form row STAYS announced --
+  // only when prose streams (the linger yields to the caret -- a
+  // present-tense verb over streaming prose claims a call that is not
+  // running, #1663) or when nothing reports (no face, no linger, no
+  // excerpt). The tool-form row STAYS announced --
   // verb + summary is low-frequency state (what ran / is running), not
   // decoration; only the thinking row is aria-hidden: per-line churn is
   // decoration riding the status row's own announcement (the
@@ -275,7 +281,7 @@ export function LiveActivityLine({
           </span>
         </div>
       );
-    } else if (subject !== undefined) {
+    } else if (subject !== undefined && !streaming) {
       activityRow = (
         <div className="activity-preview-row flex items-center text-xs text-muted-foreground">
           <span className="activity-shimmer thinking-head-excerpt">

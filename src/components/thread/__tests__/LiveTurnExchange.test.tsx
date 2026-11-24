@@ -745,7 +745,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     expect(row?.querySelector(".thinking-head-excerpt")).toBeNull();
   });
 
-  it("holds the tool face through the streaming window's grace, then reads the streaming running face", () => {
+  it("holds the tool face through the streaming window's grace, then yields the row to the caret (#1663)", () => {
     vi.useFakeTimers();
     try {
       const view = renderExchange(midCallTurn());
@@ -764,8 +764,8 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       view.rerender(exchangeEl(prose));
       // The settled call sealed into its own round; the row lingers on it
       // ACROSS the round boundary through the grace (the turn's last
-      // completed call is the linger's domain, not the tail round's);
-      // past the window the streaming face owns the line.
+      // completed call is the linger's domain, not the tail round's) --
+      // grace is an inter-call gap, not the streaming window.
       expect(view.container.querySelector(".activity-preview-row")).toHaveTextContent(
         "读取 · SELECT 1",
       );
@@ -777,10 +777,15 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       expect(view.container.querySelector(".process-toggle")?.textContent).toContain(
         "执行中（第 2 步）",
       );
-      // The steady state: the linger survives past the grace -- the row
-      // does not retire with the face that carried it in.
-      expect(view.container.querySelector(".activity-preview-row")).toHaveTextContent(
-        "读取 · SELECT 1",
+      // The steady state: the row yields to the caret -- a present-tense
+      // verb over streaming prose claims a call that is not running (the
+      // #1662 Advisory A misreading); the gaps the linger holds through
+      // are inter-call gaps and round boundaries, never this window.
+      expect(view.container.querySelector(".activity-preview-row")).toBeNull();
+      // The yield retires the linger's content wholesale -- no summary can
+      // leak onto the status row (the anti-flicker contract).
+      expect(view.container.querySelector(".process-toggle")?.textContent).not.toContain(
+        "SELECT 1",
       );
     } finally {
       vi.useRealTimers();
