@@ -713,7 +713,7 @@ function AntecedentsFold({
         />
       </FoldToggle>
       {expanded && (
-        <div className="mb-1 flex max-w-full flex-wrap items-center gap-1 text-sm text-muted-foreground">
+        <div className="mb-1 flex max-w-full flex-wrap items-center gap-1 text-[13px] text-muted-foreground">
           {antecedents.map((p) => (
             <span
               key={p.dataset.reference_name}

@@ -1104,6 +1104,11 @@
    own. */
 .thinking-head-excerpt {
   display: inline-block;
+  /* min-width: 0 -- a defensive floor, not the clamp mechanism: with
+     overflow hidden (below), a flex item's automatic minimum is already
+     0, so max-width: 100% clamps on its own; the floor just keeps that
+     clamp alive if the overflow ever changes (jsdom-invisible). */
+  min-width: 0;
   max-width: 100%;
   overflow: hidden;
   white-space: nowrap;

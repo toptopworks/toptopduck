@@ -4,7 +4,9 @@
 // (TurnCard), the live thinking fold (issue #610), the delegation
 // sub-trace fold (issue #1355), and the antecedents lineage fold
 // (issue #1627) -- one chrome so the settle swap does not
-// move the fold the user is looking at. The hook class
+// move the fold the user is looking at (the head's size excepted
+// by ruling: the live activity line's head rides the 13px chrome
+// tier while the settled process fold keeps body-md). The hook class
 // is the fold's selector / test anchor, the label rides children.
 
 import type { ReactNode } from "react";
@@ -43,7 +45,9 @@ export function FoldToggle({
   /** Which end the chevron rides. "right" trails the label and pushes to the
    *  row's far edge (ml-auto), the accordion posture -- the turn-level fold
    *  heads (the settled process fold and the live activity line, one chrome
-   *  so the settle swap moves nothing) read status left, affordance right. */
+   *  so the settle swap moves nothing structurally; the sanctioned tier
+   *  split does step the head's size 13px to body-md across the swap) read
+   *  status left, affordance right. */
   chevronSide?: "left" | "right";
   /** An activity row rendered ABOVE the fold row, inside the button (the
    *  live activity line's preview row, issue #1661): a full-width flex row

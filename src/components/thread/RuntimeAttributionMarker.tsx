@@ -33,7 +33,7 @@ export function RuntimeAttributionMarker({
   const label =
     adapters?.find((a) => a.id === adapterId)?.display_name ?? persistedName ?? adapterId;
   return (
-    <p className="runtime-attribution m-0 mb-0.5 flex items-center gap-1 text-sm text-muted-foreground">
+    <p className="runtime-attribution m-0 mb-0.5 flex items-center gap-1 text-[13px] text-muted-foreground">
       <Terminal aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
       {label}
     </p>
