@@ -30,6 +30,7 @@ export function FoldToggle({
   children,
   className,
   chevronSide = "left",
+  above,
 }: {
   hookClass: FoldHookClass;
   expanded: boolean;
@@ -44,6 +45,18 @@ export function FoldToggle({
    *  heads (the settled process fold and the live activity line, one chrome
    *  so the settle swap moves nothing) read status left, affordance right. */
   chevronSide?: "left" | "right";
+  /** An activity row rendered ABOVE the fold row, inside the button (the
+   *  live activity line's preview row, issue #1661): a full-width flex row
+   *  the row keeps single-line flex beneath. The slot's content must stay
+   *  a flex row (as the fold row itself is): a button carries the user
+   *  agent's text-align: center into plain-block inline content (the
+   *  preflight resets margin, padding, and font but not the alignment), so
+   *  a short label there reads as an indent that grows as the content
+   *  shrinks -- flex items are immune, plain blocks are not. Absent keeps
+   *  every existing caller byte-identical -- the row wrapper replaces the
+   *  button's own flex, so a single-child button lays out exactly as
+   *  before. */
+  above?: ReactNode;
 }) {
   const chevron = (
     <ChevronRight
@@ -55,20 +68,26 @@ export function FoldToggle({
       )}
     />
   );
+  const row = (
+    <div className="flex items-center gap-1">
+      {chevronSide === "left" && chevron}
+      {children}
+      {chevronSide === "right" && chevron}
+    </div>
+  );
   return (
     <button
       type="button"
       className={cn(
         hookClass,
-        "mt-0.5 flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground",
+        "mt-0.5 flex flex-col items-stretch gap-0.5 text-sm text-muted-foreground hover:text-foreground",
         className,
       )}
       aria-expanded={expanded}
       onClick={onToggle}
     >
-      {chevronSide === "left" && chevron}
-      {children}
-      {chevronSide === "right" && chevron}
+      {above}
+      {row}
     </button>
   );
 }

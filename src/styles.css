@@ -1090,14 +1090,21 @@
   background: currentColor;
   animation: activity-live-dot 2.4s ease-in-out infinite;
 }
-/* The thinking head's excerpt (issue #1658): the streamed thinking's
-   latest complete line -- one line, trailing off at the right edge (a
-   fade, never a hard clip), capped so a long line cannot crowd out the
-   elapsed figure riding the face tail. */
+/* The thinking head's excerpt (issue #1658, re-housed #1661): the streamed
+   thinking's latest complete line, or the running call's summary, on the
+   activity row ABOVE the status row -- running the row's FULL width (the
+   reference rows run the line; the cap that reserved room for the elapsed
+   figure died with the same-row form). Mounted as `activity-shimmer
+   thinking-head-excerpt`: the shimmer must clip to THIS element's own text,
+   because a descendant of a wrapping shimmer can neither clip (overflow)
+   nor fade (mask) its glyphs -- they paint from the ancestor's background,
+   so the text's tail would escape its box over whatever follows. This
+   class adds only the self-clip and the fade (the fade is this element's
+   own mask, which now actually applies), never a second gradient of its
+   own. */
 .thinking-head-excerpt {
   display: inline-block;
-  max-width: min(26rem, 60vw);
-  vertical-align: bottom;
+  max-width: 100%;
   overflow: hidden;
   white-space: nowrap;
   mask-image: linear-gradient(90deg, black 82%, transparent);
