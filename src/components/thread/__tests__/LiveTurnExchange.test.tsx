@@ -93,6 +93,65 @@ const settledRow = (over: Partial<LiveRoundRow> = {}): LiveRoundRow => ({
   ...over,
 });
 
+// jsdom does no layout: hand a scroll region its geometry (the stream's
+// height vs the viewport's; the scrollTop setter clamps like a real
+// scroller). Returns the live scrollTop reader for assertions (#1669).
+function stubScrollGeometry(region: HTMLElement, scrollHeight: number, clientHeight: number) {
+  let scrollTop = 0;
+  Object.defineProperty(region, "scrollHeight", {
+    value: scrollHeight,
+    configurable: true,
+  });
+  Object.defineProperty(region, "clientHeight", {
+    value: clientHeight,
+    configurable: true,
+  });
+  Object.defineProperty(region, "scrollTop", {
+    get: () => scrollTop,
+    set: (v: number) => {
+      scrollTop = Math.min(v, scrollHeight - clientHeight);
+    },
+    configurable: true,
+  });
+  return () => scrollTop;
+}
+
+// The expand-time pin runs inside the click, before any instance-level
+// stub can exist (the region only mounts on expand): this variant hands
+// the geometry to the element prototype so the effect's first run already
+// clamps through it. Returns the restore for the original descriptors
+// (#1669).
+function stubScrollGeometryOnPrototype(scrollHeight: number, clientHeight: number) {
+  const proto = HTMLParagraphElement.prototype;
+  const saved = ["scrollHeight", "clientHeight", "scrollTop"].map((key) => [
+    key,
+    Object.getOwnPropertyDescriptor(proto, key),
+  ] as const);
+  let scrollTop = 0;
+  Object.defineProperty(proto, "scrollHeight", {
+    value: scrollHeight,
+    configurable: true,
+  });
+  Object.defineProperty(proto, "clientHeight", {
+    value: clientHeight,
+    configurable: true,
+  });
+  Object.defineProperty(proto, "scrollTop", {
+    get: () => scrollTop,
+    set: (v: number) => {
+      scrollTop = Math.min(v, scrollHeight - clientHeight);
+    },
+    configurable: true,
+  });
+  return () => {
+    for (const [key, desc] of saved) {
+      if (desc) Object.defineProperty(proto, key, desc);
+      else Reflect.deleteProperty(proto, key);
+    }
+    scrollTop = 0;
+  };
+}
+
 describe("LiveTurnExchange runtime attribution marker (issue #818)", () => {
   it("renders no marker before the ask-time read lands (runtime absent)", () => {
     const { container } = renderExchange(liveTurnWith(undefined));
@@ -516,6 +575,129 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     const region = screen.getByRole("region", { name: "智能体思考" });
     expect(region).toHaveTextContent("第一段推理完毕");
     expect(region).toHaveTextContent("第二段正在生成");
+  });
+
+  it("keeps the expanded streaming block pinned to the tail as deltas append (#1669)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [{ thinkingText: "第一段推理完毕\n第二段正在生成", rows: [] }];
+    const view = renderExchange(turn);
+    fireEvent.click(view.container.querySelector("button.process-toggle")!);
+    const region = screen.getByRole("region", { name: "智能体思考" });
+    const scrollTop = stubScrollGeometry(region, 400, 192);
+    // The next append grows the stream: the follower re-pins the viewport
+    // to the tail (the max scroll position).
+    const grown = liveTurnWith(undefined);
+    grown.step = 1;
+    grown.rounds = [
+      { thinkingText: "第一段推理完毕\n第二段正在生成\n第三段推理完毕", rows: [] },
+    ];
+    view.rerender(exchangeEl(grown));
+    expect(scrollTop()).toBe(400 - 192);
+  });
+
+  it("pins to the tail at expand time itself, before any append (#1669)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [{ thinkingText: "第一段推理完毕\n第二段正在生成", rows: [] }];
+    const view = renderExchange(turn);
+    // The region only mounts on expand, so the expand-time pin (the
+    // `expanded` half of the effect deps) fires inside the click: the
+    // prototype-level geometry is what the effect's first run clamps
+    // through -- an instance stub is always installed too late.
+    const restore = stubScrollGeometryOnPrototype(400, 192);
+    try {
+      fireEvent.click(view.container.querySelector("button.process-toggle")!);
+      const region = screen.getByRole("region", { name: "智能体思考" });
+      expect(region.scrollTop).toBe(400 - 192);
+    } finally {
+      restore();
+    }
+  });
+
+  it("releases the stream pin while the reader scrolls up and re-arms at the tail (#1669)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [{ thinkingText: "第一段推理完毕\n第二段正在生成", rows: [] }];
+    const view = renderExchange(turn);
+    fireEvent.click(view.container.querySelector("button.process-toggle")!);
+    const region = screen.getByRole("region", { name: "智能体思考" });
+    const scrollTop = stubScrollGeometry(region, 400, 192);
+    // The reader scrolls up to read: the region's scroll event reads "past
+    // the tail" and releases the pin -- the next append leaves the viewport
+    // where the reader parked it.
+    fireEvent.scroll(region, { target: { scrollTop: 0 } });
+    const grown = liveTurnWith(undefined);
+    grown.step = 1;
+    grown.rounds = [
+      { thinkingText: "第一段推理完毕\n第二段正在生成\n第三段推理完毕", rows: [] },
+    ];
+    view.rerender(exchangeEl(grown));
+    expect(scrollTop()).toBe(0);
+    // Scrolling back to the tail re-arms the follower; the following append
+    // pins again.
+    fireEvent.scroll(region, { target: { scrollTop: 400 - 192 } });
+    const grownAgain = liveTurnWith(undefined);
+    grownAgain.step = 1;
+    grownAgain.rounds = [
+      {
+        thinkingText:
+          "第一段推理完毕\n第二段正在生成\n第三段推理完毕\n第四段推理完毕",
+        rows: [],
+      },
+    ];
+    view.rerender(exchangeEl(grownAgain));
+    expect(scrollTop()).toBe(400 - 192);
+  });
+
+  it("follows a new round's stream from its first frame without inheriting the released pin (#1669)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [{ thinkingText: "第一段推理完毕\n第二段正在生成", rows: [] }];
+    const view = renderExchange(turn);
+    fireEvent.click(view.container.querySelector("button.process-toggle")!);
+    const region = screen.getByRole("region", { name: "智能体思考" });
+    stubScrollGeometry(region, 400, 192);
+    // The reader releases the pin in round 1.
+    fireEvent.scroll(region, { target: { scrollTop: 0 } });
+    // A new round opens with its own stream: the face remounts (keyed by
+    // the round count, so the boundary does not depend on the seal's
+    // branch swap), the mount arm re-arms, and the new round's next append
+    // pins from the remounted face -- round 1's released pin does not
+    // leak.
+    const nextRound = liveTurnWith(undefined);
+    nextRound.step = 2;
+    nextRound.rounds = [
+      { thinkingText: "第一段推理完毕\n第二段正在生成", rows: [settledRow()] },
+      { thinkingText: "新一轮的流式推理文本", rows: [] },
+    ];
+    view.rerender(exchangeEl(nextRound));
+    const freshRegion = screen.getByRole("region", { name: "智能体思考" });
+    expect(freshRegion).not.toBe(region);
+    const freshScroll = stubScrollGeometry(freshRegion, 400, 192);
+    const more = liveTurnWith(undefined);
+    more.step = 2;
+    more.rounds = [
+      { thinkingText: "第一段推理完毕\n第二段正在生成", rows: [settledRow()] },
+      { thinkingText: "新一轮的流式推理文本\n继续推理", rows: [] },
+    ];
+    view.rerender(exchangeEl(more));
+    expect(freshScroll()).toBe(400 - 192);
+  });
+
+  it("keeps the fold head's chevron beside the status text (the row hugs its content, #1669)", () => {
+    const turn = liveTurnWith(undefined);
+    turn.step = 1;
+    turn.rounds = [{ thinkingText: "第一段推理完毕\n第二段正在生成", rows: [] }];
+    const { container } = renderExchange(turn);
+    // The chevron's ml-auto must never gain slack from the button's width:
+    // the fold row hugs its content, so a full-bleed activity row above
+    // cannot throw the affordance at the container's far edge. Scoped to
+    // the line's own head -- the hook class rides the settled folds too.
+    const head = container.querySelector("button.process-toggle");
+    const chevron = head?.querySelector(".ml-auto");
+    expect(chevron).not.toBeNull();
+    expect(chevron?.parentElement).toHaveClass("self-start");
   });
 
   it("keeps the excerpt off the status row: activity row above, elapsed figure never beside it (#1661)", () => {

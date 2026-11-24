@@ -31,7 +31,7 @@
 // line: no hover, no click (the user ruling). The expand posture seeds
 // the settled turn-level process fold across the swap.
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { FoldToggle } from "./FoldToggle";
 import { ThinkingFold } from "./ThinkingFold";
@@ -80,6 +80,12 @@ function liveVerbLabel(intl: IntlShape, kind: OperationKind): string {
 // the face (entry is immediate) -- they just never churn the verb.
 const FACE_WINDOW_MS = 600;
 
+// How close (px) to a scroll region's bottom counts as "at the tail" for
+// the streaming block's follower: inside the slack the pin stays armed,
+// past it the reader has scrolled up to read and the stream keeps growing
+// below the viewport without dragging it.
+const FOLLOW_SLACK_PX = 4;
+
 export function LiveActivityLine({
   liveTurn,
   onRespond,
@@ -112,6 +118,38 @@ export function LiveActivityLine({
   // what retires the line, so the domain needs no other boundary.
   const tailRound = liveTurn.rounds.at(-1);
   const lineRows = tailRound?.rows ?? [];
+  // The streaming thinking block's scroll follower (issue #1669): deltas
+  // append into a max-h-48 overflow-y-auto region, so once the stream
+  // outgrows the cap the scrollbar sits at the top while the text grows
+  // below the fold.
+  // The follower re-pins the viewport to the tail after every append --
+  // armed at the element's mount and whenever the region reads "at the
+  // tail", released the moment the reader scrolls up (the pin never fights
+  // a reader; scrolling back to the tail re-arms it). The pin itself lands
+  // the region at its tail, so its own scroll event re-reads as armed.
+  const streamRef = useRef<HTMLParagraphElement | null>(null);
+  const followTailRef = useRef(true);
+  // The mount arm (stable identity -- an inline callback would re-fire per
+  // render and resurrect a released pin on every append): a fresh stream
+  // face follows from its first paint, and a previous round's released pin
+  // must not leak into the round-boundary remount.
+  const mountStreamRef = useCallback((el: HTMLParagraphElement | null) => {
+    streamRef.current = el;
+    if (el !== null) followTailRef.current = true;
+  }, []);
+  useEffect(() => {
+    const el = streamRef.current;
+    if (el !== null && followTailRef.current) el.scrollTop = el.scrollHeight;
+  }, [expanded, tailRound?.thinkingText]);
+  // The stickiness read the region's scroll events run: past the slack the
+  // reader has scrolled up and the follower releases; at the tail it
+  // re-arms.
+  const updateTailPin = () => {
+    const el = streamRef.current;
+    if (el === null) return;
+    followTailRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_SLACK_PX;
+  };
   const running = allRows.find((row) => row.running);
   // The gate hold (an approval-channel row the gateway has not completed):
   // the activity line KEEPS the tool face while a pending card waits (the
@@ -379,8 +417,14 @@ export function LiveActivityLine({
               // body renders -- unfolded by design (the user expanded the
               // face to watch the stream), replaced by the ThinkingFold at
               // the freeze (custody: the stream's home is the activity
-              // line, the frozen block's the settle).
+              // line, the frozen block's the settle). Keyed by the round
+              // count so the round boundary remounts the face even on a
+              // seal-bypassing path -- the mount arm re-arms
+              // unconditionally (issue #1669).
               <p
+                key={liveTurn.rounds.length}
+                ref={mountStreamRef}
+                onScroll={updateTailPin}
                 className={THINKING_TEXT_CLASS}
                 tabIndex={0}
                 role="region"
