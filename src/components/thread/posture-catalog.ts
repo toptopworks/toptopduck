@@ -5,7 +5,7 @@ import type {
   DiscoveredRuntime,
   SessionModelConfig,
 } from "../../types/runtime";
-import type { CatalogNote, PostureCatalog } from "./ComposerPostureTrigger";
+import type { CatalogNote, PostureCatalog } from "./posture-directory";
 
 // The posture-catalog pure projection (ADR-0096 D6 priority chain, ADR-0097,
 // issues #529/#586): which catalog the composer's posture cascade offers,

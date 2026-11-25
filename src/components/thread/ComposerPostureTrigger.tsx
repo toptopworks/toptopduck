@@ -6,7 +6,6 @@ import { ChevronDown, Info } from "lucide-react";
 import { fmtError } from "../../lib/error-presentation";
 import { usePointerCloseIntent } from "../../lib/usePointerCloseIntent";
 import type { SaveError } from "../../types/session";
-import type { BuiltinCatalogModel, CatalogModel } from "../../types/runtime";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { Input } from "../ui/input";
 import {
@@ -21,6 +20,12 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 import { LABEL_HIDE_NARROW } from "./composer-visual";
+import {
+  deriveDimensionRows,
+  derivePostureDirectory,
+  type CatalogNote,
+  type PostureCatalog,
+} from "./posture-directory";
 
 // The next-turn posture text button (ADR-0099 Decision 3, issue #574/#573):
 // a resident text control seated BEFORE the runtime trigger on the
@@ -40,16 +45,9 @@ import { LABEL_HIDE_NARROW } from "./composer-visual";
 // clearing row and the honest synthetic row for a held value the catalog
 // does not offer (issue #529). All rows render bare ids -- the one name
 // form across the menu, the button, and the settings page (issue #1648).
-// The built-in catalog (issue #1639) rides the
-// same form with three honest deltas: the probe's in-flight window renders
-// a disabled placeholder row in both dimension lists (issue #1648); the
-// strength row is a permanent seat whose unavailable state (a held model
-// with no discrete tiers, nothing held) reads as a disabled hint instead
-// of a vanished row (issue #1648 feedback); and the MODEL
-// dimension has no clearing row (ADR-0154) -- the built-in runtime has no CLI
-// default for "unselected" to mean, so the way back to the pinned default
-// is its own selectable row, while the strength dimension keeps its clear
-// row (there "unselected" is real: no strength is injected).
+// The built-in catalog (issue #1639) rides the same form; its three honest
+// deltas (placeholder row, permanent strength seat, no model clearing row)
+// are directory rulings owned by posture-directory.ts.
 // Item selection keeps the menu open (preventDefault) so the checked state
 // updates and the fault lines below stay visible -- the fault surfaces that
 // rode the old popover's selector body.
@@ -95,40 +93,6 @@ export type ComposerPostureTriggerProps = {
   onMenuOpen?: () => void;
   disabled: boolean;
 };
-
-// The catalog the cascade menu offers, discriminated by source (ADR-0096 D6):
-// "acp" is the flat handshake catalog (independent model / thought-level
-// lists + the CLI-reported currents); "perModel" is the probe cache's
-// per-model catalog, whose thought-level list is the SELECTED model's
-// supported efforts in the CLI's declared order; "builtin" (issue #1639,
-// ADR-0153) is the built-in runtime's first-hand endpoint list with catalog
-// metadata -- no CLI current (the profile's model field is the effective
-// default), and an empty `models` list is the honest fallback shape (probe
-// pending or failed -- silent by contract), never an error surface. A null
-// `profileModel` is the unpinned profile (ADR-0154).
-export type PostureCatalog =
-  | {
-    kind: "acp";
-    models: string[];
-    thoughtLevels: string[];
-    currentModel: string | null;
-    currentThoughtLevel: string | null;
-  }
-  | { kind: "perModel"; models: CatalogModel[] }
-  | {
-    kind: "builtin";
-    models: BuiltinCatalogModel[];
-    profileModel: string | null;
-    // True while the lazy probe (issue #1639) is in flight: both dimension
-    // lists seat a disabled placeholder row instead of the settled shape
-    // (issue #1648) -- an honest wait instead of rows/strength appearing
-    // from nothing. Failure stays silent: false renders the fallback shape.
-    loading?: boolean;
-  };
-
-// The catalog provenance note kind (see ComposerPostureTriggerProps):
-// which of the two honest-source explanations, if any, applies.
-export type CatalogNote = "stale-runtime" | "from-probe" | null;
 
 export function ComposerPostureTrigger({
   label,
@@ -183,68 +147,19 @@ export function ComposerPostureTrigger({
     defaultMessage: "Default (recommended)",
   });
 
-  // Normalize the catalog into one directory shape (the acp / perModel /
-  // builtin dispatch happens once, not per consumer below): the model ids,
-  // the CLI-reported current per dimension, and -- perModel only -- the
-  // SELECTED model's supported efforts (null/unknown model = none; the
-  // flagged default model is the model dimension's effective current).
-  let modelIds: string[];
-  let currentModel: string | null;
-  let levelIds: string[];
-  let currentLevel: string | null;
-  // The strength row is a permanent seat on every family (issue #1648
-  // feedback, retiring #1639's hide): the probe's in-flight window renders
-  // the placeholder, a tiered held model renders its list, and a held model
-  // without discrete tiers renders the disabled no-levels hint -- hiding
-  // the row after the placeholder had shown it was the flicker this fixes.
-  // A held level (explicit selection) never reads unavailable: the row
-  // stays live for its synthetic row (issue #529).
-  let levelUnavailable = false;
-  if (catalog.kind === "acp") {
-    modelIds = catalog.models;
-    currentModel = catalog.currentModel;
-    levelIds = catalog.thoughtLevels;
-    currentLevel = catalog.currentThoughtLevel;
-  } else if (catalog.kind === "builtin") {
-    modelIds = catalog.models.map((m) => m.id);
-    // The effective default: the profile's pinned model, or null for an
-    // unpinned profile (ADR-0154) -- what the unselected state runs next
-    // turn when one is pinned; no CLI reports a current here.
-    currentModel = catalog.profileModel;
-    currentLevel = null;
-    const held = model ?? catalog.profileModel;
-    const entry = held != null ? catalog.models.find((m) => m.id === held) : undefined;
-    levelIds = entry?.supported_reasoning_efforts ?? [];
-    levelUnavailable =
-      !catalog.loading && levelIds.length === 0 && thoughtLevel == null;
-  } else {
-    modelIds = catalog.models.map((m) => m.id);
-    currentModel = catalog.models.find((m) => m.is_default)?.id ?? null;
-    // The strength list rides the held model (issue #1648, retiring #537's
-    // disable-while-unselected): the CLI current IS the held value when
-    // nothing is picked, so its efforts seat the list -- the default and an
-    // explicit pick of the same id configure strength alike. Unavailable
-    // only when no held id exists (an empty directory): an explicit pick
-    // outside the directory keeps the row enabled with an empty list, where
-    // the held level's own synthetic row (if any) carries the state.
-    const held = model ?? currentModel;
-    const heldEntry = held != null
-      ? (catalog.models.find((m) => m.id === held) ?? null)
-      : null;
-    levelIds = heldEntry?.supported_reasoning_efforts ?? [];
-    currentLevel = heldEntry?.default_reasoning_effort ?? null;
-    levelUnavailable = held == null;
-  }
-
-  // The held value per dimension: the explicit selection, else the
-  // CLI-reported current the next turn would actually run (the retired
-  // select's held chain). Feeds the first-level rows' inline values and the
-  // clearing rows' annotations; the second-level synthetic row is derived
-  // inside DimensionSub from the same value.
-  const heldModel = model ?? currentModel;
-  const heldLevel = thoughtLevel ?? currentLevel;
-  // The built-in probe's in-flight flag, shared by both dimension calls.
-  const builtinLoading = catalog.kind === "builtin" ? catalog.loading : undefined;
+  // The directory projection (posture-directory.ts) owns the family
+  // dispatch and the held chain; the clearing-row labels stay here -- they
+  // compose the localized default label.
+  const {
+    modelIds,
+    currentModel,
+    levelIds,
+    currentLevel,
+    levelUnavailable,
+    heldModel,
+    heldLevel,
+    builtinLoading,
+  } = derivePostureDirectory(catalog, model, thoughtLevel);
 
   // The clearing row at the top of each second-level list: "Default
   // (recommended)" -- annotated with the CLI's reported current so the user
@@ -479,26 +394,19 @@ function DimensionSub({
 }) {
   const intl = useIntl();
   const [query, setQuery] = useState("");
-  const normalizedQuery = query.trim().toLowerCase();
-  // The directory view under the current query: a row survives when its id
-  // carries the query as a case-insensitive substring (issue #1648 retired
-  // the display-name half with the names themselves). An empty (or
-  // whitespace-only) query is the full list.
-  const filteredIds =
-    normalizedQuery === ""
-      ? ids
-      : ids.filter((id) => id.toLowerCase().includes(normalizedQuery));
-  // The empty state's gates (issue #1648 review): not while the probe is in
-  // flight (the placeholder owns the wait -- "no match" over an unloaded
-  // list is a false statement), and only when the directory itself has rows
-  // to filter (an empty directory is the probe's settled fallback, not a
-  // filter miss -- the silence keeps a failed probe from reading as one).
-  const showNoMatch =
-    searchable &&
-    !loading &&
-    normalizedQuery !== "" &&
-    ids.length > 0 &&
-    filteredIds.length === 0;
+  // The row-set projection (posture-directory.ts) owns the filter view, the
+  // no-match gate, and the synthetic row; this component keeps the query
+  // state, the filter input's key handling, and the radio group's fallback
+  // chain.
+  const { filteredIds, showNoMatch, unrepresentedId, note: syntheticNote } =
+    deriveDimensionRows({
+      ids,
+      displayValue,
+      query,
+      loading,
+      searchable,
+      isBuiltinModel: isBuiltinModelDimension,
+    });
 
   // The filter input's key handling (issue #1645): character keys never
   // bubble into the content's typeahead (each keystroke would otherwise
@@ -519,22 +427,6 @@ function DimensionSub({
     }
   };
 
-  // The synthetic row's id, derived from this row's own inputs: it exists
-  // if and only if the displayed value is a non-empty id outside `ids`.
-  // Selectable, so the menu stays honest about an active posture it cannot
-  // otherwise show and the user can adopt it explicitly.
-  const unrepresentedId =
-    displayValue != null && displayValue !== "" && !ids.includes(displayValue)
-      ? displayValue
-      : null;
-  const isBuiltinModel = isBuiltinModelDimension ?? false;
-  // The "pinned" annotation retired (issue #1648 feedback): the held
-  // checkmark already names the row the next turn runs, and where the
-  // value came from (a pick vs the profile's pin) is not a distinction
-  // the mark carries either. Only the runtime omission keeps its note --
-  // selecting an id the endpoint no longer serves deserves the warning.
-  const syntheticNote =
-    unrepresentedId == null || isBuiltinModel ? undefined : "runtime";
   return (
     <DropdownMenuSub
       onOpenChange={(open) => {
@@ -593,7 +485,7 @@ function DimensionSub({
                 the button and the first-level annotation read -- instead of
                 vanishing whenever nothing was explicitly picked. */}
             <DropdownMenuRadioGroup value={selectedId ?? displayValue ?? ""}>
-              {!isBuiltinModel && (
+              {!isBuiltinModelDimension && (
                 <ClearingItem label={clearLabel} onClear={() => onSelect(null)} />
               )}
               {loading && (
