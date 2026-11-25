@@ -284,10 +284,11 @@ export function useColdStartSelection(args: {
   );
 
   // The namespace reset's second path: the EFFECTIVE runtime can move
-  // without an explicit pick (default_runtime changes in Settings or an
-  // adapter-table refetch move the startup resolution, ADR-0098). Same
-  // reset, same ledger invalidation -- the picker-path reset above covers
-  // explicit switches only.
+  // without any mounted picker observing it (default_runtime changes in
+  // Settings or an adapter-table refetch move the startup resolution,
+  // ADR-0098). Same reset, same ledger invalidation -- the picker-side
+  // reset covers only namespace changes observed while the composer is
+  // mounted.
   const prevEffectiveRuntimeRef = useRef(effectiveRuntime);
   useEffect(() => {
     const prev = prevEffectiveRuntimeRef.current;
