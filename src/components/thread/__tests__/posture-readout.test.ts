@@ -36,6 +36,13 @@ describe("derivePostureReadout", () => {
       labelKind: { kind: "held", parts: ["pinned"] },
       tooltipModel: "pinned",
     });
+    // An unpinned profile with a lone held strength keeps its bare-strength
+    // label while the tooltip half stays null -- the one built-in input
+    // where the two halves diverge.
+    expect(derivePostureReadout(reads({ thought_level: "high" }))).toEqual({
+      labelKind: { kind: "held", parts: ["high"] },
+      tooltipModel: null,
+    });
     // An unpinned profile with nothing held: the next turn refuses.
     expect(derivePostureReadout(reads())).toEqual({
       labelKind: { kind: "noModel" },
@@ -51,11 +58,11 @@ describe("derivePostureReadout", () => {
   it("external arm: the held pair's three forms, the default verdict when nothing is held", () => {
     expect(
       derivePostureReadout(reads({ model: "m-1", thought_level: "high" }, { isExternal: true })),
-    ).toEqual({ labelKind: { kind: "held", parts: ["m-1", "high"] }, tooltipModel: "m-1" });
+    ).toEqual({ labelKind: { kind: "held", parts: ["m-1", "high"] }, tooltipModel: null });
     // Either side omitted when unset: a lone model ...
     expect(derivePostureReadout(reads({ model: "m-1" }, { isExternal: true }))).toEqual({
       labelKind: { kind: "held", parts: ["m-1"] },
-      tooltipModel: "m-1",
+      tooltipModel: null,
     });
     // ... and a lone thought level is its own honest form (issue #584).
     expect(derivePostureReadout(reads({ thought_level: "medium" }, { isExternal: true }))).toEqual({
@@ -63,6 +70,14 @@ describe("derivePostureReadout", () => {
       tooltipModel: null,
     });
     expect(derivePostureReadout(reads({}, { isExternal: true }))).toEqual({
+      labelKind: { kind: "defaultRecommended" },
+      tooltipModel: null,
+    });
+    // The external arm pins the tooltip half null even with a pinned
+    // built-in profile -- the external tooltip never reads this half.
+    expect(
+      derivePostureReadout(reads({}, { isExternal: true, builtInModel: "pinned" })),
+    ).toEqual({
       labelKind: { kind: "defaultRecommended" },
       tooltipModel: null,
     });

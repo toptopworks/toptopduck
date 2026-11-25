@@ -82,9 +82,8 @@ export function derivePostureReadout(reads: PostureReadoutReads): PostureReadout
       ? { kind: "held", parts: heldParts }
       : { kind: "defaultRecommended" };
   // The tooltip slot rides the same chain's model half (held -> pinned ->
-  // the honest empty state); the external tooltip names the adapter and
-  // never reads this half.
-  const tooltipModel =
-    heldPostureParts({ model: effectiveModel, thought_level: null })[0] ?? null;
+  // the honest empty state); the external arm pins null -- its tooltip
+  // names the adapter and never reads this half.
+  const tooltipModel = isExternal ? null : effectiveModel || null;
   return { labelKind, tooltipModel };
 }

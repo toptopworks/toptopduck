@@ -469,9 +469,10 @@ export function ComposerProviderPicker({
   // identity -- another profile, or this profile's base edited in Settings,
   // arriving here as a prop change from any entry point -- is the
   // namespace reset a runtime switch already is. The same runtime write the
-  // dropdown's switch makes reseeds both channels (the session port slots
-  // the empty pair server-side, the cold-start port drops the pending
-  // pair); a same-endpoint profile switch keeps the held pair. This path
+  // dropdown's switch makes reseeds both channels (the session port
+  // re-seeds the posture slot from the new endpoint's backfill entry
+  // server-side, the cold-start port drops the pending pair); a
+  // same-endpoint profile switch keeps the held pair. This path
   // covers only changes the mounted picker can observe; the effective-
   // runtime moves that bypass it reset in composer-selection-write.ts.
   const builtInNamespace =
@@ -650,14 +651,26 @@ export function ComposerProviderPicker({
     noProfiles,
     builtInModel,
   });
-  const postureLabel =
-    labelKind.kind === "held"
-      ? labelKind.parts.join(" · ")
-      : labelKind.kind === "notConfigured"
-        ? notConfigured
-        : labelKind.kind === "noModel"
-          ? noModelSelected
-          : defaultRecommended;
+  const verdict = labelKind.kind;
+  let postureLabel: string;
+  switch (verdict) {
+    case "held":
+      postureLabel = labelKind.parts.join(" · ");
+      break;
+    case "notConfigured":
+      postureLabel = notConfigured;
+      break;
+    case "noModel":
+      postureLabel = noModelSelected;
+      break;
+    case "defaultRecommended":
+      postureLabel = defaultRecommended;
+      break;
+    default: {
+      const unhandled: never = verdict;
+      throw new Error(`unhandled posture label kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
 
   // The provider readout = the preset the active profile sits on (e.g.
   // "Anthropic"); falls back to the profile's own display name when the
