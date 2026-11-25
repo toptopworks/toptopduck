@@ -293,10 +293,21 @@ describe("ComposerPostureTrigger per-model catalog (issue #537)", () => {
     expect(levelContent.textContent).toContain("low");
     expect(levelContent.textContent).not.toContain("high");
   });
-  // The held-chain / availability rulings (the Thinking row driven by the
-  // CLI current, the enabled-with-empty-list explicit pick, the empty
-  // directory's pick-a-model hint) are pure projections pinned directly in
-  // posture-directory.test.ts.
+  // The held-chain rulings (the Thinking row driven by the CLI current, the
+  // enabled-with-empty-list explicit pick) are pure projections pinned
+  // directly in posture-directory.test.ts; the empty directory's
+  // pick-a-model hint is the one DOM-side pin below.
+  it("disables the Thinking row with the pick-a-model hint on an empty directory", () => {
+    // No held id is knowable from an empty probe cache: the row reads
+    // unavailable and the fallback hint copy (not the builtin no-levels
+    // variant) answers -- the external family's only disabled path.
+    renderTrigger({ catalog: { kind: "perModel", models: [] }, model: null });
+    const rows = screen.getAllByTestId("sub-trigger");
+    expect(rows[1].getAttribute("aria-disabled")).toBe("true");
+    expect(rows[1].textContent).toContain("Pick a model first.");
+    const contents = screen.getAllByTestId("sub-content");
+    expect(contents[1].textContent).toBe("");
+  });
 });
 
 describe("ComposerPostureTrigger built-in catalog (issue #1639)", () => {

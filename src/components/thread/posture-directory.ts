@@ -3,7 +3,9 @@ import type { BuiltinCatalogModel, CatalogModel } from "../../types/runtime";
 // The posture cascade menu's display decisions, extracted from
 // ComposerPostureTrigger as pure projections (the same face as
 // posture-catalog.ts, which derives the catalog itself). Two functions own
-// every rendering ruling the menu makes:
+// the menu's display derivations; the family-gated rendering itself (the
+// loading placeholder, the builtin model dimension's gating) stays
+// component-side:
 //
 // - derivePostureDirectory normalizes the catalog's three family arms (acp /
 //   builtin / perModel) into one directory shape -- the model ids, the
@@ -55,13 +57,17 @@ export type PostureCatalog =
 export type CatalogNote = "stale-runtime" | "from-probe" | null;
 
 // The normalized directory view one catalog renders as. `heldModel` /
-// `heldLevel` feed the first-level rows' inline values and the clearing
-// rows' annotations; `builtinLoading` is undefined outside the builtin
-// family (external catalogs never load -- cache-fed).
-export type PostureDirectory = {
-  modelIds: string[];
+// `heldLevel` feed the first-level rows' inline values; the clearing rows
+// annotate the currents (`currentModel` / `currentLevel`). `isBuiltin` is
+// the family flag the component's builtin-only rulings read; the
+// builtin-only `builtinLoading` is undefined outside the builtin family
+// (external catalogs never load -- cache-fed), a declared part of the
+// shape.
+type PostureDirectory = {
+  isBuiltin: boolean;
+  modelIds: readonly string[];
   currentModel: string | null;
-  levelIds: string[];
+  levelIds: readonly string[];
   currentLevel: string | null;
   levelUnavailable: boolean;
   heldModel: string | null;
@@ -69,14 +75,24 @@ export type PostureDirectory = {
   builtinLoading: boolean | undefined;
 };
 
+// One catalog projection's reads: the catalog itself plus the session's
+// held pair. Named as an object because the two string slots are same-shaped
+// and asymmetrically live per family (thoughtLevel carries weight only in
+// the builtin arm) -- the sibling projections in this domain all take reads
+// objects for the same reason.
+export type PostureDirectoryReads = {
+  catalog: PostureCatalog;
+  model: string | null;
+  thoughtLevel: string | null;
+};
+
 export function derivePostureDirectory(
-  catalog: PostureCatalog,
-  model: string | null,
-  thoughtLevel: string | null,
+  reads: PostureDirectoryReads,
 ): PostureDirectory {
-  let modelIds: string[];
+  const { catalog, model, thoughtLevel } = reads;
+  let modelIds: readonly string[];
   let currentModel: string | null;
-  let levelIds: string[];
+  let levelIds: readonly string[];
   let currentLevel: string | null;
   // The strength row is a permanent seat on every family (issue #1648
   // feedback, retiring #1639's hide): the probe's in-flight window renders
@@ -128,10 +144,9 @@ export function derivePostureDirectory(
   // the same value inside deriveDimensionRows.
   const heldModel = model ?? currentModel;
   const heldLevel = thoughtLevel ?? currentLevel;
-  // The built-in probe's in-flight flag, shared by both dimension calls.
-  const builtinLoading = catalog.kind === "builtin" ? catalog.loading : undefined;
 
   return {
+    isBuiltin: catalog.kind === "builtin",
     modelIds,
     currentModel,
     levelIds,
@@ -139,7 +154,7 @@ export function derivePostureDirectory(
     levelUnavailable,
     heldModel,
     heldLevel,
-    builtinLoading,
+    builtinLoading: catalog.kind === "builtin" ? catalog.loading : undefined,
   };
 }
 
@@ -148,7 +163,7 @@ export function derivePostureDirectory(
 // flag, whether the filter row is seated at all, and the built-in model
 // dimension's flag (absent on the external dimensions).
 export type DimensionRowReads = {
-  ids: string[];
+  ids: readonly string[];
   displayValue: string | null;
   query: string;
   loading?: boolean;
@@ -160,8 +175,8 @@ export type DimensionRowReads = {
 // provenance: "runtime" warns that the endpoint no longer serves the held
 // id; undefined on ordinary rows and on the built-in model dimension (the
 // built-in runtime has no CLI to "not offer" anything).
-export type DimensionRows = {
-  filteredIds: string[];
+type DimensionRows = {
+  filteredIds: readonly string[];
   showNoMatch: boolean;
   unrepresentedId: string | null;
   note: "runtime" | undefined;

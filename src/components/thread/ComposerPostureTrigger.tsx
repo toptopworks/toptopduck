@@ -38,16 +38,18 @@ import {
 // profiles, or an external CLI never probed/discovered) it renders as a
 // static label with no arrow -- never a button pretending to be clickable;
 // with a catalog it opens the cascade menu (dropdown-menu Sub primitive):
-// two first-level rows (Model / Thinking) showing the current value inline,
+// two first-level rows (Model / Thinking) showing the held value inline,
 // each opening a second-level menuitemradio list (aria-checked carries the
 // held value -- the next turn's actual model/strength -- issue #584 as
 // re-anchored by #1648) with a leading "Default (recommended)"
 // clearing row and the honest synthetic row for a held value the catalog
 // does not offer (issue #529). All rows render bare ids -- the one name
 // form across the menu, the button, and the settings page (issue #1648).
-// The built-in catalog (issue #1639) rides the same form; its three honest
-// deltas (placeholder row, permanent strength seat, no model clearing row)
-// are directory rulings owned by posture-directory.ts.
+// The built-in catalog (issue #1639) rides the same form with three honest
+// deltas: the strength seat's availability is a directory ruling owned by
+// posture-directory.ts, while the placeholder row and the no-model-clearing-
+// row gate are component rulings over the same family flag the directory
+// exports (isBuiltin).
 // Item selection keeps the menu open (preventDefault) so the checked state
 // updates and the fault lines below stay visible -- the fault surfaces that
 // rode the old popover's selector body.
@@ -151,6 +153,7 @@ export function ComposerPostureTrigger({
   // dispatch and the held chain; the clearing-row labels stay here -- they
   // compose the localized default label.
   const {
+    isBuiltin,
     modelIds,
     currentModel,
     levelIds,
@@ -159,7 +162,7 @@ export function ComposerPostureTrigger({
     heldModel,
     heldLevel,
     builtinLoading,
-  } = derivePostureDirectory(catalog, model, thoughtLevel);
+  } = derivePostureDirectory({ catalog, model, thoughtLevel });
 
   // The clearing row at the top of each second-level list: "Default
   // (recommended)" -- annotated with the CLI's reported current so the user
@@ -249,10 +252,9 @@ export function ComposerPostureTrigger({
             // the discrete, short strength list does not.
             searchable
             ids={modelIds}
-            selectedId={model}
             loading={builtinLoading}
             onSelect={onSelectModel}
-            isBuiltinModelDimension={catalog.kind === "builtin"}
+            isBuiltinModelDimension={isBuiltin}
           />
           {/* The strength row is a permanent seat (issue #1648 feedback):
               unavailable (a held model with no discrete tiers, nothing
@@ -268,10 +270,9 @@ export function ComposerPostureTrigger({
             displayValue={heldLevel}
             clearLabel={levelClearLabel}
             ids={levelIds}
-            selectedId={thoughtLevel}
             unavailable={levelUnavailable}
             unavailableMessage={
-              catalog.kind === "builtin" ? (
+              isBuiltin ? (
                 <FormattedMessage
                   id="composer.runtimePicker.noLevelsForModel"
                   defaultMessage="No thinking levels"
@@ -340,9 +341,9 @@ function InlineValue({ value }: { value: string | null }) {
 }
 
 // One cascade dimension (ADR-0099 Decision 3): a first-level row (label +
-// the inline current value) opening the second-level radio list -- the
-// leading "Default (recommended)" clearing row (unless `clearable` is
-// false), the honest synthetic row
+// the inline held value) opening the second-level radio list -- the leading
+// "Default (recommended)" clearing row (absent on the builtin model
+// dimension), the honest synthetic row
 // for a held value the directory does not offer (#529), and the directory
 // itself as menuitemradio rows whose checked state the group value carries
 // (readable to screen readers, unlike the retired aria-hidden check icon,
@@ -352,7 +353,6 @@ function DimensionSub({
   displayValue,
   clearLabel,
   ids,
-  selectedId,
   onSelect,
   unavailable = false,
   unavailableMessage,
@@ -363,8 +363,7 @@ function DimensionSub({
   label: ReactNode;
   displayValue: string | null;
   clearLabel: string;
-  ids: string[];
-  selectedId: string | null;
+  ids: readonly string[];
   onSelect: (id: string | null) => void;
   unavailable?: boolean;
   // The hint text when unavailable, right-aligned in the trigger row: the
@@ -484,7 +483,7 @@ function DimensionSub({
                 the row the NEXT turn would actually run -- the same source
                 the button and the first-level annotation read -- instead of
                 vanishing whenever nothing was explicitly picked. */}
-            <DropdownMenuRadioGroup value={selectedId ?? displayValue ?? ""}>
+            <DropdownMenuRadioGroup value={displayValue ?? ""}>
               {!isBuiltinModelDimension && (
                 <ClearingItem label={clearLabel} onClear={() => onSelect(null)} />
               )}

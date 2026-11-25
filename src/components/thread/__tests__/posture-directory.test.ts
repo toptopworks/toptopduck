@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   deriveDimensionRows,
   derivePostureDirectory,
+  type DimensionRowReads,
   type PostureCatalog,
 } from "../posture-directory";
 import type { BuiltinCatalogModel, CatalogModel } from "../../../types/runtime";
@@ -39,7 +40,8 @@ describe("derivePostureDirectory", () => {
       currentModel: "m-1",
       currentThoughtLevel: "low",
     };
-    expect(derivePostureDirectory(acp, null, null)).toEqual({
+    expect(derivePostureDirectory({ catalog: acp, model: null, thoughtLevel: null })).toEqual({
+      isBuiltin: false,
       modelIds: ["m-1", "m-2"],
       currentModel: "m-1",
       levelIds: ["low", "high"],
@@ -49,7 +51,7 @@ describe("derivePostureDirectory", () => {
       heldLevel: "low",
       builtinLoading: undefined,
     });
-    expect(derivePostureDirectory(acp, "m-2", "high")).toMatchObject({
+    expect(derivePostureDirectory({ catalog: acp, model: "m-2", thoughtLevel: "high" })).toMatchObject({
       heldModel: "m-2",
       heldLevel: "high",
     });
@@ -61,7 +63,8 @@ describe("derivePostureDirectory", () => {
       models: [builtinModel("tiered", ["low", "high"]), builtinModel("toggle-only")],
       profileModel: "tiered",
     };
-    expect(derivePostureDirectory(catalog, null, null)).toMatchObject({
+    expect(derivePostureDirectory({ catalog, model: null, thoughtLevel: null })).toMatchObject({
+      isBuiltin: true,
       modelIds: ["tiered", "toggle-only"],
       currentModel: "tiered",
       currentLevel: null,
@@ -71,18 +74,18 @@ describe("derivePostureDirectory", () => {
     });
     // A held model without discrete tiers reads unavailable -- the permanent
     // seat's disabled hint (issue #1648 feedback).
-    const toggleOnly = derivePostureDirectory(
-      { ...catalog, profileModel: "toggle-only" },
-      null,
-      null,
-    );
+    const toggleOnly = derivePostureDirectory({
+      catalog: { ...catalog, profileModel: "toggle-only" },
+      model: null,
+      thoughtLevel: null,
+    });
     expect(toggleOnly).toMatchObject({ levelIds: [], levelUnavailable: true });
     // A held level (explicit selection) never reads unavailable (issue #529).
-    const heldLevel = derivePostureDirectory(
-      { ...catalog, profileModel: "toggle-only" },
-      null,
-      "medium",
-    );
+    const heldLevel = derivePostureDirectory({
+      catalog: { ...catalog, profileModel: "toggle-only" },
+      model: null,
+      thoughtLevel: "medium",
+    });
     expect(heldLevel).toMatchObject({ levelUnavailable: false, heldLevel: "medium" });
   });
 
@@ -93,7 +96,8 @@ describe("derivePostureDirectory", () => {
       profileModel: "toggle-only",
       loading: true,
     };
-    expect(derivePostureDirectory(catalog, null, null)).toMatchObject({
+    expect(derivePostureDirectory({ catalog, model: null, thoughtLevel: null })).toMatchObject({
+      isBuiltin: true,
       levelUnavailable: false,
       builtinLoading: true,
     });
@@ -109,7 +113,7 @@ describe("derivePostureDirectory", () => {
     };
     // Nothing selected: the flagged default is the held model, its efforts
     // seat the list, its declared default is the current level (issue #1648).
-    expect(derivePostureDirectory(catalog, null, null)).toMatchObject({
+    expect(derivePostureDirectory({ catalog, model: null, thoughtLevel: null })).toMatchObject({
       modelIds: ["gpt-5", "gpt-5-codex"],
       currentModel: "gpt-5",
       currentLevel: "low",
@@ -118,22 +122,22 @@ describe("derivePostureDirectory", () => {
       heldModel: "gpt-5",
     });
     // An explicit pick outside the directory stays held: enabled, empty list.
-    expect(derivePostureDirectory(catalog, "claude-x", null)).toMatchObject({
+    expect(derivePostureDirectory({ catalog, model: "claude-x", thoughtLevel: null })).toMatchObject({
       levelIds: [],
       levelUnavailable: false,
       heldModel: "claude-x",
     });
     // Empty directory: no held id is knowable -- the pick-a-model case.
     expect(
-      derivePostureDirectory({ kind: "perModel", models: [] }, null, null),
+      derivePostureDirectory({ catalog: { kind: "perModel", models: [] }, model: null, thoughtLevel: null }),
     ).toMatchObject({ currentModel: null, levelUnavailable: true, heldModel: null });
     // No flagged default: the current is null, but an explicit pick still
     // holds the row open -- unavailable reads the held id, not the current.
-    const noDefault = derivePostureDirectory(
-      { kind: "perModel", models: [catalogModel("solo", ["low"], false)] },
-      "solo",
-      null,
-    );
+    const noDefault = derivePostureDirectory({
+      catalog: { kind: "perModel", models: [catalogModel("solo", ["low"], false)] },
+      model: "solo",
+      thoughtLevel: null,
+    });
     expect(noDefault).toMatchObject({ currentModel: null, levelUnavailable: false });
   });
 });
@@ -149,27 +153,17 @@ describe("deriveDimensionRows", () => {
     ).toEqual(["claude-sonnet-4-5"]);
     // The display-name half no longer matches: ids only (issue #1648).
     expect(deriveDimensionRows({ ids, displayValue: null, query: "Sonnet 4.5" }).filteredIds).toEqual([]);
-    // Filtering itself is unconditional: the flag only gates the filter row
-    // and the no-match line -- a foreign dimension's quiet query state (the
-    // thought list never rides the model query) is wiring, pinned on the
-    // mounted suite.
-    expect(
-      deriveDimensionRows({ ids, displayValue: null, query: "sonn", searchable: false })
-        .filteredIds,
-    ).toEqual(["claude-sonnet-4-5"]);
   });
 
   it("gates the no-match line on searchable, settled, non-blank query, non-empty directory, and zero matches", () => {
-    const rows = (
-      overrides: Partial<Parameters<typeof deriveDimensionRows>[0]> = {},
-    ) =>
+    const rows = (overrides: Partial<DimensionRowReads> = {}) =>
       deriveDimensionRows({
         ids: ["m-1"],
         displayValue: null,
         query: "zzz",
         searchable: true,
         ...overrides,
-      } as Parameters<typeof deriveDimensionRows>[0]);
+      });
     expect(rows().showNoMatch).toBe(true);
     expect(rows({ searchable: false }).showNoMatch).toBe(false);
     expect(rows({ loading: true }).showNoMatch).toBe(false);
@@ -181,13 +175,13 @@ describe("deriveDimensionRows", () => {
   });
 
   it("derives the synthetic row from a held id outside the directory, with the runtime note off the builtin model dimension", () => {
-    const rows = (overrides: Partial<Parameters<typeof deriveDimensionRows>[0]> = {}) =>
+    const rows = (overrides: Partial<DimensionRowReads> = {}) =>
       deriveDimensionRows({
         ids: ["m-1"],
         displayValue: "held-x",
         query: "",
         ...overrides,
-      } as Parameters<typeof deriveDimensionRows>[0]);
+      });
     expect(rows().unrepresentedId).toBe("held-x");
     expect(rows().note).toBe("runtime");
     // In-directory, null, and empty displays seat no synthetic row.
