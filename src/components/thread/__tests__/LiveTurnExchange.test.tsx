@@ -935,12 +935,11 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       },
     ];
     const { container } = renderExchange(turn);
-    // The gate hold previews the held call the same way: empty summary,
-    // verb alone -- the settled call's summary must not ride under the
-    // held call's verb.
-    const row = container.querySelector(".activity-preview-row");
-    expect(row?.textContent).toBe("联网");
-    expect(row?.querySelector(".thinking-head-excerpt")).toBeNull();
+    // The pending card speaks for the held call whatever its summary: the
+    // activity row is suppressed outright (the retired verb-alone
+    // preview), and the settled call's summary must not speak for the
+    // held call either.
+    expect(container.querySelector(".activity-preview-row")).toBeNull();
   });
 
   it("holds the tool face through the streaming window's grace, then yields the row to the caret (#1663)", () => {
@@ -1011,11 +1010,14 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       },
     ];
     const { container } = renderExchange(turn);
-    // The gate hold KEEPS the tool face (the call is about to run -- the
-    // line vanishing entirely read as the process dying on the device);
-    // the card renders beside it (ADR-0083's flow face).
+    // The pending hold yields the tool row: the card below names the same
+    // tool, badge, and summary verbatim -- painting the held call twice
+    // back to back is the stacked face this retires. The status row alone
+    // keeps the line's liveness (dot + figure), the card renders beside it
+    // (ADR-0083's flow face).
+    expect(container.querySelector(".activity-preview-row")).toBeNull();
     const head = container.querySelector("button.process-toggle");
-    expect(head).toHaveTextContent("联网 · GET /x");
+    expect(head).toHaveTextContent("执行中");
     expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
     expect(container.querySelector(".approval-card")).not.toBeNull();
     // The tail mount's width pin: w-full, NOT the family's max-w-full cap
@@ -1055,7 +1057,10 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     expect(container.querySelector("button.process-toggle")).toBeNull();
     const line = container.querySelector(".process-toggle");
     expect(line?.tagName).toBe("DIV");
-    expect(line).toHaveTextContent("联网 · GET /x");
+    // The pending hold yields the tool row (the card speaks for the call);
+    // the plain status face keeps the liveness.
+    expect(line).not.toHaveTextContent("联网");
+    expect(line).toHaveTextContent("执行中");
     expect(line?.querySelector(".activity-live-dot")).not.toBeNull();
     // The plain posture carries the same widened gap (the fold posture's is
     // pinned on the head above).
@@ -1331,11 +1336,13 @@ describe("LiveTurnExchange sealed round settle form (#1656)", () => {
     ];
     const { container } = renderExchange(turn);
     // One sealed block (the earlier round); the current round's settled
-    // call stays in the line's fold, beside the pending card.
+    // call stays in the line's fold, beside the pending card -- whose
+    // hold also yields the tool row (the card speaks for the call).
     expect(container.querySelectorAll("button.trace-toggle")).toHaveLength(1);
     expect(container.querySelector("button.process-toggle")).toHaveTextContent(
-      "联网 · GET /x",
+      "执行中",
     );
+    expect(container.querySelector(".activity-preview-row")).toBeNull();
     expect(container.querySelector(".approval-card")).not.toBeNull();
     // The current round's rows sit behind the line's fold, not a block fold.
     expect(screen.queryByText("SELECT 2")).not.toBeInTheDocument();
@@ -1479,10 +1486,10 @@ describe("LiveTurnExchange the turn clock on the line (#1612)", () => {
       const view = renderExchange(
         gateHoldTurn(askedAt, null),
       );
-      // Gate hold renders the tool face; the figure runs from the ask stamp.
-      expect(view.container.querySelector(".process-toggle")).toHaveTextContent(
-        "联网",
-      );
+      // Gate hold: the pending card owns the held call's face (the tool
+      // row yields); the status row keeps the line, the figure runs from
+      // the ask stamp.
+      expect(view.container.querySelector(".activity-preview-row")).toBeNull();
       expect(screen.getByText("· 46秒")).toBeInTheDocument();
       // A streaming tail arrives: after the grace the face rotates to the
       // running face -- the figure does not reset (one host, one stamp).

@@ -166,6 +166,20 @@ export function LiveActivityLine({
     (row) => row.approval !== null && !isSettledRow(row) && !row.running,
   );
   const gateHold = !running && heldRow !== undefined;
+  // The pending-gate hold (a three-button card waits on the tail): the
+  // tool row's verb · summary would paint the held call twice back to
+  // back -- the card below names the same tool, badge, and summary
+  // verbatim -- so the row yields and the status row alone carries the
+  // line's liveness (the breathing dot and the frozen figure never leave,
+  // which answers the keep-the-face ruling's process-dying concern). The
+  // deny-held / abandoned windows keep the row: no card stands on the
+  // tail there, and the row is the held call's only face. While this row
+  // is away the decision ask is announced by the card's own role="status"
+  // hint (issue #1368).
+  const pendingHold =
+    heldRow !== undefined &&
+    heldRow.approval !== null &&
+    heldRow.approval.response === null;
   const toolKind: OperationKind | undefined =
     running?.operationKind ?? (gateHold ? heldRow?.operationKind : undefined);
   const waiting = isRoundTripWait(liveTurn);
@@ -283,13 +297,16 @@ export function LiveActivityLine({
   // only when prose streams (the linger yields to the caret -- a
   // present-tense verb over streaming prose claims a call that is not
   // running, #1663) or when nothing reports (no face, no linger, no
-  // excerpt). The tool-form row STAYS announced --
+  // excerpt), or when a pending card owns the held call's face
+  // (pendingHold -- the card speaks for the call verbatim, so painting
+  // both is the stacked face this retires; the status row keeps the
+  // liveness). The tool-form row STAYS announced --
   // verb + summary is low-frequency state (what ran / is running), not
   // decoration; only the thinking row is aria-hidden: per-line churn is
   // decoration riding the status row's own announcement (the
   // WaitElapsedSuffix doctrine), never a stream of its own.
   let activityRow: ReactNode = null;
-  if (!expanded) {
+  if (!expanded && !pendingHold) {
     const subjectSummary = subject?.summary ?? "";
     if (faceKind !== undefined) {
       activityRow = (

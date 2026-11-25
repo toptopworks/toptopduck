@@ -1764,7 +1764,9 @@ describe("Thread", () => {
           onLoadApprovalAttachments={onLoad}
         />,
       );
-      fireEvent.click(screen.getByRole("button", { name: "查看传入的文件（1）" }));
+      // The delivery rides the summary expand: the fold toggle is the
+      // disclosure now.
+      fireEvent.click(document.querySelector(".summary-fold-toggle")!);
       expect(onLoad).toHaveBeenCalledWith("req-1");
       expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
     });
