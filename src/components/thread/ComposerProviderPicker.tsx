@@ -26,7 +26,8 @@ import type {
   SessionRuntimeChoice,
 } from "../../types/runtime";
 import { RUNTIME_CHOICE_DEFAULT } from "../../types/runtime";
-import { ComposerPostureTrigger, type PostureCatalog } from "./ComposerPostureTrigger";
+import { ComposerPostureTrigger } from "./ComposerPostureTrigger";
+import type { PostureCatalog } from "./posture-directory";
 import {
   createSessionSelectionPort,
   type ColdStartSelectionChannel,

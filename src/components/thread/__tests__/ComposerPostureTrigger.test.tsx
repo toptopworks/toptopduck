@@ -4,7 +4,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 
 import { ComposerPostureTrigger } from "../ComposerPostureTrigger";
-import type { PostureCatalog } from "../ComposerPostureTrigger";
+import type { PostureCatalog } from "../posture-directory";
 import { TooltipProvider } from "../../ui/tooltip";
 import {
   closeAutoFocusCapture,
@@ -293,34 +293,14 @@ describe("ComposerPostureTrigger per-model catalog (issue #537)", () => {
     expect(levelContent.textContent).toContain("low");
     expect(levelContent.textContent).not.toContain("high");
   });
-
-  it("drives the Thinking row from the held model -- the CLI current -- when nothing is selected (issue #1648)", () => {
-    // The held chain is selection ?? CLI current: the default model's own
-    // efforts seat the strength list without an explicit pick, so the
-    // default and an explicit pick of the same id configure strength alike
-    // (the #537 disable-while-unselected rule is retired).
-    renderTrigger({ catalog: PER_MODEL_CATALOG, model: null });
-    const rows = screen.getAllByTestId("sub-trigger");
-    expect(rows[1].getAttribute("aria-disabled")).toBe("false");
-    const contents = screen.getAllByTestId("sub-content");
-    expect(contents[1].textContent).toContain("low");
-    expect(contents[1].textContent).toContain("medium");
-    expect(contents[1].textContent).toContain("high");
-  });
-
-  it("keeps the Thinking row enabled with an empty list for an explicit pick outside the directory", () => {
-    // An explicit not-offered id is still a held id: the pick-a-model hint
-    // is reserved for the no-held-id case (an empty directory), so the
-    // enabled row seats the held level's own synthetic row if one exists.
-    renderTrigger({ catalog: PER_MODEL_CATALOG, model: "claude-x" });
-    const rows = screen.getAllByTestId("sub-trigger");
-    expect(rows[1].getAttribute("aria-disabled")).toBe("false");
-    expect(rows[1].textContent).not.toContain("Pick a model first.");
-  });
-
-  it("disables the Thinking row only when the held model is not in the directory", () => {
-    // Empty directory: no current is knowable, so the held value is null
-    // and the pick-a-model hint stays honest.
+  // The held-chain rulings (the Thinking row driven by the CLI current, the
+  // enabled-with-empty-list explicit pick) are pure projections pinned
+  // directly in posture-directory.test.ts; the empty directory's
+  // pick-a-model hint is the one DOM-side pin below.
+  it("disables the Thinking row with the pick-a-model hint on an empty directory", () => {
+    // No held id is knowable from an empty probe cache: the row reads
+    // unavailable and the fallback hint copy (not the builtin no-levels
+    // variant) answers -- the external family's only disabled path.
     renderTrigger({ catalog: { kind: "perModel", models: [] }, model: null });
     const rows = screen.getAllByTestId("sub-trigger");
     expect(rows[1].getAttribute("aria-disabled")).toBe("true");
@@ -559,11 +539,18 @@ describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
     profileModel: "claude-sonnet-4-5",
   };
 
-  it("seats the filter row on the model dimension only", () => {
+  it("seats the filter row on the model dimension only, keeping the thought list outside the model query", () => {
     renderTrigger({ catalog: LARGE_BUILTIN });
     const contents = screen.getAllByTestId("sub-content");
     expect(within(contents[0]).getByPlaceholderText(/Filter models/)).toBeTruthy();
     expect(within(contents[1]).queryByPlaceholderText("Filter models")).toBeNull();
+    // Typing into the model filter never disturbs the strength list: the
+    // dimensions hold independent query states.
+    fireEvent.change(screen.getByPlaceholderText(/Filter models/), { target: { value: "sonn" } });
+    expect(within(contents[1]).getAllByRole("menuitemradio").map((r) => r.textContent)).toEqual([
+      "low",
+      "high",
+    ]);
   });
 
   it("filters by id only, case-insensitively (issue #1648)", () => {
@@ -586,14 +573,19 @@ describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
     ).toEqual(["custom-deploy-7"]);
   });
 
-  it("restores the full list when the query is cleared", () => {
+  it("restores the full list when the query is cleared or whitespace-only", () => {
     renderTrigger({ catalog: LARGE_BUILTIN });
     const filter = screen.getByPlaceholderText(/Filter models/);
     fireEvent.change(filter, { target: { value: "gpt" } });
     const contents = screen.getAllByTestId("sub-content");
     expect(within(contents[0]).getAllByRole("menuitemradio").length).toBe(2);
+    // A blank query reads as no query: both "" and whitespace-only restore
+    // the full list -- one predicate, two inputs.
     fireEvent.change(filter, { target: { value: "" } });
     expect(within(contents[0]).getAllByRole("menuitemradio").length).toBe(4);
+    fireEvent.change(filter, { target: { value: " " } });
+    expect(within(contents[0]).getAllByRole("menuitemradio").length).toBe(4);
+    expect(within(contents[0]).queryByText("No matching models")).toBeNull();
   });
 
   it("shows the honest empty state when nothing matches, keeping a synthetic row", () => {
@@ -663,17 +655,6 @@ describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
     expect(first?.textContent).toBe("claude-sonnet-4-5");
   });
 
-  it("keeps the thought-level list outside the model query", () => {
-    renderTrigger({ catalog: LARGE_BUILTIN });
-    const filter = screen.getByPlaceholderText(/Filter models/);
-    fireEvent.change(filter, { target: { value: "sonn" } });
-    const contents = screen.getAllByTestId("sub-content");
-    expect(within(contents[1]).getAllByRole("menuitemradio").map((r) => r.textContent)).toEqual([
-      "low",
-      "high",
-    ]);
-  });
-
   it("keeps printable keys inside the filter (no typeahead yank)", () => {
     renderTrigger({ catalog: LARGE_BUILTIN });
     const filter = screen.getByPlaceholderText(/Filter models/);
@@ -713,15 +694,6 @@ describe("ComposerPostureTrigger model-list filter row (issue #1645)", () => {
     } finally {
       window.removeEventListener("error", onError);
     }
-  });
-
-  it("treats a whitespace-only query as the unfiltered list", () => {
-    renderTrigger({ catalog: LARGE_BUILTIN });
-    const filter = screen.getByPlaceholderText(/Filter models/);
-    fireEvent.change(filter, { target: { value: " " } });
-    const contents = screen.getAllByTestId("sub-content");
-    expect(within(contents[0]).getAllByRole("menuitemradio").length).toBe(4);
-    expect(within(contents[0]).queryByText("No matching models")).toBeNull();
   });
 
   it("keeps the clearing row visible when an acp query matches nothing", () => {
