@@ -1004,9 +1004,10 @@ fn finish(
     // The wrap-up liveness logs (#1653, ADR-0115's calibrated predicate):
     // one debug line per live-face turn (the aggregate a future "hung
     // turn" report reads), and one warn beside the NoProgress kill's
-    // existing log -- comment-form-dominant counters mean an upstream
-    // queue/processing heartbeat kept the transport alive; zero chunks
-    // mean the transport itself was silent.
+    // existing log -- comment-form-dominant counters typically mean an
+    // upstream queue/processing heartbeat kept the transport alive
+    // (directional: first-byte buckets never cross-reference event items);
+    // zero chunks mean the transport itself was silent.
     if let Some(transport) = transport {
         if matches!(termination, Termination::NoProgress(_)) {
             log::warn!(

@@ -54,25 +54,31 @@ const PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// The transport-liveness observation at turn wrap-up (#1653): aggregate
 /// counters over the live face's HTTP response bodies -- chunk count, byte
 /// total, and the comment-form (`:` first byte, the SSE heartbeat shape)
-/// vs data-form split. Copy, read once after the stream is over, never
-/// carrying content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// vs data-form split (data-form is the complement: chunks minus
+/// comment-form -- the discrimination is binary). Read once after the
+/// stream is over, never carrying content.
+#[derive(Debug)]
 pub(crate) struct TransportLiveness {
     pub(crate) chunks: u64,
     pub(crate) bytes: u64,
     pub(crate) comment_chunks: u64,
-    pub(crate) data_chunks: u64,
 }
 
 impl TransportLiveness {
     /// The wrap-up log line's payload: aggregate counts only. A
-    /// comment-form-dominant reading means an upstream queue/processing
-    /// heartbeat kept the transport alive while the application layer
-    /// stayed silent; zero chunks mean the transport itself was silent.
+    /// comment-form-dominant reading typically means an upstream
+    /// queue/processing heartbeat kept the transport alive -- directional,
+    /// not a verdict: first-byte buckets never cross-reference event
+    /// items (steady keep-alives over a normally dispatching stream also
+    /// land comment-dominant); zero chunks mean the transport itself was
+    /// silent.
     pub(crate) fn summary(&self) -> String {
         format!(
             "{} chunks / {} bytes ({} comment-form, {} data-form)",
-            self.chunks, self.bytes, self.comment_chunks, self.data_chunks
+            self.chunks,
+            self.bytes,
+            self.comment_chunks,
+            self.chunks - self.comment_chunks
         )
     }
 }
@@ -113,13 +119,13 @@ pub(crate) struct ProgressClock {
     /// [`TransportLiveness`] snapshot.
     transport_chunks: AtomicU64,
     transport_bytes: AtomicU64,
-    /// The comment-form / data-form split of those chunks (first byte `:`
-    /// vs anything else): the qualitative signal that separates an upstream
-    /// queue/processing heartbeat from data-bearing traffic. First-byte
-    /// only -- chunk boundaries ride HTTP framing, so a mid-line split can
-    /// mislabel one chunk; the aggregate stays directional.
+    /// The comment-form split of those chunks (first byte `:`): the
+    /// qualitative signal that separates an upstream queue/processing
+    /// heartbeat from data-bearing traffic (data-form is the complement,
+    /// `chunks` minus this). First-byte only -- chunk boundaries ride HTTP
+    /// framing, so a mid-line split can mislabel one chunk; the aggregate
+    /// stays directional.
     transport_comment_chunks: AtomicU64,
-    transport_data_chunks: AtomicU64,
 }
 
 impl ProgressClock {
@@ -139,7 +145,6 @@ impl ProgressClock {
             transport_chunks: AtomicU64::new(0),
             transport_bytes: AtomicU64::new(0),
             transport_comment_chunks: AtomicU64::new(0),
-            transport_data_chunks: AtomicU64::new(0),
         });
         let weak = Arc::downgrade(&clock);
         // Builder::spawn (not the panicking thread::spawn): a spawn failure
@@ -237,19 +242,16 @@ impl ProgressClock {
 
     /// Transport-layer body activity (#1653, the ADR-0115 calibration):
     /// bytes arriving on a live-face response body are liveness -- re-arm
-    /// the same cap and fold the chunk into the qualitative counters. A
+    /// the same cap and fold the chunk into the comment-form counter (the
+    /// data-form count is the complement, derived at the snapshot). A
     /// note inside a freeze segment is harmless (the watchdog re-defers the
     /// deadline every tick while frozen), and content is never recorded.
     pub(crate) fn note_transport_chunk(&self, len: usize, comment_form: bool) {
         self.transport_chunks.fetch_add(1, Ordering::Relaxed);
         self.transport_bytes
             .fetch_add(len as u64, Ordering::Relaxed);
-        if comment_form {
-            self.transport_comment_chunks
-                .fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.transport_data_chunks.fetch_add(1, Ordering::Relaxed);
-        }
+        self.transport_comment_chunks
+            .fetch_add(comment_form as u64, Ordering::Relaxed);
         self.touch();
     }
 
@@ -260,7 +262,6 @@ impl ProgressClock {
             chunks: self.transport_chunks.load(Ordering::Relaxed),
             bytes: self.transport_bytes.load(Ordering::Relaxed),
             comment_chunks: self.transport_comment_chunks.load(Ordering::Relaxed),
-            data_chunks: self.transport_data_chunks.load(Ordering::Relaxed),
         }
     }
 
@@ -548,7 +549,7 @@ mod tests {
         assert_eq!(snapshot.chunks, 3);
         assert_eq!(snapshot.bytes, 4118);
         assert_eq!(snapshot.comment_chunks, 2);
-        assert_eq!(snapshot.data_chunks, 1);
+        assert_eq!(snapshot.chunks - snapshot.comment_chunks, 1);
         assert_eq!(
             snapshot.summary(),
             "3 chunks / 4118 bytes (2 comment-form, 1 data-form)"

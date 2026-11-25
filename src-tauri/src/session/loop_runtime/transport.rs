@@ -270,9 +270,8 @@ mod tests {
     fn streaming_chunks_feed_the_clock_and_pass_through() {
         let token = Arc::new(CancelToken::new());
         let guard = token.begin_turn();
-        let generation = guard.generation();
-        std::mem::forget(guard); // keep the generation alive for the test
-        let clock = ProgressClock::arm_and_publish(generation, &token, Duration::from_secs(3600));
+        let clock =
+            ProgressClock::arm_and_publish(guard.generation(), &token, Duration::from_secs(3600));
 
         let client = LivenessClient::new(
             ScriptedBodyClient::new(two_chunk_body),
@@ -295,7 +294,7 @@ mod tests {
             ": beat\n\n".len() as u64 + "data: {}\n\n".len() as u64
         );
         assert_eq!(snapshot.comment_chunks, 1);
-        assert_eq!(snapshot.data_chunks, 1);
+        assert_eq!(snapshot.chunks - snapshot.comment_chunks, 1);
     }
 
     /// #1653: with no token to resolve a clock from, the wrapper is a pure
