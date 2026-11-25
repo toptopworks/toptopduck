@@ -989,7 +989,7 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
     }
   });
 
-  it("keeps the tool face through the gate hold; the card renders beside it", () => {
+  it("yields the tool row through the pending hold; the card speaks for the call", () => {
     const turn = liveTurnWith(undefined);
     turn.rounds = [
       {
@@ -1028,6 +1028,40 @@ describe("LiveTurnExchange live activity line (issue #1606)", () => {
       ?.closest(".trace-round");
     expect(tailMount).toHaveClass("w-full");
     expect(screen.getByText("等待审批")).toBeInTheDocument();
+  });
+
+  it("yields the row even when a pending row also runs (the lost-resolve race)", () => {
+    // pendingHold reads the rows directly, not heldRow: a started event
+    // landing while the ask is unresolved (an optimistic resolve lost)
+    // makes the row both pending and running, and heldRow's !running term
+    // would skip it -- the verb row would stack above the identical card.
+    // The yield survives the race; the card renders first (the pending arm
+    // precedes the running arm in LiveRow) and the status row keeps the
+    // liveness.
+    const turn = liveTurnWith(undefined);
+    turn.rounds = [
+      {
+        rows: [
+          {
+            key: "req-1",
+            name: "fetch",
+            server: "acme",
+            operationKind: "network",
+            summary: "GET /x",
+            approval: { requestId: "req-1", response: null },
+            running: true,
+            success: null,
+            resultExcerpt: "",
+          },
+        ],
+      },
+    ];
+    const { container } = renderExchange(turn);
+    expect(container.querySelector(".activity-preview-row")).toBeNull();
+    const head = container.querySelector("button.process-toggle");
+    expect(head).toHaveTextContent("执行中");
+    expect(head?.querySelector(".activity-live-dot")).not.toBeNull();
+    expect(container.querySelector(".approval-card")).not.toBeNull();
   });
 
   it("is a plain status line while nothing sits behind the fold (no hover, no click)", () => {

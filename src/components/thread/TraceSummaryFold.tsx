@@ -125,7 +125,14 @@ export function TraceSummaryFold({
   });
   // One toggle, both variants: the state flip plus the host callback --
   // fired from the handler, never an effect (no StrictMode double-fire).
+  // The selection guard belongs to the block posture: its expanded body
+  // sits inside the click target (the line variant keeps its expanded
+  // block outside the clickable span), so a drag-select or double-click
+  // word-select over the full text ends with mouseup on the block and
+  // fires click -- without the guard the selection collapses the fold it
+  // was made in. An active selection never toggles.
   const toggleExpanded = () => {
+    if (document.getSelection()?.isCollapsed === false) return;
     const next = !expanded;
     setExpanded(next);
     onExpandedChange?.(next);
@@ -146,7 +153,8 @@ export function TraceSummaryFold({
         >
           <p
             className={cn(
-              "approval-summary m-0 min-w-0 flex-1 whitespace-pre-wrap break-words",
+              summaryClassName,
+              "m-0 min-w-0 flex-1 whitespace-pre-wrap break-words",
               expanded
                 ? "summary-fold-block max-h-48 overflow-y-auto"
                 : "line-clamp-2",

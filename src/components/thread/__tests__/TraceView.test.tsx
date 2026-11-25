@@ -124,11 +124,51 @@ describe("LiveRow summary fold recovery (issue #826)", () => {
     expect(block).not.toBeNull();
     expect(block?.textContent).toBe(SUMMARY);
     expect(block).toHaveClass("whitespace-pre-wrap", "max-h-48");
+    // The #1363 keyboard scroll region rides the unclamped face: tabbable
+    // and named as a region, never a bare text dump.
+    expect(block).toHaveAttribute("tabindex", "0");
+    expect(block).toHaveAttribute("role", "region");
+    expect(block).toHaveAttribute("aria-label");
     // In-place: exactly one copy of the summary on the page.
     expect(screen.getAllByText(SUMMARY)).toHaveLength(1);
     fireEvent.click(toggle);
     expect(foldBlock(container)).toBeNull();
     expect(screen.getByText(SUMMARY)).toHaveClass("line-clamp-2");
+  });
+
+  it("keeps the fold open while the expanded text carries a selection", () => {
+    // The block posture's expanded body sits inside the click target (the
+    // line variant keeps its block outside), so a drag-select or double-click
+    // word-select over the full command ends with mouseup on the block and
+    // fires click. An active selection never toggles: the guard reads the
+    // live selection, so selecting the command the approver is vetting
+    // cannot collapse the fold it was made in.
+    const { container } = renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
+    fireEvent.click(summaryFoldToggle(container));
+    const toggle = summaryFoldToggle(container);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const selSpy = vi.spyOn(document, "getSelection").mockReturnValue({
+      isCollapsed: false,
+    } as Selection);
+    fireEvent.click(screen.getByText(SUMMARY));
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    selSpy.mockRestore();
+    // Collapsed selection: the plain click-to-collapse stands.
+    fireEvent.click(screen.getByText(SUMMARY));
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("keeps the head row outside the block's click target", () => {
+    // The branch comment states the contract: the head's chrome (tool name,
+    // badge, hint) rides above the block as a plain row, never part of the
+    // fold toggle. Clicking the tool name must not expand.
+    const { container } = renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
+    const toggle = summaryFoldToggle(container);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByText("code-runner"));
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByText(SUMMARY));
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
   });
 
   it("expands the approval-card summary to the carried detail (issue #1636)", () => {
@@ -429,6 +469,9 @@ describe("LiveRow approval action row wrap (issue #862)", () => {
     const hint = container.querySelector(".approval-pending-hint");
     expect(hint).not.toBeNull();
     expect(hint).toHaveClass("ml-auto", "shrink-0");
+    // The decision ask reads amber (the warning tint role), not the muted
+    // gray the hint wore in the action-row era.
+    expect(hint).toHaveClass("text-warning");
     expect(hint?.parentElement).toHaveClass("flex", "min-w-0", "items-center");
     // The action row still carries the wrap: the deny button's parent.
     const deny = container.querySelector(".approval-deny");
@@ -455,7 +498,8 @@ describe("LiveRow approval decision surface (issue #1368)", () => {
     expect(note).not.toBeNull();
     expect(note).toHaveClass("m-0", "mt-2", "text-xs", "text-muted-foreground");
     expect(note).toHaveTextContent("no longer ask for the rest of the session");
-    // Sits directly under the action row, ahead of the file-delivery section.
+    // Sits directly under the action row, after the file-delivery section
+    // (the delivery renders between the summary block and the action row).
     expect(note?.previousElementSibling).toHaveClass("flex", "flex-wrap");
   });
 
