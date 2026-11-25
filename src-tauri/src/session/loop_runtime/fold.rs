@@ -1322,8 +1322,15 @@ mod tests {
             let state = Arc::new(SharedTurnState::new());
             let mut fold = EventFold::new(Some(Protocol::Anthropic));
             fold.event(&close_item_with(rig_usage(50, 0, 0, 10)), &channel, &sink);
-            super::super::finish(fold, &state, Termination::Text("done".into()), false, model)
-                .occupancy
+            super::super::finish(
+                fold,
+                &state,
+                Termination::Text("done".into()),
+                false,
+                model,
+                None,
+            )
+            .occupancy
         };
         assert_eq!(
             stamped(Some("claude-sonnet-4-5")),

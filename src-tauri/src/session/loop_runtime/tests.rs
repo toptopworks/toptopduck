@@ -2259,6 +2259,146 @@ fn no_progress_silence_lands_no_progress() {
     }
 }
 
+/// The #1653 transport-liveness harness: a REAL rig anthropic model over
+/// the production `LivenessClient` wrapping a `ScriptedBodyClient`, so the
+/// turn drives the exact wire path production drives (request -> wrapper ->
+/// SSE parse -> fold) and the loop's cancel token reaches the wrapper the
+/// same way the wiring seam hands it over. The base URL is never
+/// contacted -- the scripted client ignores every request.
+fn scripted_liveness_runtime(
+    token: &Arc<CancelToken>,
+    make_body: impl Fn() -> rig_core::http_client::sse::BoxedStream + Send + Sync + 'static,
+) -> LoopRuntime {
+    use rig_core::client::CompletionClient;
+
+    let client = rig_core::providers::anthropic::Client::builder()
+        .api_key("sk-test")
+        .base_url("http://127.0.0.1:9")
+        .http_client(super::transport::LivenessClient::new(
+            super::transport::ScriptedBodyClient::new(make_body),
+            Some(Arc::clone(token)),
+        ))
+        .build()
+        .expect("the client builds over the scripted transport");
+    LoopRuntime::live(
+        ModelHandle::new(client.completion_model("claude-test")),
+        crate::model::Protocol::Anthropic,
+        crate::provider::output_cap::OUTPUT_TOKEN_CAP,
+        "claude-test".into(),
+    )
+}
+
+/// The anthropic terminal-text SSE tail (the provider_integration fixture
+/// shape): one text block and an `end_turn` stop. The heartbeat pins only
+/// need the turn to terminate after their scripted window.
+fn anthropic_terminal_text_sse() -> String {
+    let events = [
+        ("message_start", r#"{"type": "message_start"}"#),
+        (
+            "content_block_start",
+            r#"{"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}"#,
+        ),
+        (
+            "content_block_delta",
+            r#"{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "done"}}"#,
+        ),
+        (
+            "content_block_stop",
+            r#"{"type": "content_block_stop", "index": 0}"#,
+        ),
+        (
+            "message_delta",
+            r#"{"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 10}}"#,
+        ),
+        ("message_stop", r#"{"type": "message_stop"}"#),
+    ];
+    events
+        .iter()
+        .map(|(name, data)| format!("event: {name}\ndata: {data}\n\n"))
+        .collect()
+}
+
+/// The heartbeat-shaped scripted body (#1653): `beats` SSE comment lines at
+/// a `cadence`, then the terminal text tail as one chunk. The comment
+/// lines are swallowed by the SSE parser before dispatch -- zero event
+/// items reach the fold -- which is exactly the queue/processing window
+/// the calibration covers.
+fn heartbeat_then_text_body(
+    beats: usize,
+    cadence: Duration,
+) -> rig_core::http_client::sse::BoxedStream {
+    use futures::StreamExt;
+    use rig_core::http_client::Error as HttpError;
+
+    let tail = anthropic_terminal_text_sse();
+    let stream =
+        futures::stream::iter((0..beats).map(move |_| (cadence, ": keep-alive\n\n".to_string())))
+            .chain(futures::stream::iter([(Duration::ZERO, tail)]))
+            .then(|(delay, chunk)| async move {
+                tokio::time::sleep(delay).await;
+                Ok::<bytes::Bytes, HttpError>(bytes::Bytes::from(chunk))
+            });
+    Box::pin(stream)
+}
+
+/// #1653, AC 1: a comment-heartbeat-shaped live stream is NOT killed by
+/// the no-progress watchdog. The scripted transport answers with SSE
+/// comment lines only -- the parser swallows them before dispatch, so zero
+/// event items reach the fold's touch -- paced at cap/5 for four times the
+/// cap, then the terminal text. Under ADR-0115's calibrated bytes-are-
+/// liveness predicate the wrapper's per-chunk re-arms keep the clock alive
+/// and the turn converges; under the retired event-item-only predicate (or
+/// with the wrapper's note removed) the 250 ms cap kills the turn inside
+/// the heartbeat window.
+#[test]
+fn comment_heartbeat_stream_survives_the_no_progress_cap() {
+    let mut h = Harness::new();
+    let token = Arc::new(CancelToken::new());
+    let runtime = scripted_liveness_runtime(&token, || {
+        heartbeat_then_text_body(20, Duration::from_millis(50))
+    });
+    let outcome = h.run_with_caps(
+        &h.request("queue behind a heartbeat"),
+        runtime,
+        Arc::clone(&token),
+        24,
+        Some(Duration::from_millis(250)),
+    );
+    match outcome.termination {
+        Termination::Text(text) => assert_eq!(text, "done"),
+        other => panic!("the heartbeat-fed turn must converge, got {other:?}"),
+    }
+}
+
+/// #1653, AC 2: a transport-silent stream is still killed on time -- the
+/// calibration extends liveness, it does not abolish the kill. The
+/// scripted transport resolves the response but never yields a body chunk,
+/// so neither the wrapper (no bytes) nor the fold (no event items) re-arms
+/// the clock; the short cap lands NoProgress on schedule.
+#[test]
+fn transport_silent_stream_still_trips_the_no_progress_cap() {
+    let mut h = Harness::new();
+    let token = Arc::new(CancelToken::new());
+    let runtime = scripted_liveness_runtime(&token, || Box::pin(futures::stream::pending()));
+    let outcome = h.run_with_caps(
+        &h.request("go silent on the wire"),
+        runtime,
+        Arc::clone(&token),
+        24,
+        Some(Duration::from_millis(150)),
+    );
+    match &outcome.termination {
+        Termination::NoProgress(detail) => {
+            assert_eq!(detail.cap, Duration::from_millis(150));
+            assert!(
+                detail.silence >= detail.cap,
+                "the measured silence covers the cap: {detail:?}"
+            );
+        }
+        other => panic!("expected NoProgress, got {other:?}"),
+    }
+}
+
 /// The freeze (ADR-0115): an approval pending past the cap does NOT kill
 /// the turn -- the loop freezes the progress clock across the dispatch
 /// (an approval pending on the condvar is a wait on an external

@@ -25,7 +25,13 @@
 //! `Location` with the credential still on board. The injection point's
 //! generic contract (rig's `http_client` accepts any type implementing its
 //! `HttpClientExt`; `reqwest::Client` implements it in-tree) is verified
-//! here by construction -- this is the only injection site.
+//! here by construction -- this is the only injection site. Since #1653
+//! the injected client is the per-turn transport-liveness wrapper
+//! ([`super::transport::LivenessClient`]) over that shared egress client:
+//! streaming body chunks re-arm the turn's no-progress clock, so an
+//! upstream queue/processing heartbeat (SSE comment lines the parser
+//! swallows) keeps a live stream alive under ADR-0115's calibrated
+//! bytes-are-liveness predicate.
 
 use std::sync::Arc;
 
@@ -34,12 +40,14 @@ use rig_core::client::CompletionClient;
 use rig_core::completion::CompletionModel as _;
 use rig_core::providers::{anthropic, openai};
 
+use crate::cancel::CancelToken;
 use crate::model::Protocol;
 use crate::provider::http::validate_http_base_url;
 use crate::provider::output_cap;
 use crate::provider::{Provider, TurnModelFacts};
 use crate::session::loop_contract::Termination;
 
+use super::transport::LivenessClient;
 use super::LoopRuntime;
 
 /// Build the per-turn runner from an app provider object (the wiring seam's
@@ -66,13 +74,14 @@ pub(crate) fn turn_loop_for(
     provider: Arc<dyn Provider>,
     facts: Option<TurnModelFacts>,
     posture_model: Option<&str>,
+    cancel: Option<&Arc<CancelToken>>,
 ) -> Result<LoopRuntime, Termination> {
     match facts {
         Some(mut facts) => {
             if let Some(model) = posture_model {
                 facts.model = Some(model.to_string());
             }
-            live_runtime(facts)
+            live_runtime(facts, cancel)
         }
         None => Ok(LoopRuntime::bridged(provider)),
     }
@@ -85,7 +94,10 @@ pub(crate) fn turn_loop_for(
 /// provider builder itself, so a mid-session profile switch reroutes the
 /// very next turn (the protocol-flip pin rides the wire-level integration
 /// tests) while the connection pool beneath it stays shared (#926).
-fn handle_from_facts(facts: &TurnModelFacts) -> Result<ModelHandle, Termination> {
+fn handle_from_facts(
+    facts: &TurnModelFacts,
+    cancel: Option<&Arc<CancelToken>>,
+) -> Result<ModelHandle, Termination> {
     // Key first, then scheme, so
     // a misconfigured profile surfaces the same first refusal it always
     // did (a keyless https base reports NotWired, not InvalidConfig).
@@ -98,7 +110,15 @@ fn handle_from_facts(facts: &TurnModelFacts) -> Result<ModelHandle, Termination>
     // facts can never reach the wire.
     let model = facts.model.clone().ok_or(Termination::NoModel)?;
     let base = facts.base_url.trim_end_matches('/');
-    let http = egress_client().map_err(termination_for_build_failure)?;
+    // The transport-liveness wrapper (#1653) over the shared egress client:
+    // pool sharing is unchanged, and streaming chunks re-arm the turn's
+    // no-progress clock. `cancel` is the loop's token on the turn path; the
+    // extraction one-shot passes `None`, which makes the wrapper a pure
+    // pass-through.
+    let http = LivenessClient::new(
+        egress_client().map_err(termination_for_build_failure)?,
+        cancel.cloned(),
+    );
     Ok(match facts.protocol {
         // The app's anthropic base is the host root; rig's normalization
         // keeps it there and appends `/v1/messages` itself, so the request
@@ -140,10 +160,13 @@ fn handle_from_facts(facts: &TurnModelFacts) -> Result<ModelHandle, Termination>
 /// implies a provider profile exists -- zero-profile and CLI-only setups
 /// never reach it, and the CLI channels' occupancy stamps are pure chain
 /// reads that never trigger, so those setups egress nothing.
-fn live_runtime(facts: TurnModelFacts) -> Result<LoopRuntime, Termination> {
+fn live_runtime(
+    facts: TurnModelFacts,
+    cancel: Option<&Arc<CancelToken>>,
+) -> Result<LoopRuntime, Termination> {
     // Gates first: a refused turn (no key / bad base / no model) must not
     // trigger the catalog's lazy refresh below -- a refusal egresses nothing.
-    let handle = handle_from_facts(&facts)?;
+    let handle = handle_from_facts(&facts, cancel)?;
     crate::provider::model_catalog::ensure_fresh();
     // The gates above refused a model-less facts, so this is the model the
     // handle was just built for -- re-read rather than unwrap.
@@ -169,7 +192,9 @@ pub(crate) fn one_shot_tool_turn(
     request: &crate::provider::tool_calling::ToolTurnRequest,
 ) -> Result<crate::provider::tool_calling::ToolTurnOutcome, crate::provider::ProviderError> {
     use crate::provider::ProviderError;
-    let handle = handle_from_facts(&facts).map_err(|term| match term {
+    // No loop token on the extraction lane (#1653): the one-shot rides the
+    // same construction, and its wrapper leg is a pure pass-through.
+    let handle = handle_from_facts(&facts, None).map_err(|term| match term {
         Termination::NotWired => ProviderError::NotWired,
         Termination::InvalidConfig(detail) => ProviderError::InvalidConfig(detail),
         other => ProviderError::Unavailable(format!("{other:?}")),
@@ -286,7 +311,7 @@ mod tests {
         let provider: Arc<dyn Provider> = Arc::new(crate::provider::UnwiredProvider);
         // Ok = the bridged branch; the live branch is the only Err source
         // and it refuses on facts this provider does not present.
-        let runtime = turn_loop_for(provider, None, None)
+        let runtime = turn_loop_for(provider, None, None, None)
             .expect("the facts-less fork bridges, never refuses");
         // Issue #1001: the bridged face carries no model-keyed cap -- no
         // facts, no stamp; the request keeps its assembled cap. #1290: no
@@ -301,12 +326,15 @@ mod tests {
     /// cap pin above holds.
     #[test]
     fn live_factory_carries_the_model_name_for_the_occupancy_stamp() {
-        let runtime = live_runtime(TurnModelFacts {
-            protocol: Protocol::Anthropic,
-            base_url: "https://api.anthropic.com".into(),
-            model: Some("glm-4.6".into()),
-            api_key: Some("sk-test".into()),
-        })
+        let runtime = live_runtime(
+            TurnModelFacts {
+                protocol: Protocol::Anthropic,
+                base_url: "https://api.anthropic.com".into(),
+                model: Some("glm-4.6".into()),
+                api_key: Some("sk-test".into()),
+            },
+            None,
+        )
         .expect("a fully-present profile builds the live runtime");
         assert_eq!(runtime.model_name.as_deref(), Some("glm-4.6"));
     }
@@ -321,24 +349,30 @@ mod tests {
     /// shared client but sends nothing).
     #[test]
     fn live_factory_stamps_the_catalog_cap_for_the_facts_model() {
-        let runtime = live_runtime(TurnModelFacts {
-            protocol: Protocol::Anthropic,
-            base_url: "https://api.anthropic.com".into(),
-            model: Some("claude-3-haiku-20240307".into()),
-            api_key: Some("sk-test".into()),
-        })
+        let runtime = live_runtime(
+            TurnModelFacts {
+                protocol: Protocol::Anthropic,
+                base_url: "https://api.anthropic.com".into(),
+                model: Some("claude-3-haiku-20240307".into()),
+                api_key: Some("sk-test".into()),
+            },
+            None,
+        )
         .expect("a fully-present profile builds the live runtime");
         assert_eq!(
             runtime.output_cap,
             Some(4_096),
             "a catalog-hit model carries its documented ceiling"
         );
-        let runtime = live_runtime(TurnModelFacts {
-            protocol: Protocol::Anthropic,
-            base_url: "https://api.anthropic.com".into(),
-            model: Some("claude-sonnet-4-6".into()),
-            api_key: Some("sk-test".into()),
-        })
+        let runtime = live_runtime(
+            TurnModelFacts {
+                protocol: Protocol::Anthropic,
+                base_url: "https://api.anthropic.com".into(),
+                model: Some("claude-sonnet-4-6".into()),
+                api_key: Some("sk-test".into()),
+            },
+            None,
+        )
         .expect("a fully-present profile builds the live runtime");
         assert_eq!(
             runtime.output_cap,
@@ -351,12 +385,15 @@ mod tests {
     /// any client is built (zero round-trips, the configure-key signal).
     #[test]
     fn a_keyless_profile_refuses_as_not_wired() {
-        let err = live_runtime(TurnModelFacts {
-            protocol: Protocol::Anthropic,
-            base_url: "https://api.anthropic.com".into(),
-            model: Some("claude-test".into()),
-            api_key: None,
-        })
+        let err = live_runtime(
+            TurnModelFacts {
+                protocol: Protocol::Anthropic,
+                base_url: "https://api.anthropic.com".into(),
+                model: Some("claude-test".into()),
+                api_key: None,
+            },
+            None,
+        )
         .err()
         .expect("the keyless profile refuses");
         assert!(matches!(err, Termination::NotWired), "got {err:?}");
@@ -368,12 +405,15 @@ mod tests {
     /// the string, so normalization cannot pierce the gate.
     #[test]
     fn a_non_http_scheme_refuses_as_invalid_config() {
-        let err = live_runtime(TurnModelFacts {
-            protocol: Protocol::Anthropic,
-            base_url: "file:///etc/passwd".into(),
-            model: Some("m".into()),
-            api_key: Some("sk-test".into()),
-        })
+        let err = live_runtime(
+            TurnModelFacts {
+                protocol: Protocol::Anthropic,
+                base_url: "file:///etc/passwd".into(),
+                model: Some("m".into()),
+                api_key: Some("sk-test".into()),
+            },
+            None,
+        )
         .err()
         .expect("the non-http base refuses");
         match err {
@@ -389,12 +429,15 @@ mod tests {
     /// the configure-key signal.
     #[test]
     fn a_keyless_unpinned_profile_refuses_as_not_wired() {
-        let err = live_runtime(TurnModelFacts {
-            protocol: Protocol::Anthropic,
-            base_url: "https://api.anthropic.com".into(),
-            model: None,
-            api_key: None,
-        })
+        let err = live_runtime(
+            TurnModelFacts {
+                protocol: Protocol::Anthropic,
+                base_url: "https://api.anthropic.com".into(),
+                model: None,
+                api_key: None,
+            },
+            None,
+        )
         .err()
         .expect("the keyless profile refuses");
         assert!(matches!(err, Termination::NotWired), "got {err:?}");
@@ -406,21 +449,27 @@ mod tests {
     /// ahead of it: a bad base reports InvalidConfig with or without a model.
     #[test]
     fn an_unpinned_profile_refuses_as_no_model() {
-        let err = live_runtime(TurnModelFacts {
-            protocol: Protocol::Anthropic,
-            base_url: "https://api.anthropic.com".into(),
-            model: None,
-            api_key: Some("sk-test".into()),
-        })
+        let err = live_runtime(
+            TurnModelFacts {
+                protocol: Protocol::Anthropic,
+                base_url: "https://api.anthropic.com".into(),
+                model: None,
+                api_key: Some("sk-test".into()),
+            },
+            None,
+        )
         .err()
         .expect("the model-less profile refuses");
         assert!(matches!(err, Termination::NoModel), "got {err:?}");
-        let err = live_runtime(TurnModelFacts {
-            protocol: Protocol::Anthropic,
-            base_url: "file:///etc/passwd".into(),
-            model: None,
-            api_key: Some("sk-test".into()),
-        })
+        let err = live_runtime(
+            TurnModelFacts {
+                protocol: Protocol::Anthropic,
+                base_url: "file:///etc/passwd".into(),
+                model: None,
+                api_key: Some("sk-test".into()),
+            },
+            None,
+        )
         .err()
         .expect("the non-http base refuses");
         assert!(matches!(err, Termination::InvalidConfig(_)), "got {err:?}");
@@ -441,6 +490,7 @@ mod tests {
                 api_key: Some("sk-test".into()),
             }),
             Some("glm-4.6"),
+            None,
         )
         .expect("the posture model completes the facts");
         assert_eq!(runtime.model_name.as_deref(), Some("glm-4.6"));

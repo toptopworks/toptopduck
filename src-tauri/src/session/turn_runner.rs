@@ -556,6 +556,11 @@ impl super::Session {
                         // contributes nothing and the pinned profile model
                         // (or the NoModel refusal) takes over.
                         turn_posture.model.as_deref(),
+                        // The turn's cancel token (#1653): the transport-
+                        // liveness wrapper resolves the armed no-progress
+                        // clock off it per request, so streaming bytes
+                        // re-arm the cap the same token's watchdog enforces.
+                        Some(&self.cancel),
                     ) {
                         Err(termination) => LoopOutcome {
                             termination,
