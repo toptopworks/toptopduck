@@ -28,11 +28,23 @@ function TooltipProvider({
   );
 }
 
+// Default ON for disableHoverableContent: every tooltip in the app is
+// display-only except one (McpSection's scrollable tool descriptions, the
+// sole local opt-out). Radix's default hoverable content -- the invisible
+// hover bridge that holds the tooltip past the pointer -- transit-gates
+// sibling opens (isPointerInTransit), so a fast sweep across adjacent
+// triggers swallows them (the sidebar-button jank; cf. rowHints.ts
+// sequence 1).
 function Tooltip({
+  disableHoverableContent = true,
   ...props
 }: ComponentProps<typeof TooltipPrimitive.Root>) {
   return (
-    <TooltipPrimitive.Root data-slot="tooltip" {...props} />
+    <TooltipPrimitive.Root
+      data-slot="tooltip"
+      disableHoverableContent={disableHoverableContent}
+      {...props}
+    />
   );
 }
 
