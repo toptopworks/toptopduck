@@ -1096,33 +1096,6 @@ describe("ComposerProviderPicker built-in posture menu (issue #1639)", () => {
 });
 
 describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)", () => {
-  it("shows the active profile's model on the built-in runtime's menu button", () => {
-    renderPicker(pickerJsx());
-    // Interactive since #1639: a profile row exists, so the posture
-    // control seats the cascade menu (the fallback shape before any
-    // probe -- the held model's synthetic row + the clearing row).
-    expect(
-      screen.getByRole("button", { name: "Model: claude-sonnet-4-6" }),
-    ).toBeTruthy();
-  });
-
-  it("names the pinned model beside a lone held strength on the built-in runtime (issue #1648)", async () => {
-    // An unselected model runs the pinned profile model next turn
-    // (ADR-0154): the button reads "{pinned} · {strength}", never the
-    // bare strength alone -- the bare strength hid what the turn would
-    // actually run.
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: "high",
-      cached_discovered: null,
-      in_scope: true,
-    });
-    renderPicker(pickerJsx());
-    expect(
-      await screen.findByRole("button", { name: "Model: claude-sonnet-4-6 · high" }),
-    ).toBeTruthy();
-  });
-
   it("switches the label with the runtime within one dropdown visit", async () => {
     vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     renderPicker(pickerJsx());
@@ -1147,30 +1120,6 @@ describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)"
       await screen.findByRole("button", { name: "Model: claude-sonnet-4-6" }),
     ).toBeTruthy();
     expect(screen.queryByText("Default (recommended)")).toBeNull();
-  });
-
-  it("shows the honest no-model state (never an em dash) when the active profile has no model", () => {
-    renderPicker(pickerJsx({ provider: pickerProvider("glm") }));
-    expect(screen.getByText("No model selected")).toBeTruthy();
-    expect(screen.queryByText("—")).toBeNull();
-  });
-
-  it("shows Not configured on the built-in runtime with zero profiles (issue #570)", () => {
-    renderPicker(
-      pickerJsx({ provider: { profiles: [], active_profile: null } }),
-    );
-    // Icon-only face: the posture label is the only "Not configured" text
-    // (the select trigger's accessible name is not a text node).
-    expect(screen.getAllByText("Not configured").length).toBe(1);
-    // "Default (recommended)" is the CLI unselected state's copy: the
-    // built-in zero-profile state must never borrow it (ADR-0100 anchor).
-    expect(screen.queryByText("Default (recommended)")).toBeNull();
-  });
-
-  it("shows Default (recommended) as a static label on a catalog-less external runtime", async () => {
-    await renderExternalPicker();
-    expect(screen.getByText("Default (recommended)")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
   });
 
   it("shows Default (recommended) when the discovery cache predates the provenance stamp (unattributable currents)", async () => {
@@ -1223,41 +1172,6 @@ describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)"
     expect(screen.getAllByTestId("sub-trigger")[0].textContent).toContain(
       "fake-opus",
     );
-  });
-
-  it("shows the held pair when a posture is selected", async () => {
-    await renderExternalPicker(
-      {},
-      {
-        model: "fake-opus",
-        thought_level: "medium",
-        cached_discovered: CATALOG,
-      },
-    );
-    expect(screen.getByText("fake-opus · medium")).toBeTruthy();
-  });
-
-  it("shows the model alone when the strength is unset", async () => {
-    await renderExternalPicker(
-      {},
-      { model: "fake-opus", cached_discovered: CATALOG },
-    );
-    expect(
-      screen.getByRole("button", { name: "Model: fake-opus" }),
-    ).toBeTruthy();
-  });
-
-  it("shows the held thought level alone when no model is held (fifth state, issue #584)", async () => {
-    // The two dimensions are independently reachable on ACP adapters: a
-    // lone held level must NOT collapse to "Default (recommended)" -- the
-    // label and the Thinking submenu's checked row agree.
-    await renderExternalPicker(
-      {},
-      { thought_level: "medium", cached_discovered: CATALOG },
-    );
-    expect(screen.getByRole("button", { name: "Model: medium" })).toBeTruthy();
-    const level = screen.getByRole("menuitemradio", { name: /^medium$/ });
-    expect(level.getAttribute("aria-checked")).toBe("true");
   });
 
   it("checks the held model's radio row in the menu", async () => {

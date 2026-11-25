@@ -35,9 +35,9 @@ import {
 import {
   derivePostureCatalog,
   EMPTY_POSTURE,
-  heldPostureParts,
   MODEL_CONFIG_DEFAULT,
 } from "./posture-catalog";
+import { derivePostureReadout } from "./posture-readout";
 import { MANAGE_RUNTIMES_VALUE, ComposerRuntimeMenu } from "./ComposerRuntimeMenu";
 import {
   PRESET_CUSTOM,
@@ -471,7 +471,9 @@ export function ComposerProviderPicker({
   // namespace reset a runtime switch already is. The same runtime write the
   // dropdown's switch makes reseeds both channels (the session port slots
   // the empty pair server-side, the cold-start port drops the pending
-  // pair); a same-endpoint profile switch keeps the held pair.
+  // pair); a same-endpoint profile switch keeps the held pair. This path
+  // covers only changes the mounted picker can observe; the effective-
+  // runtime moves that bypass it reset in composer-selection-write.ts.
   const builtInNamespace =
     isExternal || builtinEndpoint === "" ? null : builtinEndpoint;
   const prevNamespaceRef = useRef(builtInNamespace);
@@ -637,42 +639,25 @@ export function ComposerProviderPicker({
     defaultMessage: "No model selected",
   });
 
-  // The posture label (ADR-0099 Decision 3 / #573, extended by #1639):
-  // built-in shows the HELD pair first (a session-level selection is the
-  // next turn's posture, same readout form as external), falling back to
-  // the active profile's pinned model, then to the honest "No model
-  // selected" state (an unpinned profile with nothing held -- the next turn
-  // refuses; zero profiles -> "Not configured", never a fake default);
-  // external shows the held pair
-  // (either side omitted when unset -- the two dimensions are
-  // independently reachable on ACP adapters, so a lone thought level has
-  // its own held form) or "Default (recommended)" when nothing is held --
-  // anchored to never-selected-or-cleared per dimension (ADR-0100
-  // Decision 1). The turn-end live currents never touch the label (issue
-  // #586, user-supplied form): they ride the trigger's tooltip instead,
-  // so the unselected label keeps its default copy verbatim. An
-  // empty-string field counts as unset, matching the menu guards'
-  // convention, so a hand-edited blank cannot blank the button.
-  const heldParts = heldPostureParts(posture);
-  // The built-in button always names the model half: an unselected model
-  // runs the pinned profile model next turn (ADR-0154), so a lone held
-  // strength reads "{pinned} · {strength}" -- the bare strength alone
-  // hid what the turn would actually run (issue #1648 feedback). The
-  // external form keeps its own held pair (the CLI default is real there,
-  // ADR-0100 D1: a lone thought level is its own honest form).
-  const builtInParts = heldPostureParts({
-    model: posture.model || builtInModel,
-    thought_level: posture.thought_level,
+  // The posture readout verdict lives in posture-readout.ts -- the label
+  // priority chain's full narrative is that module's header (ADR-0099 D3 /
+  // #573 / #1639 / #1648 / ADR-0154 / ADR-0100 D1 / #586). One call feeds
+  // both faces, the button label and the tooltip's model half; the
+  // component keeps the i18n copies and the " · " join.
+  const { labelKind, tooltipModel } = derivePostureReadout({
+    posture,
+    isExternal,
+    noProfiles,
+    builtInModel,
   });
-  const postureLabel = !isExternal
-    ? noProfiles
-      ? notConfigured
-      : builtInParts.length > 0
-        ? builtInParts.join(" · ")
-        : noModelSelected
-    : heldParts.length > 0
-      ? heldParts.join(" · ")
-      : defaultRecommended;
+  const postureLabel =
+    labelKind.kind === "held"
+      ? labelKind.parts.join(" · ")
+      : labelKind.kind === "notConfigured"
+        ? notConfigured
+        : labelKind.kind === "noModel"
+          ? noModelSelected
+          : defaultRecommended;
 
   // The provider readout = the preset the active profile sits on (e.g.
   // "Anthropic"); falls back to the profile's own display name when the
@@ -696,11 +681,9 @@ export function ComposerProviderPicker({
       id: "composer.providerPicker.tooltip",
       defaultMessage: "{provider} · {model}",
     },
-    // The preview names the model the next turn runs: the in-scope held
-    // pair first, else the pinned default, else the honest empty state.
     {
       provider: providerName,
-      model: posture.model ?? builtInModel ?? noModelSelected,
+      model: tooltipModel ?? noModelSelected,
     },
   );
   const noKeyMark = intl.formatMessage({
