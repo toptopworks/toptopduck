@@ -109,9 +109,9 @@ const ICON_BUTTON_BASE = `${BUTTON_CHROME} h-7 w-7 flex items-center justify-cen
 // of rename / replace / delete): the pointer / focus / Radix entries below
 // are the guarded open paths of the row-hint protocol (rowHints.ts sequences
 // 2-3), pointer-leave / blur / activation close the hint, and activation
-// hands to the caller on a clean slot. disableHoverableContent: terse
-// non-copyable labels -- Radix's invisible hover bridge would hold the
-// tooltip open after the pointer has left the icon and shadow the row above.
+// hands to the caller on a clean slot. The hover bridge is off app-wide (the
+// shared Tooltip default), so the terse non-copyable labels cannot shadow the
+// row above once the pointer has left the icon.
 function RowActionButton({
   hintKey,
   open,
@@ -138,7 +138,6 @@ function RowActionButton({
     <Tooltip
       open={open}
       onOpenChange={(next) => hintOpenChange(hintKey, next)}
-      disableHoverableContent
     >
       <TooltipTrigger asChild>
         <button

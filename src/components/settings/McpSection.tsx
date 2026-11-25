@@ -833,7 +833,10 @@ function ToolTable({ tools }: { tools: McpToolInfo[] }) {
               <td className="font-mono px-2 py-1.5 truncate">{tool.name}</td>
               <td className="text-muted-foreground px-2 py-1.5">
                 {tool.description ? (
-                  <Tooltip>
+                  // The one hoverable opt-out in the app: the scrollable
+                  // body must stay open under the pointer (the shared
+                  // Tooltip default is disableHoverableContent).
+                  <Tooltip disableHoverableContent={false}>
                     <TooltipTrigger asChild>
                       <span className="block truncate">{tool.description}</span>
                     </TooltipTrigger>

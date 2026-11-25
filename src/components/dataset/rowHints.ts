@@ -25,9 +25,11 @@ import { useRef, useState, type RefObject } from "react";
 //    never emits it), and the single-source key is what excludes those. The
 //    pointermove path is also transit-gated by the provider
 //    (isPointerInTransit, set while the pointer crosses a HOVERABLE
-//    tooltip's exit grace area -- the stale chip's or the provenance
-//    badge's, the row tooltips without disableHoverableContent), so a sweep can silently swallow a
-//    Radix-side open; the direct handlers are what actually open the hints.
+//    tooltip's exit grace area), so a sweep can silently swallow a
+//    Radix-side open; the direct handlers are what actually open the
+//    hints. No row tooltip is a transit source anymore -- the shared
+//    Tooltip default is disableHoverableContent -- but the direct
+//    handlers stay the canonical open path regardless.
 //    Opens take the slot unconditionally: Radix's own opens arrive on an
 //    empty slot anyway (the broadcast has already closed the mounted peers),
 //    and the hints' direct opens are ordered pointer-leave-then-enter by the
