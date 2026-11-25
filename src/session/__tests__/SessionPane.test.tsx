@@ -283,7 +283,9 @@ describe("SessionPane approval wiring", () => {
     await act(async () => {
       view.ask();
     });
-    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    // The delivery rides the summary expand: the fold toggle is the
+    // disclosure now.
+    fireEvent.click(document.querySelector(".summary-fold-toggle")!);
     expect(getApprovalAttachments).toHaveBeenCalledWith(SID, "req-1");
     expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
   });

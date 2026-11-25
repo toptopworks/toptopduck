@@ -14,16 +14,18 @@
 // two-line row, so that glyph column sits outside the click target while
 // the live spinner / shield sit inside it.
 //
-// The chevron is a real button (the keyboard path; aria-expanded names
-// the posture) whose click bubbles to the line's onClick -- one handler,
-// one toggle. Its 16px box is intentionally tight: the whole line is the
-// pointer path, the button is the keyboard / focus path. The affordance
-// rides every row unconditionally -- no
-// render-time truncation gate (jsdom cannot measure, and a short summary
-// expanding is harmless); the expanded state is session-ephemeral, the
-// stepsExpanded tier: the settle swap collapses it and a reload loses it
-// (an approval-to-running branch switch reconciles this same component
-// in place and KEEPS the fold open -- the one unlocked in-between).
+// The block posture (variant="block"): the summary is the body surface,
+// not a line tail -- the approval card's decision face. Rest: the bounded
+// summary two-line clamped on the code-block surface ({colors.muted}).
+// Expanded: the SAME block unclamps -- the #1636 detail swaps in when the
+// row carries one -- never a second copy of what rest already shows; the
+// height cap and the keyboard scroll region (#1363) ride the unclamped
+// face. The chevron rides the line variant's hover-reveal: no rest-state
+// affordance claims hidden content -- a short summary expands to itself,
+// a clamped one keeps its tail for the same hover / focus recovery. The
+// trace sites keep the line: their
+// summaries are scan payload, the card's is the decision's subject
+// matter.
 
 import { useState, type ReactNode } from "react";
 import { useIntl } from "react-intl";
@@ -32,9 +34,39 @@ import { cn } from "@/lib/utils";
 import { SUMMARY_ROW_REVEAL_CLASS } from "./turn-visual";
 
 /** The hook class anchoring the truncated summary span (test / selector
- *  anchor) -- a literal union so a typo'd class fails at the call site,
- *  not as a selector miss (FoldToggle's FoldHookClass precedent). */
+ * anchor) -- a literal union so a typo'd class fails at the call site,
+ * not as a selector miss (FoldToggle's FoldHookClass precedent). */
 type SummaryHookClass = "trace-summary" | "approval-summary";
+
+// The fold's chevron control, shared by both postures: the keyboard path
+// (a real button, aria-expanded naming the posture) and the reveal class
+// ride here once. Color is the caller's -- the line site owns its muted +
+// hover pair, the block site inherits its host's.
+function SummaryFoldChevron({
+  expanded,
+  className,
+}: {
+  expanded: boolean;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "summary-fold-toggle inline-flex h-4 w-4 shrink-0 items-center justify-center",
+        SUMMARY_ROW_REVEAL_CLASS,
+        expanded && "opacity-100",
+        className,
+      )}
+      aria-expanded={expanded}
+    >
+      <ChevronRight
+        aria-hidden="true"
+        className={cn("h-3.5 w-3.5 transition-transform", expanded && "rotate-90")}
+      />
+    </button>
+  );
+}
 
 export function TraceSummaryFold({
   summary,
@@ -43,42 +75,106 @@ export function TraceSummaryFold({
   head = null,
   resultExcerpt,
   replacements,
+  variant = "line",
+  onExpandedChange,
 }: {
   summary: string;
-  /** The full text behind a cut summary (issue #1636): the expand block's
-   *  argument column upgrades from the bounded head to this when present;
-   *  absent (an uncut argument, a pre-#1636 record, the approval card)
-   *  keeps the head. The line itself always stays the bounded head. */
+  /** The full text behind a cut summary (issue #1636): the expand face
+   * upgrades from the bounded head to this when present; absent (an uncut
+   * argument, a pre-#1636 record) keeps the head -- which then unclamps
+   * in place instead of duplicating itself. */
   summaryDetail?: string;
   /** The hook class for the truncated summary span -- the visual
-   *  utilities live here, shared. */
+   * utilities live here, shared. */
   summaryClassName: SummaryHookClass;
   /** The site-specific line head (spinner / shield, tool name, badges)
-   *  rendered inside the line before the summary. */
+   * rendered before the summary. In the block posture it rides above the
+   * block as a plain row (never part of the click target -- the head's
+   * chrome is not the fold). */
   head?: ReactNode;
   /** The call's result excerpt, folded into the expand block beside the
-   *  argument summary as a second column (issue #1604). Absent keeps the
-   *  single-column block -- the trace row passes it only for the one
-   *  success whose excerpt survives the projection (the capped
-   *  delegation's truncation notice, issue #1047). */
+   * argument summary as a second column (issue #1604). Absent keeps the
+   * single-column block -- the trace row passes it only for the one
+   * success whose excerpt survives the projection (the capped
+   * delegation's truncation notice, issue #1047). */
   resultExcerpt?: string;
   /** The edit's replacement count (issue #1621), rendered as one lead
-   *  line of the expand block (a count beyond 1 implies replace_all).
-   *  Absent keeps the block without the line -- only a successful edit
-   *  entry carries one; a write has no replacements to name. */
+   * line of the expand block (a count beyond 1 implies replace_all).
+   * Absent keeps the block without the line -- only a successful edit
+   * entry carries one; a write has no replacements to name. */
   replacements?: number;
+  /** The presentation posture: the line (default) keeps the trace
+   * family's single-line scan row -- head + truncated summary + the
+   * hover-revealed chevron, the whole line the click target. The block
+   * turns the summary into the body surface: the head rides above as a
+   * plain row and the summary itself unclamps on expand. */
+  variant?: "line" | "block";
+  /** The posture change, out to the host: the approval card fires its
+   * one-shot full-file-values pull on the first expand (issue #1009). */
+  onExpandedChange?: (expanded: boolean) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const intl = useIntl();
-  // Issue #1636: the expand block recovers the full argument when the
-  // backend persisted one; every fallback keeps the old single-string
-  // behavior.
+  // Issue #1636: the expand face recovers the full argument when the
+  // backend persisted one; every fallback keeps the single-string
+  // behavior (the block posture unclamps it in place).
   const expandText = summaryDetail ?? summary;
+  const regionLabel = intl.formatMessage({
+    id: "thread.trace.summaryBlockAria",
+    defaultMessage: "Full summary",
+  });
+  // One toggle, both variants: the state flip plus the host callback --
+  // fired from the handler, never an effect (no StrictMode double-fire).
+  // The selection guard belongs to the block posture: its expanded body
+  // sits inside the click target (the line variant keeps its expanded
+  // block outside the clickable span), so a drag-select or double-click
+  // word-select over the full text ends with mouseup on the block and
+  // fires click -- without the guard the selection collapses the fold it
+  // was made in. An active selection never toggles.
+  const toggleExpanded = () => {
+    if (document.getSelection()?.isCollapsed === false) return;
+    const next = !expanded;
+    setExpanded(next);
+    onExpandedChange?.(next);
+  };
+  if (variant === "block") {
+    return (
+      <>
+        {head !== null && (
+          <span className="flex min-w-0 items-center gap-1.5">{head}</span>
+        )}
+        {/* The block is the body AND the click target (the line variant's
+            whole-line anatomy, one posture over); the chevron button is
+            the keyboard path. Expanded, the bounded head swaps for the
+            full text in place -- the scroll region (#1363) rides it. */}
+        <div
+          className="group/summary-row mt-2 flex w-full cursor-pointer items-start gap-1.5 rounded-md bg-muted px-2 py-2 text-left font-mono text-[13px] leading-5 text-muted-foreground hover:text-foreground"
+          onClick={toggleExpanded}
+        >
+          <p
+            className={cn(
+              summaryClassName,
+              "m-0 min-w-0 flex-1 whitespace-pre-wrap break-words",
+              expanded
+                ? "summary-fold-block max-h-48 overflow-y-auto"
+                : "line-clamp-2",
+            )}
+            tabIndex={expanded ? 0 : undefined}
+            role={expanded ? "region" : undefined}
+            aria-label={expanded ? regionLabel : undefined}
+          >
+            {expanded ? expandText : summary}
+          </p>
+          <SummaryFoldChevron expanded={expanded} className="mt-0.5" />
+        </div>
+      </>
+    );
+  }
   return (
     <>
       <span
         className="group/summary-row flex min-w-0 cursor-pointer items-center gap-1.5"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={toggleExpanded}
       >
         {head}
         <span
@@ -89,20 +185,10 @@ export function TraceSummaryFold({
         >
           {summary}
         </span>
-        <button
-          type="button"
-          className={cn(
-            "summary-fold-toggle inline-flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground hover:text-foreground",
-            SUMMARY_ROW_REVEAL_CLASS,
-            expanded && "opacity-100",
-          )}
-          aria-expanded={expanded}
-        >
-          <ChevronRight
-            aria-hidden="true"
-            className={cn("h-3.5 w-3.5 transition-transform", expanded && "rotate-90")}
-          />
-        </button>
+        <SummaryFoldChevron
+          expanded={expanded}
+          className="text-muted-foreground hover:text-foreground"
+        />
       </span>
       {/* Keyboard-reachable scroll region (#1363): the tabindex puts the
           height-capped block in the Tab order so arrow keys scroll it
@@ -113,10 +199,7 @@ export function TraceSummaryFold({
           className="summary-fold-block m-0 mt-0.5 rounded-md bg-muted p-2 font-mono text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto"
           tabIndex={0}
           role="region"
-          aria-label={intl.formatMessage({
-            id: "thread.trace.summaryBlockAria",
-            defaultMessage: "Full summary",
-          })}
+          aria-label={regionLabel}
         >
           {replacements !== undefined && (
             // The edit's replacement count as the block's lead line (issue

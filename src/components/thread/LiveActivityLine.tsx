@@ -152,20 +152,39 @@ export function LiveActivityLine({
   };
   const running = allRows.find((row) => row.running);
   // The gate hold (an approval-channel row the gateway has not completed):
-  // the activity line KEEPS the tool face while a pending card waits (the
-  // call is about to run, the card -- the answer surface -- beside it; the
-  // line vanishing entirely read as the process dying on the device) and,
-  // by the same mechanism, while a resolved row awaits its completion
-  // event (a deny between its optimistic resolve and the gateway's
-  // completed broadcast) or an abandoned call rides the turn forever
-  // (#1267) -- those rows are not settled, so the fold faces admit none
-  // of them and the held face plus the tail badge row are their surfaces.
-  // The verb names the held row's own kind -- the imminent activity for a
-  // pending card; a denial's completion is a network window away.
+  // the activity line KEEPS the tool face while a resolved row awaits its
+  // completion event (a deny between its optimistic resolve and the
+  // gateway's completed broadcast) or an abandoned call rides the turn
+  // forever (#1267) -- those rows are not settled, so the fold faces admit
+  // none of them and the held face plus the tail badge row are their
+  // surfaces. A pending card's window is the exception: pendingHold below
+  // yields the row to the card, which speaks for the call verbatim. The
+  // verb names the held row's own kind -- a denial's completion is a
+  // network window away.
   const heldRow = allRows.find(
     (row) => row.approval !== null && !isSettledRow(row) && !row.running,
   );
   const gateHold = !running && heldRow !== undefined;
+  // The pending-gate hold (a three-button card waits on the tail): the
+  // tool row's verb · summary would paint the held call twice back to
+  // back -- the card below names the same tool, badge, and summary
+  // verbatim -- so the row yields and the status row alone carries the
+  // line's liveness (the breathing dot and the frozen figure never leave,
+  // which answers the keep-the-face ruling's process-dying concern). The
+  // deny-held / abandoned windows keep the row: no card stands on the
+  // tail there, and the row is the held call's only face. While this row
+  // is away the decision ask is announced by the card's own role="status"
+  // hint (issue #1368). The predicate reads the rows directly instead of
+  // riding heldRow: the card renders for any unsettled response-null row,
+  // and heldRow's !running term would let a pending row that also runs
+  // (a started event landing while the ask is unresolved) skip the hold
+  // and stack the verb row above the card.
+  const pendingHold = allRows.some(
+    (row) =>
+      row.approval !== null &&
+      row.approval.response === null &&
+      !isSettledRow(row),
+  );
   const toolKind: OperationKind | undefined =
     running?.operationKind ?? (gateHold ? heldRow?.operationKind : undefined);
   const waiting = isRoundTripWait(liveTurn);
@@ -283,13 +302,16 @@ export function LiveActivityLine({
   // only when prose streams (the linger yields to the caret -- a
   // present-tense verb over streaming prose claims a call that is not
   // running, #1663) or when nothing reports (no face, no linger, no
-  // excerpt). The tool-form row STAYS announced --
+  // excerpt), or when a pending card owns the held call's face
+  // (pendingHold -- the card speaks for the call verbatim, so painting
+  // both is the stacked face this retires; the status row keeps the
+  // liveness). The tool-form row STAYS announced --
   // verb + summary is low-frequency state (what ran / is running), not
   // decoration; only the thinking row is aria-hidden: per-line churn is
   // decoration riding the status row's own announcement (the
   // WaitElapsedSuffix doctrine), never a stream of its own.
   let activityRow: ReactNode = null;
-  if (!expanded) {
+  if (!expanded && !pendingHold) {
     const subjectSummary = subject?.summary ?? "";
     if (faceKind !== undefined) {
       activityRow = (

@@ -108,18 +108,89 @@ describe("LiveRow summary fold recovery (issue #826)", () => {
     expect(foldBlock(container)?.textContent).toBe(SUMMARY);
   });
 
-  it("expands an approval-card summary the same way", () => {
+  it("expands an approval-card summary in place, never a duplicate block", () => {
+    // The decision face's summary is the card's body (the block posture):
+    // a rest-state clamped mono block -- NOT the trace family's inline
+    // truncate row -- with the whole block the click / keyboard target.
+    // Expand unclamps THE SAME block (or swaps in the #1636 detail): the
+    // bounded text is never rendered twice.
     const { container } = renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
-    expect(screen.getByText(SUMMARY)).toHaveClass("approval-summary", "truncate");
+    expect(screen.getByText(SUMMARY)).toHaveClass("approval-summary", "line-clamp-2");
+    const toggle = summaryFoldToggle(container);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByText(SUMMARY));
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const block = foldBlock(container);
+    expect(block).not.toBeNull();
+    expect(block?.textContent).toBe(SUMMARY);
+    expect(block).toHaveClass("whitespace-pre-wrap", "max-h-48");
+    // The #1363 keyboard scroll region rides the unclamped face: tabbable
+    // and named as a region, never a bare text dump.
+    expect(block).toHaveAttribute("tabindex", "0");
+    expect(block).toHaveAttribute("role", "region");
+    expect(block).toHaveAttribute("aria-label");
+    // In-place: exactly one copy of the summary on the page.
+    expect(screen.getAllByText(SUMMARY)).toHaveLength(1);
+    fireEvent.click(toggle);
+    expect(foldBlock(container)).toBeNull();
+    expect(screen.getByText(SUMMARY)).toHaveClass("line-clamp-2");
+  });
+
+  it("keeps the fold open while the expanded text carries a selection", () => {
+    // The block posture's expanded body sits inside the click target (the
+    // line variant keeps its block outside), so a drag-select or double-click
+    // word-select over the full command ends with mouseup on the block and
+    // fires click. An active selection never toggles: the guard reads the
+    // live selection, so selecting the command the approver is vetting
+    // cannot collapse the fold it was made in.
+    const { container } = renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
     fireEvent.click(summaryFoldToggle(container));
-    expect(foldBlock(container)?.textContent).toBe(SUMMARY);
+    const toggle = summaryFoldToggle(container);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const selSpy = vi.spyOn(document, "getSelection").mockReturnValue({
+      isCollapsed: false,
+    } as Selection);
+    fireEvent.click(screen.getByText(SUMMARY));
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    selSpy.mockRestore();
+    // Collapsed selection: the plain click-to-collapse stands.
+    fireEvent.click(screen.getByText(SUMMARY));
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("keeps the head row outside the block's click target", () => {
+    // The branch comment states the contract: the head's chrome (tool name,
+    // badge, hint) rides above the block as a plain row, never part of the
+    // fold toggle. Clicking the tool name must not expand.
+    const { container } = renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
+    const toggle = summaryFoldToggle(container);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByText("code-runner"));
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByText(SUMMARY));
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("expands the approval-card summary to the carried detail (issue #1636)", () => {
+    // The merged row's full text behind a cut summary upgrades the expand
+    // block's column; the rest block stays the bounded head.
+    const DETAIL = "python C:\\very\\long\\path\\cli-script.tmp --flag value";
+    const { container } = renderWithProviders(
+      <LiveRow row={rowWith({ summaryDetail: DETAIL })} onRespond={vi.fn()} />,
+    );
+    fireEvent.click(summaryFoldToggle(container));
+    expect(foldBlock(container)?.textContent).toBe(DETAIL);
   });
 });
 
 describe("LiveRow caption tokens (issue #826)", () => {
-  it("sizes the summary and badge chrome at the caption token", () => {
-    renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
-    expect(screen.getByText(SUMMARY)).toHaveClass("text-xs");
+  it("sizes the decision block on the code token and the badge on the caption token", () => {
+    // The card's summary is the body surface (the block posture): it
+    // rides the 13px code token; the badge chrome stays caption-sized.
+    const { container } = renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
+    // The code token rides the block surface (the summary span inherits it).
+    expect(summaryFoldToggle(container).parentElement).toHaveClass("font-mono", "text-[13px]");
+    expect(screen.getByText(SUMMARY)).toHaveClass("approval-summary", "line-clamp-2");
     expect(screen.getByText("execute")).toHaveClass("text-xs");
   });
 
@@ -385,19 +456,26 @@ describe("TraceStepFold fold label (issue #1604)", () => {
 });
 
 describe("LiveRow approval action row wrap (issue #862)", () => {
-  it("wraps the action row so the trailing hint stays reachable in a narrow column", () => {
-    // The Button base class carries whitespace-nowrap (button-variants.ts),
-    // so each action button's min-content is its full label; three buttons
-    // plus the ml-auto awaiting hint outrun the narrow rail's content box
-    // and the rail's overflow-x crop eats the tail. flex-wrap drops the
-    // hint to a second line and wraps button pairs if the labels alone
-    // still outrun the column.
+  it("keeps the awaiting hint on the head row's status slot; the action row keeps the wrap", () => {
+    // The hint moved to the head row (the card's status slot): the tool
+    // name is min-w-0 truncate, so the hint can never be pushed out --
+    // stronger than the wrap it retires. The action row keeps flex-wrap
+    // (#862): the Button base class carries whitespace-nowrap, so the
+    // labels alone can still outrun a narrow column and the pairs wrap
+    // instead of being cropped.
     const { container } = renderWithProviders(
       <LiveRow row={rowWith()} onRespond={vi.fn()} />,
     );
     const hint = container.querySelector(".approval-pending-hint");
     expect(hint).not.toBeNull();
-    expect(hint?.parentElement).toHaveClass("flex", "flex-wrap");
+    expect(hint).toHaveClass("ml-auto", "shrink-0");
+    // The decision ask reads amber (the warning tint role), not the muted
+    // gray the hint wore in the action-row era.
+    expect(hint).toHaveClass("text-warning");
+    expect(hint?.parentElement).toHaveClass("flex", "min-w-0", "items-center");
+    // The action row still carries the wrap: the deny button's parent.
+    const deny = container.querySelector(".approval-deny");
+    expect(deny?.parentElement).toHaveClass("flex", "flex-wrap");
   });
 });
 
@@ -418,9 +496,10 @@ describe("LiveRow approval decision surface (issue #1368)", () => {
     );
     const note = container.querySelector(".approval-scope-note");
     expect(note).not.toBeNull();
-    expect(note).toHaveClass("m-0", "mt-1", "text-xs", "text-muted-foreground");
+    expect(note).toHaveClass("m-0", "mt-2", "text-xs", "text-muted-foreground");
     expect(note).toHaveTextContent("no longer ask for the rest of the session");
-    // Sits directly under the action row, ahead of the file-delivery section.
+    // Sits directly under the action row, after the file-delivery section
+    // (the delivery renders between the summary block and the action row).
     expect(note?.previousElementSibling).toHaveClass("flex", "flex-wrap");
   });
 
@@ -545,37 +624,50 @@ describe("LiveRow approval resolved badge shrink (issue #876)", () => {
 });
 
 describe("LiveRow approval card file values", () => {
-  it("hides the file contents until the approver expands them", () => {
-    renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
+  // The file delivery rides the summary expand (one disclosure for the
+  // call's full inputs): the one-shot #1009 pull fires on the first
+  // expand, the capped preview is the load-gap / rejection face, and the
+  // at-rest head row carries the attachment count (the paperclip figure).
+  const expandSummary = (container: HTMLElement) =>
+    fireEvent.click(summaryFoldToggle(container));
+
+  it("hides the file contents until the summary expands, count aside", () => {
+    const { container } = renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} />,
+    );
     // The argv summary (with the temp path) is the default face.
     expect(screen.getByText(SUMMARY)).toBeInTheDocument();
     expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
-    const toggle = screen.getByRole("button", { name: "View file values (1)" });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-  });
-
-  it("expands the approval-time snapshot and collapses it again", () => {
-    renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    expect(container.querySelector(".approval-file")).toBeNull();
+    expandSummary(container);
     // The snapshot names its parameter and carries the captured value.
     expect(screen.getByText("code")).toBeInTheDocument();
     expect(screen.getByText("print(1)")).toBeInTheDocument();
-    const hide = screen.getByRole("button", { name: "Hide file values" });
-    expect(hide).toHaveAttribute("aria-expanded", "true");
-    fireEvent.click(hide);
+    // Collapse takes the values with it.
+    expandSummary(container);
     expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
   });
 
-  it("renders no expand toggle for a card without file values", () => {
-    renderWithProviders(
+  it("carries the attachment count on the head row at rest", () => {
+    // The delivery merged into the expand -- the old toggle's "(1)" count
+    // survives as the head row's paperclip figure; the sr-only sentence
+    // carries it to assistive tech.
+    const withFiles = renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} />,
+    );
+    expect(
+      withFiles.container.querySelector(".lucide-paperclip"),
+    ).not.toBeNull();
+    expect(screen.getByText("1 attached file")).toBeInTheDocument();
+    withFiles.unmount();
+    const bare = renderWithProviders(
       <LiveRow
         row={rowWith({ approval: { requestId: "req-1", response: null } })}
         onRespond={vi.fn()}
       />,
     );
-    expect(
-      screen.queryByRole("button", { name: /file values/i }),
-    ).not.toBeInTheDocument();
+    expect(bare.container.querySelector(".lucide-paperclip")).toBeNull();
+    expect(screen.queryByText(/attached file/)).not.toBeInTheDocument();
   });
 
   // Issue #1009: expanding pulls the FULL pre-truncation contents through
@@ -583,12 +675,12 @@ describe("LiveRow approval card file values", () => {
   // boundary) and replaces the capped preview in place -- arrival alone is
   // not replacement, so the capped text must be gone once the full text
   // lands.
-  it("pulls the uncut contents when expanded and replaces the capped preview", async () => {
+  it("pulls the uncut contents when the summary expands and replaces the capped preview", async () => {
     const onLoad = vi.fn().mockResolvedValue(UNCUT_FILES);
-    renderWithProviders(
+    const { container } = renderWithProviders(
       <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    expandSummary(container);
     expect(onLoad).toHaveBeenCalledWith("req-1");
     expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
     expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
@@ -596,10 +688,10 @@ describe("LiveRow approval card file values", () => {
 
   it("falls back to the capped preview with an error note when the pull rejects", async () => {
     const onLoad = vi.fn().mockRejectedValue(new Error("slot released"));
-    renderWithProviders(
+    const { container } = renderWithProviders(
       <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    expandSummary(container);
     // The async fallback note is a live note (role="status") -- found by
     // text, since the pending hint carries role="status" too (issue #1368)
     // and a role finder would reject the two matches; the attribute assert
@@ -614,14 +706,14 @@ describe("LiveRow approval card file values", () => {
   // card is up, so collapsing and re-expanding reuses the settled full view.
   it("does not refetch when collapsing and re-expanding", async () => {
     const onLoad = vi.fn().mockResolvedValue(UNCUT_FILES);
-    renderWithProviders(
+    const { container } = renderWithProviders(
       <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    expandSummary(container);
     await screen.findByText("print(1); print(2)");
-    fireEvent.click(screen.getByRole("button", { name: "Hide file values" }));
+    expandSummary(container);
     expect(screen.queryByText("print(1); print(2)")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    expandSummary(container);
     expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
     expect(onLoad).toHaveBeenCalledTimes(1);
   });
@@ -635,20 +727,34 @@ describe("LiveRow approval card file values", () => {
     const onLoad = vi.fn().mockImplementation(
       () => new Promise<FileAttachment[]>((resolve) => { resolvePull = resolve; }),
     );
-    renderWithProviders(
+    const { container } = renderWithProviders(
       <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    expandSummary(container);
     // Load gap: the capped broadcast snapshot is the visible face.
     expect(screen.getByText("print(1)")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Hide file values" }));
-    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    expandSummary(container);
+    expandSummary(container);
     expect(onLoad).toHaveBeenCalledTimes(1);
     await act(async () => {
       resolvePull(UNCUT_FILES);
     });
     expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
     expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
+  });
+
+  it("fetches nothing when expanding a card without file values", () => {
+    const onLoad = vi.fn().mockResolvedValue(UNCUT_FILES);
+    const { container } = renderWithProviders(
+      <LiveRow
+        row={rowWith({ approval: { requestId: "req-1", response: null } })}
+        onRespond={vi.fn()}
+        onLoadAttachments={onLoad}
+      />,
+    );
+    expandSummary(container);
+    expect(onLoad).not.toHaveBeenCalled();
+    expect(container.querySelector(".approval-file")).toBeNull();
   });
 });
 

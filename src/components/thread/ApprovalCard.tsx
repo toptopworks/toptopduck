@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
-import { ShieldQuestion } from "lucide-react";
+import { Paperclip, ShieldQuestion } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { OperationBadge } from "./TraceRow";
@@ -23,13 +23,16 @@ import type { ApprovalResponse, FileAttachment } from "../../types/approval";
 // routes through react-intl with a static literal id; the layer-4 content
 // (tool names, summaries, excerpts) passes through untranslated.
 
-// The in-flow approval card (ADR-0083): tool name + operation badge +
-// parameter summary + the three answers. The gateway suspends the turn on
-// this request; answering wakes it (respond_tool_approval).
+// The in-flow approval card (ADR-0083): the decision surface a gated call
+// mounts on the stream tail while the gateway suspends the turn -- tool
+// name + operation badge as the head row, the parameter summary as the
+// card's body block (the approver reads the call here, not beside it),
+// then the three answers. Answering wakes the turn (respond_tool_approval).
 export function ApprovalCard({
   approval,
   name,
   summary,
+  summaryDetail,
   operationKind,
   onRespond,
   onLoadAttachments,
@@ -40,6 +43,10 @@ export function ApprovalCard({
   approval: NonNullable<LiveRoundRow["approval"]> & { response: null };
   name: LiveRoundRow["name"];
   summary: LiveRoundRow["summary"];
+  /** The full text behind a cut summary (issue #1636), threaded from the
+   *  merged row: the body block's expand recovers it. Optional -- the
+   *  same absent arms as the wire entry. */
+  summaryDetail?: LiveRoundRow["summaryDetail"];
   operationKind: LiveRoundRow["operationKind"];
   onRespond: (requestId: string, response: ApprovalResponse) => void;
   /** Pulls the FULL pre-truncation file values for a pending request
@@ -51,11 +58,55 @@ export function ApprovalCard({
 }) {
   const { requestId } = approval;
   const fileValues = approval.fileAttachments ?? [];
+  // The full-file-values pull (issue #1009), fired from the summary
+  // expand (the handler, never an effect -- one shot, no StrictMode
+  // double-fetch): the file delivery rides the same disclosure as the
+  // call's full text, so the first expand is when the uncut originals
+  // are worth pulling. One fetch per card -- the pending-window snapshot
+  // is immutable while the card is up, so re-expanding reuses the
+  // settled state; the load gap and a rejected pull both show the capped
+  // preview (the broadcast snapshot), only a landed fetch replaces it.
+  const [fullView, setFullView] = useState<
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "full"; files: FileAttachment[] }
+    | { kind: "failed" }
+  >({ kind: "idle" });
+  // The delivery renders only while the summary expand is open -- the
+  // posture lives inside TraceSummaryFold, so the mirror rides the same
+  // callback that fires the pull.
+  const [detailOpen, setDetailOpen] = useState(false);
+  const handleDetailExpand = (expanded: boolean) => {
+    setDetailOpen(expanded);
+    if (
+      !expanded ||
+      fullView.kind !== "idle" ||
+      fileValues.length === 0 ||
+      !onLoadAttachments
+    ) {
+      return;
+    }
+    setFullView({ kind: "loading" });
+    void onLoadAttachments(requestId).then(
+      (files) => setFullView({ kind: "full", files }),
+      (err) => {
+        // The durable trace the respond-command catch keeps too (ADR-0029):
+        // an expected lifecycle rejection and a real IPC failure are
+        // indistinguishable in the UI, so the log carries the difference.
+        log.warn(
+          "approval",
+          "full-attachments pull rejected; falling back to the capped preview",
+          { requestId, err },
+        );
+        setFullView({ kind: "failed" });
+      },
+    );
+  };
   // The originator annotation (issue #934): a sub-agent's call names its
   // delegator above the card head, so the approver knows WHO is asking
   // before reading what. Absent (no row) for a main-loop call.
   const originNote = approval.originAgent ? (
-    <p className="approval-origin m-0 mb-1 text-xs text-muted-foreground">
+    <p className="approval-origin m-0 mb-2 text-xs text-muted-foreground">
       <FormattedMessage
         id="thread.approval.originAgent"
         defaultMessage="Sub-agent {name} wants to call:"
@@ -64,11 +115,24 @@ export function ApprovalCard({
     </p>
   ) : null;
   return (
-    <li className="approval-card rounded-md border border-border bg-accent/40 p-1.5 my-0.5 text-xs">
+    // The shell rides the in-content card tier (hairline border + the
+    // shadow-sm lift, DESIGN.md's card posture) -- the decision moment is
+    // a card, not a tinted trace wrapper; the brightness step + shadow
+    // give it the gravity the tint-foil wrap read as unfinished.
+    <li className="approval-card mt-2 mb-1 rounded-lg border border-border bg-card p-3 shadow-sm">
       {originNote}
+      {/* The summary is the card's body (TraceSummaryFold's block
+          posture): head row above, the call's text in a rest-state
+          clamped mono block that unclamps in place on expand (#1636's
+          detail when the row carries it). The file-delivery view (#672,
+          #1009) rides the same disclosure -- one expand = the call's
+          full inputs, argument text and delivered values together. */}
       <TraceSummaryFold
+        variant="block"
         summary={summary}
+        summaryDetail={summaryDetail}
         summaryClassName="approval-summary"
+        onExpandedChange={handleDetailExpand}
         head={(
           <>
             <ShieldQuestion
@@ -77,26 +141,77 @@ export function ApprovalCard({
             />
             {/* min-w-0 + truncate: an external tool rides a server prefix
                 + tool name that can outrun the narrow column; shrink-0
-                refused to shrink and pushed the summary and badge out of
-                the card, whose border carries no overflow strategy
-                (issue #872) -- this joins the same row's summary family
-                (#826): single line, tail ellipsis. */}
-            <span className="approval-tool font-medium min-w-0 truncate">{name}</span>
+                refused to shrink and pushed the badge out of the card,
+                whose border carries no overflow strategy (issue #872) --
+                single line, tail ellipsis. */}
+            <span className="approval-tool text-[13px] font-medium min-w-0 truncate">
+              {name}
+            </span>
             <OperationBadge kind={operationKind} />
+            {/* The at-rest attachment count (#672's Vec -- the old toggle's
+                "(1)" lived here): the delivery now rides the summary
+                expand, so this is the only rest-state signal that files
+                exist and how many; the visible figure is decorative, the
+                sr-only sentence carries it to assistive tech. */}
+            {fileValues.length > 0 && (
+              <>
+                <span
+                  aria-hidden="true"
+                  className="flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground"
+                >
+                  <Paperclip className="h-3 w-3" />
+                  {fileValues.length}
+                </span>
+                <span className="sr-only">
+                  <FormattedMessage
+                    id="thread.approval.filesAttached"
+                    defaultMessage="{count, plural, one {# attached file} other {# attached files}}"
+                    values={{ count: fileValues.length }}
+                  />
+                </span>
+              </>
+            )}
+            {/* role="status": while the gate suspends the turn the
+                round-trip wait line is gone (isRoundTripWait judges false
+                on the undecided row), so this hint is the only
+                announcement to assistive technology that a decision is
+                being asked for -- polite, the SessionPane alert convention
+                (issue #1368). The head row is the card's status slot: the
+                tool name is min-w-0 truncate, so the hint can never be
+                pushed out of the row. The "only" rides two facts outside
+                this card's tree -- the isRoundTripWait predicate and the
+                wait line it gates away; if the gate ever keeps a live
+                region up during suspension, this comment and the LiveRow
+                pin move together. */}
+            <span
+              role="status"
+              className="approval-pending-hint ml-auto shrink-0 text-xs text-warning"
+            >
+              <FormattedMessage
+                id="thread.approval.pending"
+                defaultMessage="Awaiting approval"
+              />
+            </span>
           </>
         )}
       />
+      {detailOpen && fileValues.length > 0 && (
+        <ApprovalFileValues
+          shown={fullView.kind === "full" ? fullView.files : fileValues}
+          failed={fullView.kind === "failed"}
+        />
+      )}
       {/* flex-wrap: the Button base class carries whitespace-nowrap, so
-          each button's min-content is its full label; three buttons plus
-          the ml-auto awaiting hint outrun the narrow rail's content box
-          and the overflow-x crop eats the tail -- the hint drops to a
-          second line, button pairs wrap if the labels alone still
-          outrun the column (issue #862). */}
-      <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          each button's min-content is its full label; if the three labels
+          alone outrun the narrow rail's content box the overflow-x crop
+          eats the tail -- the pairs wrap instead (issue #862; the
+          awaiting hint moved to the head row's status slot, off this
+          row's width budget). */}
+      <span className="mt-2 flex flex-wrap items-center gap-1.5">
         <Button
           type="button"
           size="sm"
-          className="approval-allow-once h-6 px-2 text-xs"
+          className="approval-allow-once h-7 px-3 text-[13px]"
           onClick={() => onRespond(requestId, "allow_once")}
         >
           <FormattedMessage id="thread.approval.allowOnce" defaultMessage="Allow once" />
@@ -105,7 +220,7 @@ export function ApprovalCard({
           type="button"
           size="sm"
           variant="secondary"
-          className="approval-always-allow h-6 px-2 text-xs"
+          className="approval-always-allow h-7 px-3 text-[13px]"
           onClick={() => onRespond(requestId, "always_allow")}
         >
           <FormattedMessage id="thread.approval.alwaysAllow" defaultMessage="Always allow" />
@@ -121,151 +236,63 @@ export function ApprovalCard({
           type="button"
           size="sm"
           variant="outline"
-          className="approval-deny ml-3 h-6 px-2 text-xs"
+          className="approval-deny ml-3 h-7 px-3 text-[13px]"
           onClick={() => onRespond(requestId, "deny")}
         >
           <FormattedMessage id="thread.approval.deny" defaultMessage="Deny" />
         </Button>
-        {/* role="status": while the gate suspends the turn the round-trip
-            wait line is gone (isRoundTripWait judges false on the undecided
-            row), so this hint is the only announcement to assistive
-            technology that a decision is being asked for -- polite, the
-            SessionPane alert convention (issue #1368). The "only" rides two
-            facts outside this card's tree -- the isRoundTripWait predicate
-            and the wait line it gates away; if the gate ever keeps a live
-            region up during suspension, this comment and the LiveRow pin
-            move together. */}
-        <span
-          role="status"
-          className="approval-pending-hint ml-auto text-xs text-muted-foreground"
-        >
-          <FormattedMessage
-            id="thread.approval.pending"
-            defaultMessage="Awaiting approval"
-          />
-        </span>
       </span>
       {/* The always-allow trust-scope disclosure (issue #1368): a resident
           line under the answers, not a hover disclosure -- "Always allow"
           lifts this one tool to session-wide trust (ADR-0080 Decision 3),
           and that consequence must be readable at the decision moment with
           zero interaction. Same caption family as the originator note. */}
-      <p className="approval-scope-note m-0 mt-1 text-xs text-muted-foreground">
+      <p className="approval-scope-note m-0 mt-2 text-xs text-muted-foreground">
         <FormattedMessage
           id="thread.approval.alwaysAllowScope"
           defaultMessage="After Always allow, calls to this tool no longer ask for the rest of the session."
         />
       </p>
-      {fileValues.length > 0 && (
-        <ApprovalFileValues
-          preview={fileValues}
-          requestId={requestId}
-          onLoad={onLoadAttachments}
-        />
-      )}
     </li>
   );
 }
 
-// The file-delivery expand-on-demand view (issue #672, ADR-0109 Decision 8;
-// full view issue #1009): collapsed by default, a deliberate low-frequency
-// action. Expanding pulls the FULL pre-truncation contents through the
-// `get_approval_attachments` command (the broadcast snapshot is capped at
-// the 4 KiB budget, not the content boundary); the capped preview renders
-// during the load gap and stays as the fallback when the pull rejects (slot
-// released, IPC failure) with a one-line error note. Without a loader the
-// expand keeps the capped snapshot (the #672 behavior -- tests without the
-// session id).
+// The file-delivery view (issue #672, ADR-0109 Decision 8; full view issue
+// #1009): the VALUES only -- it renders while the summary expand is open
+// and unmounts with it. The pull state machine lives in the card (the
+// expand is the trigger there); the load gap and a rejected pull both show
+// the capped broadcast snapshot, only a landed fetch replaces it, and the
+// rejection carries a one-line live note.
 function ApprovalFileValues({
-  preview,
-  requestId,
-  onLoad,
+  shown,
+  failed,
 }: {
-  preview: FileAttachment[];
-  requestId: string;
-  onLoad?: (requestId: string) => Promise<FileAttachment[]>;
+  shown: FileAttachment[];
+  failed: boolean;
 }) {
-  const [filesOpen, setFilesOpen] = useState(false);
-  // One fetch per card: idle until the first expand, then the uncut contents
-  // or the fallback posture. The pending-window snapshot is immutable while
-  // the card is up, so re-expanding reuses the settled state.
-  const [fullView, setFullView] = useState<
-    | { kind: "idle" }
-    | { kind: "loading" }
-    | { kind: "full"; files: FileAttachment[] }
-    | { kind: "failed" }
-  >({ kind: "idle" });
-
-  const toggleFiles = () => {
-    const next = !filesOpen;
-    setFilesOpen(next);
-    // Fired from the handler (not an effect): one shot, no StrictMode
-    // double-fetch, no refetch on re-expand.
-    if (next && fullView.kind === "idle" && onLoad) {
-      setFullView({ kind: "loading" });
-      void onLoad(requestId).then(
-        (files) => setFullView({ kind: "full", files }),
-        (err) => {
-          // The durable trace the respond-command catch keeps too (ADR-0029):
-          // an expected lifecycle rejection and a real IPC failure are
-          // indistinguishable in the UI, so the log carries the difference.
-          log.warn(
-            "approval",
-            "full-attachments pull rejected; falling back to the capped preview",
-            { requestId, err },
-          );
-          setFullView({ kind: "failed" });
-        },
-      );
-    }
-  };
-
-  // The load gap and the failure both show the capped preview; only a landed
-  // full fetch replaces it.
-  const shown = fullView.kind === "full" ? fullView.files : preview;
   return (
     <>
-      <button
-        type="button"
-        className="approval-files-toggle mt-1 text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
-        aria-expanded={filesOpen}
-        onClick={toggleFiles}
-      >
-        {filesOpen ? (
-          <FormattedMessage id="thread.approval.hideFiles" defaultMessage="Hide file values" />
-        ) : (
+      {failed && (
+        // role="status": the note appears asynchronously after the fetch
+        // rejects -- the same live-note semantics the thread's other
+        // async error notes carry.
+        <p role="status" className="approval-file-error m-0 mt-1 text-xs text-destructive">
           <FormattedMessage
-            id="thread.approval.viewFiles"
-            defaultMessage="View file values ({count})"
-            values={{ count: preview.length }}
+            id="thread.approval.fileValuesLoadFailed"
+            defaultMessage="Full contents unavailable — showing the capped preview."
           />
-        )}
-      </button>
-      {filesOpen && (
-        <>
-          {fullView.kind === "failed" && (
-            // role="status": the note appears asynchronously after the fetch
-            // rejects -- the same live-note semantics the thread's other
-            // async error notes carry.
-            <p role="status" className="approval-file-error m-0 mt-1 text-xs text-destructive">
-              <FormattedMessage
-                id="thread.approval.fileValuesLoadFailed"
-                defaultMessage="Full contents unavailable — showing the capped preview."
-              />
-            </p>
-          )}
-          {shown.map((file) => (
-            <span key={file.param} className="approval-file mt-1 block">
-              <span className="approval-file-param font-mono text-xs text-muted-foreground">
-                {file.param}
-              </span>
-              <pre className="approval-file-content mt-0.5 max-h-40 overflow-auto rounded-sm bg-background p-1.5 font-mono text-xs whitespace-pre-wrap break-all">
-                {file.content}
-              </pre>
-            </span>
-          ))}
-        </>
+        </p>
       )}
+      {shown.map((file) => (
+        <span key={file.param} className="approval-file mt-1 block">
+          <span className="approval-file-param font-mono text-xs text-muted-foreground">
+            {file.param}
+          </span>
+          <pre className="approval-file-content mt-0.5 max-h-40 overflow-auto rounded-sm bg-background p-1.5 font-mono text-xs whitespace-pre-wrap break-all">
+            {file.content}
+          </pre>
+        </span>
+      ))}
     </>
   );
 }

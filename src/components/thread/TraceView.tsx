@@ -172,6 +172,7 @@ export function LiveRow({
         approval={row.approval}
         name={row.name}
         summary={row.summary}
+        summaryDetail={row.summaryDetail}
         operationKind={row.operationKind}
         onRespond={onRespond}
         onLoadAttachments={onLoadAttachments}
