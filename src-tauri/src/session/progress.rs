@@ -18,6 +18,18 @@
 //! [`Termination::NoProgress`](crate::session::loop_contract::Termination::NoProgress)
 //! instead of a bare `Cancelled`.
 //!
+//! Liveness calibration (#1653, amending ADR-0115's "inbound stream
+//! activity" to its measured form): on the live face, transport-layer bytes
+//! are activity too. A gateway's queue/processing heartbeat arrives as SSE
+//! comment lines that the parser swallows before dispatching, and delta
+//! fields the parser does not recognize produce no event items at all --
+//! both shapes keep the transport alive while the application layer stays
+//! silent. [`ProgressClock::note_transport_chunk`] feeds those bytes into
+//! the same re-arm (one cap, unchanged freeze semantics) and into the
+//! aggregate [`TransportLiveness`] counters the wrap-up logs read, so a
+//! "hung turn" report can distinguish a heartbeat-fed stream from a
+//! transport-silent one.
+//!
 //! Lifetime: the clock lives in a slot on the session's [`CancelToken`] (so
 //! the gateway can freeze across a bridge-served tool call it serves) while
 //! the watchdog thread holds only a [`Weak`] -- when the turn ends, the
@@ -38,6 +50,32 @@ use crate::session::loop_contract::{NoProgressDetail, Termination};
 /// 25 ms loop (the UI cancel round-trip); kill latency past the cap is one
 /// interval, which a 120 s cap makes invisible.
 const PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// The transport-liveness observation at turn wrap-up (#1653): aggregate
+/// counters over the live face's HTTP response bodies -- chunk count, byte
+/// total, and the comment-form (`:` first byte, the SSE heartbeat shape)
+/// vs data-form split. Copy, read once after the stream is over, never
+/// carrying content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct TransportLiveness {
+    pub(crate) chunks: u64,
+    pub(crate) bytes: u64,
+    pub(crate) comment_chunks: u64,
+    pub(crate) data_chunks: u64,
+}
+
+impl TransportLiveness {
+    /// The wrap-up log line's payload: aggregate counts only. A
+    /// comment-form-dominant reading means an upstream queue/processing
+    /// heartbeat kept the transport alive while the application layer
+    /// stayed silent; zero chunks mean the transport itself was silent.
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "{} chunks / {} bytes ({} comment-form, {} data-form)",
+            self.chunks, self.bytes, self.comment_chunks, self.data_chunks
+        )
+    }
+}
 
 pub(crate) struct ProgressClock {
     /// The cap the clock arms with (the ADR-0021-aligned 120 s in
@@ -69,6 +107,19 @@ pub(crate) struct ProgressClock {
     /// arm -- the measurements the NoProgress payload carries.
     trip_silence_ms: AtomicU64,
     trip_elapsed_ms: AtomicU64,
+    /// Transport-liveness counters (#1653): chunks observed on the live
+    /// face's HTTP response bodies, and their byte total. Fed only by
+    /// [`Self::note_transport_chunk`]; read once at wrap-up into a
+    /// [`TransportLiveness`] snapshot.
+    transport_chunks: AtomicU64,
+    transport_bytes: AtomicU64,
+    /// The comment-form / data-form split of those chunks (first byte `:`
+    /// vs anything else): the qualitative signal that separates an upstream
+    /// queue/processing heartbeat from data-bearing traffic. First-byte
+    /// only -- chunk boundaries ride HTTP framing, so a mid-line split can
+    /// mislabel one chunk; the aggregate stays directional.
+    transport_comment_chunks: AtomicU64,
+    transport_data_chunks: AtomicU64,
 }
 
 impl ProgressClock {
@@ -85,6 +136,10 @@ impl ProgressClock {
             timed_out: AtomicBool::new(false),
             trip_silence_ms: AtomicU64::new(0),
             trip_elapsed_ms: AtomicU64::new(0),
+            transport_chunks: AtomicU64::new(0),
+            transport_bytes: AtomicU64::new(0),
+            transport_comment_chunks: AtomicU64::new(0),
+            transport_data_chunks: AtomicU64::new(0),
         });
         let weak = Arc::downgrade(&clock);
         // Builder::spawn (not the panicking thread::spawn): a spawn failure
@@ -178,6 +233,35 @@ impl ProgressClock {
     /// freeze segments keep the clock deferred by the watchdog instead.
     pub(crate) fn touch(&self) {
         self.defer(self.timeout);
+    }
+
+    /// Transport-layer body activity (#1653, the ADR-0115 calibration):
+    /// bytes arriving on a live-face response body are liveness -- re-arm
+    /// the same cap and fold the chunk into the qualitative counters. A
+    /// note inside a freeze segment is harmless (the watchdog re-defers the
+    /// deadline every tick while frozen), and content is never recorded.
+    pub(crate) fn note_transport_chunk(&self, len: usize, comment_form: bool) {
+        self.transport_chunks.fetch_add(1, Ordering::Relaxed);
+        self.transport_bytes
+            .fetch_add(len as u64, Ordering::Relaxed);
+        if comment_form {
+            self.transport_comment_chunks
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.transport_data_chunks.fetch_add(1, Ordering::Relaxed);
+        }
+        self.touch();
+    }
+
+    /// The wrap-up observation of the transport counters (#1653): the
+    /// aggregate the turn-end debug line and the NoProgress kill warn read.
+    pub(crate) fn transport_snapshot(&self) -> TransportLiveness {
+        TransportLiveness {
+            chunks: self.transport_chunks.load(Ordering::Relaxed),
+            bytes: self.transport_bytes.load(Ordering::Relaxed),
+            comment_chunks: self.transport_comment_chunks.load(Ordering::Relaxed),
+            data_chunks: self.transport_data_chunks.load(Ordering::Relaxed),
+        }
     }
 
     /// Open a freeze segment (a wait on an external principal): the
@@ -449,5 +533,45 @@ mod tests {
             !token.is_requested(),
             "the successor turn is untouched by the stale expiry"
         );
+    }
+
+    /// #1653: transport chunks fold into the aggregate counters with the
+    /// comment/data first-byte split, and the snapshot reads the totals --
+    /// content itself never recorded.
+    #[test]
+    fn transport_chunks_aggregate_into_the_liveness_snapshot() {
+        let (_token, clock, _generation) = armed(CAP);
+        clock.note_transport_chunk(11, true); // ": keep-alive"
+        clock.note_transport_chunk(4096, false); // "data: {...}"
+        clock.note_transport_chunk(11, true);
+        let snapshot = clock.transport_snapshot();
+        assert_eq!(snapshot.chunks, 3);
+        assert_eq!(snapshot.bytes, 4118);
+        assert_eq!(snapshot.comment_chunks, 2);
+        assert_eq!(snapshot.data_chunks, 1);
+        assert_eq!(
+            snapshot.summary(),
+            "3 chunks / 4118 bytes (2 comment-form, 1 data-form)"
+        );
+    }
+
+    /// #1653: a transport note re-arms the deadline exactly like an event
+    /// touch -- heartbeat-shaped chunks at a sub-cap cadence keep the clock
+    /// alive, and stopping them lets it fire (the calibration's kill half:
+    /// a transport-silent stream still trips).
+    #[test]
+    fn transport_notes_defer_expiry_while_heartbeats_continue() {
+        let (token, clock, _generation) = armed(CAP);
+        for _ in 0..10 {
+            thread::sleep(Duration::from_millis(30));
+            clock.note_transport_chunk(11, true);
+        }
+        assert!(
+            !token.is_requested(),
+            "steady heartbeat chunks must never trip the cap"
+        );
+        thread::sleep(CAP + PROGRESS_POLL_INTERVAL * 4);
+        assert!(clock.is_timed_out());
+        assert!(token.is_requested());
     }
 }

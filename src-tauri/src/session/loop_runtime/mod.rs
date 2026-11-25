@@ -34,6 +34,7 @@ mod invalid_tool;
 mod live;
 mod model;
 mod subagent;
+mod transport;
 mod truncation;
 
 #[cfg(test)]
@@ -63,7 +64,7 @@ use crate::session::loop_contract::{
     WINDOW_CONVERGENCE_NUDGE,
 };
 use crate::session::materializer::{DispatchDeps, Materializer};
-use crate::session::progress::ProgressClock;
+use crate::session::progress::{ProgressClock, TransportLiveness};
 use crate::session::turn_dispatch::{
     classify_call, dispatch_gated_call, panic_to_transient, CallFace, DispatchAbort, GateCtx,
 };
@@ -136,6 +137,16 @@ impl LoopRuntime {
             output_cap: Some(output_cap),
             model_name: Some(model_name),
             ..Self::new(model)
+        }
+    }
+
+    /// The turn's transport-liveness snapshot for the wrap-up logs (#1653):
+    /// the counters ride the armed clock, and only the live face feeds
+    /// them -- the bridged face's all-zero lines stay silent.
+    fn transport_snapshot(&self, clock: &Option<Arc<ProgressClock>>) -> Option<TransportLiveness> {
+        match (self.protocol.is_some(), clock) {
+            (true, Some(clock)) => Some(clock.transport_snapshot()),
+            _ => None,
         }
     }
 
@@ -483,6 +494,7 @@ impl LoopRuntime {
                     termination,
                     fold_replaced,
                     self.model_name.as_deref(),
+                    self.transport_snapshot(&clock),
                 );
             }
             if state.turn_over(&cancel) {
@@ -495,6 +507,7 @@ impl LoopRuntime {
                     ProgressClock::cancel_landing(clock.as_ref()),
                     fold_replaced,
                     self.model_name.as_deref(),
+                    self.transport_snapshot(&clock),
                 );
             }
             let termination = match exit {
@@ -533,6 +546,7 @@ impl LoopRuntime {
                 termination,
                 fold_replaced,
                 self.model_name.as_deref(),
+                self.transport_snapshot(&clock),
             )
         })
     }
@@ -985,7 +999,28 @@ fn finish(
     termination: Termination,
     fold_replaced: bool,
     model_name: Option<&str>,
+    transport: Option<TransportLiveness>,
 ) -> LoopOutcome {
+    // The wrap-up liveness logs (#1653, ADR-0115's calibrated predicate):
+    // one debug line per live-face turn (the aggregate a future "hung
+    // turn" report reads), and one warn beside the NoProgress kill's
+    // existing log -- comment-form-dominant counters mean an upstream
+    // queue/processing heartbeat kept the transport alive; zero chunks
+    // mean the transport itself was silent.
+    if let Some(transport) = transport {
+        if matches!(termination, Termination::NoProgress(_)) {
+            log::warn!(
+                target: "toptopduck::session",
+                "no-progress kill transport liveness: {}",
+                transport.summary()
+            );
+        }
+        log::debug!(
+            target: "toptopduck::session",
+            "turn transport liveness: {}",
+            transport.summary()
+        );
+    }
     let drained = fold.drain_residual(&state.main);
     let recorded_calls = state.main.recorded_calls.load(Ordering::SeqCst);
     // The pairing is scoped to the MAIN channel (#944 review Critical 1):
