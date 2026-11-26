@@ -1350,7 +1350,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };

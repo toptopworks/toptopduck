@@ -4588,7 +4588,7 @@ mod tests {
 
     /// A bridge-originated call naming a registered CLI tool gates under the
     /// CLI trust key with the Execute badge, and the card carries the full
-    /// argv + the file-delivered value -- the approver signs exactly what
+    /// argv + the delivered param value -- the approver signs exactly what
     /// will run, identically to a built-in-initiated call (ADR-0108
     /// Decisions 7/8). The sink allows once; the executor's structured spawn
     /// failure (a nonexistent executable) comes back as the call's own
@@ -4647,9 +4647,9 @@ mod tests {
             "summary renders the full argv: {}",
             body.summary
         );
-        assert_eq!(body.file_attachments.len(), 1);
-        assert_eq!(body.file_attachments[0].param, "doc");
-        assert_eq!(body.file_attachments[0].content, "hello body");
+        assert_eq!(body.param_values.len(), 1);
+        assert_eq!(body.param_values[0].param, "doc");
+        assert_eq!(body.param_values[0].content, "hello body");
     }
 
     /// A denial is the call's own `isError` envelope + one trace row naming

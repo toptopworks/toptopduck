@@ -9,7 +9,7 @@ import { invalidateSessionData } from "./useWorkingSet";
 import type { ApprovalEntry } from "./useApprovalEvents";
 import type { UseViewedResult } from "./useViewedResult";
 import type { AppError } from "../types/error";
-import type { ApprovalResponse, FileAttachment, OperationKind } from "../types/approval";
+import type { ApprovalResponse, ParamValue, OperationKind } from "../types/approval";
 import type { TurnPhase } from "../types/session";
 import type { SessionRuntimeChoice } from "../types/runtime";
 import type {
@@ -113,13 +113,13 @@ export interface LiveTraceRow {
    *  `response` null while PENDING (three live buttons), the user's answer
    *  once resolved (badge), or `"abandoned"` when the external caller
    *  dropped the call with no answer (issue #1267 -- abandoned badge). null
-   *  for ungated built-in calls. The fileAttachments snapshot (issue #672)
+   *  for ungated built-in calls. The paramValues snapshot (issue #672)
    *  rides the pending card; the card is its only surface (the settled
    *  trace keeps the argv summary). */
   approval: {
     requestId: string;
     response: ApprovalResponse | "abandoned" | null;
-    fileAttachments?: FileAttachment[];
+    paramValues?: ParamValue[];
     /** The delegating sub-agent's name (issue #934): the card renders it as
      *  "sub-agent X wants to call Y". undefined for a main-loop call. */
     originAgent?: string;
@@ -331,7 +331,7 @@ export function mergeLiveTrace(
         approval: {
           requestId: match.requestId,
           response: liveApprovalResponse(match.status),
-          fileAttachments: match.fileAttachments,
+          paramValues: match.paramValues,
           originAgent: match.originAgent,
         },
         running: call.running,
@@ -384,7 +384,7 @@ export function mergeLiveTrace(
       approval: {
         requestId: a.requestId,
         response: liveApprovalResponse(a.status),
-        fileAttachments: a.fileAttachments,
+        paramValues: a.paramValues,
         originAgent: a.originAgent,
       },
       running: false,

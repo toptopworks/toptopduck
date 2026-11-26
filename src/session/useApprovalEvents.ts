@@ -5,7 +5,7 @@ import {
   onApprovalResolved,
   respondToolApproval,
 } from "../api";
-import type { ApprovalResponse, FileAttachment, OperationKind } from "../types/approval";
+import type { ApprovalResponse, ParamValue, OperationKind } from "../types/approval";
 import { log } from "../lib/log";
 
 // App-level ownership of the tiered-approval side channel (ADR-0083, issue
@@ -37,10 +37,10 @@ export interface ApprovalEntry {
   tool: string;
   operationKind: OperationKind;
   summary: string;
-  /** File-delivery values for the card's expand-on-demand view (issue #672):
-   * the approval-time snapshot of each file-delivered parameter. undefined
+  /** Delivered param values for the card's expand-on-demand view (issue #672):
+   * the approval-time snapshot of each delivered param value. undefined
    * for calls without them (the backend omits the field). */
-  fileAttachments?: FileAttachment[];
+  paramValues?: ParamValue[];
   /** The call's originator (issue #934): the delegating sub-agent's name.
    * undefined for a main-loop / external-runtime call (the backend omits the
    * field); the card renders it as "sub-agent X wants to call Y". */
@@ -107,7 +107,7 @@ export function useApprovalEvents(): UseApprovalEvents {
           tool: ev.tool,
           operationKind: ev.operation_kind,
           summary: ev.summary,
-          fileAttachments: ev.file_attachments,
+          paramValues: ev.param_values,
           originAgent: ev.origin_agent,
           receivedAt: Date.now(),
           status: { kind: "pending" },

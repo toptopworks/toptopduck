@@ -253,25 +253,25 @@ pub struct ApprovalRequestBody {
     /// defense -- it bounds the broadcast surface, it does not sanitize
     /// content.
     pub summary: String,
-    /// File-delivery values for the card's expand-on-demand view (issue
+    /// Delivered param values for the card's expand-on-demand view (issue
     /// #672): each entry carries the parameter name and its content as
-    /// captured at approval time. Empty for calls without file-delivered
-    /// parameters -- the field omits from the wire rather than riding along
+    /// captured at approval time. Empty for calls without delivered
+    /// param values -- the field omits from the wire rather than riding along
     /// as `[]` on every card.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub file_attachments: Vec<FileAttachment>,
+    pub param_values: Vec<ParamValue>,
     /// The call's originator annotation (issue #934): the delegating
     /// sub-agent's name, `None` for a main-loop / external-runtime call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin_agent: Option<String>,
 }
 
-/// Hard cap on each file attachment's content in `char`s (issue #672). The
-/// attachments ride the same global `app.emit` broadcast as the summary
+/// Hard cap on each param value's content in `char`s (issue #672). The
+/// param_values ride the same global `app.emit` broadcast as the summary
 /// (ADR-0056 multi-pane), so each content is bounded the same way -- 4 KiB
 /// covers a realistic interpreter-script value while keeping one payload
 /// from flooding every pane.
-pub const FILE_ATTACHMENT_MAX_CHARS: usize = 4 * 1024;
+pub const PARAM_VALUE_MAX_CHARS: usize = 4 * 1024;
 
 /// Hard cap on [`ApprovalRequestBody::summary`] length in `char`s (issue
 /// #312). The summary is globally broadcast via `app.emit` (ADR-0056 multi-
@@ -316,10 +316,10 @@ pub struct ApprovalRequestPayload {
     pub tool: String,
     pub operation_kind: OperationKind,
     pub summary: String,
-    /// File-delivery values for the card's expand-on-demand view (issue
-    /// #672); omitted when empty (calls without file-delivered parameters).
+    /// Delivered param values for the card's expand-on-demand view (issue
+    /// #672); omitted when empty (calls without delivered param values).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub file_attachments: Vec<FileAttachment>,
+    pub param_values: Vec<ParamValue>,
     /// The call's originator annotation (issue #934): the delegating
     /// sub-agent's name; omitted for a main-loop / external-runtime call.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -387,14 +387,14 @@ pub struct GateCancelled;
 
 /// One expandable audit payload for the approval card (issue #672,
 /// ADR-0109 Decision 8): the approver can expand the value on the card.
-/// Three payload kinds ride this shape -- file-delivery values (issue
+/// Three payload kinds ride this shape -- delivered param values (issue
 /// #672), the skill markdown body (`skills::create`), and the full
 /// pre-truncation argv rendering when the summary's cap cut it (issue
-/// #1195). Captured at approval time -- for file-delivery values, the
+/// #1195). Captured at approval time -- for delivered param values, the
 /// temp file is deleted when the call ends, so the payload snapshot is
 /// the only durable view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FileAttachment {
+pub struct ParamValue {
     pub param: String,
     pub content: String,
 }
@@ -405,9 +405,9 @@ pub struct ApprovalRequest {
     pub key: ToolKey,
     pub operation_kind: OperationKind,
     pub summary: String,
-    /// File-delivery values for the card's expand-on-demand view; empty for
-    /// every call shape without file-delivered parameters (built-ins, MCP).
-    pub file_attachments: Vec<FileAttachment>,
+    /// Delivered param values for the card's expand-on-demand view; empty for
+    /// every call shape without delivered param values (built-ins, MCP).
+    pub param_values: Vec<ParamValue>,
     /// The call's originator annotation (ADR-0117 Decision 4 -- the approval
     /// popup names the originator; issue #934):
     /// the delegating sub-agent's name when the call rides a sub-agent's
@@ -438,13 +438,13 @@ struct Pending {
     /// terminal gateway echo with this gate before abandoning it.
     call_id: Option<String>,
     response: Option<ApprovalResponse>,
-    /// The pre-truncation file attachments (issue #1009): the broadcast copy
-    /// caps each content at [`FILE_ATTACHMENT_MAX_CHARS`] as a budget (the
+    /// The pre-truncation param values (issue #1009): the broadcast copy
+    /// caps each content at [`PARAM_VALUE_MAX_CHARS`] as a budget (the
     /// ADR-0056 cross-pane surface), while this slot keeps the uncut
-    /// originals alive for the pending window so [`Self::pending_attachments`]
+    /// originals alive for the pending window so [`Self::pending_param_values`]
     /// can serve the card's full view. Dropped with the slot when the gate
     /// takes it (respond / cancel / close).
-    file_attachments: Vec<FileAttachment>,
+    param_values: Vec<ParamValue>,
 }
 
 /// Authorization policy fields guarded by a single mutex so [`ApprovalState::reset`]
@@ -634,12 +634,12 @@ impl ApprovalState {
             // The expand-on-demand contents ride the same broadcast as the
             // summary, so each is capped the same way (issue #672) -- the
             // truncation is visible via the ellipsis, never a silent cut.
-            file_attachments: request
-                .file_attachments
+            param_values: request
+                .param_values
                 .iter()
-                .map(|a| FileAttachment {
+                .map(|a| ParamValue {
                     param: a.param.clone(),
-                    content: truncate_summary(&a.content, FILE_ATTACHMENT_MAX_CHARS),
+                    content: truncate_summary(&a.content, PARAM_VALUE_MAX_CHARS),
                 })
                 .collect(),
         };
@@ -674,7 +674,7 @@ impl ApprovalState {
                 response: None,
                 // The uncut originals move into the slot; the broadcast body
                 // above already holds its own capped copies (issue #1009).
-                file_attachments: request.file_attachments,
+                param_values: request.param_values,
             });
         }
         sink.emit_request(&body);
@@ -805,9 +805,9 @@ impl ApprovalState {
         Ok(())
     }
 
-    /// Serve the pre-truncation file attachments for the still-pending
+    /// Serve the pre-truncation param values for the still-pending
     /// request (issue #1009): the card's expand view pulls the full contents
-    /// through the `get_approval_attachments` command while the turn is
+    /// through the `get_approval_param_values` command while the turn is
     /// suspended on the gate -- the broadcast's capped copy is a budget, not
     /// the content boundary (ADR-0109 Decision 8). The full snapshot lives
     /// exactly as long as the slot: once the gate takes it (respond / cancel
@@ -815,10 +815,10 @@ impl ApprovalState {
     /// broadcast copy. Read-only -- the gate releases `pending` while parked
     /// inside `cv.wait_timeout`, so this cannot deadlock the wait (it may
     /// briefly contend between the gate's poll iterations).
-    pub fn pending_attachments(
+    pub fn pending_param_values(
         &self,
         request_id: uuid::Uuid,
-    ) -> Result<Vec<FileAttachment>, RespondError> {
+    ) -> Result<Vec<ParamValue>, RespondError> {
         let g = self.pending.lock().expect("pending lock poisoned");
         let Some(p) = g.as_ref() else {
             return Err(RespondError::NoPending);
@@ -826,7 +826,7 @@ impl ApprovalState {
         if p.request_id != request_id {
             return Err(RespondError::UnknownRequest);
         }
-        Ok(p.file_attachments.clone())
+        Ok(p.param_values.clone())
     }
 
     /// Whether a tool key is currently in the session trust set (test surface
@@ -852,7 +852,7 @@ impl ApprovalState {
     }
 }
 
-/// Why a `respond_tool_approval` call or a `pending_attachments` read did
+/// Why a `respond_tool_approval` call or a `pending_param_values` read did
 /// not land (issues #294, #1009). The read path never produces
 /// `AlreadyAnswered` -- a taken slot reads as `NoPending`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -952,7 +952,7 @@ mod tests {
             key,
             operation_kind: OperationKind::Network,
             summary: "GET /x".into(),
-            file_attachments: Vec::new(),
+            param_values: Vec::new(),
             origin_agent: None,
             call_id: None,
         };
@@ -979,7 +979,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: Some("analyst".into()),
                 call_id: None,
             };
@@ -1002,7 +1002,7 @@ mod tests {
             tool: "fetch".into(),
             operation_kind: OperationKind::Network,
             summary: "GET /x".into(),
-            file_attachments: Vec::new(),
+            param_values: Vec::new(),
             origin_agent: None,
         };
         assert!(!serde_json::to_string(&plain)
@@ -1035,7 +1035,7 @@ mod tests {
                 key: key_c,
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };
@@ -1064,9 +1064,9 @@ mod tests {
     }
 
     #[test]
-    fn gate_caps_and_passes_through_file_attachments() {
+    fn gate_caps_and_passes_through_param_values() {
         // Issue #672: the expand-on-demand contents ride the same broadcast
-        // as the summary, so the gate caps each content at the attachment
+        // as the summary, so the gate caps each content at the param-value
         // cap with the visible ellipsis -- never an unbounded payload on the
         // wire -- and passes the (param, content) pairs through untouched
         // otherwise.
@@ -1082,12 +1082,12 @@ mod tests {
                 key: ToolKey::external(ToolKey::CLI_SERVER, "code-runner"),
                 operation_kind: OperationKind::Execute,
                 summary: "run".into(),
-                file_attachments: vec![
-                    FileAttachment {
+                param_values: vec![
+                    ParamValue {
                         param: "code".into(),
-                        content: "x".repeat(FILE_ATTACHMENT_MAX_CHARS + 100),
+                        content: "x".repeat(PARAM_VALUE_MAX_CHARS + 100),
                     },
-                    FileAttachment {
+                    ParamValue {
                         param: "notes".into(),
                         content: "short".into(),
                     },
@@ -1108,26 +1108,26 @@ mod tests {
         handle.join().expect("gate thread").0.expect("allow");
 
         let body = sink.last_request().expect("card body recorded");
-        assert_eq!(body.file_attachments.len(), 2);
-        assert_eq!(body.file_attachments[0].param, "code");
+        assert_eq!(body.param_values.len(), 2);
+        assert_eq!(body.param_values[0].param, "code");
         assert_eq!(
-            body.file_attachments[0].content.chars().count(),
-            FILE_ATTACHMENT_MAX_CHARS,
+            body.param_values[0].content.chars().count(),
+            PARAM_VALUE_MAX_CHARS,
             "an over-cap content truncates to exactly the cap"
         );
         assert!(
-            body.file_attachments[0].content.ends_with("..."),
+            body.param_values[0].content.ends_with("..."),
             "the cut is visible (the ellipsis), never silent"
         );
-        assert_eq!(body.file_attachments[1].content, "short");
+        assert_eq!(body.param_values[1].content, "short");
     }
 
     /// Issue #1009: the pre-truncation snapshot outlives the broadcast cap.
-    /// While the turn is suspended on the gate, `pending_attachments` serves
+    /// While the turn is suspended on the gate, `pending_param_values` serves
     /// the uncut originals (the broadcast stays capped, #672); once the gate
     /// takes the slot (respond / cancel) the snapshot is gone with it.
     #[test]
-    fn pending_attachments_serve_the_uncut_snapshot_for_the_pending_window_only() {
+    fn pending_param_values_serve_the_uncut_snapshot_for_the_pending_window_only() {
         let state = Arc::new(ApprovalState::new());
         let cancel = Arc::new(CancelToken::new());
         let sink = Arc::new(RecordingSink::default());
@@ -1140,12 +1140,12 @@ mod tests {
                 key: ToolKey::external(ToolKey::CLI_SERVER, "code-runner"),
                 operation_kind: OperationKind::Execute,
                 summary: "run".into(),
-                file_attachments: vec![
-                    FileAttachment {
+                param_values: vec![
+                    ParamValue {
                         param: "code".into(),
-                        content: "x".repeat(FILE_ATTACHMENT_MAX_CHARS + 100),
+                        content: "x".repeat(PARAM_VALUE_MAX_CHARS + 100),
                     },
-                    FileAttachment {
+                    ParamValue {
                         param: "notes".into(),
                         content: "short".into(),
                     },
@@ -1162,27 +1162,27 @@ mod tests {
         let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
         // Suspended window: the broadcast copy is capped, the pending-window
         // copy is the full pre-truncation original.
-        let attachments = state
-            .pending_attachments(request_id)
+        let param_values = state
+            .pending_param_values(request_id)
             .expect("full snapshot served while pending");
-        assert_eq!(attachments.len(), 2);
-        assert_eq!(attachments[0].param, "code");
+        assert_eq!(param_values.len(), 2);
+        assert_eq!(param_values[0].param, "code");
         assert_eq!(
-            attachments[0].content.chars().count(),
-            FILE_ATTACHMENT_MAX_CHARS + 100,
+            param_values[0].content.chars().count(),
+            PARAM_VALUE_MAX_CHARS + 100,
             "the pending-window snapshot is the pre-truncation original"
         );
-        assert_eq!(attachments[1].content, "short");
+        assert_eq!(param_values[1].content, "short");
         let body = sink.last_request().expect("card body recorded");
         assert_eq!(
-            body.file_attachments[0].content.chars().count(),
-            FILE_ATTACHMENT_MAX_CHARS,
+            body.param_values[0].content.chars().count(),
+            PARAM_VALUE_MAX_CHARS,
             "the broadcast copy stays capped (the #672 pin, other side of the seam)"
         );
         // A different id while one request is pending: unknown request, not a
         // silent serve of whichever slot happens to be live.
         assert!(matches!(
-            state.pending_attachments(uuid::Uuid::new_v4()),
+            state.pending_param_values(uuid::Uuid::new_v4()),
             Err(RespondError::UnknownRequest)
         ));
         state
@@ -1191,16 +1191,16 @@ mod tests {
         handle.join().expect("gate thread").0.expect("deny");
         // The slot is taken with the gate's return: the snapshot is gone.
         assert!(matches!(
-            state.pending_attachments(request_id),
+            state.pending_param_values(request_id),
             Err(RespondError::NoPending)
         ));
     }
 
     #[test]
-    fn pending_attachments_reject_with_nothing_in_flight() {
+    fn pending_param_values_reject_with_nothing_in_flight() {
         let state = ApprovalState::new();
         assert!(matches!(
-            state.pending_attachments(uuid::Uuid::new_v4()),
+            state.pending_param_values(uuid::Uuid::new_v4()),
             Err(RespondError::NoPending)
         ));
     }
@@ -1210,7 +1210,7 @@ mod tests {
     /// command rejects after cancellation too -- the pending window and the
     /// slot share one lifecycle.
     #[test]
-    fn pending_attachments_reject_after_a_cancelled_gate() {
+    fn pending_param_values_reject_after_a_cancelled_gate() {
         let state = Arc::new(ApprovalState::new());
         let cancel = Arc::new(CancelToken::new());
         let sink = Arc::new(RecordingSink::default());
@@ -1223,7 +1223,7 @@ mod tests {
                 key: ToolKey::external(ToolKey::CLI_SERVER, "code-runner"),
                 operation_kind: OperationKind::Execute,
                 summary: "run".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };
@@ -1239,7 +1239,7 @@ mod tests {
             GateCancelled
         );
         assert!(matches!(
-            state.pending_attachments(request_id),
+            state.pending_param_values(request_id),
             Err(RespondError::NoPending)
         ));
     }
@@ -1263,7 +1263,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: Some("rpc-42".into()),
             };
@@ -1288,7 +1288,7 @@ mod tests {
             "no denial exists to report -- nobody answered"
         );
         assert!(matches!(
-            state.pending_attachments(request_id),
+            state.pending_param_values(request_id),
             Err(RespondError::NoPending)
         ));
     }
@@ -1310,7 +1310,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: Some("rpc-43".into()),
             };
@@ -1349,7 +1349,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };
@@ -1383,7 +1383,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: Some(String::new()),
             };
@@ -1419,7 +1419,7 @@ mod tests {
                 key: key_c,
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };
@@ -1444,7 +1444,7 @@ mod tests {
             key,
             operation_kind: OperationKind::Network,
             summary: "GET /y".into(),
-            file_attachments: Vec::new(),
+            param_values: Vec::new(),
             origin_agent: None,
             call_id: None,
         };
@@ -1467,7 +1467,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };
@@ -1499,7 +1499,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };
@@ -1543,7 +1543,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };
@@ -1567,7 +1567,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };
@@ -1633,7 +1633,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };
@@ -1648,7 +1648,7 @@ mod tests {
             key: ToolKey::external("other", "fetch"),
             operation_kind: OperationKind::Network,
             summary: "GET /y".into(),
-            file_attachments: Vec::new(),
+            param_values: Vec::new(),
             origin_agent: None,
             call_id: None,
         };
@@ -1690,7 +1690,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };
@@ -1737,7 +1737,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };
@@ -1908,7 +1908,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "S".repeat(1000),
-                file_attachments: Vec::new(),
+                param_values: Vec::new(),
                 origin_agent: None,
                 call_id: None,
             };

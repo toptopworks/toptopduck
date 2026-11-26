@@ -1268,16 +1268,16 @@ describe("useTurnFlow", () => {
       expect(rows[0]?.approval).toMatchObject({ requestId: "req-1", response: "abandoned" });
     });
 
-    it("carries the fileAttachments snapshot onto the approval card row (issue #672)", () => {
+    it("carries the paramValues snapshot onto the approval card row (issue #672)", () => {
       // The pending card is the snapshot's only surface: the approver
       // expands it against a value whose temp file is deleted when the call
       // ends, so the merge must not drop it on the way to the row.
-      const files = [{ param: "code", content: "print(1)" }];
-      const rows = mergeLiveTrace([], [approval({ fileAttachments: files })], 1);
+      const values = [{ param: "code", content: "print(1)" }];
+      const rows = mergeLiveTrace([], [approval({ paramValues: values })], 1);
       expect(rows[0]?.approval).toMatchObject({
         requestId: "req-1",
         response: null,
-        fileAttachments: files,
+        paramValues: values,
       });
     });
 

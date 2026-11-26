@@ -58,7 +58,7 @@ import type {
   ApprovalResolvedPayload,
   ApprovalResponse,
   AuthMode,
-  FileAttachment,
+  ParamValue,
   ToolKey,
 } from "./types/approval";
 import type {
@@ -1183,17 +1183,17 @@ export async function respondToolApproval(
   await invoke<void>("respond_tool_approval", { sessionId, requestId, response });
 }
 
-// Fetch the full (pre-truncation) file-delivery values for the session's
+// Fetch the full (pre-truncation) delivered param values for the session's
 // in-flight approval request (issue #1009, ADR-0109 Decision 8): the
-// `approval-request` broadcast caps each attachment (a budget, not a content
+// `approval-request` broadcast caps each param value (a budget, not a content
 // boundary); this command serves the uncut originals while the turn is
 // suspended on the gate. Rejects once the request is answered or cancelled
 // -- callers fall back to the capped broadcast snapshot.
-export async function getApprovalAttachments(
+export async function getApprovalParamValues(
   sessionId: string,
   requestId: string,
-): Promise<FileAttachment[]> {
-  return invoke<FileAttachment[]>("get_approval_attachments", { sessionId, requestId });
+): Promise<ParamValue[]> {
+  return invoke<ParamValue[]>("get_approval_param_values", { sessionId, requestId });
 }
 
 // Read the session's authorization posture (ADR-0080 Decision 4): `per_call`

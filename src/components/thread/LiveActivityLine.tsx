@@ -40,7 +40,7 @@ import { LiveRow } from "./TraceView";
 import { TraceList } from "./TraceList";
 import { WaitElapsedSuffix } from "./WaitElapsedSuffix";
 import { isRoundTripWait, isSettledRow, thinkingHeadExcerpt } from "../../session/useTurnFlow";
-import type { ApprovalResponse, FileAttachment, OperationKind } from "../../types/approval";
+import type { ApprovalResponse, ParamValue, OperationKind } from "../../types/approval";
 import type { LiveTurn } from "../../session/useTurnFlow";
 
 // The head's activity verb: the progressive face of the operation kind (the
@@ -89,13 +89,13 @@ const FOLLOW_SLACK_PX = 4;
 export function LiveActivityLine({
   liveTurn,
   onRespond,
-  onLoadAttachments,
+  onLoadParamValues,
   onExpandedChange,
 }: {
   liveTurn: LiveTurn;
   onRespond: (requestId: string, response: ApprovalResponse) => void;
   /** Passed through to the expand face's running rows (issue #1009). */
-  onLoadAttachments?: (requestId: string) => Promise<FileAttachment[]>;
+  onLoadParamValues?: (requestId: string) => Promise<ParamValue[]>;
   /** Reports the line's posture whenever it changes (mount included) --
    *  the collector no-ops a report matching its current state. Pass a
    *  stable callback: the report effect re-fires on identity churn
@@ -466,7 +466,7 @@ export function LiveActivityLine({
                   key={row.key}
                   row={row}
                   onRespond={onRespond}
-                  onLoadAttachments={onLoadAttachments}
+                  onLoadParamValues={onLoadParamValues}
                 />
               ))}
             </TraceList>

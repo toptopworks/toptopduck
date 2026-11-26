@@ -77,8 +77,8 @@ pub(crate) const TRACE_EXCERPT_MAX: usize = 240;
 /// past whatever output cap already bounded it) kept as a durable record so
 /// the audit surface can show what the model actually self-corrected from --
 /// the excerpt anchor stays at [`TRACE_EXCERPT_MAX`] as the compact head.
-/// The same 4KB scale as the approval surface's attachment cap
-/// (`FILE_ATTACHMENT_MAX_CHARS`), so the two bounded-text budgets of one
+/// The same 4KB scale as the approval surface's param-value cap
+/// (`PARAM_VALUE_MAX_CHARS`), so the two bounded-text budgets of one
 /// payload family agree. Shared across runtimes like the excerpt cap above.
 pub(crate) const TRACE_FAILURE_DETAIL_MAX: usize = 4 * 1024;
 

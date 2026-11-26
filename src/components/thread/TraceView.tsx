@@ -14,7 +14,7 @@ import {
   type DelegationLiveView,
   type LiveRoundRow,
 } from "../../session/useTurnFlow";
-import type { ApprovalResponse, FileAttachment } from "../../types/approval";
+import type { ApprovalResponse, ParamValue } from "../../types/approval";
 import type { ReactNode } from "react";
 
 // The execution-trace renderers (ADR-0078, issue #297): the expanded tool-call
@@ -23,7 +23,7 @@ import type { ReactNode } from "react";
 // rendering path for both the recorded trace and the live event stream, per
 // ADR-0083 ("the decision moment and the trace record share one rendering
 // path"). Rows render the operation badge + argument summary +
-// success/failure; a gated call's approval presentation (pending card, file
+// success/failure; a gated call's approval presentation (pending card, param
 // values, resolved badge) is the approval-card species in ApprovalCard,
 // which the live arms below dispatch to (ADR-0080/0083). The chrome strings
 // each species renders follow ADR-0052 (react-intl, static literal ids) in
@@ -71,12 +71,12 @@ function RunningRow({
   row,
   resolvedBadge,
   onRespond,
-  onLoadAttachments,
+  onLoadParamValues,
 }: {
   row: LiveRoundRow;
   resolvedBadge: ReactNode;
   onRespond: (requestId: string, response: ApprovalResponse) => void;
-  onLoadAttachments?: (requestId: string) => Promise<FileAttachment[]>;
+  onLoadParamValues?: (requestId: string) => Promise<ParamValue[]>;
 }) {
   const [subOpen, setSubOpen] = useState(false);
   const view = row.delegation;
@@ -138,7 +138,7 @@ function RunningRow({
                       key={sub.key}
                       row={sub}
                       onRespond={onRespond}
-                      onLoadAttachments={onLoadAttachments}
+                      onLoadParamValues={onLoadParamValues}
                     />
                   ))}
                 </TraceList>
@@ -159,12 +159,12 @@ function RunningRow({
 export function LiveRow({
   row,
   onRespond,
-  onLoadAttachments,
+  onLoadParamValues,
 }: {
   row: LiveRoundRow;
   onRespond: (requestId: string, response: ApprovalResponse) => void;
   /** Passed through to ApprovalCard (issue #1009). */
-  onLoadAttachments?: (requestId: string) => Promise<FileAttachment[]>;
+  onLoadParamValues?: (requestId: string) => Promise<ParamValue[]>;
 }) {
   if (row.approval !== null && isPendingApproval(row.approval)) {
     return (
@@ -175,7 +175,7 @@ export function LiveRow({
         summaryDetail={row.summaryDetail}
         operationKind={row.operationKind}
         onRespond={onRespond}
-        onLoadAttachments={onLoadAttachments}
+        onLoadParamValues={onLoadParamValues}
       />
     );
   }
@@ -196,7 +196,7 @@ export function LiveRow({
         row={row}
         resolvedBadge={resolvedBadge}
         onRespond={onRespond}
-        onLoadAttachments={onLoadAttachments}
+        onLoadParamValues={onLoadParamValues}
       />
     );
   }

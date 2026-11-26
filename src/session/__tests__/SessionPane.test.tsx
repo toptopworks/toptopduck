@@ -10,7 +10,7 @@ import {
   askQuestion,
   activeDataset,
   conversation,
-  getApprovalAttachments,
+  getApprovalParamValues,
   ingestFile,
   listSkills,
   listWorkingSet,
@@ -31,7 +31,7 @@ import type { DatasetDescriptor, LoadOutcome } from "../../types/dataset";
 // The pane-level approval wiring pins (issue #1009 review, PR #1010): both
 // approval callbacks live ONLY on the pane -- the respond callback binds the
 // pane's sessionId onto the approval channel's respond, and the loader
-// closes it over getApprovalAttachments. Thread-level tests hand the props
+// closes it over getApprovalParamValues. Thread-level tests hand the props
 // in directly, so nothing else observed this pass-through: a dropped prop
 // or a mis-bound id would silently degrade the card (the no-loader branch
 // renders exactly the #672 capped behavior with no error note).
@@ -64,7 +64,7 @@ vi.mock("../../api", async (importOriginal) => {
     activeDataset: vi.fn(),
     takeSourceNotices: vi.fn(),
     takePersistError: vi.fn(async () => null),
-    getApprovalAttachments: vi.fn(),
+    getApprovalParamValues: vi.fn(),
     listSkills: vi.fn(),
     artifactExists: vi.fn(),
     onTurnProgress: vi.fn(async () => () => {}),
@@ -111,7 +111,7 @@ const SID = "sid-1";
 
 // The pending approval entry riding the app-level approval channel (the map
 // slice the pane hands the real hook as its approvals prop): req-1 suspended
-// on the gate with one capped broadcast attachment. useTurnFlow merges it
+// on the gate with one capped broadcast param value. useTurnFlow merges it
 // into the live turn's trailing rows, so the card renders inside the rail.
 function pendingApprovalEntry(): ApprovalEntry {
   return {
@@ -120,7 +120,7 @@ function pendingApprovalEntry(): ApprovalEntry {
     tool: "code-runner",
     operationKind: "execute",
     summary: "run /tmp/x.py",
-    fileAttachments: [{ param: "code", content: "print(1)" }],
+    paramValues: [{ param: "code", content: "print(1)" }],
     receivedAt: 0,
     status: { kind: "pending" },
   };
@@ -143,7 +143,7 @@ function stubSessionApis() {
     root_error: null,
   });
   vi.mocked(artifactExists).mockResolvedValue(true);
-  vi.mocked(getApprovalAttachments).mockResolvedValue([]);
+  vi.mocked(getApprovalParamValues).mockResolvedValue([]);
   vi.mocked(askQuestion).mockImplementation(() => new Promise(() => {}));
 }
 
@@ -276,7 +276,7 @@ describe("SessionPane turn-running report (issue #1629)", () => {
 describe("SessionPane approval wiring", () => {
   beforeEach(stubSessionApis);
   it("threads the full-view loader to the pending card with the pane's session id", async () => {
-    vi.mocked(getApprovalAttachments).mockResolvedValue([
+    vi.mocked(getApprovalParamValues).mockResolvedValue([
       { param: "code", content: "print(1); print(2)" },
     ]);
     const view = renderPane({ approvals: [pendingApprovalEntry()] });
@@ -286,7 +286,7 @@ describe("SessionPane approval wiring", () => {
     // The delivery rides the summary expand: the fold toggle is the
     // disclosure now.
     fireEvent.click(document.querySelector(".summary-fold-toggle")!);
-    expect(getApprovalAttachments).toHaveBeenCalledWith(SID, "req-1");
+    expect(getApprovalParamValues).toHaveBeenCalledWith(SID, "req-1");
     expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
   });
 
