@@ -390,7 +390,7 @@ pub struct GateCancelled;
 /// Three payload kinds ride this shape -- delivered param values (issue
 /// #672), the skill markdown body (`skills::create`), and the full
 /// pre-truncation argv rendering when the summary's cap cut it (issue
-/// #1195). Captured at approval time -- for delivered param values, the
+/// #1195). Captured at approval time -- for file-shaped deliveries, the
 /// temp file is deleted when the call ends, so the payload snapshot is
 /// the only durable view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1015,6 +1015,39 @@ mod tests {
             handle.join().expect("gate thread").expect("allow"),
             GateOutcome::Allow
         );
+    }
+
+    /// The wire key name is pinned by string (issue #1682): the frontend
+    /// mirrors `param_values` with a hand-written interface, so a
+    /// serde-side key slip is invisible to every type-checked fixture --
+    /// this pin makes it loud. The empty body omits the key entirely
+    /// (serde skip, not null).
+    #[test]
+    fn wire_body_pins_the_param_values_key_name() {
+        let body = ApprovalRequestBody {
+            request_id: "r".into(),
+            server: "acme".into(),
+            tool: "fetch".into(),
+            operation_kind: OperationKind::Network,
+            summary: "GET /x".into(),
+            param_values: vec![ParamValue {
+                param: "code".into(),
+                content: "print(1)".into(),
+            }],
+            origin_agent: None,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(
+            json.contains("\"param_values\":[{\"param\":\"code\""),
+            "{json}"
+        );
+        let empty = ApprovalRequestBody {
+            param_values: Vec::new(),
+            ..body.clone()
+        };
+        assert!(!serde_json::to_string(&empty)
+            .unwrap()
+            .contains("param_values"));
     }
 
     #[test]

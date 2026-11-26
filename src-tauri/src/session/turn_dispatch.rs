@@ -1166,8 +1166,9 @@ const ARGS_PREVIEW_MAX_CHARS: usize = 512;
 /// deterministic temp paths the execution later renders (issue #672), so the
 /// argv the approver signs is exactly the one that runs; the
 /// delivered param values ride along as expandable card payloads (ADR-0109
-/// Decision 8), captured NOW -- the temp file is deleted when the call
-/// ends, so the payload snapshot is the approver's only durable view.
+/// Decision 8), captured NOW -- for file-shaped deliveries the temp file
+/// is deleted when the call ends, so the payload snapshot is the
+/// approver's only durable view.
 fn classify_cli_tool(
     tool: &crate::cli_tools::config::CliToolConfig,
     input: &Value,
