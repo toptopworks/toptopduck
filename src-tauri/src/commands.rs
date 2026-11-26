@@ -29,7 +29,7 @@ use tauri::{Emitter, Manager, State};
 
 use crate::app_config::{AppConfig, DefaultRuntime, ModelPosture};
 use crate::approval::{
-    ApprovalRequestBody, ApprovalResponse, ApprovalSink, AuthMode, FileAttachment, ToolKey,
+    ApprovalRequestBody, ApprovalResponse, ApprovalSink, AuthMode, ParamValue, ToolKey,
 };
 use crate::cancel::CancelToken;
 use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
@@ -3280,7 +3280,7 @@ impl ApprovalSink for TauriApprovalSink {
                 tool: body.tool.clone(),
                 operation_kind: body.operation_kind,
                 summary: body.summary.clone(),
-                file_attachments: body.file_attachments.clone(),
+                param_values: body.param_values.clone(),
                 origin_agent: body.origin_agent.clone(),
             },
         ) {
@@ -3364,10 +3364,10 @@ pub fn respond_tool_approval(
     Ok(())
 }
 
-/// Fetch the full (pre-truncation) file-delivery values for the session's
+/// Fetch the full (pre-truncation) delivered param values for the session's
 /// in-flight approval request (issue #1009, ADR-0109 Decision 8): the
-/// `approval-request` broadcast caps each attachment at
-/// `FILE_ATTACHMENT_MAX_CHARS` as a budget (the ADR-0056 cross-pane surface),
+/// `approval-request` broadcast caps each param value at
+/// `PARAM_VALUE_MAX_CHARS` as a budget (the ADR-0056 cross-pane surface),
 /// so the card's expand view pulls the uncut originals through this command
 /// while the turn is suspended on the gate. The full snapshot lives exactly
 /// as long as the pending slot: once answered or cancelled this rejects (a
@@ -3375,17 +3375,17 @@ pub fn respond_tool_approval(
 /// `respond_tool_approval`), and the card falls back to the capped broadcast
 /// copy. Read-only -- no resuming guard (mirrors `get_authorization_mode`).
 #[tauri::command]
-pub fn get_approval_attachments(
+pub fn get_approval_param_values(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     request_id: String,
-) -> Result<Vec<FileAttachment>, SessionError> {
+) -> Result<Vec<ParamValue>, SessionError> {
     let handle = resolve_session(&store, &session_id)?;
     let request_uuid = uuid::Uuid::parse_str(&request_id)
         .map_err(|_| SessionError::Engine("approval request id malformed".into()))?;
     handle
         .approval_state()
-        .pending_attachments(request_uuid)
+        .pending_param_values(request_uuid)
         .map_err(|e| SessionError::Engine(format!("{e:?}")))
 }
 

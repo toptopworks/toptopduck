@@ -7,13 +7,13 @@ import { OperationBadge } from "./TraceRow";
 import { TraceSummaryFold } from "./TraceSummaryFold";
 import type { LiveRoundRow } from "../../session/useTurnFlow";
 import { log } from "../../lib/log";
-import type { ApprovalResponse, FileAttachment } from "../../types/approval";
+import type { ApprovalResponse, ParamValue } from "../../types/approval";
 
 // The approval-card species (ADR-0083): the presentation vocabulary a gated
 // call contributes to the live trace, split from the trace renderer
 // (TraceView) so each species reads as one file. Three pieces: the in-flow
 // pending card (the decision moment -- the gateway suspends the turn until
-// the user answers, ADR-0080/0083), its file-delivery expand-on-demand view
+// the user answers, ADR-0080/0083), its param-value expand-on-demand view
 // (issues #672 / #1009), and the resolved marker that flips the card in
 // place once answered. LiveRow (TraceView) stays the three-arm dispatcher;
 // the pending precondition (`response === null`) is pinned in the card's
@@ -35,7 +35,7 @@ export function ApprovalCard({
   summaryDetail,
   operationKind,
   onRespond,
-  onLoadAttachments,
+  onLoadParamValues,
 }: {
   /** The pending request's snapshot -- the card renders the three answers,
    *  never a resolved state; the `response: null` intersection pins that
@@ -49,18 +49,18 @@ export function ApprovalCard({
   summaryDetail?: LiveRoundRow["summaryDetail"];
   operationKind: LiveRoundRow["operationKind"];
   onRespond: (requestId: string, response: ApprovalResponse) => void;
-  /** Pulls the FULL pre-truncation file values for a pending request
+  /** Pulls the FULL pre-truncation param values for a pending request
    *  (issue #1009): the snapshot the row already holds is the capped
    *  broadcast copy; this fetches the uncut originals while the turn is
    *  suspended on the gate. Optional -- absent loaders keep the #672
    *  capped-snapshot behavior. */
-  onLoadAttachments?: (requestId: string) => Promise<FileAttachment[]>;
+  onLoadParamValues?: (requestId: string) => Promise<ParamValue[]>;
 }) {
   const { requestId } = approval;
-  const fileValues = approval.fileAttachments ?? [];
-  // The full-file-values pull (issue #1009), fired from the summary
+  const paramValues = approval.paramValues ?? [];
+  // The full-param-values pull (issue #1009), fired from the summary
   // expand (the handler, never an effect -- one shot, no StrictMode
-  // double-fetch): the file delivery rides the same disclosure as the
+  // double-fetch): the value delivery rides the same disclosure as the
   // call's full text, so the first expand is when the uncut originals
   // are worth pulling. One fetch per card -- the pending-window snapshot
   // is immutable while the card is up, so re-expanding reuses the
@@ -69,7 +69,7 @@ export function ApprovalCard({
   const [fullView, setFullView] = useState<
     | { kind: "idle" }
     | { kind: "loading" }
-    | { kind: "full"; files: FileAttachment[] }
+    | { kind: "full"; values: ParamValue[] }
     | { kind: "failed" }
   >({ kind: "idle" });
   // The delivery renders only while the summary expand is open -- the
@@ -81,21 +81,21 @@ export function ApprovalCard({
     if (
       !expanded ||
       fullView.kind !== "idle" ||
-      fileValues.length === 0 ||
-      !onLoadAttachments
+      paramValues.length === 0 ||
+      !onLoadParamValues
     ) {
       return;
     }
     setFullView({ kind: "loading" });
-    void onLoadAttachments(requestId).then(
-      (files) => setFullView({ kind: "full", files }),
+    void onLoadParamValues(requestId).then(
+      (values) => setFullView({ kind: "full", values }),
       (err) => {
         // The durable trace the respond-command catch keeps too (ADR-0029):
         // an expected lifecycle rejection and a real IPC failure are
         // indistinguishable in the UI, so the log carries the difference.
         log.warn(
           "approval",
-          "full-attachments pull rejected; falling back to the capped preview",
+          "full-param-values pull rejected; falling back to the capped preview",
           { requestId, err },
         );
         setFullView({ kind: "failed" });
@@ -124,7 +124,7 @@ export function ApprovalCard({
       {/* The summary is the card's body (TraceSummaryFold's block
           posture): head row above, the call's text in a rest-state
           clamped mono block that unclamps in place on expand (#1636's
-          detail when the row carries it). The file-delivery view (#672,
+          detail when the row carries it). The param-value view (#672,
           #1009) rides the same disclosure -- one expand = the call's
           full inputs, argument text and delivered values together. */}
       <TraceSummaryFold
@@ -148,25 +148,25 @@ export function ApprovalCard({
               {name}
             </span>
             <OperationBadge kind={operationKind} />
-            {/* The at-rest attachment count (#672's Vec -- the old toggle's
+            {/* The at-rest param-value count (#672's Vec -- the old toggle's
                 "(1)" lived here): the delivery now rides the summary
-                expand, so this is the only rest-state signal that files
+                expand, so this is the only rest-state signal that values
                 exist and how many; the visible figure is decorative, the
                 sr-only sentence carries it to assistive tech. */}
-            {fileValues.length > 0 && (
+            {paramValues.length > 0 && (
               <>
                 <span
                   aria-hidden="true"
                   className="flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground"
                 >
                   <Paperclip className="h-3 w-3" />
-                  {fileValues.length}
+                  {paramValues.length}
                 </span>
                 <span className="sr-only">
                   <FormattedMessage
-                    id="thread.approval.filesAttached"
+                    id="thread.approval.paramValuesAttached"
                     defaultMessage="{count, plural, one {# attached file} other {# attached files}}"
-                    values={{ count: fileValues.length }}
+                    values={{ count: paramValues.length }}
                   />
                 </span>
               </>
@@ -195,9 +195,9 @@ export function ApprovalCard({
           </>
         )}
       />
-      {detailOpen && fileValues.length > 0 && (
-        <ApprovalFileValues
-          shown={fullView.kind === "full" ? fullView.files : fileValues}
+      {detailOpen && paramValues.length > 0 && (
+        <ApprovalParamValues
+          shown={fullView.kind === "full" ? fullView.values : paramValues}
           failed={fullView.kind === "failed"}
         />
       )}
@@ -257,17 +257,17 @@ export function ApprovalCard({
   );
 }
 
-// The file-delivery view (issue #672, ADR-0109 Decision 8; full view issue
+// The param-value view (issue #672, ADR-0109 Decision 8; full view issue
 // #1009): the VALUES only -- it renders while the summary expand is open
 // and unmounts with it. The pull state machine lives in the card (the
 // expand is the trigger there); the load gap and a rejected pull both show
 // the capped broadcast snapshot, only a landed fetch replaces it, and the
 // rejection carries a one-line live note.
-function ApprovalFileValues({
+function ApprovalParamValues({
   shown,
   failed,
 }: {
-  shown: FileAttachment[];
+  shown: ParamValue[];
   failed: boolean;
 }) {
   return (
@@ -276,20 +276,20 @@ function ApprovalFileValues({
         // role="status": the note appears asynchronously after the fetch
         // rejects -- the same live-note semantics the thread's other
         // async error notes carry.
-        <p role="status" className="approval-file-error m-0 mt-1 text-xs text-destructive">
+        <p role="status" className="approval-param-error m-0 mt-1 text-xs text-destructive">
           <FormattedMessage
-            id="thread.approval.fileValuesLoadFailed"
+            id="thread.approval.paramValuesLoadFailed"
             defaultMessage="Full contents unavailable — showing the capped preview."
           />
         </p>
       )}
-      {shown.map((file) => (
-        <span key={file.param} className="approval-file mt-1 block">
-          <span className="approval-file-param font-mono text-xs text-muted-foreground">
-            {file.param}
+      {shown.map((value) => (
+        <span key={value.param} className="approval-param mt-1 block">
+          <span className="approval-param-name font-mono text-xs text-muted-foreground">
+            {value.param}
           </span>
-          <pre className="approval-file-content mt-0.5 max-h-40 overflow-auto rounded-sm bg-background p-1.5 font-mono text-xs whitespace-pre-wrap break-all">
-            {file.content}
+          <pre className="approval-param-content mt-0.5 max-h-40 overflow-auto rounded-sm bg-background p-1.5 font-mono text-xs whitespace-pre-wrap break-all">
+            {value.content}
           </pre>
         </span>
       ))}

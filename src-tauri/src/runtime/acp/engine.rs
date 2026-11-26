@@ -1713,9 +1713,9 @@ fn decide_permission(
             display_name,
             crate::approval::SUMMARY_MAX_CHARS,
         ),
-        // ACP permission requests carry no file-delivery values (issue #672
+        // ACP permission requests carry no delivered param values (issue #672
         // is the registered-CLI card's channel); the field rides empty.
-        file_attachments: Vec::new(),
+        param_values: Vec::new(),
         // An external CLI's permission request has no sub-agent originator
         // (delegation is built-in-only -- ADR-0117's v1 calibration scopes
         // the delegation family to the built-in runtime; external bridge
@@ -2204,7 +2204,7 @@ mod tests {
                     key: crate::approval::ToolKey::external("acme", "fetch"),
                     operation_kind: crate::approval::OperationKind::Network,
                     summary: "GET /x".into(),
-                    file_attachments: Vec::new(),
+                    param_values: Vec::new(),
                     origin_agent: None,
                     call_id: Some(call_id),
                 };

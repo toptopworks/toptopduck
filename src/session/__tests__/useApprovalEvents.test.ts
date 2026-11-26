@@ -111,7 +111,7 @@ describe("useApprovalEvents", () => {
     nowSpy.mockRestore();
   });
 
-  it("maps file_attachments from the request event onto the entry (issue #672)", async () => {
+  it("maps param_values from the request event onto the entry (issue #672)", async () => {
     // The wire field is the only source of the pending card's expand-on-
     // demand snapshot; a rename or a dropped mapping line would silently
     // kill the feature (`?? []` downstream swallows undefined).
@@ -120,11 +120,11 @@ describe("useApprovalEvents", () => {
     act(() =>
       approvalCbs.request!(
         requestEvent({
-          file_attachments: [{ param: "code", content: "print(1)" }],
+          param_values: [{ param: "code", content: "print(1)" }],
         }),
       ),
     );
-    expect(result.current.approvalsBySession.get(SID)?.[0].fileAttachments).toEqual([
+    expect(result.current.approvalsBySession.get(SID)?.[0].paramValues).toEqual([
       { param: "code", content: "print(1)" },
     ]);
   });

@@ -37,7 +37,7 @@ import { foldLabel, type DatasetLabel } from "./turn-visual";
 import { isSettledRow } from "../../session/useTurnFlow";
 import { TurnExchangeFrame } from "./TurnExchangeFrame";
 import type { LiveRound, LiveTurn } from "../../session/useTurnFlow";
-import type { ApprovalResponse, FileAttachment } from "../../types/approval";
+import type { ApprovalResponse, ParamValue } from "../../types/approval";
 
 // One live round's block, both postures in one component type (#1656): the
 // thinking fold + connective prose ride the SAME RoundBody the settled
@@ -60,16 +60,16 @@ function LiveRoundBlock({
   sealed,
   streaming,
   onRespond,
-  onLoadAttachments,
+  onLoadParamValues,
 }: {
   round: LiveRound;
   sealed: boolean;
   streaming: boolean;
   onRespond: (requestId: string, response: ApprovalResponse) => void;
-  /** Pulls the full (uncapped) file values for a pending approval card
+  /** Pulls the full (uncapped) param values for a pending approval card
    * (issue #1009); optional -- absent loaders keep the capped broadcast
    * snapshot. */
-  onLoadAttachments?: (requestId: string) => Promise<FileAttachment[]>;
+  onLoadParamValues?: (requestId: string) => Promise<ParamValue[]>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const intl = useIntl();
@@ -100,7 +100,7 @@ function LiveRoundBlock({
                   key={row.key}
                   row={row}
                   onRespond={onRespond}
-                  onLoadAttachments={onLoadAttachments}
+                  onLoadParamValues={onLoadParamValues}
                 />
               ))}
             </TraceList>
@@ -115,7 +115,7 @@ export function LiveTurnExchange({
   liveTurn,
   mentionedDataset,
   onRespondApproval,
-  onLoadApprovalAttachments,
+  onLoadApprovalParamValues,
   onActivityExpandedChange,
 }: {
   liveTurn: LiveTurn;
@@ -125,10 +125,10 @@ export function LiveTurnExchange({
    *  when the question names none. */
   mentionedDataset: DatasetLabel | null;
   onRespondApproval: (requestId: string, response: ApprovalResponse) => void;
-  /** Pulls the full (uncapped) file values for a pending approval card
+  /** Pulls the full (uncapped) param values for a pending approval card
    * (issue #1009); optional -- absent loaders keep the capped broadcast
    * snapshot. Threaded to each row's LiveRow. */
-  onLoadApprovalAttachments?: (requestId: string) => Promise<FileAttachment[]>;
+  onLoadApprovalParamValues?: (requestId: string) => Promise<ParamValue[]>;
   /** Reports the activity line's toggle posture (issue #1606): an expanded
    *  line seeds the settled turn-level process fold across the settle swap
    *  -- the process face the user was reading lands open at the same spot. */
@@ -193,7 +193,7 @@ export function LiveTurnExchange({
           sealed={i < tailIndex && round.rows.every(isSettledRow)}
           streaming={i === tailIndex && round.rows.length === 0}
           onRespond={onRespondApproval}
-          onLoadAttachments={onLoadApprovalAttachments}
+          onLoadParamValues={onLoadApprovalParamValues}
         />
       ))}
       {/* ONE activity line for the whole turn, pinned after the rounds (a
@@ -208,14 +208,14 @@ export function LiveTurnExchange({
       <LiveActivityLine
         liveTurn={liveTurn}
         onRespond={onRespondApproval}
-        onLoadAttachments={onLoadApprovalAttachments}
+        onLoadParamValues={onLoadApprovalParamValues}
         onExpandedChange={onActivityExpandedChange}
       />
       {tailRows.length > 0 && (
         // w-full (not the trace family's max-w-full cap): the stream's
         // items-start makes a bare fit-content item size by its widest
         // row's max-content -- a short pending card shrinks narrower than
-        // the rows above it, and a long summary / expanded file value
+        // the rows above it, and a long summary / expanded param value
         // overruns the rail into the overflow-x crop. The card is a
         // bordered decision surface: pinned full width restores the row
         // family's truncate posture (issues #826/#872) for both ends.
@@ -226,7 +226,7 @@ export function LiveTurnExchange({
                 key={row.key}
                 row={row}
                 onRespond={onRespondApproval}
-                onLoadAttachments={onLoadApprovalAttachments}
+                onLoadParamValues={onLoadApprovalParamValues}
               />
             ))}
           </TraceList>

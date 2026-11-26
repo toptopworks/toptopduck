@@ -15,9 +15,9 @@
 //! authority), intercepted in the shared dispatch core AHEAD of
 //! classification, refused on a malformed / out-of-domain / over-cap call
 //! BEFORE the card (the model's error, never the approver's), and gated per
-//! call with a Write badge + the write payload as card attachments (the
+//! call with a Write badge + the write payload as card param_values (the
 //! uncut snapshot rides the gate's pending slot, issue #1009, so a
-//! broadcast-capped attachment still expands to the full view).
+//! broadcast-capped param value still expands to the full view).
 //!
 //! Domain (ADR-0137): `file_path` resolves against the session workspace
 //! (the bound canonical path); a path that canonicalizes outside it is
@@ -35,7 +35,7 @@ use serde_json::{json, Value};
 
 use crate::analysis_tools::definitions::get_str;
 use crate::approval::{
-    ApprovalRequest, FileAttachment, GateCancelled, GateOutcome, OperationKind, ToolKey,
+    ApprovalRequest, GateCancelled, GateOutcome, OperationKind, ParamValue, ToolKey,
 };
 use crate::model::{TraceEntryView, TurnPhase};
 use crate::persistence::io::{write_str_atomic, WritePerms};
@@ -153,12 +153,12 @@ enum WorkspaceToolOutcome {
 
 /// One approved write, fully resolved ahead of the gate so the approver
 /// signs an operation that can land: the canonical target, the final file
-/// body (for `edit`, the post-replacement content), the card attachments,
+/// body (for `edit`, the post-replacement content), the card param_values,
 /// and the summary (`file_path` as the model spelled it).
 struct WritePlan {
     target: PathBuf,
     content: String,
-    attachments: Vec<FileAttachment>,
+    param_values: Vec<ParamValue>,
     /// `Some(n)` on `edit` (the replacement count), `None` on `write`.
     replacements: Option<usize>,
     /// The landed line counts (issue #1621), counted off the same payloads
@@ -193,7 +193,7 @@ fn resolve_write(call: &ToolUse, workspace: Option<&Path>) -> WorkspaceToolOutco
         Ok(WritePlan {
             target,
             content: content.clone(),
-            attachments: vec![FileAttachment {
+            param_values: vec![ParamValue {
                 param: "content".into(),
                 content,
             }],
@@ -261,12 +261,12 @@ fn resolve_edit(call: &ToolUse, workspace: Option<&Path>) -> WorkspaceToolOutcom
         Ok(WritePlan {
             target,
             content: updated,
-            attachments: vec![
-                FileAttachment {
+            param_values: vec![
+                ParamValue {
                     param: "old_string".into(),
                     content: old_string,
                 },
-                FileAttachment {
+                ParamValue {
                     param: "new_string".into(),
                     content: new_string,
                 },
@@ -323,7 +323,7 @@ pub(crate) fn dispatch_workspace_tool(
         key: ToolKey::builtin(call.name.as_str()),
         operation_kind: OperationKind::Write,
         summary: plan.summary.clone(),
-        file_attachments: std::mem::take(&mut plan.attachments),
+        param_values: std::mem::take(&mut plan.param_values),
         // The originator annotation rides the gate like every other call's
         // (issue #934). The call_id stays a literal None: this arm is only
         // reachable on the Builtin face (the core's face discriminator
@@ -721,15 +721,15 @@ mod tests {
     // --- resolve: write -----------------------------------------------------
 
     /// A valid write resolves in-workspace with the requested spelling as
-    /// the card summary and the body mounted as the `content` attachment.
+    /// the card summary and the body mounted as the `content` param value.
     #[test]
     fn resolve_write_yields_the_gated_shape() {
         let (_dir, ws) = ws_dir();
         let plan = gated(resolve_write(&write_call("notes.txt", "hello"), Some(&ws)));
         assert_eq!(plan.summary, "notes.txt");
-        assert_eq!(plan.attachments.len(), 1);
-        assert_eq!(plan.attachments[0].param, "content");
-        assert_eq!(plan.attachments[0].content, "hello");
+        assert_eq!(plan.param_values.len(), 1);
+        assert_eq!(plan.param_values[0].param, "content");
+        assert_eq!(plan.param_values[0].content, "hello");
         assert_eq!(plan.content, "hello");
         assert!(plan.target.starts_with(&ws), "{}", plan.target.display());
         assert_eq!(plan.replacements, None);
@@ -1169,7 +1169,7 @@ mod tests {
     // --- resolve: edit ------------------------------------------------------
 
     /// A unique match produces the post-replacement body plus the old/new
-    /// pair as card attachments.
+    /// pair as card param_values.
     #[test]
     fn resolve_edit_replaces_a_unique_match() {
         let (dir, ws) = ws_dir();
@@ -1181,11 +1181,11 @@ mod tests {
         assert_eq!(plan.content, "a = 11\nb = 2\n");
         assert_eq!(plan.replacements, Some(1));
         assert_eq!(plan.summary, "s.py");
-        assert_eq!(plan.attachments.len(), 2);
-        assert_eq!(plan.attachments[0].param, "old_string");
-        assert_eq!(plan.attachments[0].content, "a = 1");
-        assert_eq!(plan.attachments[1].param, "new_string");
-        assert_eq!(plan.attachments[1].content, "a = 11");
+        assert_eq!(plan.param_values.len(), 2);
+        assert_eq!(plan.param_values[0].param, "old_string");
+        assert_eq!(plan.param_values[0].content, "a = 1");
+        assert_eq!(plan.param_values[1].param, "new_string");
+        assert_eq!(plan.param_values[1].content, "a = 11");
         assert_eq!(plan.lines_added, Some(1));
         assert_eq!(plan.lines_removed, Some(1));
     }
@@ -1410,14 +1410,14 @@ mod tests {
         assert_eq!(body.tool, WRITE_TOOL);
         assert_eq!(body.server, "builtin");
         assert_eq!(body.operation_kind, OperationKind::Write);
-        // The card carries the whole `content` as its attachment (the
+        // The card carries the whole `content` as its param value (the
         // approver sees the exact bytes that will land).
-        let attachment = body
-            .file_attachments
+        let param_value = body
+            .param_values
             .iter()
             .find(|a| a.param == "content")
-            .expect("a content attachment");
-        assert_eq!(attachment.content, "print('ok')");
+            .expect("a content param value");
+        assert_eq!(param_value.content, "print('ok')");
     }
 
     /// `write` over an existing file replaces it whole: the prior body is
@@ -1466,11 +1466,11 @@ mod tests {
         assert!(matches!(phases[0], TurnPhase::ToolCallCompleted { .. }));
     }
 
-    /// An edit call's card carries the old/new pair as attachments (the
+    /// An edit call's card carries the old/new pair as param_values (the
     /// approver sees the exact transformation), and an allowed edit lands
     /// the replacement.
     #[test]
-    fn dispatch_mounts_the_edit_pair_as_card_attachments() {
+    fn dispatch_mounts_the_edit_pair_as_card_param_values() {
         let mut fixture = DepsFixture::new();
         std::fs::write(fixture.workspace_dir.path().join("s.py"), "a = 1\n").unwrap();
         let (result, entry, _, body) = run_dispatch(
@@ -1487,11 +1487,7 @@ mod tests {
         assert!(entry.success);
         let body = body.expect("the card surfaced");
         assert_eq!(body.tool, EDIT_TOOL);
-        let params: Vec<&str> = body
-            .file_attachments
-            .iter()
-            .map(|a| a.param.as_str())
-            .collect();
+        let params: Vec<&str> = body.param_values.iter().map(|a| a.param.as_str()).collect();
         assert_eq!(params, vec!["old_string", "new_string"]);
     }
 
@@ -1541,17 +1537,17 @@ mod tests {
         );
     }
 
-    /// The over-cap attachment leg on the write tools' own face (AC5): a
+    /// The over-cap param-value leg on the write tools' own face (AC5): a
     /// body over the 4 KiB broadcast cap rides the card capped to exactly
     /// the cap with the visible ellipsis, while the gate's pending slot
     /// serves the UNcut original for the card's expand view (issue #1009)
     /// -- asserted while the gate is still parked, before the responder
     /// answers.
     #[test]
-    fn dispatch_caps_an_overlong_attachment_but_serves_the_full_snapshot() {
-        use crate::approval::FILE_ATTACHMENT_MAX_CHARS;
+    fn dispatch_caps_an_overlong_param_value_but_serves_the_full_snapshot() {
+        use crate::approval::PARAM_VALUE_MAX_CHARS;
         let mut fixture = DepsFixture::new();
-        let payload = "y".repeat(FILE_ATTACHMENT_MAX_CHARS + 512);
+        let payload = "y".repeat(PARAM_VALUE_MAX_CHARS + 512);
         let approval = Arc::new(ApprovalState::new());
         let sink = Arc::new(RecordingSink::default());
         let cancel = CancelToken::new();
@@ -1562,20 +1558,20 @@ mod tests {
             let body = poll_body(&sink_c, std::time::Duration::from_secs(2))
                 .expect("the gate emitted an approval request");
             // The broadcast copy is capped to the visible budget...
-            assert_eq!(body.file_attachments.len(), 1);
+            assert_eq!(body.param_values.len(), 1);
             assert_eq!(
-                body.file_attachments[0].content.chars().count(),
-                FILE_ATTACHMENT_MAX_CHARS,
+                body.param_values[0].content.chars().count(),
+                PARAM_VALUE_MAX_CHARS,
                 "an over-cap content truncates to exactly the cap"
             );
             assert!(
-                body.file_attachments[0].content.ends_with("..."),
+                body.param_values[0].content.ends_with("..."),
                 "the cut is visible (the ellipsis), never silent"
             );
             // ...while the pending slot still serves the uncut original.
             let id = uuid::Uuid::parse_str(&body.request_id).expect("request id parses");
             let pending = approval_c
-                .pending_attachments(id)
+                .pending_param_values(id)
                 .expect("pending snapshot");
             assert_eq!(pending.len(), 1);
             assert_eq!(

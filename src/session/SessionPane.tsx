@@ -4,7 +4,7 @@ import { useIntl, FormattedMessage } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail } from "../lib/error-presentation";
 import { log } from "../lib/log";
-import { getApprovalAttachments } from "../api";
+import { getApprovalParamValues } from "../api";
 import { RightSidebarToggle } from "../shell/RightSidebarToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useRailFollow } from "./useRailFollow";
@@ -195,11 +195,11 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     (requestId: string, response: ApprovalResponse) => respond(sessionId, requestId, response),
     [respond, sessionId],
   );
-  // Issue #1009: the card's expand view pulls the FULL pre-truncation file
+  // Issue #1009: the card's expand view pulls the FULL pre-truncation param
   // values through the pending-window command; the capped broadcast snapshot
   // stays the fallback when it rejects (answered / cancelled / IPC failure).
-  const handleLoadApprovalAttachments = useCallback(
-    (requestId: string) => getApprovalAttachments(sessionId, requestId),
+  const handleLoadApprovalParamValues = useCallback(
+    (requestId: string) => getApprovalParamValues(sessionId, requestId),
     [sessionId],
   );
   const handleApprovalsSettled = useCallback(
@@ -705,7 +705,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   ingestProgress={s.ingestProgress}
                   replaceProgress={replaceProgress}
                   onRespondApproval={handleRespondApproval}
-                  onLoadApprovalAttachments={handleLoadApprovalAttachments}
+                  onLoadApprovalParamValues={handleLoadApprovalParamValues}
                   onRetryTurn={handleAskAgain}
                   busy={s.loading}
                 />

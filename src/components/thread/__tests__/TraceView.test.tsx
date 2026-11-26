@@ -6,10 +6,10 @@ import type { ReactElement } from "react";
 import { LiveRow } from "../TraceView";
 import { TraceRow, TraceStepFold } from "../TraceRow";
 import type { LiveRoundRow } from "../../../session/useTurnFlow";
-import type { FileAttachment } from "../../../types/approval";
+import type { ParamValue } from "../../../types/approval";
 import type { TraceEntry } from "../../../types/thread";
 
-// LiveRow's pending approval card (ADR-0083) + the file-delivery
+// LiveRow's pending approval card (ADR-0083) + the param-value
 // expand-on-demand view (issue #672, ADR-0109 Decision 8): the snapshot
 // rides the pending card only -- collapsed by default, a deliberate
 // low-frequency action; the settled trace keeps just the argv summary.
@@ -34,7 +34,7 @@ function rowWith(over: Partial<LiveRoundRow> = {}): LiveRoundRow {
     approval: {
       requestId: "req-1",
       response: null,
-      fileAttachments: [{ param: "code", content: "print(1)" }],
+      paramValues: [{ param: "code", content: "print(1)" }],
     },
     running: false,
     success: null,
@@ -49,7 +49,7 @@ const SUMMARY = "/bin/py cli-code-runner-code-tu_7.tmp";
 
 // The uncut full view the loader resolves with (issue #1009): the same
 // literal anchors the replace, refetch, and in-flight assertions.
-const UNCUT_FILES = [{ param: "code", content: "print(1); print(2)" }];
+const UNCUT_VALUES = [{ param: "code", content: "print(1); print(2)" }];
 
 // Fold recovery (issue #826): the WHOLE line is the click target -- one
 // click grows an expand block under the line (whitespace-pre-wrap keeps a
@@ -214,7 +214,7 @@ describe("LiveRow caption tokens (issue #826)", () => {
     const resolved = renderWithProviders(
       <LiveRow
         row={rowWith({
-          approval: { requestId: "req-1", response: "deny", fileAttachments: [] },
+          approval: { requestId: "req-1", response: "deny", paramValues: [] },
           running: false,
           success: null,
         })}
@@ -231,7 +231,7 @@ describe("LiveRow caption tokens (issue #826)", () => {
     const abandoned = renderWithProviders(
       <LiveRow
         row={rowWith({
-          approval: { requestId: "req-1", response: "abandoned", fileAttachments: [] },
+          approval: { requestId: "req-1", response: "abandoned", paramValues: [] },
           running: false,
           success: null,
         })}
@@ -498,7 +498,7 @@ describe("LiveRow approval decision surface (issue #1368)", () => {
     expect(note).not.toBeNull();
     expect(note).toHaveClass("m-0", "mt-2", "text-xs", "text-muted-foreground");
     expect(note).toHaveTextContent("no longer ask for the rest of the session");
-    // Sits directly under the action row, after the file-delivery section
+    // Sits directly under the action row, after the param-value section
     // (the delivery renders between the summary block and the action row).
     expect(note?.previousElementSibling).toHaveClass("flex", "flex-wrap");
   });
@@ -598,7 +598,7 @@ describe("LiveRow approval resolved badge shrink (issue #876)", () => {
     // which would otherwise pin the badge wide and silently defeat
     // min-w-0. The remaining single-word chrome stays shrink-0 by the
     // ticket's locked scope (rationale, not an assertion this test makes).
-    const approval = { requestId: "req-1", response: "deny" as const, fileAttachments: [] };
+    const approval = { requestId: "req-1", response: "deny" as const, paramValues: [] };
     // Branch discriminator: each sub-case pins the branch it walks (the
     // settled case renders the success glyph, the running case the
     // spinner), so a fixture-state regression cannot silently swap sites
@@ -623,22 +623,22 @@ describe("LiveRow approval resolved badge shrink (issue #876)", () => {
   });
 });
 
-describe("LiveRow approval card file values", () => {
-  // The file delivery rides the summary expand (one disclosure for the
+describe("LiveRow approval card param values", () => {
+  // The value delivery rides the summary expand (one disclosure for the
   // call's full inputs): the one-shot #1009 pull fires on the first
   // expand, the capped preview is the load-gap / rejection face, and the
-  // at-rest head row carries the attachment count (the paperclip figure).
+  // at-rest head row carries the param-value count (the paperclip figure).
   const expandSummary = (container: HTMLElement) =>
     fireEvent.click(summaryFoldToggle(container));
 
-  it("hides the file contents until the summary expands, count aside", () => {
+  it("hides the value contents until the summary expands, count aside", () => {
     const { container } = renderWithProviders(
       <LiveRow row={rowWith()} onRespond={vi.fn()} />,
     );
     // The argv summary (with the temp path) is the default face.
     expect(screen.getByText(SUMMARY)).toBeInTheDocument();
     expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
-    expect(container.querySelector(".approval-file")).toBeNull();
+    expect(container.querySelector(".approval-param")).toBeNull();
     expandSummary(container);
     // The snapshot names its parameter and carries the captured value.
     expect(screen.getByText("code")).toBeInTheDocument();
@@ -648,18 +648,18 @@ describe("LiveRow approval card file values", () => {
     expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
   });
 
-  it("carries the attachment count on the head row at rest", () => {
+  it("carries the param-value count on the head row at rest", () => {
     // The delivery merged into the expand -- the old toggle's "(1)" count
     // survives as the head row's paperclip figure; the sr-only sentence
     // carries it to assistive tech.
-    const withFiles = renderWithProviders(
+    const withValues = renderWithProviders(
       <LiveRow row={rowWith()} onRespond={vi.fn()} />,
     );
     expect(
-      withFiles.container.querySelector(".lucide-paperclip"),
+      withValues.container.querySelector(".lucide-paperclip"),
     ).not.toBeNull();
     expect(screen.getByText("1 attached file")).toBeInTheDocument();
-    withFiles.unmount();
+    withValues.unmount();
     const bare = renderWithProviders(
       <LiveRow
         row={rowWith({ approval: { requestId: "req-1", response: null } })}
@@ -676,9 +676,9 @@ describe("LiveRow approval card file values", () => {
   // not replacement, so the capped text must be gone once the full text
   // lands.
   it("pulls the uncut contents when the summary expands and replaces the capped preview", async () => {
-    const onLoad = vi.fn().mockResolvedValue(UNCUT_FILES);
+    const onLoad = vi.fn().mockResolvedValue(UNCUT_VALUES);
     const { container } = renderWithProviders(
-      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
+      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadParamValues={onLoad} />,
     );
     expandSummary(container);
     expect(onLoad).toHaveBeenCalledWith("req-1");
@@ -689,7 +689,7 @@ describe("LiveRow approval card file values", () => {
   it("falls back to the capped preview with an error note when the pull rejects", async () => {
     const onLoad = vi.fn().mockRejectedValue(new Error("slot released"));
     const { container } = renderWithProviders(
-      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
+      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadParamValues={onLoad} />,
     );
     expandSummary(container);
     // The async fallback note is a live note (role="status") -- found by
@@ -705,9 +705,9 @@ describe("LiveRow approval card file values", () => {
   // One fetch per card: the pending-window snapshot is immutable while the
   // card is up, so collapsing and re-expanding reuses the settled full view.
   it("does not refetch when collapsing and re-expanding", async () => {
-    const onLoad = vi.fn().mockResolvedValue(UNCUT_FILES);
+    const onLoad = vi.fn().mockResolvedValue(UNCUT_VALUES);
     const { container } = renderWithProviders(
-      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
+      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadParamValues={onLoad} />,
     );
     expandSummary(container);
     await screen.findByText("print(1); print(2)");
@@ -723,12 +723,12 @@ describe("LiveRow approval card file values", () => {
   // fetch, and the capped preview stays the load-gap face until the pull
   // lands.
   it("keeps the capped preview and one call while the pull is in flight", async () => {
-    let resolvePull!: (files: FileAttachment[]) => void;
+    let resolvePull!: (values: ParamValue[]) => void;
     const onLoad = vi.fn().mockImplementation(
-      () => new Promise<FileAttachment[]>((resolve) => { resolvePull = resolve; }),
+      () => new Promise<ParamValue[]>((resolve) => { resolvePull = resolve; }),
     );
     const { container } = renderWithProviders(
-      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
+      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadParamValues={onLoad} />,
     );
     expandSummary(container);
     // Load gap: the capped broadcast snapshot is the visible face.
@@ -737,24 +737,24 @@ describe("LiveRow approval card file values", () => {
     expandSummary(container);
     expect(onLoad).toHaveBeenCalledTimes(1);
     await act(async () => {
-      resolvePull(UNCUT_FILES);
+      resolvePull(UNCUT_VALUES);
     });
     expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
     expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
   });
 
-  it("fetches nothing when expanding a card without file values", () => {
-    const onLoad = vi.fn().mockResolvedValue(UNCUT_FILES);
+  it("fetches nothing when expanding a card without param values", () => {
+    const onLoad = vi.fn().mockResolvedValue(UNCUT_VALUES);
     const { container } = renderWithProviders(
       <LiveRow
         row={rowWith({ approval: { requestId: "req-1", response: null } })}
         onRespond={vi.fn()}
-        onLoadAttachments={onLoad}
+        onLoadParamValues={onLoad}
       />,
     );
     expandSummary(container);
     expect(onLoad).not.toHaveBeenCalled();
-    expect(container.querySelector(".approval-file")).toBeNull();
+    expect(container.querySelector(".approval-param")).toBeNull();
   });
 });
 
@@ -769,7 +769,7 @@ describe("LiveRow approval originator annotation (issue #934)", () => {
           approval: {
             requestId: "req-1",
             response: null,
-            fileAttachments: undefined,
+            paramValues: undefined,
             originAgent: "analyst",
           },
         })}

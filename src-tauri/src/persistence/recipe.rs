@@ -300,7 +300,7 @@ pub struct RecipeTraceEntry {
     pub result_excerpt: String,
     /// The model-visible error text of a FAILED call (issue #1610), bounded
     /// at the failure-detail cap (same 4KB scale as the approval surface's
-    /// attachment budget): the durable audit record that upgrades the
+    /// param-value budget): the durable audit record that upgrades the
     /// ADR-0078 failure anchor from its bounded head to the full text the
     /// model self-corrected from. Absent on every success entry and on every
     /// arm that produced no real text; absent on pre-#1610 sessions (serde
@@ -524,7 +524,7 @@ pub(crate) fn truncate_trace_summary(s: &str) -> String {
 
 /// The full text behind a cut summary (issue #1636): `Some` only when the
 /// argument actually exceeded [`TRACE_SUMMARY_MAX`] (the cut predicate
-/// mirrors the approval surface's on-cut attachment rule), bounded at
+/// mirrors the approval surface's on-cut param-value rule), bounded at
 /// [`TRACE_SUMMARY_DETAIL_MAX`] with the shared truncation marker -- an
 /// uncut argument duplicates nothing, so the detail stays honestly absent.
 /// Shared by [`synthetic_materialize_trace`] and the live classification's

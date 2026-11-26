@@ -38,11 +38,12 @@ export type OperationKind = "read" | "write" | "execute" | "network";
 // from (ADR-0077).
 export type ApprovalResponse = "allow_once" | "always_allow" | "deny";
 
-// One file-delivery value's content for the approval card (issue #672,
+// One delivered param value's content for the approval card (issue #672,
 // ADR-0109 Decision 8): the approver can expand the parameter's value on
-// the card. Captured at approval time -- the temp file is deleted when the
-// call ends, so this snapshot is the only durable view.
-export interface FileAttachment {
+// the card. Captured at approval time -- for file-shaped deliveries the
+// temp file is deleted when the call ends, so this snapshot is the only
+// durable view.
+export interface ParamValue {
   param: string;
   content: string;
 }
@@ -59,10 +60,10 @@ export interface ApprovalRequestPayload {
   // Short agent-readable parameter summary for the card body -- NOT the full
   // call arguments (those may be large or sensitive). The bridge summarizes.
   summary: string;
-  // File-delivery values for the card's expand-on-demand view (issue #672).
-  // Optional: the backend omits the field for calls without file-delivered
-  // parameters (serde skip_serializing_if empty).
-  file_attachments?: FileAttachment[];
+  // Delivered param values for the card's expand-on-demand view (issue #672).
+  // Optional: the backend omits the field for calls without delivered
+  // param values (serde skip_serializing_if empty).
+  param_values?: ParamValue[];
   // The call's originator annotation (issue #934): the delegating sub-agent's
   // name when the call rides a sub-agent's tool face. Optional: the backend
   // omits the field for a main-loop / external-runtime call (serde

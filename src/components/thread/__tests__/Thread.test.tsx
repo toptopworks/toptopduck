@@ -1721,11 +1721,11 @@ describe("Thread", () => {
       expect(onRespondApproval).toHaveBeenCalledWith("req-1", "deny");
     });
 
-    // Issue #1009: the file-values expand threads the full-view loader
+    // Issue #1009: the param-values expand threads the full-view loader
     // through to the pending card (Thread -> LiveTurnExchange -> LiveRow) --
     // expanding pulls the uncut originals, not just the capped broadcast
     // snapshot the row carries.
-    it("threads the full-view loader to a pending card's file-values expand", async () => {
+    it("threads the full-view loader to a pending card's param-values expand", async () => {
       const onLoad = vi.fn().mockResolvedValue([{ param: "code", content: "print(1); print(2)" }]);
       const liveTurn: LiveTurn = {
         question: "q",
@@ -1745,7 +1745,7 @@ describe("Thread", () => {
                 approval: {
                   requestId: "req-1",
                   response: null,
-                  fileAttachments: [{ param: "code", content: "print(1)" }],
+                  paramValues: [{ param: "code", content: "print(1)" }],
                 },
                 running: false,
                 success: null,
@@ -1761,7 +1761,7 @@ describe("Thread", () => {
           selectedResult={null}
           onSelectResult={() => {}}
           liveTurn={liveTurn}
-          onLoadApprovalAttachments={onLoad}
+          onLoadApprovalParamValues={onLoad}
         />,
       );
       // The delivery rides the summary expand: the fold toggle is the

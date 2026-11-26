@@ -455,7 +455,7 @@ fn dispatch_gated_call_inner(
                         key: crate::approval::ToolKey::builtin(crate::skills::create::CREATE_SKILL),
                         operation_kind: OperationKind::Write,
                         summary: summary.clone(),
-                        file_attachments: vec![crate::skills::create::skill_markdown_attachment(
+                        param_values: vec![crate::skills::create::skill_markdown_param_value(
                             &markdown,
                         )],
                         // The originator annotation rides the gate like every
@@ -559,7 +559,7 @@ fn dispatch_gated_call_inner(
     // session workspace -- the sedimentation channel, deliberately split
     // from the python execution medium (ADR-0108 D4). Like `create_skill`
     // above, the effect outlives the turn, so the pair GATES per call
-    // (Write badge; the write payload rides the card as attachments); a
+    // (Write badge; the write payload rides the card as its param values); a
     // resolution failure (an out-of-workspace path, an over-cap or binary
     // payload, an unresolvable edit target, no bound workspace) is refused
     // AHEAD of the card -- the model's error, never the approver's. The
@@ -585,14 +585,14 @@ fn dispatch_gated_call_inner(
         operation_kind,
         summary,
         summary_detail,
-        file_attachments,
+        param_values,
         cli_tool,
     } = classify_with_cli_tool(cli, call, deps.temp_path);
     let gate_req = ApprovalRequest {
         key,
         operation_kind,
         summary: summary.clone(),
-        file_attachments,
+        param_values,
         // The originator annotation (issue #934): the delegating sub-agent's
         // name rides the gate so the approval card reads "sub-agent X wants
         // to call Y"; a main-loop call carries none. The card's call id is
@@ -1165,9 +1165,10 @@ const ARGS_PREVIEW_MAX_CHARS: usize = 512;
 /// is the card's full-argv rendering. `temp_dir` + `call_id` drive the same
 /// deterministic temp paths the execution later renders (issue #672), so the
 /// argv the approver signs is exactly the one that runs; the
-/// file-delivery values ride along as expandable attachments (ADR-0109
-/// Decision 8), captured NOW -- the temp file is deleted when the call
-/// ends, so the payload snapshot is the approver's only durable view.
+/// delivered param values ride along as expandable card payloads (ADR-0109
+/// Decision 8), captured NOW -- for file-shaped deliveries the temp file
+/// is deleted when the call ends, so the payload snapshot is the
+/// approver's only durable view.
 fn classify_cli_tool(
     tool: &crate::cli_tools::config::CliToolConfig,
     input: &Value,
@@ -1177,16 +1178,16 @@ fn classify_cli_tool(
     ToolKey,
     OperationKind,
     String,
-    Vec<crate::approval::FileAttachment>,
+    Vec<crate::approval::ParamValue>,
 ) {
     let summary_and_files = |rendered: crate::cli_tools::config::RenderedCall| {
         let mut argv = Vec::with_capacity(rendered.argv.len() + 1);
         argv.push(tool.executable.clone());
         argv.extend(rendered.argv.iter().cloned());
-        let mut attachments = rendered
+        let mut param_values = rendered
             .files
             .into_iter()
-            .map(|f| crate::approval::FileAttachment {
+            .map(|f| crate::approval::ParamValue {
                 param: f.param,
                 content: f.content,
             })
@@ -1195,19 +1196,19 @@ fn classify_cli_tool(
         let summary = crate::approval::truncate_summary(&full_argv, ARGS_PREVIEW_MAX_CHARS);
         // When the cap cut, the ellipsis hides a tail the approver cannot
         // otherwise see -- the full rendering rides along as an expandable
-        // audit attachment (issue #1195). Mounted only when the summary is
+        // audit param value (issue #1195). Mounted only when the summary is
         // actually shorter than the argv: an in-cap summary already shows
         // the verbatim full argv, and this comparison mirrors
         // `truncate_summary`'s own cut decision.
         if summary.chars().count() < full_argv.chars().count() {
-            attachments.push(crate::approval::FileAttachment {
+            param_values.push(crate::approval::ParamValue {
                 param: "argv".into(),
                 content: full_argv,
             });
         }
-        (summary, attachments)
+        (summary, param_values)
     };
-    let (summary, file_attachments) =
+    let (summary, param_values) =
         match crate::cli_tools::config::render_call(tool, input, temp_dir, call_id) {
             Ok(rendered) => summary_and_files(rendered),
             // Rendering can fail on a mis-shaped call (a missing parameter);
@@ -1222,7 +1223,7 @@ fn classify_cli_tool(
         ToolKey::external(ToolKey::CLI_SERVER, tool.name.clone()),
         OperationKind::Execute,
         summary,
-        file_attachments,
+        param_values,
     )
 }
 
@@ -1241,7 +1242,7 @@ pub(crate) struct ResolvedClassification<'a> {
     /// external arms (their summaries are argv digests / framed previews
     /// with their own on-cut channels).
     pub summary_detail: Option<String>,
-    pub file_attachments: Vec<crate::approval::FileAttachment>,
+    pub param_values: Vec<crate::approval::ParamValue>,
     /// The registration the call's name matched, for the dispatch arm;
     /// `None` when the name is not a registered CLI tool.
     pub cli_tool: Option<&'a crate::cli_tools::config::CliToolConfig>,
@@ -1250,9 +1251,9 @@ pub(crate) struct ResolvedClassification<'a> {
 /// Classify one call with the CLI-registration lookup folded in: a
 /// registered name classifies under its own reserved server (`classify_cli_tool`,
 /// ADR-0108 Decision 7 -- the approver signs exactly what will run, with that
-/// arm's file-delivery and argv attachments); anything else falls through to
+/// arm's file-delivery and argv param_values); anything else falls through to
 /// the shared builtin/external classification, where the external arm mounts
-/// its on-cut args attachment (ADR-0146) and the builtin arm carries none (it
+/// its on-cut args param value (ADR-0146) and the builtin arm carries none (it
 /// never gates). Registration validation refuses builtin / meta / namespaced
 /// names, so the two arms are disjoint.
 pub(crate) fn classify_with_cli_tool<'a>(
@@ -1263,26 +1264,25 @@ pub(crate) fn classify_with_cli_tool<'a>(
     let cli_tool = cli.iter().find(|t| t.name == call.name);
     match cli_tool {
         Some(tool) => {
-            let (key, operation_kind, summary, file_attachments) =
+            let (key, operation_kind, summary, param_values) =
                 classify_cli_tool(tool, &call.input, temp_dir, &call.id);
             ResolvedClassification {
                 key,
                 operation_kind,
                 summary,
                 summary_detail: None,
-                file_attachments,
+                param_values,
                 cli_tool: Some(tool),
             }
         }
         None => {
-            let (key, operation_kind, summary, summary_detail, file_attachments) =
-                classify_call(call);
+            let (key, operation_kind, summary, summary_detail, param_values) = classify_call(call);
             ResolvedClassification {
                 key,
                 operation_kind,
                 summary,
                 summary_detail,
-                file_attachments,
+                param_values,
                 cli_tool: None,
             }
         }
@@ -1296,7 +1296,7 @@ pub(crate) fn classify_call(
     OperationKind,
     String,
     Option<String>,
-    Vec<crate::approval::FileAttachment>,
+    Vec<crate::approval::ParamValue>,
 ) {
     match definitions::builtin_metadata(&call.name) {
         Some(spec) => {
@@ -1309,7 +1309,7 @@ pub(crate) fn classify_call(
                 summary_detail,
                 // The builtin arm never gates (ADR-0080 Decision 1
                 // pass-through), so it has no approval surface to mount
-                // attachments for.
+                // param_values for.
                 Vec::new(),
             )
         }
@@ -1361,23 +1361,23 @@ pub(crate) fn classify_call(
             // #1370), the tail
             // is invisible everywhere -- the trace keeps this same capped
             // summary. The full JSON rides the gate as an expandable
-            // "arguments" attachment (the "argv" attachment's channel, issue
-            // #1195): the broadcast caps it at FILE_ATTACHMENT_MAX_CHARS
+            // "arguments" param value (the "argv" param value's channel, issue
+            // #1195): the broadcast caps it at PARAM_VALUE_MAX_CHARS
             // while the pending slot keeps the uncut original for the
             // pending window's on-demand pull. Mounted only when a cap
             // actually cut -- the predicate mirrors both cut decisions, so a
             // long tool name that eats the frame budget mounts even when the
             // args alone fit the preview cap.
-            let mut attachments = Vec::new();
+            let mut param_values = Vec::new();
             if args_preview.chars().count() < full_args.chars().count()
                 || summary.chars().count() < framed.chars().count()
             {
-                attachments.push(crate::approval::FileAttachment {
+                param_values.push(crate::approval::ParamValue {
                     param: "arguments".into(),
                     content: full_args,
                 });
             }
-            (key, OperationKind::Network, summary, None, attachments)
+            (key, OperationKind::Network, summary, None, param_values)
         }
     }
 }
@@ -1495,7 +1495,7 @@ mod tests {
             source: Default::default(),
             baseline: None,
         };
-        let (key, kind, summary, attachments) = classify_cli_tool(
+        let (key, kind, summary, param_values) = classify_cli_tool(
             &tool,
             &serde_json::json!({"output": "out.pdf"}),
             std::path::Path::new("/tmp"),
@@ -1507,11 +1507,11 @@ mod tests {
         // ADR-0108 Decision 7: the card renders the complete argv that will
         // run -- the executable plus the rendered template.
         assert_eq!(summary, "/bin/pandoc -o out.pdf");
-        assert!(attachments.is_empty(), "no file delivery, no attachments");
+        assert!(param_values.is_empty(), "no file delivery, no param_values");
     }
 
     #[test]
-    fn a_file_delivery_cli_call_carries_its_value_as_an_approval_attachment() {
+    fn a_file_delivery_cli_call_carries_its_value_as_an_approval_param_value() {
         // Issue #672, ADR-0109 Decision 8: the argv shows the deterministic
         // temp path (captured before any file exists -- a denial leaves
         // nothing on disk), and the value itself rides the request as the
@@ -1533,7 +1533,7 @@ mod tests {
             source: Default::default(),
             baseline: None,
         };
-        let (_, _, summary, attachments) = classify_cli_tool(
+        let (_, _, summary, param_values) = classify_cli_tool(
             &tool,
             &serde_json::json!({"code": "print(1)"}),
             std::path::Path::new("/session/tmp"),
@@ -1545,9 +1545,9 @@ mod tests {
                 .ends_with("/cli-code-runner-code-tu_7.tmp"),
             "the argv carries the temp path, not the value: {summary}"
         );
-        assert_eq!(attachments.len(), 1);
-        assert_eq!(attachments[0].param, "code");
-        assert_eq!(attachments[0].content, "print(1)");
+        assert_eq!(param_values.len(), 1);
+        assert_eq!(param_values[0].param, "code");
+        assert_eq!(param_values[0].content, "print(1)");
     }
 
     #[test]
@@ -1582,12 +1582,12 @@ mod tests {
     }
 
     #[test]
-    fn an_oversize_cli_argv_mounts_the_full_rendering_as_an_audit_attachment() {
+    fn an_oversize_cli_argv_mounts_the_full_rendering_as_an_audit_param_value() {
         // Issue #1195: when the summary's cap cuts the argv, the hidden
         // tail is exactly the flags the approver is signing for, so the
-        // full rendering rides along as an expandable attachment --
+        // full rendering rides along as an expandable param value --
         // mounted only when the cap actually cut (the in-cap case is
-        // pinned by the badge test's empty-attachments assert above).
+        // pinned by the badge test's empty-param_values assert above).
         use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
         let tool = CliToolConfig {
             name: "pandoc".into(),
@@ -1606,7 +1606,7 @@ mod tests {
             baseline: None,
         };
         let long_flag = format!("--metadata title={}", "x".repeat(600));
-        let (_, _, summary, attachments) = classify_cli_tool(
+        let (_, _, summary, param_values) = classify_cli_tool(
             &tool,
             &serde_json::json!({ "extra": ["--toc", &long_flag] }),
             std::path::Path::new("/tmp"),
@@ -1617,18 +1617,18 @@ mod tests {
         // not moving).
         assert_eq!(summary.chars().count(), ARGS_PREVIEW_MAX_CHARS);
         assert!(summary.ends_with("..."));
-        // The argv attachment carries the full rendering verbatim -- the
+        // The argv param value carries the full rendering verbatim -- the
         // exact join, separator, and argument order -- and the summary's
         // head is its prefix, so the approver can verify the card against
         // what will actually run.
-        let audit = attachments
+        let audit = param_values
             .iter()
             .find(|a| a.param == "argv")
-            .expect("oversize argv mounts an audit attachment");
+            .expect("oversize argv mounts an audit param value");
         assert_eq!(
             audit.content,
             format!("/bin/pandoc --toc {long_flag}"),
-            "the attachment carries the full verbatim join"
+            "the param value carries the full verbatim join"
         );
         let head = summary.strip_suffix("...").unwrap();
         assert!(
@@ -1638,7 +1638,7 @@ mod tests {
     }
 
     #[test]
-    fn an_oversize_cli_argv_mounts_alongside_the_file_delivery_attachments() {
+    fn an_oversize_cli_argv_mounts_alongside_the_file_delivery_param_values() {
         // The mount is additive: the file-delivery snapshots the approver
         // needs (the temp files are deleted at call end) stay in the list
         // and the argv audit rides after them -- a rebuild instead of a
@@ -1669,7 +1669,7 @@ mod tests {
             baseline: None,
         };
         let long_flag = format!("--metadata title={}", "x".repeat(600));
-        let (_, _, summary, attachments) = classify_cli_tool(
+        let (_, _, summary, param_values) = classify_cli_tool(
             &tool,
             &serde_json::json!({ "input_md": "# hi", "extra": ["--toc", &long_flag] }),
             std::path::Path::new("/tmp"),
@@ -1677,13 +1677,13 @@ mod tests {
         );
         assert_eq!(summary.chars().count(), ARGS_PREVIEW_MAX_CHARS);
         assert_eq!(
-            attachments.len(),
+            param_values.len(),
             2,
             "the argv mount is additive, not a rebuild"
         );
-        assert_eq!(attachments[0].param, "input_md");
-        assert_eq!(attachments[0].content, "# hi");
-        assert_eq!(attachments[1].param, "argv");
+        assert_eq!(param_values[0].param, "input_md");
+        assert_eq!(param_values[0].content, "# hi");
+        assert_eq!(param_values[1].param, "argv");
     }
 
     /// A route failure (unknown slug) surfaces as a tool error the agent
@@ -2031,7 +2031,7 @@ mod tests {
     /// the full model-emitted text as the classification's summary detail;
     /// an uncut SQL and a field-absent (fallback) call carry none. The
     /// external arm never carries one (its on-cut channel is the approval
-    /// attachment, not the trace).
+    /// param value, not the trace).
     #[test]
     fn classify_call_carries_summary_detail_only_for_a_cut_builtin_argument() {
         let long_sql = format!("SELECT {} AS n", "x".repeat(600));
@@ -2068,18 +2068,18 @@ mod tests {
         });
         assert_eq!(
             detail, None,
-            "the external arm's full args ride the approval attachment, not the trace"
+            "the external arm's full args ride the approval param value, not the trace"
         );
     }
 
     /// Issue #1370: when either truncation cap cuts into the external call's
     /// arguments, the full compact JSON rides the gate as an expandable
-    /// "arguments" attachment (the "argv" attachment's channel, issue #1195)
+    /// "arguments" param value (the "argv" param value's channel, issue #1195)
     /// so the approver can pull the uncut value in the pending window -- the
     /// tail is otherwise invisible everywhere, trace included. Within budget
-    /// there is no attachment (zero noise).
+    /// there is no param value (zero noise).
     #[test]
-    fn classify_mounts_full_args_attachment_when_the_args_preview_cuts() {
+    fn classify_mounts_full_args_param_value_when_the_args_preview_cuts() {
         let call = ToolUse {
             id: "tu_1".into(),
             name: "mcp__github__search".into(),
@@ -2091,33 +2091,33 @@ mod tests {
             "fixture must exceed the args-preview cap"
         );
         let resolved = classify_with_cli_tool(&[], &call, std::path::Path::new(""));
-        assert_eq!(resolved.file_attachments.len(), 1);
-        let attachment = &resolved.file_attachments[0];
-        assert_eq!(attachment.param, "arguments");
-        assert_eq!(attachment.content, full_args);
+        assert_eq!(resolved.param_values.len(), 1);
+        let param_value = &resolved.param_values[0];
+        assert_eq!(param_value.param, "arguments");
+        assert_eq!(param_value.content, full_args);
     }
 
     /// The zero-noise side: an in-budget call mounts nothing -- the summary
     /// already shows the verbatim arguments.
     #[test]
-    fn classify_mounts_no_args_attachment_when_within_budget() {
+    fn classify_mounts_no_args_param_value_when_within_budget() {
         let call = ToolUse {
             id: "tu_1".into(),
             name: "mcp__github__search".into(),
             input: serde_json::json!({ "q": "tiny" }),
         };
         let resolved = classify_with_cli_tool(&[], &call, std::path::Path::new(""));
-        assert!(resolved.file_attachments.is_empty());
+        assert!(resolved.param_values.is_empty());
     }
 
     /// The framing prefix eats card budget too: the args JSON fits the
     /// preview cap on its own, but frame + args exceed the card budget and
     /// the outer trim lands inside the tool name -- the arguments never
-    /// reach the summary at all, so the attachment must still mount. Pins
+    /// reach the summary at all, so the param value must still mount. Pins
     /// the two-cap predicate (comparing the summary's own length against
     /// the full JSON's would miss this case).
     #[test]
-    fn classify_mounts_full_args_attachment_when_the_frame_eats_the_budget() {
+    fn classify_mounts_full_args_param_value_when_the_frame_eats_the_budget() {
         let call = ToolUse {
             id: "tu_1".into(),
             name: format!("mcp__{}__search", "x".repeat(600)),
@@ -2129,8 +2129,8 @@ mod tests {
             "fixture args must fit the preview cap on their own"
         );
         let resolved = classify_with_cli_tool(&[], &call, std::path::Path::new(""));
-        assert_eq!(resolved.file_attachments.len(), 1);
-        assert_eq!(resolved.file_attachments[0].content, full_args);
+        assert_eq!(resolved.param_values.len(), 1);
+        assert_eq!(resolved.param_values[0].content, full_args);
     }
 
     /// The ADR-0078 (issue #297) event stream: a dispatch emits the
@@ -3837,7 +3837,7 @@ mod tests {
 
     #[test]
     fn classify_call_pins_builtin_and_external_arms() {
-        // explore: builtin server, Read badge, sql summary, no attachments.
+        // explore: builtin server, Read badge, sql summary, no param_values.
         let explore = classify_call(&ToolUse {
             id: "1".into(),
             name: "explore".into(),

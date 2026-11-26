@@ -3,7 +3,7 @@
 //! mint PERSISTS across sessions and the body is a future prompt-injection
 //! source, so the call is gated (`OperationKind::Write`) instead of served
 //! directly -- the approval card carries the whole `skillMarkdown` as its
-//! expand-on-demand attachment (full-text informed consent, issue #1009's
+//! expand-on-demand param value (full-text informed consent, issue #1009's
 //! channel).
 //!
 //! The parameter is ONE string -- the whole `SKILL.md`. The server-side
@@ -13,7 +13,7 @@
 
 use serde_json::{json, Value};
 
-use crate::approval::{truncate_summary, FileAttachment, SUMMARY_MAX_CHARS};
+use crate::approval::{truncate_summary, ParamValue, SUMMARY_MAX_CHARS};
 use crate::provider::tool_calling::{ToolDefinition, ToolUse};
 use crate::LiveProviderConfig;
 
@@ -22,7 +22,7 @@ use crate::LiveProviderConfig;
 pub(crate) const CREATE_SKILL: &str = "create_skill";
 
 /// The one parameter's name: the schema key, the extraction key, and the
-/// approval attachment's param label share it (single source).
+/// approval param value's param label share it (single source).
 pub(crate) const SKILL_MARKDOWN_PARAM: &str = "skillMarkdown";
 
 /// Compose the success message both dispatch arms serve after an approved
@@ -91,18 +91,18 @@ pub(crate) enum SkillCreateOutcome {
     Refused(String),
     /// A validated creation awaiting the gate: the trace / approval
     /// summary and the verbatim payload to write. The card's full-text
-    /// attachment derives from the payload below -- one store, one derived
+    /// param value derives from the payload below -- one store, one derived
     /// view, so the informed-consent invariant (the approver's text equals
     /// the written bytes) holds by construction.
     Gated { summary: String, markdown: String },
 }
 
-/// The approval card's full-text attachment derived from the verbatim
+/// The approval card's full-text param value derived from the verbatim
 /// payload: the single derivation point both dispatch arms pass to their
 /// `ApprovalRequest`s, so the approver's expand-on-demand copy can never
 /// drift from the bytes an approved mint writes.
-pub(crate) fn skill_markdown_attachment(markdown: &str) -> FileAttachment {
-    FileAttachment {
+pub(crate) fn skill_markdown_param_value(markdown: &str) -> ParamValue {
+    ParamValue {
         param: SKILL_MARKDOWN_PARAM.to_string(),
         content: markdown.to_string(),
     }
@@ -291,7 +291,7 @@ mod tests {
     }
 
     /// A valid document yields the gated shape: a name-bearing summary and
-    /// the verbatim write payload, whose derived card attachment is the same
+    /// the verbatim write payload, whose derived card param value is the same
     /// whole document under the parameter's name.
     #[test]
     fn resolve_yields_the_gated_shape() {
@@ -300,9 +300,9 @@ mod tests {
             SkillCreateOutcome::Gated { summary, markdown } => {
                 assert!(summary.contains("sql-coach"), "{summary}");
                 assert_eq!(markdown, VALID);
-                let attachment = skill_markdown_attachment(&markdown);
-                assert_eq!(attachment.param, SKILL_MARKDOWN_PARAM);
-                assert_eq!(attachment.content, VALID);
+                let param_value = skill_markdown_param_value(&markdown);
+                assert_eq!(param_value.param, SKILL_MARKDOWN_PARAM);
+                assert_eq!(param_value.content, VALID);
             }
             _ => panic!("expected the gated shape"),
         }
