@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
-import { Paperclip, ShieldQuestion } from "lucide-react";
+import { ShieldQuestion } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { FoldToggle } from "./FoldToggle";
 import { OperationBadge } from "./TraceRow";
 import { TraceSummaryFold } from "./TraceSummaryFold";
 import type { LiveRoundRow } from "../../session/useTurnFlow";
@@ -148,29 +149,6 @@ export function ApprovalCard({
               {name}
             </span>
             <OperationBadge kind={operationKind} />
-            {/* The at-rest param-value count (#672's Vec -- the old toggle's
-                "(1)" lived here): the delivery now rides the summary
-                expand, so this is the only rest-state signal that values
-                exist and how many; the visible figure is decorative, the
-                sr-only sentence carries it to assistive tech. */}
-            {paramValues.length > 0 && (
-              <>
-                <span
-                  aria-hidden="true"
-                  className="flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground"
-                >
-                  <Paperclip className="h-3 w-3" />
-                  {paramValues.length}
-                </span>
-                <span className="sr-only">
-                  <FormattedMessage
-                    id="thread.approval.paramValuesAttached"
-                    defaultMessage="{count, plural, one {# attached file} other {# attached files}}"
-                    values={{ count: paramValues.length }}
-                  />
-                </span>
-              </>
-            )}
             {/* role="status": while the gate suspends the turn the
                 round-trip wait line is gone (isRoundTripWait judges false
                 on the undecided row), so this hint is the only
@@ -207,7 +185,7 @@ export function ApprovalCard({
           eats the tail -- the pairs wrap instead (issue #862; the
           awaiting hint moved to the head row's status slot, off this
           row's width budget). */}
-      <span className="mt-2 flex flex-wrap items-center gap-1.5">
+      <span className="mt-3 flex flex-wrap items-center gap-1.5">
         <Button
           type="button"
           size="sm"
@@ -263,6 +241,16 @@ export function ApprovalCard({
 // expand is the trigger there); the load gap and a rejected pull both show
 // the capped broadcast snapshot, only a landed fetch replaces it, and the
 // rejection carries a one-line live note.
+//
+// The stack posture (issue #1681): one fold head per param, the name
+// always on the row; single-open -- opening a block collapses the
+// incumbent, at most one expanded block at any moment, so the answer row
+// below stays reachable no matter how many values a call carries. The
+// first block opens by default (the common single-value case reads open
+// outright). The expanded block keeps its own height cap + scroll -- the
+// only scroll context the stack itself grows; the summary block above
+// carries its own #1363 scroll region, and single-open keeps at most one
+// param block scrolling at a time.
 function ApprovalParamValues({
   shown,
   failed,
@@ -270,6 +258,17 @@ function ApprovalParamValues({
   shown: ParamValue[];
   failed: boolean;
 }) {
+  // `param | null`: null = every block collapsed. Seeded from the first
+  // snapshot entry at mount; the later full-view swap keeps the same
+  // params (per-value truncation, not a capped list), so the open block
+  // stays open and its content upgrades in place.
+  const [openParam, setOpenParam] = useState<string | null>(
+    () => shown[0]?.param ?? null,
+  );
+  // The flip (single-open per the posture above): re-clicking the open
+  // param collapses it too (null = all closed).
+  const toggleParam = (param: string) =>
+    setOpenParam((cur) => (cur === param ? null : param));
   return (
     <>
       {failed && (
@@ -284,13 +283,25 @@ function ApprovalParamValues({
         </p>
       )}
       {shown.map((value) => (
-        <span key={value.param} className="approval-param mt-1 block">
-          <span className="approval-param-name font-mono text-xs text-muted-foreground">
-            {value.param}
-          </span>
-          <pre className="approval-param-content mt-0.5 max-h-40 overflow-auto rounded-sm bg-background p-1.5 font-mono text-xs whitespace-pre-wrap break-all">
-            {value.content}
-          </pre>
+        // pl-2: heads and content indent to the summary block's text
+        // column (the block carries px-2) -- the bare fold rows otherwise
+        // hang 8px proud of the only surface above them.
+        <span key={value.param} className="approval-param mt-2 block pl-2">
+          <FoldToggle
+            hookClass="approval-param-toggle"
+            expanded={openParam === value.param}
+            onToggle={() => toggleParam(value.param)}
+            className="text-[13px]"
+          >
+            <span className="approval-param-name min-w-0 truncate font-mono">
+              {value.param}
+            </span>
+          </FoldToggle>
+          {openParam === value.param && (
+            <pre className="approval-param-content mt-0.5 max-h-40 overflow-auto rounded-sm bg-background p-1.5 font-mono text-xs whitespace-pre-wrap break-all">
+              {value.content}
+            </pre>
+          )}
         </span>
       ))}
     </>
