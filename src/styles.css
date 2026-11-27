@@ -963,7 +963,7 @@
  * Internally still a flex column. */
 .session-conversation {
   grid-column: 2;
-  /* Floor matches layoutBounds COMPENSATED_MIN_WIDTH (420px, issue #1685:
+  /* Floor matches layoutBounds CONVERSATION_MIN_WIDTH (420px, issue #1685:
      the conversation column's protection floor). Last-resort visual floor
      only -- the minmax(0, 100%) track ignores it, and the fullwidth
      posture lifts it so the track can collapse to zero. */

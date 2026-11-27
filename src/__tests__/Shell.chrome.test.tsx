@@ -496,6 +496,11 @@ describe("Right-sidebar fullwidth posture mirroring (issue #1685)", () => {
     ).toBe(true);
     // The conversation column drops out of the Tab sequence (inert).
     expect(document.querySelector(".session-conversation")).toHaveAttribute("inert");
+    // AC (issue #1685): both tabs stay reachable in the fullwidth posture --
+    // the panel is not inerted, so the tablist survives intact.
+    expect(document.querySelector(".session-right-sidebar")).not.toHaveAttribute("inert");
+    expect(screen.getByRole("tab", { name: "结果" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "工作集" })).toBeInTheDocument();
     // Exit fullwidth: the negotiated width returns.
     fireEvent.click(screen.getByRole("button", { name: "退出满宽" }));
     expect(

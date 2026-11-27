@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  COMPENSATED_MIN_WIDTH,
+  CONVERSATION_MIN_WIDTH,
   RIGHT_SIDEBAR_MAX_WIDTH,
   RIGHT_SIDEBAR_MIN_WIDTH,
   rightSidebarDefaultWidth,
@@ -24,7 +24,7 @@ describe("layoutBounds", () => {
   it("pins the conversation protection floor at 420", () => {
     // The conversation column's protected floor, enforced through the right
     // sidebar's dynamic ceiling (track host − 420) rather than a drag floor.
-    expect(COMPENSATED_MIN_WIDTH).toBe(420);
+    expect(CONVERSATION_MIN_WIDTH).toBe(420);
   });
 
   it("pins the right-sidebar static ceiling at 1200", () => {

@@ -16,7 +16,7 @@ export const RIGHT_SIDEBAR_MIN_WIDTH = 300;
  *  (the sidebar drag yields the right sidebar's rendered width down to the
  *  conversation's protection line instead of crushing it). The CSS side
  *  mirrors it as the conversation column's min-width (styles.css). */
-export const COMPENSATED_MIN_WIDTH = 420;
+export const CONVERSATION_MIN_WIDTH = 420;
 
 /** Static ceiling for the right sidebar (px): caps the user's stored
  *  preference and the drag on very wide windows. */
@@ -61,7 +61,7 @@ export function clampRenderedWidth(
  * live-width ceiling would bind at the same widths this floor form does,
  * while the floor form also stays correct at restore time. */
 export function sidebarMaxWidth(shellWidth: number): number {
-  return shellWidth - COMPENSATED_MIN_WIDTH - RIGHT_SIDEBAR_MIN_WIDTH;
+  return shellWidth - CONVERSATION_MIN_WIDTH - RIGHT_SIDEBAR_MIN_WIDTH;
 }
 
 /** Right sidebar width ceiling: the track host width (shell minus the
@@ -70,6 +70,6 @@ export function sidebarMaxWidth(shellWidth: number): number {
 export function rightSidebarMaxWidth(trackHostWidth: number): number {
   return Math.min(
     RIGHT_SIDEBAR_MAX_WIDTH,
-    trackHostWidth - COMPENSATED_MIN_WIDTH,
+    trackHostWidth - CONVERSATION_MIN_WIDTH,
   );
 }
