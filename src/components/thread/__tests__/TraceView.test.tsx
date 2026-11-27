@@ -654,9 +654,16 @@ describe("LiveRow approval card param values", () => {
     expect(screen.getByText(SUMMARY)).toBeInTheDocument();
     expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
     expect(container.querySelector(".approval-param")).toBeNull();
+    // No at-rest param signal (ruled on the ticket): the retired
+    // paperclip figure and attached-file sentence must stay gone -- the
+    // figure is aria-hidden decoration the catalog guard cannot see.
+    expect(container.querySelector(".lucide-paperclip")).toBeNull();
+    expect(screen.queryByText(/attached file/)).not.toBeInTheDocument();
     expandSummary(container);
     // The first block is open by default: the captured value shows under
-    // its fold head (the name rides both the rest line and the head).
+    // its fold head. (The param name itself carries no text assertion:
+    // it lives inside the toggle button, whose textContent equals the
+    // span's, so getByText would match both and throw.)
     expect(screen.getByText("print(1)")).toBeInTheDocument();
     // The per-param fold collapses independently of the summary.
     fireEvent.click(paramFoldHeads(container)[0]);
@@ -720,16 +727,34 @@ describe("LiveRow approval card param values", () => {
   // the loader (the broadcast snapshot is a 4 KiB budget, not the content
   // boundary) and replaces the capped preview in place -- arrival alone is
   // not replacement, so the capped text must be gone once the full text
-  // lands.
+  // lands. Three values with the second block opened by hand: the swap
+  // must keep the user-opened block open across the face change, not
+  // replay the first-block seed.
   it("pulls the uncut contents when the summary expands and replaces the capped preview", async () => {
-    const onLoad = vi.fn().mockResolvedValue(UNCUT_VALUES);
+    const onLoad = vi.fn().mockResolvedValue([
+      { param: "arg0", content: "v0-full" },
+      { param: "arg1", content: "v1-full" },
+      { param: "arg2", content: "v2-full" },
+    ]);
     const { container } = renderWithProviders(
-      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadParamValues={onLoad} />,
+      <LiveRow
+        row={rowWith({ approval: { requestId: "req-1", response: null, paramValues: THREE_VALUES } })}
+        onRespond={vi.fn()}
+        onLoadParamValues={onLoad}
+      />,
     );
     expandSummary(container);
+    fireEvent.click(paramFoldHeads(container)[1]);
     expect(onLoad).toHaveBeenCalledWith("req-1");
-    expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
-    expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
+    expect(await screen.findByText("v1-full")).toBeInTheDocument();
+    // The capped text is gone and the hand-opened second block stayed
+    // open through the swap.
+    expect(screen.queryByText("v1")).not.toBeInTheDocument();
+    expect(paramFoldHeads(container)[1]).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.queryByText("v0-full")).not.toBeInTheDocument();
   });
 
   it("falls back to the capped preview with an error note when the pull rejects", async () => {

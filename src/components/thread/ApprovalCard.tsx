@@ -248,7 +248,9 @@ export function ApprovalCard({
 // below stays reachable no matter how many values a call carries. The
 // first block opens by default (the common single-value case reads open
 // outright). The expanded block keeps its own height cap + scroll -- the
-// only scroll context in the card at any moment.
+// only scroll context the stack itself grows; the summary block above
+// carries its own #1363 scroll region, and single-open keeps at most one
+// param block scrolling at a time.
 function ApprovalParamValues({
   shown,
   failed,
@@ -263,8 +265,8 @@ function ApprovalParamValues({
   const [openParam, setOpenParam] = useState<string | null>(
     () => shown[0]?.param ?? null,
   );
-  // Single-open flip: opening a param collapses the incumbent; clicking
-  // the open param again collapses it (null = all closed).
+  // The flip (single-open per the posture above): re-clicking the open
+  // param collapses it too (null = all closed).
   const toggleParam = (param: string) =>
     setOpenParam((cur) => (cur === param ? null : param));
   return (

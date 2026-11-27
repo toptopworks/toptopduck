@@ -2,8 +2,9 @@
 // rotating on expand; aria-expanded conveys the fold state. Used by the
 // turn-level process fold, the settled per-round thinking + steps folds
 // (TurnCard), the live thinking fold (issue #610), the delegation
-// sub-trace fold (issue #1355), and the antecedents lineage fold
-// (issue #1627) -- one chrome so the settle swap does not
+// sub-trace fold (issue #1355), the antecedents lineage fold
+// (issue #1627), and the approval card's per-param value folds -- one
+// chrome so the settle swap does not
 // move the fold the user is looking at (the head's size excepted
 // by ruling: the live activity line's head rides the 13px chrome
 // tier while the settled process fold keeps body-md). The hook class
