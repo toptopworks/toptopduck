@@ -15,6 +15,7 @@ const SESSION_FIELDS: ComposerSessionFields = {
   handleCancel: vi.fn(),
   handleIngestFiles: vi.fn(),
   rightSidebarCollapsed: false,
+  rightSidebarFullwidth: false,
 };
 
 // Wrapper that always passes both args. The `as string` cast bypasses the

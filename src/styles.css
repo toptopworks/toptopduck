@@ -199,33 +199,41 @@
   grid-template-columns: var(--sidebar-width, 280px) 1fr;
   grid-template-rows: auto auto 1fr;
   overflow: hidden;
-  /* Shared 4-track conversation grid (ADR-0083/0090). Both .session-body and
-   * .shell-bar-track reference these so the bar sits exactly under the
-   * conversation column. Default: rail open. Collapsed: right sidebar folded,
-   * the conversation track takes the container's full width -- the rail is
-   * the scroll container, so its scrollbar hugs the window edge and the old
-   * empty flank tracks cease to exist as dead spacer areas (wheel over them
-   * scrolls now). The reading measure is capped not by the track but by the
-   * .rail-reading-column wrapper inside the rail plus the bar mirror below
-   * (--reading-column-cap).
+  /* Shared 4-track conversation grid (ADR-0083/0090, renegotiated by issue
+   * #1685). Both .session-body and .shell-bar-track reference these so the
+   * bar sits exactly under the conversation column. Default: right sidebar
+   * open at its EXPLICIT width. Collapsed: right sidebar folded, the
+   * conversation track takes the container's full width -- the conversation
+   * is the scroll container, so its scrollbar hugs the window edge and the
+   * old empty flank tracks cease to exist as dead spacer areas (wheel over
+   * them scrolls now). Fullwidth (issue #1685): the conversation track
+   * exits and the right sidebar fills the main region. The reading measure
+   * is capped not by the track but by the .rail-reading-column wrapper
+   * inside the rail plus the bar mirror below (--reading-column-cap).
    *
-   * Right-sidebar floor (issue #770): the right-sidebar track's 320px min
-   * mirrors RIGHT_SIDEBAR_MIN_WIDTH in src/shell/layoutBounds.ts -- the
-   * grid-level guarantee that the expanded right sidebar never resolves
-   * below 320px (the rail track yields first via its minmax(0, ·) min). The
-   * minmax-bearing tracks (conversation/right sidebar) keep a matching
-   * minmax() structure in
-   * both lists and the bare-flex spacers pair fr↔fr, so the fold animation's
-   * grid-template-columns interpolation stays smooth (a bare 0fr in the
-   * collapsed list would pair a length min against auto and snap). The
-   * collapsed conversation track pairs its expanded px max against 100% --
-   * length vs percentage, both resolving against the same definite container
-   * width -- so the fold slide interpolates as smoothly as the retired
-   * px ↔ px pair did. */
-  --right-sidebar-min-width: 320px;
+   * Right-sidebar width (issue #1685): the panel is an EXPLICIT width now --
+   * --right-sidebar-width is set inline on .shell by useRightSidebarResize
+   * (preference/render split, clamped to [300, min(1200, host − 420)]; the
+   * fallback mirrors the 1200px-default-window derivation of
+   * clamp(viewport × 0.42, 360, 640) in src/shell/layoutBounds.ts). The
+   * conversation track has no width of its own: it is the flexible
+   * remainder, protected at 420px by the panel's dynamic ceiling (the
+   * conversation column's min-width below mirrors it) whenever the window
+   * can afford it -- when it cannot, the panel stops at its 300px minimum
+   * and the conversation clips.
+   *
+   * Interpolation: every posture pair keeps matching track-sizing forms --
+   * bare length ↔ bare percentage (calc-mix) on the panel track between the
+   * open and fullwidth lists, bare px ↔ bare px on the folded panel track,
+   * and minmax(0, 100%) on the conversation track in every list (identical
+   * form, nothing to interpolate) -- so the fold / fullwidth slides stay
+   * smooth (a bare fr inside any list would pair against a
+   * length/percentage and snap). */
+  --right-sidebar-width: 504px;
   --track-grid:
-    0fr minmax(0, var(--rail-width, 460px)) minmax(var(--right-sidebar-min-width), 1fr) 0fr;
-  --track-grid-collapsed: 0fr minmax(0, 100%) minmax(0, 0fr) 0fr;
+    0fr minmax(0, 100%) var(--right-sidebar-width) 0fr;
+  --track-grid-collapsed: 0fr minmax(0, 100%) 0px 0fr;
+  --track-grid-fullwidth: 0fr minmax(0, 0px) 100% 0fr;
   /* Collapsed reading column cap (issue #833; recalibrated for the 1200px
    * default window, issue #1286): the folded conversation track reads
    * through one centered column -- this cap is both its text measure and
@@ -248,7 +256,8 @@
    * and keep column and card flush. */
   --rail-col-relax: 10px;
   /* Session header height (issue #782): single 64px source shared by
-   * .session-header (height/min-height) and .rail-resize-handle (top) so the
+   * .session-header (height/min-height) and .right-sidebar-resize-handle
+   * (top) so the
    * drag line stops exactly at the header's bottom edge — ADR-0092 lifted
    * the handle to .main-area with top:0, which let it span the header strip
    * (drag line bleeding over the header + col-resize hit area stealing
@@ -394,7 +403,7 @@
 }
 /* Same drag exception as the bar track: during a rail / sidebar drag the
  * width must follow the pointer 1:1 instead of lagging a transition. */
-.shell.rail-dragging > .shell-error-track,
+.shell.right-sidebar-dragging > .shell-error-track,
 .shell.sidebar-dragging > .shell-error-track { transition: none; }
 .shell > .shell-error-track > .shell-error {
   grid-column: 2;
@@ -596,9 +605,10 @@
  *
  * Bottom width tracking (ADR-0090 calibration, ADR-0092): the
  * .shell-bar-track mirrors the pane's 4-track .session-body grid so the bar
- * sits exactly under the conversation column — rail width (--rail-width)
- * when the right sidebar is open, the full-width conversation track when the
- * active pane is right-sidebar-collapsed (App mirrors the fold via .right-sidebar-collapsed,
+ * sits exactly under the conversation column — the conversation remainder
+ * track when the right sidebar is open, the full-width conversation track
+ * when the active pane is right-sidebar-collapsed or fullwidth (App mirrors
+ * the fold / fullwidth via .right-sidebar-collapsed / .right-sidebar-fullwidth,
  * reported upward through the composer fields). The track's
  * grid-template-columns transition matches the pane's so the bar follows the
  * fold animation + rail drag.
@@ -709,10 +719,10 @@
   margin-inline: auto;
   width: min(var(--reading-column-cap), calc(100% - 2 * var(--rail-gutter)));
 }
-/* Disable the track's grid transition during rail / sidebar drag so the bar
+/* Disable the track's grid transition during panel / sidebar drag so the bar
  * width follows the pointer 1:1 instead of lagging (same rule the pane's
  * .session-body uses). */
-.shell.rail-dragging .shell-bar-slot.bottom .shell-bar-track,
+.shell.right-sidebar-dragging .shell-bar-slot.bottom .shell-bar-track,
 .shell.sidebar-dragging .shell-bar-slot.bottom .shell-bar-track { transition: none; }
 
 /* --- Pane column: header + session-body (ADR-0083) --------------------------
@@ -729,10 +739,11 @@
  *
  * ADR-0083 right-sidebar fold (issue #298): the pane carries .right-sidebar-collapsed
  * while the panel is folded away (cold-start default, session-ephemeral) --
- * the rail owns the released space (the rail-as-primary form). The rail's
- * floors live in useRailResize (350 direct-drag / 280 compensated); the
- * 320px minimum-usable-column floor is the right-sidebar track's
- * (--right-sidebar-min-width, issue #770). */
+ * the conversation column owns the released space (the rail-as-primary
+ * form). The conversation column's 420px protection floor lives in the
+ * right sidebar's dynamic ceiling (useRightSidebarResize / layoutBounds,
+ * issue #1685); the panel's own floors are 300px minimum / 1200px static
+ * ceiling. */
 .session-pane {
   height: 100%;
   display: flex;
@@ -740,15 +751,15 @@
 }
 /* Right sidebar folded (ADR-0083, issue #298): 4-track grid hands the container's
  * full width to the conversation track when the right sidebar folds. Tracks:
- * [spacer 0fr] [conversation minmax(0, 100%)] [right sidebar minmax(0, 0fr)]
- * [spacer 0fr] -- the rail scroll container spans the pane's full width
- * (scrollbar pinned to the window edge, wheel over the old empty flanks
- * scrolls because that surface is rail now, not dead spacer grid area), and
- * the .rail-reading-column wrapper inside the rail caps the reading measure.
- * The right-sidebar column shrinks minmax(min, 1fr) -> minmax(0, 0fr). Every
- * track interpolates (minmax<->minmax length-vs-percentage on the
- * conversation max, px-by-px on the right-sidebar min, bare fr<->fr on the
- * spacers) so no jitter. */
+ * [spacer 0fr] [conversation minmax(0, 100%)] [right sidebar 0px]
+ * [spacer 0fr] -- the conversation scroll container spans the pane's full
+ * width (scrollbar pinned to the window edge, wheel over the old empty
+ * flanks scrolls because that surface is conversation now, not dead spacer
+ * grid area), and the .rail-reading-column wrapper inside the rail caps the
+ * reading measure. The right-sidebar column collapses to a bare 0px length.
+ * Every track interpolates (identical minmax on the conversation, px-by-px
+ * on the bare-length panel track, bare fr<->fr on the spacers) so no
+ * jitter. */
 .shell .session-pane.right-sidebar-collapsed .session-body {
   grid-template-columns: var(--track-grid-collapsed);
 }
@@ -782,6 +793,28 @@
   opacity: 0;
   transition: opacity 200ms ease;
 }
+/* Issue #1685 fullwidth posture: the expanded panel fills the main region --
+ * the conversation track exits (minmax(0, 0px)) and the right sidebar takes
+ * the container's full width (bare 100%). The conversation is inert
+ * (SessionPane sets the HTML attribute) so the crushed column leaves the
+ * Tab sequence; its min-width floor is lifted here so the track can
+ * actually collapse to zero. The bar + error tracks reuse the COLLAPSED
+ * grid on purpose: those surfaces mirror the conversation column, which no
+ * longer exists in this posture, so the bar card spans the full width just
+ * as it does in the fold (the panel is full-height behind them). */
+.shell .session-pane.right-sidebar-fullwidth .session-body {
+  grid-template-columns: var(--track-grid-fullwidth);
+}
+.shell .session-pane.right-sidebar-fullwidth .session-conversation {
+  border-right-color: transparent;
+  min-width: 0;
+}
+.shell-bar-slot.right-sidebar-fullwidth .shell-bar-track {
+  grid-template-columns: var(--track-grid-collapsed);
+}
+.shell > .shell-error-track.right-sidebar-fullwidth {
+  grid-template-columns: var(--track-grid-collapsed);
+}
 /* Fold direction: the header fallback toggle mounts in the same commit that
    starts the 280ms column slide (React swaps the two conditional mounts in
    one paint), so unstaged it pops into the header mid-slide as a flicker.
@@ -811,14 +844,14 @@
 }
 /* Grid row: conversation + right sidebar. Same grid-template-columns slide
  * pattern as the shell sidebar -- the transition on grid-template-columns
- * makes the column boundary slide smoothly (expanded rail track <-> the
- * full-width fold track).
+ * makes the column boundary slide smoothly (the explicit panel track <->
+ * the full-width fold track).
  * background prevents white flash during the slide.
  *
- * --rail-width (set inline on .shell by useRailResize) drives the
- * conversation column's max width so the user can drag-resize the
- * conversation/right-sidebar boundary, mirroring the sidebar resize pattern.
- * position:relative anchors the absolutely-positioned .rail-resize-handle. */
+ * --right-sidebar-width (set inline on .shell by useRightSidebarResize)
+ * sizes the panel track; the conversation column is the flexible remainder
+ * (issue #1685). position:relative anchors the absolutely-positioned
+ * .right-sidebar-resize-handle. */
 .session-body {
   flex: 1;
   position: relative;
@@ -829,9 +862,11 @@
   background: var(--background);
   transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-/* Disable grid-template-columns transition during rail drag so the column
-   tracks the pointer 1:1 instead of lagging behind a 280ms animation. */
-.shell.rail-dragging .session-body,
+/* Disable grid-template-columns transition during a panel or sidebar drag
+   so the column tracks the pointer 1:1 instead of lagging behind a 280ms
+   animation (the sidebar drag re-derives the panel width through the
+   track-host observer, so it needs the exception too). */
+.shell.right-sidebar-dragging .session-body,
 .shell.sidebar-dragging .session-body { transition: none; }
 /* The follow pill (#1307): the paused posture's visible exit -- the rail's
    stick-to-bottom machine pauses on a user scroll and stays silent after
@@ -860,27 +895,28 @@
   bottom: calc(var(--shell-bar-h, 0px) + 0.5rem);
   z-index: 5;
 }
-/* Draggable rail resize handle (conversation/right-sidebar boundary). A thin
-   strip straddling the conversation/right-sidebar column boundary; absolutely
-   positioned within .main-area so its bottom spans the shell-level
-   QuestionBar (ADR-0092) while its top stops at the session header's bottom
-   edge (issue #782) -- the boundary is meaningless inside the full-width
-   header strip, so the line and its col-resize hit area stay out of it. The
-   handle's top and the header's height share --session-header-height. The
-   --rail-width variable (set
-   inline on .shell by useRailResize) drives left placement. Hidden when
-   cold-start, settings mode, or the right sidebar is folded
-   (.right-sidebar-collapsed) -- the 4-track grid hands the conversation track
-   the full width and the boundary no longer maps to --rail-width.
-   touch-action:none prevents the
+/* Draggable right-sidebar resize handle (conversation/right-sidebar
+   boundary, issue #1685). A thin strip straddling the conversation/panel
+   column boundary; absolutely positioned within .main-area so its bottom
+   spans the shell-level QuestionBar (ADR-0092) while its top stops at the
+   session header's bottom edge (issue #782) -- the boundary is meaningless
+   inside the full-width header strip, so the line and its col-resize hit
+   area stay out of it. The handle's top and the header's height share
+   --session-header-height. The --right-sidebar-width variable (set inline
+   on .shell by useRightSidebarResize) drives right placement: the panel
+   track is the grid's LAST content track, so the boundary sits exactly
+   --right-sidebar-width from the main area's right edge. Hidden when
+   cold-start, settings mode, the right sidebar is folded
+   (.right-sidebar-collapsed), or fullwidth -- in every one of those
+   postures the boundary no longer exists. touch-action:none prevents the
    browser from interpreting the drag as a pan/zoom. */
-.rail-resize-handle {
+.right-sidebar-resize-handle {
   position: absolute;
   top: var(--session-header-height);
   bottom: 0;
-  left: var(--rail-width, 460px);
+  right: var(--right-sidebar-width, 504px);
   width: 6px;
-  margin-left: -3px; /* center the 6px hit area on the column boundary */
+  margin-right: -3px; /* center the 6px hit area on the column boundary */
   cursor: col-resize;
   z-index: 10;
   touch-action: none;
@@ -893,7 +929,7 @@
    events), but the suppressed column border takes the whole column with
    it, so the visual line has to cover the header segment too or the
    divider-runs-unbroken topology breaks while hovering/dragging. */
-.rail-resize-handle::before {
+.right-sidebar-resize-handle::before {
   content: "";
   position: absolute;
   top: calc(-1 * var(--session-header-height));
@@ -903,21 +939,23 @@
   background-color: transparent;
   transition: background-color 120ms ease;
 }
-.rail-resize-handle:hover::before,
-.shell.rail-dragging .rail-resize-handle::before {
+.right-sidebar-resize-handle:hover::before,
+.shell.right-sidebar-dragging .right-sidebar-resize-handle::before {
   background-color: var(--border);
 }
 /* Suppress the .session-conversation permanent border-right under the handle
    so hover/drag shows a single 1px line instead of a doubled 2px. */
-.main-area:has(.rail-resize-handle:hover) .session-conversation,
-.shell.rail-dragging .session-conversation {
+.main-area:has(.right-sidebar-resize-handle:hover) .session-conversation,
+.shell.right-sidebar-dragging .session-conversation {
   border-right-color: transparent;
 }
-/* Hide the rail handle when there is no active session (cold start), in
-   settings mode, or when the active session's right sidebar is folded. */
-.shell.cold-start-mode .rail-resize-handle,
-.shell.settings-mode .rail-resize-handle,
-.main-area.right-sidebar-collapsed .rail-resize-handle {
+/* Hide the panel handle when there is no active session (cold start), in
+   settings mode, when the active session's right sidebar is folded, or in
+   the fullwidth posture (no boundary exists in any of them). */
+.shell.cold-start-mode .right-sidebar-resize-handle,
+.shell.settings-mode .right-sidebar-resize-handle,
+.main-area.right-sidebar-collapsed .right-sidebar-resize-handle,
+.main-area.right-sidebar-fullwidth .right-sidebar-resize-handle {
   display: none;
 }
 /* Conversation column: the thread rail (ADR-0092: the QuestionBar moved to
@@ -925,9 +963,11 @@
  * Internally still a flex column. */
 .session-conversation {
   grid-column: 2;
-  /* Floor matches useRailResize COMPENSATED_MIN_WIDTH clamp (280px, the
-     sidebar-compensation floor). */
-  min-width: 280px;
+  /* Floor matches layoutBounds COMPENSATED_MIN_WIDTH (420px, issue #1685:
+     the conversation column's protection floor). Last-resort visual floor
+     only -- the minmax(0, 100%) track ignores it, and the fullwidth
+     posture lifts it so the track can collapse to zero. */
+  min-width: 420px;
   display: flex;
   flex-direction: column;
   overflow: hidden;

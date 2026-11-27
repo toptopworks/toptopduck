@@ -295,7 +295,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     const { unmount } = render(<App />);
     // The observed element is the slot itself: the card, its margins,
     // and the centered greeting all contribute to its height. Other
-    // observers exist (useRailResize), so filter by target.
+    // observers exist (useRightSidebarResize), so filter by target.
     const slot = document.querySelector<HTMLElement>(".shell-bar-slot")!;
     const observers = instances.filter((i) => i.targets.includes(slot));
     expect(observers).toHaveLength(1);

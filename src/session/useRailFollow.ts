@@ -123,7 +123,8 @@ export function useRailFollow({
   const followingRef = useRef(true);
 
   // Latest-value mirror for the same reason (the dep-less sync follows
-  // useRailResize's getMaxWidthRef pattern, src/shell/useRailResize.ts): the
+  // useRightSidebarResize's getMaxWidthRef pattern,
+  // src/shell/useRightSidebarResize.ts): the
   // rAF callback outlives renders and must read the CURRENT activation, not
   // the one from its creating render.
   const activeRef = useRef(active);
@@ -300,7 +301,7 @@ export function useRailFollow({
   // unmounts, ADR-0051 keep-alive) cancels it. Clearing the handle matters
   // as much as the cancel: the StrictMode remount cycle runs effect ->
   // cleanup -> effect, and a canceled-but-set handle would absorb every
-  // future scheduleAlign at the guard (useRailResize's cleanup resets for
+  // future scheduleAlign at the guard (useRightSidebarResize's cleanup resets for
   // the same reason). React already nulls railRef.current during the unmount
   // commit, so an uncanceled stale callback would bail at the el guard
   // anyway; the cancel is frame-count hygiene.

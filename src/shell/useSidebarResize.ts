@@ -51,12 +51,8 @@ function loadStoredWidth(): number {
 }
 
 export function useSidebarResize(options?: {
-  /** Called with the per-frame rendered-width delta during drag. Used by
-   *  App.tsx to compensate the rail width (−delta) so the workspace stays
-   *  visually fixed when the sidebar is dragged. */
-  onDelta?: (delta: number) => void;
   /** Dynamic width ceiling in px (issue #770: shell width minus the rail and
-   *  workspace floors), consulted on every pointermove, at the initial
+   *  conversation floors), consulted on every pointermove, at the initial
    *  render derivation, and on every window resize. Return undefined to
    *  fall back to the static MAX_WIDTH — e.g. jsdom, where clientWidth
    *  reads as 0. */
@@ -77,18 +73,16 @@ export function useSidebarResize(options?: {
   const [isDragging, setIsDragging] = useState(false);
   const prefRef = useRef(prefWidth);
   const draggingRef = useRef(false);
-  // Store the latest onDelta / getMaxWidth in refs so the global pointermove
+  // Store the latest getMaxWidth in a ref so the global pointermove
   // listener (mounted once) always reads the current callbacks without
   // re-subscribing.
-  const onDeltaRef = useRef(options?.onDelta);
   const getMaxWidthRef = useRef(options?.getMaxWidth);
   useEffect(() => {
-    onDeltaRef.current = options?.onDelta;
     getMaxWidthRef.current = options?.getMaxWidth;
   });
 
   /** min(MAX_WIDTH, dynamic ceiling) — an undefined getter reads as
-   *  static-only (mergeCeiling, shared with useRailResize). */
+   *  static-only (mergeCeiling, shared with useRightSidebarResize). */
   const effectiveMax = useCallback(
     (): number => mergeCeiling(getMaxWidthRef.current?.(), MAX_WIDTH),
     [],
@@ -133,7 +127,7 @@ export function useSidebarResize(options?: {
 
   const onResizeStart = useCallback((e: ReactPointerEvent) => {
     e.preventDefault();
-    // Pointer capture for the same hover-stuck fix as useRailResize
+    // Pointer capture for the same hover-stuck fix as useRightSidebarResize
     // (release re-runs the hover hit-test once the handle stops at a
     // clamp bound and pointerup lands outside it).
     e.currentTarget?.setPointerCapture?.(e.pointerId);
@@ -151,15 +145,7 @@ export function useSidebarResize(options?: {
       if (!draggingRef.current) return;
       // clientX maps directly to the desired sidebar width because the
       // sidebar starts at the window's left edge (x = 0).
-      const clamped = clampWidth(e.clientX, effectiveMax());
-      // Delta of the RENDERED width: the preference and the rendered width
-      // can diverge after a mid-drag environmental shrink, and the rail
-      // compensation must absorb exactly what the sidebar visually moves
-      // (#1303).
-      const delta = clamped - renderedRef.current;
-      applyPreference(clamped);
-      // Compensate the rail so the workspace stays fixed.
-      if (delta !== 0) onDeltaRef.current?.(delta);
+      applyPreference(clampWidth(e.clientX, effectiveMax()));
     }
 
     function onPointerUp(): void {

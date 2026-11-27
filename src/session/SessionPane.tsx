@@ -6,6 +6,7 @@ import { fmtError, errorDetail } from "../lib/error-presentation";
 import { log } from "../lib/log";
 import { getApprovalParamValues } from "../api";
 import { RightSidebarToggle } from "../shell/RightSidebarToggle";
+import { RightSidebarFullwidthToggle } from "../shell/RightSidebarFullwidthToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useRailFollow } from "./useRailFollow";
 import { useSelectionSurface } from "./useSelectionSurface";
@@ -303,6 +304,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
       handleCancel: s.handleCancel,
       handleIngestFiles: ingestMany,
       rightSidebarCollapsed: s.rightSidebarCollapsed,
+      rightSidebarFullwidth: s.rightSidebarFullwidth,
     });
   }, [
     sessionId,
@@ -312,6 +314,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     s.handleCancel,
     ingestMany,
     s.rightSidebarCollapsed,
+    s.rightSidebarFullwidth,
     onComposerFields,
   ]);
 
@@ -572,6 +575,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
       className={cn(
         "session-pane",
         s.rightSidebarCollapsed && "right-sidebar-collapsed",
+        s.rightSidebarFullwidth && "right-sidebar-fullwidth",
       )}
     >
       {/* Session header (row 1): session name + management menu. ADR-0093
@@ -609,7 +613,14 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           scrolls behind the bar (the rail's dynamic bottom padding keeps the
           last element readable above it). */}
       <div className="session-body">
-        <div className="session-conversation" ref={conversationRef}>
+        <div
+          className="session-conversation"
+          ref={conversationRef}
+          // Issue #1685 fullwidth posture: the conversation track exits, so
+          // the crushed column drops out of the Tab sequence + pointer hit
+          // (the twin of the fold's inert on the right sidebar below).
+          inert={s.rightSidebarFullwidth}
+        >
           <div className="session-header" data-tauri-drag-region>
             <span className="min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
               {sessionName ||
@@ -830,7 +841,18 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 </Badge>
               )}
               {!s.rightSidebarCollapsed && (
-                <RightSidebarToggle collapsed={s.rightSidebarCollapsed} onToggle={handleToggleRightSidebar} ref={rightSidebarToggleRef} />
+                <>
+                  {/* Issue #1685: the fullwidth posture toggle rides the
+                      cluster ahead of the collapse toggle. Only rendered
+                      while the panel is expanded (the folded shell has no
+                      fullwidth posture); the button persists across its own
+                      toggle, so keyboard focus stays on the control. */}
+                  <RightSidebarFullwidthToggle
+                    fullwidth={s.rightSidebarFullwidth}
+                    onToggle={s.handleToggleRightSidebarFullwidth}
+                  />
+                  <RightSidebarToggle collapsed={s.rightSidebarCollapsed} onToggle={handleToggleRightSidebar} ref={rightSidebarToggleRef} />
+                </>
               )}
             </div>
           </div>

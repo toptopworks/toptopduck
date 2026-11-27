@@ -773,7 +773,7 @@ describe("useRailFollow", () => {
   it("keeps aligning when ResizeObserver is unavailable (the guard's jsdom arm)", () => {
     // The shared setup installs the registry stub; stubbing the global
     // away entirely is what exercises the guard's early return (the
-    // useRailResize precedent). The machine degrades to its pre-#843
+    // useRightSidebarResize precedent). The machine degrades to its pre-#843
     // self: the append effect's mount firing still lands the align, with
     // no observer attached.
     vi.stubGlobal("ResizeObserver", undefined);
@@ -869,7 +869,7 @@ describe("useRailFollow", () => {
     // StrictMode runs effect -> cleanup -> effect on mount. The cleanup must
     // cancel AND clear rafRef: a canceled-but-set handle absorbs every
     // future scheduleAlign at the guard, disarming the whole machine for the
-    // component's life (useRailResize's cleanup resets for the same reason).
+    // component's life (useRightSidebarResize's cleanup resets for the same reason).
     const { getByTestId, rerender } = render(
       <StrictMode>
         <Host active={true} entryCount={3} liveTurn={null} />

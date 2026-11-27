@@ -22,10 +22,16 @@ import type { ThreadEntry } from "../types/thread";
 export interface UseRightSidebarCollapse {
   /** True while the right sidebar is folded away (the rail owns the pane). */
   rightSidebarCollapsed: boolean;
+  /** True while the expanded panel fills the main region (issue #1685's
+   *  fullwidth posture). Session-ephemeral like the fold: never persisted,
+   *  reset whenever the panel folds. */
+  rightSidebarFullwidth: boolean;
   /** Open the panel (result selection from the rail). Idempotent. */
   expandRightSidebar: () => void;
   /** The session header toggle (the manual fold-AND-unfold path). */
   toggleRightSidebar: () => void;
+  /** The tab-row cluster's fullwidth toggle (the manual enter/exit path). */
+  toggleRightSidebarFullwidth: () => void;
   /** A result_N promotion just settled (the useTurnFlow markProduced seam).
    *  The FIRST call auto-expands, unless the mount scan already spent the
    *  one-shot on a session that materialized before this mount (issue
@@ -37,6 +43,12 @@ export interface UseRightSidebarCollapse {
 export function useRightSidebarCollapse(thread: ThreadEntry[]): UseRightSidebarCollapse {
   // Cold start (app / session start) is always folded (ADR-0083).
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(true);
+  // Issue #1685's fullwidth posture: session-ephemeral (never persisted),
+  // and the fold owns the reset -- a folded shell has no fullwidth posture
+  // to remember, so re-expanding starts from the negotiated width. The
+  // reset rides the fold path below (the only transition onto collapsed),
+  // not an effect.
+  const [rightSidebarFullwidth, setRightSidebarFullwidth] = useState(false);
   // The auto-expand one-shot. A ref (not state) because its consumption never
   // needs a render on its own -- it only guards the notePromotion transition.
   const autoExpandedRef = useRef(false);
@@ -67,18 +79,25 @@ export function useRightSidebarCollapse(thread: ThreadEntry[]): UseRightSidebarC
     setRightSidebarCollapsed(false);
   }, []);
   const toggleRightSidebar = useCallback(() => {
+    // Folding away resets the fullwidth posture (issue #1685).
+    if (!rightSidebarCollapsed) setRightSidebarFullwidth(false);
     setRightSidebarCollapsed((collapsed) => !collapsed);
-  }, []);
+  }, [rightSidebarCollapsed]);
   const notePromotion = useCallback(() => {
     if (autoExpandedRef.current) return;
     autoExpandedRef.current = true;
     setRightSidebarCollapsed(false);
   }, []);
+  const toggleRightSidebarFullwidth = useCallback(() => {
+    setRightSidebarFullwidth((fullwidth) => !fullwidth);
+  }, []);
 
   return {
     rightSidebarCollapsed,
+    rightSidebarFullwidth,
     expandRightSidebar,
     toggleRightSidebar,
+    toggleRightSidebarFullwidth,
     notePromotion,
   };
 }

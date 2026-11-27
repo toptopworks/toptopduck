@@ -446,3 +446,88 @@ describe("App context-menu policy mount (ADR-0149, issue #1570)", () => {
     expect(onField.defaultPrevented).toBe(false);
   });
 });
+
+describe("Right-sidebar fullwidth posture mirroring (issue #1685)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    // Hold app-config pending like the first describe: the shell renders on
+    // the cold-start default and the composer is live without a config.
+    vi.mocked(getAppConfig).mockImplementation(
+      () => new Promise<AppConfig>(() => {}),
+    );
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+    vi.mocked(listSessions).mockResolvedValue([
+      {
+        recipe_path: "/x/persisted.json",
+        display_name: "季报",
+        last_modified_at: Date.now(),
+        source_summary: { first_source_name: "people", source_count: 1, turn_count: 2 },
+        format_version: 1,
+        pinned: false,
+        archived: false,
+        workspace: null,
+      },
+    ]);
+  });
+
+  it("mirrors the fullwidth class on the pane, main area, and bar slot, and resets it on fold", async () => {
+    render(<App />);
+    await openSession();
+    // Expand the folded panel (the header fallback toggle).
+    fireEvent.click(screen.getByRole("button", { name: "展开右侧栏" }));
+    // Posture precondition: no fullwidth yet, and the resize handle is wired.
+    expect(
+      document.querySelector(".session-pane")?.classList.contains("right-sidebar-fullwidth"),
+    ).toBe(false);
+    expect(document.querySelector(".main-area .right-sidebar-resize-handle")).not.toBeNull();
+    // Enter fullwidth from the tab-row cluster.
+    fireEvent.click(screen.getByRole("button", { name: "展开至满宽" }));
+    expect(
+      document.querySelector(".session-pane")?.classList.contains("right-sidebar-fullwidth"),
+    ).toBe(true);
+    expect(
+      document.querySelector(".main-area")?.classList.contains("right-sidebar-fullwidth"),
+    ).toBe(true);
+    expect(
+      document.querySelector(".shell-bar-slot")?.classList.contains("right-sidebar-fullwidth"),
+    ).toBe(true);
+    // The conversation column drops out of the Tab sequence (inert).
+    expect(document.querySelector(".session-conversation")).toHaveAttribute("inert");
+    // Exit fullwidth: the negotiated width returns.
+    fireEvent.click(screen.getByRole("button", { name: "退出满宽" }));
+    expect(
+      document.querySelector(".session-pane")?.classList.contains("right-sidebar-fullwidth"),
+    ).toBe(false);
+    expect(
+      document.querySelector(".main-area")?.classList.contains("right-sidebar-fullwidth"),
+    ).toBe(false);
+    expect(
+      document.querySelector(".shell-bar-slot")?.classList.contains("right-sidebar-fullwidth"),
+    ).toBe(false);
+    expect(document.querySelector(".session-conversation")).not.toHaveAttribute("inert");
+  });
+
+  it("forgets the fullwidth posture across a fold + re-expand cycle", async () => {
+    render(<App />);
+    await openSession();
+    fireEvent.click(screen.getByRole("button", { name: "展开右侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开至满宽" }));
+    expect(
+      document.querySelector(".session-pane")?.classList.contains("right-sidebar-fullwidth"),
+    ).toBe(true);
+    // Fold: the fullwidth posture resets (a folded shell has no fullwidth
+    // posture to remember).
+    fireEvent.click(screen.getByRole("button", { name: "收起右侧栏" }));
+    expect(
+      document.querySelector(".session-pane")?.classList.contains("right-sidebar-fullwidth"),
+    ).toBe(false);
+    // Re-expand: the negotiated width, not the fullwidth.
+    fireEvent.click(screen.getByRole("button", { name: "展开右侧栏" }));
+    expect(
+      document.querySelector(".session-pane")?.classList.contains("right-sidebar-fullwidth"),
+    ).toBe(false);
+  });
+});

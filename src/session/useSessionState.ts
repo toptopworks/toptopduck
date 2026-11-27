@@ -76,6 +76,10 @@ export interface UseSessionState {
    *  one-shot is session-scoped (issue #771): a remount onto an
    *  already-materialized session does not re-arm it. */
   rightSidebarCollapsed: boolean;
+  /** Issue #1685: the expanded panel's fullwidth posture (session-ephemeral,
+   *  reset by the fold). The pane renders it as the session-body's
+   *  .right-sidebar-fullwidth class + reports it to the shell-level bar. */
+  rightSidebarFullwidth: boolean;
   /** Derived union (turnLoading || mutationLoading): the pane-consumption
    *  ADR-0040 execution-window gate -- either domain in flight disables. */
   loading: boolean;
@@ -155,6 +159,8 @@ export interface UseSessionState {
   handleJumpToLatest: () => void;
   /** The session header's right-sidebar fold toggle (ADR-0083, issue #298). */
   handleToggleRightSidebar: () => void;
+  /** The tab-row cluster's fullwidth toggle (issue #1685). */
+  handleToggleRightSidebarFullwidth: () => void;
   clearError: () => void;
   /** Issue #763: refetch every session query currently in error state (the
    *  banner's Retry). Healthy queries keep their cached data untouched -- a
@@ -245,8 +251,10 @@ export function useSessionState(
   // onto an already-materialized session stays spent.
   const {
     rightSidebarCollapsed,
+    rightSidebarFullwidth,
     expandRightSidebar,
     toggleRightSidebar,
+    toggleRightSidebarFullwidth,
     notePromotion,
   } = useRightSidebarCollapse(thread);
   // ADR-0124 Decision 3 (issue #1088): the artifact auto-open one-shot.
@@ -498,6 +506,7 @@ export function useSessionState(
     viewedResult,
     rightSidebarContent,
     rightSidebarCollapsed,
+    rightSidebarFullwidth,
     loading,
     turnLoading,
     liveTurn,
@@ -521,6 +530,7 @@ export function useSessionState(
     handleSelectViz,
     handleJumpToLatest: jumpToLatest,
     handleToggleRightSidebar: toggleRightSidebar,
+    handleToggleRightSidebarFullwidth: toggleRightSidebarFullwidth,
     clearError,
     handleRetryQueries,
     mutationSurfaces,

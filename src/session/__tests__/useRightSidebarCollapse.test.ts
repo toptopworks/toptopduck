@@ -49,6 +49,35 @@ describe("useRightSidebarCollapse", () => {
     });
   });
 
+  describe("fullwidth posture (issue #1685)", () => {
+    it("starts not-fullwidth", () => {
+      const { result } = renderHook(() => useRightSidebarCollapse([]));
+      expect(result.current.rightSidebarFullwidth).toBe(false);
+    });
+
+    it("toggleRightSidebarFullwidth flips the state while expanded", () => {
+      const { result } = renderHook(() => useRightSidebarCollapse([]));
+      act(() => result.current.toggleRightSidebarFullwidth());
+      expect(result.current.rightSidebarFullwidth).toBe(true);
+      act(() => result.current.toggleRightSidebarFullwidth());
+      expect(result.current.rightSidebarFullwidth).toBe(false);
+    });
+
+    it("collapsing the panel resets the fullwidth posture (fold owns the reset)", () => {
+      const { result } = renderHook(() => useRightSidebarCollapse([]));
+      // Expand first (the hook mounts folded), then enter fullwidth.
+      act(() => result.current.expandRightSidebar());
+      act(() => result.current.toggleRightSidebarFullwidth());
+      expect(result.current.rightSidebarFullwidth).toBe(true);
+      act(() => result.current.toggleRightSidebar());
+      expect(result.current.rightSidebarCollapsed).toBe(true);
+      expect(result.current.rightSidebarFullwidth).toBe(false);
+      // Re-expanding starts from the negotiated width, not the fullwidth.
+      act(() => result.current.expandRightSidebar());
+      expect(result.current.rightSidebarFullwidth).toBe(false);
+    });
+  });
+
   describe("first-promotion auto-expand once (ADR-0083)", () => {
     it("the first notePromotion expands the collapsed right sidebar", () => {
       const { result } = renderHook(() => useRightSidebarCollapse([]));
