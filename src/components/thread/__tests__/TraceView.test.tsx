@@ -51,6 +51,14 @@ const SUMMARY = "/bin/py cli-code-runner-code-tu_7.tmp";
 // literal anchors the replace, refetch, and in-flight assertions.
 const UNCUT_VALUES = [{ param: "code", content: "print(1); print(2)" }];
 
+// A three-value snapshot for the fold-stack posture (issue #1681): the
+// same literal anchors the default-open and single-open assertions.
+const THREE_VALUES: ParamValue[] = [
+  { param: "arg0", content: "v0" },
+  { param: "arg1", content: "v1" },
+  { param: "arg2", content: "v2" },
+];
+
 // Fold recovery (issue #826): the WHOLE line is the click target -- one
 // click grows an expand block under the line (whitespace-pre-wrap keeps a
 // multi-line summary's line structure, #772 posture; scroll-capped), the
@@ -626,12 +634,19 @@ describe("LiveRow approval resolved badge shrink (issue #876)", () => {
 describe("LiveRow approval card param values", () => {
   // The value delivery rides the summary expand (one disclosure for the
   // call's full inputs): the one-shot #1009 pull fires on the first
-  // expand, the capped preview is the load-gap / rejection face, and the
-  // at-rest head row carries the param-value count (the paperclip figure).
+  // expand, the capped preview is the load-gap / rejection face. The
+  // expanded stack is a per-param
+  // fold accordion, first block open by default, single-open (issue
+  // #1681): the answer row stays reachable no matter how many values a
+  // call carries. At rest the card carries no param signal -- the
+  // summary expand is the one reveal (ruled on the ticket).
   const expandSummary = (container: HTMLElement) =>
     fireEvent.click(summaryFoldToggle(container));
 
-  it("hides the value contents until the summary expands, count aside", () => {
+  const paramFoldHeads = (container: HTMLElement) =>
+    container.querySelectorAll(".approval-param-toggle");
+
+  it("hides the value contents until the summary expands", () => {
     const { container } = renderWithProviders(
       <LiveRow row={rowWith()} onRespond={vi.fn()} />,
     );
@@ -640,34 +655,65 @@ describe("LiveRow approval card param values", () => {
     expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
     expect(container.querySelector(".approval-param")).toBeNull();
     expandSummary(container);
-    // The snapshot names its parameter and carries the captured value.
-    expect(screen.getByText("code")).toBeInTheDocument();
+    // The first block is open by default: the captured value shows under
+    // its fold head (the name rides both the rest line and the head).
     expect(screen.getByText("print(1)")).toBeInTheDocument();
-    // Collapse takes the values with it.
-    expandSummary(container);
+    // The per-param fold collapses independently of the summary.
+    fireEvent.click(paramFoldHeads(container)[0]);
     expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
+    // Collapse the summary -- the whole stack goes with it.
+    expandSummary(container);
+    expect(container.querySelector(".approval-param")).toBeNull();
   });
 
-  it("carries the param-value count on the head row at rest", () => {
-    // The delivery merged into the expand -- the old toggle's "(1)" count
-    // survives as the head row's paperclip figure; the sr-only sentence
-    // carries it to assistive tech.
-    const withValues = renderWithProviders(
-      <LiveRow row={rowWith()} onRespond={vi.fn()} />,
-    );
-    expect(
-      withValues.container.querySelector(".lucide-paperclip"),
-    ).not.toBeNull();
-    expect(screen.getByText("1 attached file")).toBeInTheDocument();
-    withValues.unmount();
-    const bare = renderWithProviders(
+  it("opens the first block by default and keeps the rest collapsed", () => {
+    const { container } = renderWithProviders(
       <LiveRow
-        row={rowWith({ approval: { requestId: "req-1", response: null } })}
+        row={rowWith({ approval: { requestId: "req-1", response: null, paramValues: THREE_VALUES } })}
         onRespond={vi.fn()}
       />,
     );
-    expect(bare.container.querySelector(".lucide-paperclip")).toBeNull();
-    expect(screen.queryByText(/attached file/)).not.toBeInTheDocument();
+    expandSummary(container);
+    const heads = paramFoldHeads(container);
+    expect(heads).toHaveLength(3);
+    expect(heads[0]).toHaveAttribute("aria-expanded", "true");
+    expect(heads[1]).toHaveAttribute("aria-expanded", "false");
+    expect(heads[2]).toHaveAttribute("aria-expanded", "false");
+    // Every head names its param, open or collapsed.
+    expect(heads[1]).toHaveTextContent("arg1");
+    expect(heads[2]).toHaveTextContent("arg2");
+    // Only the first block's content is mounted.
+    expect(screen.getByText("v0")).toBeInTheDocument();
+    expect(screen.queryByText("v1")).not.toBeInTheDocument();
+    expect(screen.queryByText("v2")).not.toBeInTheDocument();
+    // The open block keeps the capped scroll posture: the stack itself
+    // never grows a second scroll context (single-open).
+    expect(container.querySelector(".approval-param-content")).toHaveClass(
+      "max-h-40",
+      "overflow-auto",
+    );
+  });
+
+  it("collapses the open block when another opens (single-open)", () => {
+    const { container } = renderWithProviders(
+      <LiveRow
+        row={rowWith({ approval: { requestId: "req-1", response: null, paramValues: THREE_VALUES } })}
+        onRespond={vi.fn()}
+      />,
+    );
+    expandSummary(container);
+    const heads = paramFoldHeads(container);
+    // Opening the second collapses the first: at most one expanded block
+    // at any moment, so the answers stay reachable.
+    fireEvent.click(heads[1]);
+    expect(heads[0]).toHaveAttribute("aria-expanded", "false");
+    expect(heads[1]).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByText("v0")).not.toBeInTheDocument();
+    expect(screen.getByText("v1")).toBeInTheDocument();
+    // Clicking the open head collapses it too -- all closed is a state.
+    fireEvent.click(heads[1]);
+    expect(heads[1]).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("v1")).not.toBeInTheDocument();
   });
 
   // Issue #1009: expanding pulls the FULL pre-truncation contents through

@@ -696,7 +696,6 @@
   "thread.approval.alwaysAllowScope": "After Always allow, calls to this tool no longer ask for the rest of the session.",
   "thread.approval.deny": "Deny",
   "thread.approval.originAgent": "Sub-agent {name} wants to call:",
-  "thread.approval.paramValuesAttached": "{count, plural, one {# attached file} other {# attached files}}",
   "thread.approval.paramValuesLoadFailed": "Full contents unavailable — showing the capped preview.",
   "thread.approval.pending": "Awaiting approval",
   "thread.approval.resolved.allowOnce": "Allowed",
