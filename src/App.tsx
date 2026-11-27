@@ -22,8 +22,8 @@ import {
 } from "./shell/ColdStartGuideBanner";
 import { useStartupRuntime } from "./shell/useStartupRuntime";
 import { useSidebarResize } from "./shell/useSidebarResize";
-import { useRailResize } from "./shell/useRailResize";
-import { railMaxWidth, sidebarMaxWidth } from "./shell/layoutBounds";
+import { useRightSidebarResize } from "./shell/useRightSidebarResize";
+import { rightSidebarMaxWidth, sidebarMaxWidth } from "./shell/layoutBounds";
 import { useProfileKeys } from "./shell/useProfileKeys";
 import { useShellBarSlotMetrics } from "./shell/useShellBarSlotMetrics";
 import { useBarWheelForward } from "./shell/useBarWheelForward";
@@ -213,14 +213,14 @@ export default function App() {
     bootSeed,
   } = useAppConfigState({ setShellError });
 
-  // --- Draggable sidebar + rail widths ------------------------------------
+  // --- Draggable sidebar + right-sidebar widths ----------------------------
   // Frontend-only localStorage persistence; the widths are exposed as CSS
   // custom properties on .shell so the grid + resize handles consume them
-  // without a hardcoded px value. The rail width is declared first so the
-  // sidebar hook can compensate it (sidebar grows -> rail shrinks by the same
-  // delta, keeping the right sidebar visually fixed). The rail handle is
-  // per-SessionPane but the width is global so it stays consistent across
-  // keep-alive session switches.
+  // without a hardcoded px value. The conversation column has no width of
+  // its own (issue #1685): it is the flexible remainder between the two
+  // explicit columns, protected by the right sidebar's dynamic ceiling
+  // (track host − 420), which the right sidebar hook re-derives from the
+  // track host's settled layout.
   //
   // Availability ceilings (issue #770): both drags clamp to what the live
   // grid containers can actually fit (measured from the elements, not
@@ -240,31 +240,29 @@ export default function App() {
       shellRef.current?.clientWidth ?? document.documentElement.clientWidth;
     return shellWidth > 0 ? sidebarMaxWidth(shellWidth) : undefined;
   }, []);
-  const getRailMaxWidth = useCallback((): number | undefined => {
+  const getRightSidebarMaxWidth = useCallback((): number | undefined => {
     const trackHostWidth = mainAreaRef.current?.clientWidth ?? 0;
-    return trackHostWidth > 0 ? railMaxWidth(trackHostWidth) : undefined;
+    return trackHostWidth > 0 ? rightSidebarMaxWidth(trackHostWidth) : undefined;
   }, []);
-
-  const {
-    width: railWidth,
-    isDragging: railDragging,
-    onResizeStart: onRailResizeStart,
-    adjustWidth: adjustRailWidth,
-  } = useRailResize({
-    getMaxWidth: getRailMaxWidth,
-    // Issue #781: the rail's ceiling reads the track host, whose clientWidth
-    // lags the sidebar's own re-clamp inside a single window-resize event —
-    // so the re-clamp observes the host's settled layout instead of resize.
-    observeTarget: mainAreaRef,
-  });
 
   const {
     width: sidebarWidth,
     isDragging: sidebarDragging,
     onResizeStart: onSidebarResizeStart,
   } = useSidebarResize({
-    onDelta: (delta) => adjustRailWidth(-delta),
     getMaxWidth: getSidebarMaxWidth,
+  });
+
+  const {
+    width: rightSidebarWidth,
+    isDragging: rightSidebarDragging,
+    onResizeStart: onRightSidebarResizeStart,
+  } = useRightSidebarResize({
+    getMaxWidth: getRightSidebarMaxWidth,
+    // Issue #781 pattern: the panel's ceiling reads the track host, whose
+    // width changes without a window resize whenever the sidebar drags or
+    // collapses — the host's settled layout drives the re-derivation.
+    observeTarget: mainAreaRef,
   });
 
   // --- Session shell (issue #195) -----------------------------------------
@@ -412,11 +410,19 @@ export default function App() {
   // pane has not reported its fields yet (the activation -> mount-report
   // window): every SessionPane mount path starts folded (useRightSidebarCollapse
   // initial state), so the mirrors render the folded geometry from the entry
-  // frame instead of one frame at rail-width geometry followed by a 280ms
+  // frame instead of one frame at panel-width geometry followed by a 280ms
   // slide into the collapsed track.
   const activeRightSidebarCollapsed =
     activeSessionId !== null &&
     (readFields(activeSessionId)?.rightSidebarCollapsed ?? true);
+  // The active pane's fullwidth posture mirrored onto the shell-level
+  // layout (.main-area + the bar slot + the error track). Gated on the
+  // fold: a folded shell has no fullwidth posture (the pane resets its own
+  // state, and the mirror follows one frame behind at worst).
+  const activeRightSidebarFullwidth =
+    !activeRightSidebarCollapsed &&
+    activeSessionId !== null &&
+    (readFields(activeSessionId)?.rightSidebarFullwidth ?? false);
 
   // ADR-0092 Decision 6 (#500): shell-level pending composer posture for the
   // cold-start bar. Every composer control renders on the centered bar with
@@ -1050,11 +1056,11 @@ export default function App() {
             <NavigationHistoryProvider location={location} restore={restore}>
               <div
                 ref={shellRef}
-                className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidebarDragging ? " sidebar-dragging" : ""}${railDragging ? " rail-dragging" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}${isColdStart ? " cold-start-mode" : ""}`}
+                className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidebarDragging ? " sidebar-dragging" : ""}${rightSidebarDragging ? " right-sidebar-dragging" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}${isColdStart ? " cold-start-mode" : ""}`}
                 style={
                   {
                     "--sidebar-width": `${sidebarWidth}px`,
-                    "--rail-width": `${railWidth}px`,
+                    "--right-sidebar-width": `${rightSidebarWidth}px`,
                   } as CSSProperties
                 }
               >
@@ -1194,7 +1200,7 @@ export default function App() {
                     host. */}
                 <main
                   ref={mainAreaRef}
-                  className={`main-area${activeRightSidebarCollapsed ? " right-sidebar-collapsed" : ""}`}
+                  className={`main-area${activeRightSidebarCollapsed ? " right-sidebar-collapsed" : ""}${activeRightSidebarFullwidth ? " right-sidebar-fullwidth" : ""}`}
                 >
                   <div className="session-pane-host">
                     {openSessions.map((s) => (
@@ -1263,7 +1269,7 @@ export default function App() {
                       width tracks the conversation column in both postures. */}
                   <div
                     ref={shellBarSlotRef}
-                    className={`shell-bar-slot${isColdStart ? " centered" : " bottom"}${activeRightSidebarCollapsed ? " right-sidebar-collapsed" : ""}`}
+                    className={`shell-bar-slot${isColdStart ? " centered" : " bottom"}${activeRightSidebarCollapsed ? " right-sidebar-collapsed" : ""}${activeRightSidebarFullwidth ? " right-sidebar-fullwidth" : ""}`}
                     onWheel={handleBarWheel}
                   >
                     {isColdStart && (
@@ -1392,15 +1398,17 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Draggable rail resize handle at the conversation/right-sidebar
-                      boundary. Hoisted to .main-area (ADR-0092) so it spans the
-                      full height — including the shell-level QuestionBar overlay
-                      (z-index 10 keeps it grabbable across the bar strip) —
-                      matching the sidebar handle's reach. Hidden via CSS when
-                      cold-start, settings mode, or right-sidebar folded. */}
+                  {/* Draggable right-sidebar resize handle at the conversation/
+                      right-sidebar boundary (issue #1685: the panel's explicit
+                      width). Hoisted to .main-area (ADR-0092) so it spans the
+                      full height — including the shell-level QuestionBar
+                      overlay (z-index 10 keeps it grabbable across the bar
+                      strip) — matching the sidebar handle's reach. Hidden via
+                      CSS when cold-start, settings mode, right-sidebar
+                      folded, or fullwidth. */}
                   <div
-                    className="rail-resize-handle"
-                    onPointerDown={onRailResizeStart}
+                    className="right-sidebar-resize-handle"
+                    onPointerDown={onRightSidebarResizeStart}
                   />
 
                   {/* Resume progress strip (ADR-0034). Absent unless an open/
@@ -1418,7 +1426,7 @@ export default function App() {
 
                 {shellError && (
                   <div
-                    className={`shell-error-track${activeRightSidebarCollapsed ? " right-sidebar-collapsed" : ""}`}
+                    className={`shell-error-track${activeRightSidebarCollapsed ? " right-sidebar-collapsed" : ""}${activeRightSidebarFullwidth ? " right-sidebar-fullwidth" : ""}`}
                   >
                     <ErrorBanner
                       className="shell-error"

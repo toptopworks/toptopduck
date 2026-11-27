@@ -79,7 +79,7 @@ describe("useSidebarResize", () => {
   });
 
   it("captures the pointer on drag start (the implicit release re-runs the hover hit-test)", () => {
-    // Same proxy assertion as useRailResize: jsdom has no hover model, so
+    // Same proxy assertion as useRightSidebarResize: jsdom has no hover model, so
     // the capture call pins the stuck-:hover fix.
     const { result } = renderHook(() => useSidebarResize());
     const capture = vi.fn();
@@ -191,103 +191,6 @@ describe("useSidebarResize", () => {
 
     expect(document.body.style.cursor).toBe("");
     expect(document.body.style.userSelect).toBe("");
-  });
-
-  // --- onDelta callback (sidebar → rail compensation) -------------------
-
-  it("fires onDelta with the per-frame delta during drag", () => {
-    const deltas: number[] = [];
-    const { result } = renderHook(() =>
-      useSidebarResize({ onDelta: (d) => deltas.push(d) }),
-    );
-
-    act(() => {
-      result.current.onResizeStart({
-        preventDefault: vi.fn(),
-      } as unknown as React.PointerEvent);
-    });
-
-    // Sidebar starts at default (280). Move to 300 → delta = 20.
-    act(() => {
-      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 300 }));
-    });
-    // Move to 350 → delta = 50.
-    act(() => {
-      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 350 }));
-    });
-
-    expect(deltas).toEqual([20, 50]);
-  });
-
-  it("does not fire onDelta when delta is zero (clamped to same value)", () => {
-    const onDelta = vi.fn();
-    // Seed the static floor as the current width so the clamped move
-    // collapses back onto it (the 280 default no longer sits at the floor).
-    localStorage.setItem(STORAGE_KEY, "238");
-    const { result } = renderHook(() => useSidebarResize({ onDelta }));
-
-    act(() => {
-      result.current.onResizeStart({
-        preventDefault: vi.fn(),
-      } as unknown as React.PointerEvent);
-    });
-
-    // clientX below the floor clamps back to the stored 238 (the current
-    // width) → delta = 0.
-    act(() => {
-      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 50 }));
-    });
-
-    expect(onDelta).not.toHaveBeenCalled();
-  });
-
-  it("does not fire onDelta when not dragging", () => {
-    const onDelta = vi.fn();
-    renderHook(() => useSidebarResize({ onDelta }));
-
-    act(() => {
-      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 400 }));
-    });
-
-    expect(onDelta).not.toHaveBeenCalled();
-  });
-
-  it("fires negative delta when sidebar shrinks", () => {
-    const deltas: number[] = [];
-    const { result } = renderHook(() =>
-      useSidebarResize({ onDelta: (d) => deltas.push(d) }),
-    );
-
-    act(() => {
-      result.current.onResizeStart({
-        preventDefault: vi.fn(),
-      } as unknown as React.PointerEvent);
-    });
-
-    // Move to 300 first (delta = 20).
-    act(() => {
-      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 300 }));
-    });
-    // Move back to 260 (delta = 260 - 300 = -40).
-    act(() => {
-      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 260 }));
-    });
-
-    expect(deltas).toEqual([20, -40]);
-  });
-
-  it("onDelta is optional — hook works without it", () => {
-    const { result } = renderHook(() => useSidebarResize());
-    act(() => {
-      result.current.onResizeStart({
-        preventDefault: vi.fn(),
-      } as unknown as React.PointerEvent);
-    });
-    // Should not throw even though onDelta is undefined.
-    act(() => {
-      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 300 }));
-    });
-    expect(result.current.width).toBe(300);
   });
 
   // --- Dynamic availability ceiling (issue #770) -------------------------

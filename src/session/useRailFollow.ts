@@ -27,7 +27,7 @@ const RESUME_BAND_PX = 40;
  *    chiefly the bar's height change easing the rail's bottom padding over
  *    its 200ms transition (styles.css) and the workspace fold/unfold
  *    reflow, but a
- *    window resize or the rail-width handle drag ride the same observer.
+ *    window resize or a resize-handle drag ride the same observer.
  *    The observer also watches the rail's content wrapper: streamed prose
  *    and post-commit markdown enrichment (async code highlight, image
  *    decode) grow the content with neither a React signal nor a rail-box
@@ -123,7 +123,8 @@ export function useRailFollow({
   const followingRef = useRef(true);
 
   // Latest-value mirror for the same reason (the dep-less sync follows
-  // useRailResize's getMaxWidthRef pattern, src/shell/useRailResize.ts): the
+  // useRightSidebarResize's getMaxWidthRef pattern,
+  // src/shell/useRightSidebarResize.ts): the
   // rAF callback outlives renders and must read the CURRENT activation, not
   // the one from its creating render.
   const activeRef = useRef(active);
@@ -300,7 +301,7 @@ export function useRailFollow({
   // unmounts, ADR-0051 keep-alive) cancels it. Clearing the handle matters
   // as much as the cancel: the StrictMode remount cycle runs effect ->
   // cleanup -> effect, and a canceled-but-set handle would absorb every
-  // future scheduleAlign at the guard (useRailResize's cleanup resets for
+  // future scheduleAlign at the guard (useRightSidebarResize's cleanup resets for
   // the same reason). React already nulls railRef.current during the unmount
   // commit, so an uncanceled stale callback would bail at the el guard
   // anyway; the cancel is frame-count hygiene.

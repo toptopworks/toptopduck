@@ -16,6 +16,7 @@ function makeFields(
     handleCancel: vi.fn(),
     handleIngestFiles: vi.fn(),
     rightSidebarCollapsed: false,
+    rightSidebarFullwidth: false,
     ...overrides,
   };
 }

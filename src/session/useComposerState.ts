@@ -41,6 +41,11 @@ export interface ComposerSessionFields {
    *  reading-column width), so the bar width tracks the conversation column
    *  (ADR-0090 calibration, ADR-0092). */
   rightSidebarCollapsed: boolean;
+  /** The pane's fullwidth posture (issue #1685). Bar-shaping unlike the
+   *  fold: the shell-level bar strip hides outright (the conversation track
+   *  exits and the panel owns the whole main region). Always
+   *  false while the panel is folded (the fold owns the reset). */
+  rightSidebarFullwidth: boolean;
 }
 
 export interface ComposerState extends ComposerSessionFields {
@@ -115,6 +120,7 @@ export const IDLE_SESSION_FIELDS: ComposerSessionFields = {
   handleCancel: idleHandleCancel,
   handleIngestFiles: idleHandleIngestFiles,
   rightSidebarCollapsed: false,
+  rightSidebarFullwidth: false,
 };
 
 // Null-safe hook for the composer bar's QuestionBar-facing state. Owns

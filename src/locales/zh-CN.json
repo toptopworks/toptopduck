@@ -263,6 +263,8 @@
   "rightSidebar.artifact.saveAs": "另存为…",
   "rightSidebar.artifact.saveFailed": "无法另存该文件的副本",
   "rightSidebar.collapse": "收起右侧栏",
+  "rightSidebar.enterFullwidth": "进入全屏",
+  "rightSidebar.exitFullwidth": "退出全屏",
   "rightSidebar.expand": "展开右侧栏",
   "session.activeChip.label": "作用于 {name}",
   "session.activeChip.title": "下一个提问默认作用于此表",
