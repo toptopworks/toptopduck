@@ -225,8 +225,9 @@
    * Interpolation: every posture pair keeps matching track-sizing forms --
    * bare length ↔ bare percentage (calc-mix) on the panel track between the
    * open and fullwidth lists, bare px ↔ bare px on the folded panel track,
-   * and minmax(0, 100%) on the conversation track in every list (identical
-   * form, nothing to interpolate) -- so the fold / fullwidth slides stay
+   * and minmax(0, <length-percentage>) on the conversation track in every
+   * list (minmax(0, 100%) open and collapsed, minmax(0, 0px) fullwidth --
+   * same form, interpolable args) -- so the fold / fullwidth slides stay
    * smooth (a bare fr inside any list would pair against a
    * length/percentage and snap). */
   --right-sidebar-width: 504px;
@@ -607,9 +608,10 @@
  * .shell-bar-track mirrors the pane's 4-track .session-body grid so the bar
  * sits exactly under the conversation column — the conversation remainder
  * track when the right sidebar is open, the full-width conversation track
- * when the active pane is right-sidebar-collapsed or fullwidth (App mirrors
+ * when the active pane is right-sidebar-collapsed; under fullwidth the
+ * track hides outright instead (see the fullwidth block below). (App mirrors
  * the fold / fullwidth via .right-sidebar-collapsed / .right-sidebar-fullwidth,
- * reported upward through the composer fields). The track's
+ * reported upward through the composer fields.) The track's
  * grid-template-columns transition matches the pane's so the bar follows the
  * fold animation + rail drag.
  *
@@ -677,7 +679,9 @@
   width: 100%;
   display: grid;
   grid-template-columns: var(--track-grid);
-  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
+  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 280ms cubic-bezier(0.4, 0, 0.2, 1),
+    visibility 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 /* Right sidebar folded (ADR-0083): mirror the pane's fold tracks so the bar's
  * track spans the same full-width conversation column. Both selectors
@@ -798,10 +802,14 @@
  * the container's full width (bare 100%). The conversation is inert
  * (SessionPane sets the HTML attribute) so the crushed column leaves the
  * Tab sequence; its min-width floor is lifted here so the track can
- * actually collapse to zero. The bar + error tracks reuse the COLLAPSED
- * grid on purpose: those surfaces mirror the conversation column, which no
- * longer exists in this posture, so the bar card spans the full width just
- * as it does in the fold (the panel is full-height behind them). */
+ * actually collapse to zero. The bar strip hides with the conversation it
+ * mirrors: the whole track (card + backdrop inside it) fades out so the
+ * full-height panel owns the main region unobstructed. visibility:hidden,
+ * not display, keeps the React bar mounted (ADR-0092) and beats the card's
+ * and backdrop's explicit pointer-events re-enables while invisible; the
+ * fade rides the base track's transition so the strip dissolves with the
+ * panel's own slide. The error track still mirrors the conversation column
+ * and reads centered as in the fold. */
 .shell .session-pane.right-sidebar-fullwidth .session-body {
   grid-template-columns: var(--track-grid-fullwidth);
 }
@@ -810,7 +818,8 @@
   min-width: 0;
 }
 .shell-bar-slot.right-sidebar-fullwidth .shell-bar-track {
-  grid-template-columns: var(--track-grid-collapsed);
+  opacity: 0;
+  visibility: hidden;
 }
 .shell > .shell-error-track.right-sidebar-fullwidth {
   grid-template-columns: var(--track-grid-collapsed);

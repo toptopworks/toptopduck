@@ -846,12 +846,18 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                       cluster ahead of the collapse toggle. Only rendered
                       while the panel is expanded (the folded shell has no
                       fullwidth posture); the button persists across its own
-                      toggle, so keyboard focus stays on the control. */}
+                      toggle, so keyboard focus stays on the control. The
+                      collapse toggle sits the fullwidth posture out: folding
+                      from fullwidth is not a path (the fold owns the
+                      reset), so the exit-fullwidth toggle is the only way
+                      back. */}
                   <RightSidebarFullwidthToggle
                     fullwidth={s.rightSidebarFullwidth}
                     onToggle={s.handleToggleRightSidebarFullwidth}
                   />
-                  <RightSidebarToggle collapsed={s.rightSidebarCollapsed} onToggle={handleToggleRightSidebar} ref={rightSidebarToggleRef} />
+                  {!s.rightSidebarFullwidth && (
+                    <RightSidebarToggle collapsed={s.rightSidebarCollapsed} onToggle={handleToggleRightSidebar} ref={rightSidebarToggleRef} />
+                  )}
                 </>
               )}
             </div>

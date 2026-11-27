@@ -484,7 +484,7 @@ describe("Right-sidebar fullwidth posture mirroring (issue #1685)", () => {
     ).toBe(false);
     expect(document.querySelector(".main-area .right-sidebar-resize-handle")).not.toBeNull();
     // Enter fullwidth from the tab-row cluster.
-    fireEvent.click(screen.getByRole("button", { name: "展开至满宽" }));
+    fireEvent.click(screen.getByRole("button", { name: "进入全屏" }));
     expect(
       document.querySelector(".session-pane")?.classList.contains("right-sidebar-fullwidth"),
     ).toBe(true);
@@ -494,6 +494,9 @@ describe("Right-sidebar fullwidth posture mirroring (issue #1685)", () => {
     expect(
       document.querySelector(".shell-bar-slot")?.classList.contains("right-sidebar-fullwidth"),
     ).toBe(true);
+    // The fold button sits the fullwidth posture out: the exit-fullwidth
+    // toggle is the only way back.
+    expect(screen.queryByRole("button", { name: "收起右侧栏" })).toBeNull();
     // The conversation column drops out of the Tab sequence (inert).
     expect(document.querySelector(".session-conversation")).toHaveAttribute("inert");
     // AC (issue #1685): both tabs stay reachable in the fullwidth posture --
@@ -502,7 +505,7 @@ describe("Right-sidebar fullwidth posture mirroring (issue #1685)", () => {
     expect(screen.getByRole("tab", { name: "结果" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "工作集" })).toBeInTheDocument();
     // Exit fullwidth: the negotiated width returns.
-    fireEvent.click(screen.getByRole("button", { name: "退出满宽" }));
+    fireEvent.click(screen.getByRole("button", { name: "退出全屏" }));
     expect(
       document.querySelector(".session-pane")?.classList.contains("right-sidebar-fullwidth"),
     ).toBe(false);
@@ -512,6 +515,8 @@ describe("Right-sidebar fullwidth posture mirroring (issue #1685)", () => {
     expect(
       document.querySelector(".shell-bar-slot")?.classList.contains("right-sidebar-fullwidth"),
     ).toBe(false);
+    // The fold button rides back in with the expanded cluster.
+    expect(screen.queryByRole("button", { name: "收起右侧栏" })).not.toBeNull();
     expect(document.querySelector(".session-conversation")).not.toHaveAttribute("inert");
   });
 
@@ -519,16 +524,26 @@ describe("Right-sidebar fullwidth posture mirroring (issue #1685)", () => {
     render(<App />);
     await openSession();
     fireEvent.click(screen.getByRole("button", { name: "展开右侧栏" }));
-    fireEvent.click(screen.getByRole("button", { name: "展开至满宽" }));
+    fireEvent.click(screen.getByRole("button", { name: "进入全屏" }));
     expect(
       document.querySelector(".session-pane")?.classList.contains("right-sidebar-fullwidth"),
     ).toBe(true);
-    // Fold: the fullwidth posture resets (a folded shell has no fullwidth
-    // posture to remember).
+    // Exit fullwidth first: the fold button sits this posture out, so the
+    // exit toggle is the only way back to the negotiated width.
+    fireEvent.click(screen.getByRole("button", { name: "退出全屏" }));
+    expect(
+      document.querySelector(".session-pane")?.classList.contains("right-sidebar-fullwidth"),
+    ).toBe(false);
+    // Fold + re-expand: the posture stays forgotten (a folded shell has no
+    // fullwidth posture to remember).
     fireEvent.click(screen.getByRole("button", { name: "收起右侧栏" }));
     expect(
       document.querySelector(".session-pane")?.classList.contains("right-sidebar-fullwidth"),
     ).toBe(false);
+    // A folded shell renders no fullwidth toggle and keeps the conversation
+    // column out of the inert state.
+    expect(screen.queryByRole("button", { name: "进入全屏" })).toBeNull();
+    expect(document.querySelector(".session-conversation")).not.toHaveAttribute("inert");
     // Re-expand: the negotiated width, not the fullwidth.
     fireEvent.click(screen.getByRole("button", { name: "展开右侧栏" }));
     expect(

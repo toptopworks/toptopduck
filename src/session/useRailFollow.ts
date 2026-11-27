@@ -27,7 +27,7 @@ const RESUME_BAND_PX = 40;
  *    chiefly the bar's height change easing the rail's bottom padding over
  *    its 200ms transition (styles.css) and the workspace fold/unfold
  *    reflow, but a
- *    window resize or the rail-width handle drag ride the same observer.
+ *    window resize or a resize-handle drag ride the same observer.
  *    The observer also watches the rail's content wrapper: streamed prose
  *    and post-commit markdown enrichment (async code highlight, image
  *    decode) grow the content with neither a React signal nor a rail-box

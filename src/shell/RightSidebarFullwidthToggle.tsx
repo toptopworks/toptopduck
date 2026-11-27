@@ -18,15 +18,15 @@ export function RightSidebarFullwidthToggle({
 }) {
   const intl = useIntl();
   const label = fullwidth
-    ? intl.formatMessage({ id: "rightSidebar.exitFullwidth", defaultMessage: "Exit full width" })
-    : intl.formatMessage({ id: "rightSidebar.enterFullwidth", defaultMessage: "Expand to full width" });
+    ? intl.formatMessage({ id: "rightSidebar.exitFullwidth", defaultMessage: "Exit fullscreen" })
+    : intl.formatMessage({ id: "rightSidebar.enterFullwidth", defaultMessage: "Enter fullscreen" });
   return (
     <button
       type="button"
       // Ghost icon button (ADR-0067 #171 visual rule): h-7 w-7 + h-3.5 w-3.5
       // glyph + text-foreground/70, matching the right-sidebar toggle family
       // (issue #774: 28px hit area).
-      className="right-sidebar-fullwidth-toggle inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-transit hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-transit hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       aria-label={label}
       title={label}
       aria-pressed={fullwidth}

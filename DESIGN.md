@@ -201,7 +201,7 @@ components:
     backgroundColor: "{colors.canvas}"
     textColor: "{colors.ink}"
     typography: "{typography.body-sm}"
-    width: 460px
+    width: flexible remainder between the fixed columns
   conversation-rail-dark:
     backgroundColor: "{colors.canvas-dark}"
     textColor: "{colors.ink-dark}"
@@ -498,7 +498,7 @@ When the right sidebar folds, the conversation column promotes to primary surfac
 
 ### Grid
 - Shell: `grid-template-columns: var(--sidebar-width, 280px) 1fr` (sidebar + main block).
-- Session pane: 4-track conversation grid — `0fr minmax(0, 100%) var(--right-sidebar-width) 0fr` (spacer / conversation remainder / explicit-width right sidebar / spacer); the right-sidebar-folded form `0fr minmax(0, 100%) 0px 0fr` and the fullwidth form `0fr minmax(0, 0px) 100% 0fr` swap which track carries the width, with the reading measure capped by the `.rail-reading-column` content wrapper. The shell-level question bar mirrors the same tracks so the bar sits under the conversation column; in the folded form the bar card rides the reading column's axis rather than its exact width (the card follows `min(--reading-column-cap, track - 2 * gutter)`): below the cap under classic scrollbars it runs a few pixels wider per side than the thread column, and at the cap the two meet flush (ADR-0092, issue #839).
+- Session pane: 4-track conversation grid — `0fr minmax(0, 100%) var(--right-sidebar-width) 0fr` (spacer / conversation remainder / explicit-width right sidebar / spacer); the right-sidebar-folded form `0fr minmax(0, 100%) 0px 0fr` and the fullwidth form `0fr minmax(0, 0px) 100% 0fr` swap which track carries the width, with the reading measure capped by the `.rail-reading-column` content wrapper. The shell-level question bar mirrors the same tracks so the bar sits under the conversation column; in the fullwidth form the bar strip hides outright so the panel owns the whole main region; in the folded form the bar card rides the reading column's axis rather than its exact width (the card follows `min(--reading-column-cap, track - 2 * gutter)`): below the cap under classic scrollbars it runs a few pixels wider per side than the thread column, and at the cap the two meet flush (ADR-0092, issue #839).
 - Settings overlay: `grid-template-columns: var(--sidebar-width, 280px) 1fr` (nav + content) — matches the sidebar width so the left boundary stays fixed when switching views.
 
 ### Whitespace Philosophy

@@ -19,10 +19,9 @@
 //
 // Unlike the sidebar, the handle sits on the panel's LEFT edge (the
 // conversation/panel boundary), so clientX cannot map directly to the
-// desired width. The drag is delta-based with an INVERTED mapping (the rail
-// resize's anchor pattern): the pointer-down clientX + starting rendered
-// width are captured, and each move adds (start − clientX) — dragging left
-// grows the panel.
+// desired width. The drag is delta-based with an INVERTED mapping: the
+// pointer-down clientX + starting rendered width are captured, and each
+// move adds (start − clientX) — dragging left grows the panel.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
 import {

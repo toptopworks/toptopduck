@@ -41,9 +41,9 @@ export interface ComposerSessionFields {
    *  reading-column width), so the bar width tracks the conversation column
    *  (ADR-0090 calibration, ADR-0092). */
   rightSidebarCollapsed: boolean;
-  /** The pane's fullwidth posture (issue #1685). Bar-shaping like the fold:
-   *  the shell-level bar slot mirrors the expanded fullwidth geometry (the
-   *  conversation track exits, the bar card spans the main region). Always
+  /** The pane's fullwidth posture (issue #1685). Bar-shaping unlike the
+   *  fold: the shell-level bar strip hides outright (the conversation track
+   *  exits and the panel owns the whole main region). Always
    *  false while the panel is folded (the fold owns the reset). */
   rightSidebarFullwidth: boolean;
 }

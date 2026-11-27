@@ -169,7 +169,7 @@ describe("useRightSidebarResize", () => {
     expect(localStorage.getItem(STORAGE_KEY)).toBe("460");
   });
 
-  it("restores body cursor on pointercancel (touch gesture abort)", () => {
+  it("restores body cursor and persists the width on pointercancel (touch gesture abort)", () => {
     const { result } = renderHook(() => useRightSidebarResize());
     act(() => {
       result.current.onResizeStart({
@@ -178,10 +178,15 @@ describe("useRightSidebarResize", () => {
       } as unknown as React.PointerEvent);
     });
     act(() => {
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 700 }));
+    });
+    act(() => {
       window.dispatchEvent(new PointerEvent("pointercancel"));
     });
     expect(result.current.isDragging).toBe(false);
     expect(document.body.style.cursor).toBe("");
+    // Cancel shares the release path with pointerup: the dragged width lands.
+    expect(localStorage.getItem(STORAGE_KEY)).toBe("460");
   });
 
   it("does not persist width on pointerup when no drag was active", () => {
